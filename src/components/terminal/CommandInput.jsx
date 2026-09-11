@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GitBranch, Trash2, Folder } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
+import { chord } from '../../lib/platform.js';
 
 /**
  * Translate a keydown into the bytes a terminal would receive (raw mode).
@@ -54,6 +55,10 @@ export function CommandInput({ onExecute, onNavigateBlock = null, isRunning = fa
       const bytes = keyEventToBytes(e);
       if (bytes !== null) {
         e.preventDefault();
+        // Stop the global window-level shortcut listener from also acting on
+        // this key (e.g. Ctrl+D on Windows must only reach the PTY, not also
+        // split the pane).
+        e.stopPropagation();
         onRawInput(bytes);
         return;
       }
@@ -119,7 +124,11 @@ export function CommandInput({ onExecute, onNavigateBlock = null, isRunning = fa
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={isRunning ? 'Running — keys go to the process · ⌃C to interrupt' : 'Type a shell command...'}
+          placeholder={
+            isRunning
+              ? `Running — keys go to the process · ${chord('ctrl', 'c')} to interrupt`
+              : 'Type a shell command...'
+          }
           className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-code text-vsc-fg placeholder:text-vsc-placeholder"
           spellCheck={false}
           autoComplete="off"
@@ -131,7 +140,7 @@ export function CommandInput({ onExecute, onNavigateBlock = null, isRunning = fa
             type="button"
             onClick={() => clearBlocks()}
             className="p-1 rounded text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors"
-            title="Clear unpinned blocks (⌘L)"
+            title={`Clear unpinned blocks (${chord('mod', 'l')})`}
           >
             <Trash2 size={14} />
           </button>

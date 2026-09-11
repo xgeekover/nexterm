@@ -9,12 +9,25 @@
 //! the predefined edit items or text fields stop working. App-specific items
 //! are forwarded to the webview as a `menu` event carrying the item id; the
 //! frontend maps ids to store actions (see `src/hooks/useMenuEvents.js`).
+//!
+//! The leading "app menu" (About/Services/Hide/…/Quit) is a macOS-only
+//! convention — muda cannot build those items on other platforms, and
+//! Windows/Linux apps don't have an app-named menu at all. There we fold the
+//! items that would otherwise live there (Settings…, Quit) into the File
+//! menu instead, VS-Code-style. Either way the same 14 custom ids exist on
+//! every platform (see `every_custom_id_is_unique_and_matches_the_frontend_contract`),
+//! so the frontend's id-based event handling in `useMenuEvents.js` needs no
+//! platform branching.
 
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Runtime};
 
 pub const EVENT: &str = "menu";
 
+// About/Services/Hide/HideOthers/ShowAll are only ever constructed in the
+// macOS branch of `spec()` below; on other platforms they are legitimately
+// unused variants of an otherwise-live enum.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Predefined {
     About,
@@ -57,8 +70,12 @@ fn custom(id: &'static str, label: &'static str, accelerator: &'static str) -> I
 pub fn spec() -> Vec<Submenu> {
     use Item::{Predefined as P, Separator as Sep};
     use Predefined::*;
-    vec![
-        Submenu {
+
+    let mut submenus = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        submenus.push(Submenu {
             title: "NexTerm",
             items: vec![
                 P(About),
@@ -73,8 +90,8 @@ pub fn spec() -> Vec<Submenu> {
                 Sep,
                 P(Quit),
             ],
-        },
-        Submenu {
+        });
+        submenus.push(Submenu {
             title: "File",
             items: vec![
                 custom("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
@@ -84,41 +101,73 @@ pub fn spec() -> Vec<Submenu> {
                 Sep,
                 P(CloseWindow),
             ],
-        },
-        Submenu {
-            title: "Edit",
-            items: vec![P(Undo), P(Redo), Sep, P(Cut), P(Copy), P(Paste), P(SelectAll)],
-        },
-        Submenu {
-            title: "View",
+        });
+    }
+
+    // Windows/Linux have no Apple-style app menu, so Settings… and Quit
+    // (which live in the "NexTerm" menu on macOS) move into File instead —
+    // the same layout VS Code and most native Windows/Linux apps use.
+    #[cfg(not(target_os = "macos"))]
+    {
+        submenus.push(Submenu {
+            title: "File",
             items: vec![
-                custom("command-palette", "Command Palette…", "CmdOrCtrl+K"),
-                custom("quick-open", "Go to File…", "CmdOrCtrl+P"),
+                custom("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
+                custom("new-terminal", "New Terminal", "Ctrl+Shift+`"),
+                custom("save", "Save", "CmdOrCtrl+S"),
                 Sep,
-                custom("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
-                custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
-                custom("toggle-secondary", "Toggle AI Side Bar", "CmdOrCtrl+Alt+B"),
+                custom("preferences", "Settings…", "CmdOrCtrl+,"),
                 Sep,
-                custom("toggle-theme", "Toggle Light/Dark Theme", "CmdOrCtrl+Shift+T"),
-                Sep,
-                P(Fullscreen),
+                P(Quit),
             ],
-        },
-        Submenu {
-            title: "Terminal",
-            items: vec![
-                custom("split-right", "Split Right", "CmdOrCtrl+D"),
-                custom("split-down", "Split Down", "CmdOrCtrl+Shift+D"),
-                custom("close-pane", "Close Pane", "CmdOrCtrl+W"),
-                Sep,
-                custom("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
-            ],
-        },
-        Submenu {
-            title: "Window",
-            items: vec![P(Minimize), P(Maximize)],
-        },
-    ]
+        });
+    }
+
+    submenus.push(Submenu {
+        title: "Edit",
+        items: vec![P(Undo), P(Redo), Sep, P(Cut), P(Copy), P(Paste), P(SelectAll)],
+    });
+    submenus.push(Submenu {
+        title: "View",
+        items: vec![
+            custom("command-palette", "Command Palette…", "CmdOrCtrl+K"),
+            custom("quick-open", "Go to File…", "CmdOrCtrl+P"),
+            Sep,
+            custom("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
+            custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
+            custom("toggle-secondary", "Toggle AI Side Bar", "CmdOrCtrl+Alt+B"),
+            Sep,
+            custom("toggle-theme", "Toggle Light/Dark Theme", "CmdOrCtrl+Shift+T"),
+            Sep,
+            P(Fullscreen),
+        ],
+    });
+    submenus.push(Submenu {
+        title: "Terminal",
+        items: vec![
+            custom("split-right", "Split Right", "CmdOrCtrl+D"),
+            custom("split-down", "Split Down", "CmdOrCtrl+Shift+D"),
+            custom("close-pane", "Close Pane", "CmdOrCtrl+W"),
+            Sep,
+            custom("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
+        ],
+    });
+
+    // `CloseWindow` lives in the macOS File menu (above); fold it into
+    // Window on other platforms, which is where it conventionally lives.
+    let window_items = {
+        #[cfg(target_os = "macos")]
+        {
+            vec![P(Minimize), P(Maximize)]
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            vec![P(Minimize), P(Maximize), P(CloseWindow)]
+        }
+    };
+    submenus.push(Submenu { title: "Window", items: window_items });
+
+    submenus
 }
 
 /// Every app-specific item id, in menu order.
@@ -189,7 +238,49 @@ mod tests {
     #[test]
     fn menu_bar_has_the_expected_submenus_in_order() {
         let titles: Vec<&str> = spec().iter().map(|s| s.title).collect();
+        #[cfg(target_os = "macos")]
         assert_eq!(titles, ["NexTerm", "File", "Edit", "View", "Terminal", "Window"]);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(titles, ["File", "Edit", "View", "Terminal", "Window"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keeps_the_native_app_menu_under_nexterm() {
+        let nexterm = spec().into_iter().find(|s| s.title == "NexTerm").expect("NexTerm submenu");
+        for needed in [
+            Predefined::About,
+            Predefined::Services,
+            Predefined::Hide,
+            Predefined::HideOthers,
+            Predefined::ShowAll,
+            Predefined::Quit,
+        ] {
+            assert!(nexterm.items.contains(&Item::Predefined(needed)), "NexTerm menu lacks {needed:?}");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_file_menu_absorbs_settings_and_quit() {
+        let file = spec().into_iter().find(|s| s.title == "File").expect("File submenu");
+        assert!(file.items.contains(&custom("preferences", "Settings…", "CmdOrCtrl+,")));
+        assert!(file.items.contains(&Item::Predefined(Predefined::Quit)));
+
+        // macOS Apple-menu-only concepts must not appear anywhere off macOS.
+        let all_items: Vec<Item> = spec().into_iter().flat_map(|s| s.items).collect();
+        for mac_only in [
+            Predefined::About,
+            Predefined::Services,
+            Predefined::Hide,
+            Predefined::HideOthers,
+            Predefined::ShowAll,
+        ] {
+            assert!(
+                !all_items.contains(&Item::Predefined(mac_only)),
+                "{mac_only:?} should not appear outside macOS"
+            );
+        }
     }
 
     #[test]

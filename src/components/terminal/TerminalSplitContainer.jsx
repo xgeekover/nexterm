@@ -5,6 +5,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalBlock } from './TerminalBlock.jsx';
 import { CommandInput } from './CommandInput.jsx';
 import { cn } from '../../lib/utils.js';
+import { chord } from '../../lib/platform.js';
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
@@ -43,12 +44,18 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
   const outputRef = useRef(null);
 
   const [selectedBlockId, setSelectedBlockId] = useState(null);
+  const [paneHeight, setPaneHeight] = useState(0);
 
   const isActivePane = activePaneId === paneId;
 
   // This pane shows the tab bound to it, or falls back to active tab
   const boundTab = tabs.find((t) => t.id === tabId) || tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
   const isRunning = !!boundTab?.blocks?.some((b) => b.status === 'running');
+
+  // Read fresh inside the ResizeObserver callback without tearing the
+  // observer down every time a command starts/stops.
+  const isRunningRef = useRef(isRunning);
+  isRunningRef.current = isRunning;
 
   // Keep the backend PTY sized to this pane so real shell output wraps correctly.
   useEffect(() => {
@@ -57,6 +64,10 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
     if (!el || !boundId || typeof ResizeObserver === 'undefined') return undefined;
     let timer = null;
     const measure = () => {
+      setPaneHeight(el.clientHeight);
+      // While a block is running, its own <XtermSurface> owns PTY sizing —
+      // the pane-level observer must not fight it with a second resize.
+      if (isRunningRef.current) return;
       const cell = measureCell(el);
       const cols = Math.max(20, Math.floor((el.clientWidth - 24) / cell.width));
       const rows = Math.max(5, Math.floor(el.clientHeight / cell.height));
@@ -123,10 +134,10 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
         </div>
 
         <div className="flex items-center gap-0.5 px-1 shrink-0">
-          <button type="button" onClick={onSplitH} className={paneHeaderBtn} title="Split Right (⌘D)">
+          <button type="button" onClick={onSplitH} className={paneHeaderBtn} title={`Split Right (${chord('mod', 'd')})`}>
             <SplitSquareHorizontal size={14} />
           </button>
-          <button type="button" onClick={onSplitV} className={paneHeaderBtn} title="Split Down (⌘⇧D)">
+          <button type="button" onClick={onSplitV} className={paneHeaderBtn} title={`Split Down (${chord('mod', 'shift', 'd')})`}>
             <SplitSquareVertical size={14} />
           </button>
           {canClose && (
@@ -134,7 +145,7 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
               type="button"
               onClick={onClose}
               className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
-              title="Close Pane (⌘W)"
+              title={`Close Pane (${chord("mod", "w")})`}
             >
               <X size={14} />
             </button>
@@ -149,11 +160,11 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
             <p className="text-ui-sm text-vsc-muted">Type a command below</p>
             <div className="flex items-center gap-3 text-ui-sm text-vsc-muted">
               <span className="inline-flex items-center gap-1">
-                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">⌘D</kbd>
+                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">{chord('mod', 'd')}</kbd>
                 split right
               </span>
               <span className="inline-flex items-center gap-1">
-                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">⌘⇧D</kbd>
+                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">{chord('mod', 'shift', 'd')}</kbd>
                 split down
               </span>
             </div>
@@ -167,6 +178,7 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
                 tabId={boundTab.id}
                 selected={block.id === selectedBlockId}
                 onSelect={setSelectedBlockId}
+                paneHeight={paneHeight}
               />
             ))}
             <div ref={blocksEndRef} />

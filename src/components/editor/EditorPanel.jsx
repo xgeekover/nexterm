@@ -6,6 +6,7 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs } from './EditorTabs.jsx';
 import { DiffViewer } from './DiffViewer.jsx';
 import { cn } from '../../lib/utils.js';
+import { chord } from '../../lib/platform.js';
 
 const MONACO_OPTIONS = {
   fontFamily: '"SF Mono", Menlo, Monaco, "Cascadia Code", Consolas, monospace',
@@ -22,10 +23,10 @@ const MONACO_OPTIONS = {
 };
 
 const WATERMARK_SHORTCUTS = [
-  ['Show All Commands', '⌘K'],
-  ['Open File', '⌘P'],
-  ['Toggle Terminal', '⌃`'],
-  ['New Terminal', '⌃⇧`'],
+  ['Show All Commands', chord('mod', 'k')],
+  ['Open File', chord('mod', 'p')],
+  ['Toggle Terminal', chord('ctrl', '`')],
+  ['New Terminal', chord('ctrl', 'shift', '`')],
 ];
 
 function Kbd({ children }) {
@@ -86,7 +87,7 @@ export function EditorPanel() {
                 type="button"
                 onClick={() => saveFile(activeTab.id)}
                 className="shrink-0 ml-2 text-vsc-link hover:underline"
-                title="Save (⌘S)"
+                title={`Save (${chord('mod', 's')})`}
               >
                 Save
               </button>

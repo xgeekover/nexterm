@@ -11,6 +11,14 @@ import { useTerminalStore } from './stores/terminalStore.js';
 import { useEditorStore } from './stores/editorStore.js';
 import { useAgentStore } from './stores/agentStore.js';
 import { useChatStore } from './stores/chatStore.js';
+import { useSettingsStore } from './stores/settingsStore.js';
+import { mockBridge } from './lib/ipc.js';
+
+// QA hook: expose stores + the browser mock so tests/scripts can seed state.
+// Only in dev builds or when the page is opened with `?debug`.
+if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debug')) {
+  window.__nexterm = { useTerminalStore, useEditorStore, useAgentStore, useChatStore, useSettingsStore, mockBridge };
+}
 
 export default function App() {
   // Initialize global theme and keyboard shortcuts

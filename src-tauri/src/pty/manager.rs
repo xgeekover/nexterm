@@ -62,6 +62,16 @@ impl PtyManager {
         }
         #[cfg(windows)]
         {
+            // PowerShell 7+ (`pwsh.exe`) is the modern, cross-platform build;
+            // prefer it when the user has it installed. It does not ship
+            // with Windows, so we search PATH ourselves rather than assume
+            // it resolves the way `powershell.exe` (always in System32) does.
+            if let Some(pwsh) = Self::find_on_path("pwsh.exe") {
+                return pwsh;
+            }
+            if Self::find_on_path("powershell.exe").is_some() {
+                return "powershell.exe".to_string();
+            }
             if let Ok(comspec) = std::env::var("COMSPEC") {
                 if !comspec.trim().is_empty() && Path::new(&comspec).exists() {
                     return comspec;
@@ -69,6 +79,21 @@ impl PtyManager {
             }
             "powershell.exe".to_string()
         }
+    }
+
+    /// Search `PATH` for an executable by file name, Windows-only. Used to
+    /// find `pwsh.exe`, which — unlike `powershell.exe` — is not guaranteed
+    /// to exist, so we must probe for it instead of assuming it resolves.
+    #[cfg(windows)]
+    fn find_on_path(exe_name: &str) -> Option<String> {
+        let path_var = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(exe_name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+        None
     }
 
     pub fn spawn(
@@ -91,11 +116,16 @@ impl PtyManager {
                 cmd.cwd(dir);
             }
         }
+        // ConPTY (Windows) ignores TERM/COLORTERM; harmless to set anyway.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("NEXTERM", "1");
-        for (key, value) in shell_integration::env_for_shell(&shell_path) {
+        let integration = shell_integration::for_shell(&shell_path);
+        for (key, value) in integration.env {
             cmd.env(key, value);
+        }
+        if !integration.args.is_empty() {
+            cmd.args(&integration.args);
         }
 
         let pty_system = native_pty_system();

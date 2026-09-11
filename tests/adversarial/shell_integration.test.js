@@ -90,4 +90,15 @@ describe('Shell integration: OSC 133 command boundaries', () => {
     await store.getState().writeRaw(tab().id, '\x03');
     await store.getState().writeRaw(tab().id, '');
   });
+
+  test('SI-08: setBlockOutput replaces a block\'s output', async () => {
+    seedRunningBlock('blk-snap');
+    await mockBridge.emit('pty-output', { session_id: sessionId(), data: 'raw ansi bytes' });
+    store.getState().setBlockOutput(tab().id, 'blk-snap', 'x');
+    const b = tab().blocks.find((b2) => b2.id === 'blk-snap');
+    assert.equal(b.output, 'x');
+    // Only the output field changes — everything else on the block is untouched.
+    assert.equal(b.status, 'running');
+    assert.equal(b.command, 'sleep 1');
+  });
 });

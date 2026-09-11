@@ -484,6 +484,20 @@ export const useTerminalStore = create((set, get) => ({
     }));
   },
 
+  // Replace a block's output outright (e.g. an xterm snapshot taken when a
+  // running block completes). No other field changes.
+  setBlockOutput: (tabId, blockId, output) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        return {
+          ...tab,
+          blocks: tab.blocks.map((b) => (b.id === blockId ? { ...b, output } : b)),
+        };
+      }),
+    }));
+  },
+
   // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
   writeRaw: async (tabId, data) => {
     const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));

@@ -2,6 +2,7 @@ import React from 'react';
 import { X, Circle, FileCode2, FileJson, FileText, File } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
+import { chord } from '../../lib/platform.js';
 
 function getTabIcon(fileName) {
   const ext = fileName.split('.').pop()?.toLowerCase();
@@ -66,7 +67,7 @@ export function EditorTabs() {
                   e.stopPropagation();
                   closeTab(tab.id);
                 }}
-                title="Close (⌘W)"
+                title={`Close (${chord('mod', 'w')})`}
                 className={cn(
                   'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover',
                   tab.isDirty

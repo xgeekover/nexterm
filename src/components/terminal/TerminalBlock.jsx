@@ -19,13 +19,14 @@ import { useChatStore } from '../../stores/chatStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { AnsiText } from '../../lib/ansiParser.js';
 import { formatDuration, formatTimestamp, cn } from '../../lib/utils.js';
+import { XtermSurface } from './XtermSurface.jsx';
 
 const MAX_VISIBLE_LINES = 200;
 
 const toolbarBtn =
   'p-1 rounded text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
 
-export function TerminalBlock({ block, tabId = null, selected = false, onSelect = null }) {
+export function TerminalBlock({ block, tabId = null, selected = false, onSelect = null, paneHeight = null }) {
   const pinBlock = useTerminalStore((s) => s.pinBlock);
   const executeCommand = useTerminalStore((s) => s.executeCommand);
   const attachContext = useChatStore((s) => s.attachContext);
@@ -36,10 +37,17 @@ export function TerminalBlock({ block, tabId = null, selected = false, onSelect 
   const [showAllLines, setShowAllLines] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [copiedOut, setCopiedOut] = useState(false);
+  // Blocks that were already completed when this component mounted (e.g. a
+  // history reload) never need the live xterm surface at all.
+  const [snapshotted, setSnapshotted] = useState(() => block.status !== 'running');
 
   const isRunning = block.status === 'running';
   const isFailed = block.status === 'failed' || (block.exitCode !== null && block.exitCode !== 0);
   const isSuccess = block.status === 'completed' && block.exitCode === 0;
+  // Keep the live surface mounted while running, and until it has written its
+  // completion snapshot back into the block's output.
+  const showLiveSurface = isRunning || !snapshotted;
+  const surfaceHeight = Math.max(160, (paneHeight || 0) - 120);
 
   const outputLines = block.output ? block.output.split('\n') : [];
   const totalLines = outputLines.length;
@@ -176,7 +184,14 @@ export function TerminalBlock({ block, tabId = null, selected = false, onSelect 
       {/* Output */}
       {!isCollapsed && (
         <div className="mt-1 pl-6 overflow-x-auto">
-          {block.output ? (
+          {showLiveSurface ? (
+            <XtermSurface
+              tabId={tabId}
+              block={block}
+              height={surfaceHeight}
+              onSnapshot={() => setSnapshotted(true)}
+            />
+          ) : block.output ? (
             <>
               <AnsiText text={visibleOutput} className="text-vsc-fg" />
               {isLongOutput && !showAllLines && (
@@ -189,11 +204,6 @@ export function TerminalBlock({ block, tabId = null, selected = false, onSelect 
                 </button>
               )}
             </>
-          ) : isRunning ? (
-            <div className="flex items-center gap-2 text-vsc-muted italic py-1 text-code font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-vsc-info animate-pulse" />
-              Executing command...
-            </div>
           ) : (
             <span className="text-vsc-muted italic text-code font-mono">No output</span>
           )}

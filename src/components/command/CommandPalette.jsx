@@ -15,6 +15,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useAgentStore } from '../../stores/agentStore.js';
 import { useChatStore } from '../../stores/chatStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
+import { chord } from '../../lib/platform.js';
 
 export function CommandPalette() {
   const isOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
@@ -72,7 +73,7 @@ export function CommandPalette() {
   const commandItems = [
     {
       type: 'command',
-      hint: '⌘K',
+      hint: chord('mod', 'k'),
       id: 'cmd-switch-theme',
       title: 'Switch Dark / Light Theme',
       subtitle: 'Toggles global theme color palette',
@@ -81,7 +82,7 @@ export function CommandPalette() {
     },
     {
       type: 'command',
-      hint: '⌃⇧`',
+      hint: chord('ctrl', 'shift', '`'),
       id: 'cmd-new-terminal',
       title: 'New Terminal Tab',
       subtitle: 'Spawns a new independent PTY terminal session',
@@ -93,7 +94,7 @@ export function CommandPalette() {
     },
     {
       type: 'command',
-      hint: '⌘L',
+      hint: chord('mod', 'l'),
       id: 'cmd-clear-terminal',
       title: 'Clear Terminal Output',
       subtitle: 'Purges unpinned blocks in current terminal tab',
@@ -114,7 +115,7 @@ export function CommandPalette() {
     },
     {
       type: 'command',
-      hint: '⌘S',
+      hint: chord('mod', 's'),
       id: 'cmd-save-all',
       title: 'Save All Files',
       subtitle: 'Writes all dirty editor buffers to disk',
