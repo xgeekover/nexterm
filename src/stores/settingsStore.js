@@ -6,6 +6,7 @@ export const useSettingsStore = create((set, get) => ({
   activeView: 'terminal', // 'terminal' | 'editor' | 'agents' | 'chat' | 'all' — legacy, mapped onto shell flags below
   layoutMode: 'split', // 'split' | 'single'
   isCommandPaletteOpen: false,
+  commandPaletteMode: 'all', // 'all' | 'files' (⌘P quick open)
   isSettingsModalOpen: false,
 
   // VS Code Dark Modern shell regions
@@ -103,7 +104,8 @@ export const useSettingsStore = create((set, get) => ({
   },
 
   setModelPreference: (modelPreference) => set({ modelPreference }),
-  setCommandPaletteOpen: (open) => set({ isCommandPaletteOpen: open }),
+  setCommandPaletteOpen: (open, mode = 'all') =>
+    set({ isCommandPaletteOpen: open, commandPaletteMode: open ? mode : 'all' }),
   setSettingsModalOpen: (open) => set({ isSettingsModalOpen: open }),
 }));
 

@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { DEFAULT_CHAT_MESSAGES } from '../lib/constants.js';
 
+let unlisteners = [];
+let listening = false;
+
 export const useChatStore = create((set, get) => ({
   messages: JSON.parse(JSON.stringify(DEFAULT_CHAT_MESSAGES)),
   isStreaming: false,
@@ -10,10 +13,12 @@ export const useChatStore = create((set, get) => ({
   chatContext: null, // { title: string, content: string }
   isInitialized: false,
 
-  initChat: async () => {
-    if (get().isInitialized) return;
-
-    listen('chat-token', (payload) => {
+  // Event listeners are attached once and can be torn down (HMR, unmount)
+  // without losing the bootstrap state.
+  attachListeners: async () => {
+    if (listening) return;
+    listening = true;
+    unlisteners.push(await listen('chat-token', (payload) => {
       const { message_id, token, done } = payload || {};
       if (!message_id) return;
 
@@ -57,7 +62,26 @@ export const useChatStore = create((set, get) => ({
         }
         return state;
       });
-    });
+    }));
+  },
+
+  dispose: () => {
+    for (const off of unlisteners) {
+      try {
+        if (typeof off === 'function') off();
+      } catch (_) {
+        // listener already gone
+      }
+    }
+    unlisteners = [];
+    listening = false;
+  },
+  initChat: async () => {
+    if (get().isInitialized) {
+      await get().attachListeners();
+      return;
+    }
+
 
     set({ isInitialized: true });
   },
@@ -117,6 +141,7 @@ export const useChatStore = create((set, get) => ({
       });
 
       return asstReply;
+      await get().attachListeners();
     } catch (err) {
       console.error('[ChatStore] Failed to send chat message:', err);
       set({ isStreaming: false, activeStreamingMessageId: null });

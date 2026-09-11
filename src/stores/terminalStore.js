@@ -22,6 +22,9 @@ function collectLeaves(node, acc = []) {
   return acc;
 }
 
+let unlisteners = [];
+let listening = false;
+
 export const useTerminalStore = create((set, get) => ({
   tabs: [],
   activeTabId: null,
@@ -196,8 +199,96 @@ export const useTerminalStore = create((set, get) => ({
     set({ splitTree: updateBinding(splitTree) });
   },
 
+  // Event listeners are attached once and can be torn down (HMR, unmount)
+  // without losing the bootstrap state.
+  attachListeners: async () => {
+    if (listening) return;
+    listening = true;
+    unlisteners.push(await listen('pty-output', (payload) => {
+      const { session_id, data } = payload || {};
+      if (!session_id || !data) return;
+
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.sessionId !== session_id) return tab;
+          const blocks = [...tab.blocks];
+          const runningIdx = blocks.findIndex((b) => b.status === 'running');
+          if (runningIdx !== -1) {
+            blocks[runningIdx] = {
+              ...blocks[runningIdx],
+              output: blocks[runningIdx].output + data,
+            };
+          }
+          // No running block: this is prompt/banner noise — never append it
+          // to a finished (possibly pinned) block.
+          return { ...tab, blocks };
+        }),
+      }));
+    }));
+    unlisteners.push(await listen('pty-command-done', (payload) => {
+      const { session_id, exit_code } = payload || {};
+      if (!session_id) return;
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.sessionId !== session_id) return tab;
+          const idx = tab.blocks.findIndex((b) => b.status === 'running');
+          if (idx === -1) return tab;
+          const blocks = [...tab.blocks];
+          const running = blocks[idx];
+          const ok = exit_code === null || exit_code === undefined || exit_code === 0;
+          blocks[idx] = {
+            ...running,
+            // zsh pads the last line to the terminal width before the prompt;
+            // drop that trailing whitespace so blocks end cleanly.
+            output: running.output.replace(/[ \t]+\r?$/, ''),
+            status: ok ? 'completed' : 'failed',
+            exitCode: exit_code ?? 0,
+            durationMs: Date.now() - (running.startTime || Date.now()),
+          };
+          return { ...tab, blocks };
+        }),
+      }));
+    }));
+    unlisteners.push(await listen('pty-exit', (payload) => {
+      const { session_id, exit_code } = payload || {};
+      if (!session_id) return;
+
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.sessionId !== session_id) return tab;
+          const blocks = [...tab.blocks];
+          const runningIdx = blocks.findIndex((b) => b.status === 'running');
+          if (runningIdx !== -1) {
+            const blk = blocks[runningIdx];
+            blocks[runningIdx] = {
+              ...blk,
+              status: exit_code === 0 ? 'completed' : 'failed',
+              exitCode: exit_code,
+              durationMs: Math.max(1, Date.now() - (blk.startTime || Date.now())),
+            };
+          }
+          return { ...tab, blocks };
+        }),
+      }));
+    }));
+  },
+
+  dispose: () => {
+    for (const off of unlisteners) {
+      try {
+        if (typeof off === 'function') off();
+      } catch (_) {
+        // listener already gone
+      }
+    }
+    unlisteners = [];
+    listening = false;
+  },
   init: async () => {
-    if (get().isInitialized) return;
+    if (get().isInitialized) {
+      await get().attachListeners();
+      return;
+    }
 
     try {
       let rootPath = '/workspace';
@@ -233,79 +324,13 @@ export const useTerminalStore = create((set, get) => ({
       });
 
       // Register PTY output listener
-      listen('pty-output', (payload) => {
-        const { session_id, data } = payload || {};
-        if (!session_id || !data) return;
-
-        set((state) => ({
-          tabs: state.tabs.map((tab) => {
-            if (tab.sessionId !== session_id) return tab;
-            const blocks = [...tab.blocks];
-            const runningIdx = blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx !== -1) {
-              blocks[runningIdx] = {
-                ...blocks[runningIdx],
-                output: blocks[runningIdx].output + data,
-              };
-            }
-            // No running block: this is prompt/banner noise — never append it
-            // to a finished (possibly pinned) block.
-            return { ...tab, blocks };
-          }),
-        }));
-      });
 
       // Register PTY exit listener
       // Shell integration (OSC 133): the shell reported that a command finished.
       // This is the real completion signal in the desktop app; `pty-exit`
       // below only fires when the shell itself dies (or from the browser mock).
-      listen('pty-command-done', (payload) => {
-        const { session_id, exit_code } = payload || {};
-        if (!session_id) return;
-        set((state) => ({
-          tabs: state.tabs.map((tab) => {
-            if (tab.sessionId !== session_id) return tab;
-            const idx = tab.blocks.findIndex((b) => b.status === 'running');
-            if (idx === -1) return tab;
-            const blocks = [...tab.blocks];
-            const running = blocks[idx];
-            const ok = exit_code === null || exit_code === undefined || exit_code === 0;
-            blocks[idx] = {
-              ...running,
-              // zsh pads the last line to the terminal width before the prompt;
-              // drop that trailing whitespace so blocks end cleanly.
-              output: running.output.replace(/[ \t]+\r?$/, ''),
-              status: ok ? 'completed' : 'failed',
-              exitCode: exit_code ?? 0,
-              durationMs: Date.now() - (running.startTime || Date.now()),
-            };
-            return { ...tab, blocks };
-          }),
-        }));
-      });
 
-      listen('pty-exit', (payload) => {
-        const { session_id, exit_code } = payload || {};
-        if (!session_id) return;
-
-        set((state) => ({
-          tabs: state.tabs.map((tab) => {
-            if (tab.sessionId !== session_id) return tab;
-            const blocks = [...tab.blocks];
-            const runningIdx = blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx !== -1) {
-              const blk = blocks[runningIdx];
-              blocks[runningIdx] = {
-                ...blk,
-                status: exit_code === 0 ? 'completed' : 'failed',
-                exitCode: exit_code,
-                durationMs: Math.max(1, Date.now() - (blk.startTime || Date.now())),
-              };
-            }
-            return { ...tab, blocks };
-          }),
-        }));
-      });
+      await get().attachListeners();
     } catch (err) {
       console.error('[TerminalStore] Failed to initialize terminal session:', err);
     }

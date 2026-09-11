@@ -26,6 +26,7 @@ export function FileExplorer() {
 
   const [creatingType, setCreatingType] = useState(null); // 'file' | 'folder' | null
   const [newItemName, setNewItemName] = useState('');
+  const [createError, setCreateError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
 
   useEffect(() => {
@@ -50,8 +51,9 @@ export function FileExplorer() {
       }
       setNewItemName('');
       setCreatingType(null);
+      setCreateError('');
     } catch (err) {
-      alert(`Error creating ${creatingType}: ${err.message}`);
+      setCreateError(`Could not create ${creatingType}: ${err.message}`);
     }
   };
 
@@ -200,6 +202,11 @@ export function FileExplorer() {
       {/* Directory Tree */}
       {rootExpanded && (
         <div className="flex-1 overflow-y-auto">
+          {createError && (
+            <div role="alert" className="px-3 py-1 text-ui-sm text-vsc-error border-b border-vsc-border">
+              {createError}
+            </div>
+          )}
           {rootNodes.length > 0 ? (
             rootNodes.map((node) => (
               <FileTreeNode key={node.path} node={node} depth={0} allNodes={fileTree} />

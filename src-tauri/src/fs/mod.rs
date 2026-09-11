@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::models::FileNode;
 
-const SKIPPED_FOLDERS: &[&str] = &[".git", "node_modules", "target", ".agents", "dist"];
+pub const SKIPPED_FOLDERS: &[&str] = &[".git", "node_modules", "target", ".agents", "dist"];
 
 pub fn resolve_path(path_str: &str) -> PathBuf {
     let trimmed = path_str.trim();

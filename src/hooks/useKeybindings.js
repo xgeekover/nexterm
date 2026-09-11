@@ -26,6 +26,13 @@ export function useKeybindings() {
       const isMod = e.metaKey || e.ctrlKey;
       const isInMonacoEditor = Boolean(e.target && e.target.closest && e.target.closest('.monaco-editor'));
 
+      // ⌘P: Go to File (quick open) · ⌘⇧P: all commands
+      if (isMod && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setCommandPaletteOpen(true, e.shiftKey ? 'all' : 'files');
+        return;
+      }
+
       // ⌘K / Ctrl+K: Command Palette
       if (isMod && e.key.toLowerCase() === 'k') {
         e.preventDefault();

@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
 
+let unlisteners = [];
+let listening = false;
+let refreshTimer = null;
 export const useEditorStore = create((set, get) => ({
   tabs: [],
   activeTabId: null,
@@ -11,6 +14,29 @@ export const useEditorStore = create((set, get) => ({
   isLoadingTree: false,
   diffView: null,
 
+  // Event listeners are attached once and can be torn down (HMR, unmount)
+  // without losing the bootstrap state.
+  attachListeners: async () => {
+    if (listening) return;
+    listening = true;
+    unlisteners.push(await listen('fs-change', () => {
+      // A build or install fires hundreds of events; refresh once they settle.
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => get().refreshExplorer(), 300);
+    }));
+  },
+
+  dispose: () => {
+    for (const off of unlisteners) {
+      try {
+        if (typeof off === 'function') off();
+      } catch (_) {
+        // listener already gone
+      }
+    }
+    unlisteners = [];
+    listening = false;
+  },
   init: async () => {
     // The backend owns the workspace root; the browser mock reports '/workspace'.
     try {
@@ -22,9 +48,7 @@ export const useEditorStore = create((set, get) => ({
     await get().refreshExplorer();
 
     // Listen to filesystem changes
-    listen('fs-change', async () => {
-      await get().refreshExplorer();
-    });
+    await get().attachListeners();
   },
 
   refreshExplorer: async () => {

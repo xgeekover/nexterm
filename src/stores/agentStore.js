@@ -28,6 +28,9 @@ export function computeTelemetry(agents = []) {
   };
 }
 
+let unlisteners = [];
+let listening = false;
+
 export const useAgentStore = create((set, get) => ({
   agents: JSON.parse(JSON.stringify(DEFAULT_AGENTS)),
   telemetry: computeTelemetry(DEFAULT_AGENTS),
@@ -37,8 +40,50 @@ export const useAgentStore = create((set, get) => ({
   isLogsDrawerOpen: false,
   isInitialized: false,
 
+  // Event listeners are attached once and can be torn down (HMR, unmount)
+  // without losing the bootstrap state.
+  attachListeners: async () => {
+    if (listening) return;
+    listening = true;
+    unlisteners.push(await listen('agent-updated', (updated) => {
+      if (!updated || !updated.id) return;
+      set((state) => {
+        const idx = state.agents.findIndex((a) => a.id === updated.id);
+        let nextAgents;
+        if (idx >= 0) {
+          nextAgents = [...state.agents];
+          nextAgents[idx] = { ...nextAgents[idx], ...updated };
+        } else {
+          nextAgents = [...state.agents, updated];
+        }
+        return {
+          agents: nextAgents,
+          telemetry: computeTelemetry(nextAgents),
+        };
+      });
+    }));
+    unlisteners.push(await listen('agent-log', (logEntry) => {
+      if (!logEntry || !logEntry.agent_id) return;
+      get().appendLog(logEntry.agent_id, logEntry);
+    }));
+  },
+
+  dispose: () => {
+    for (const off of unlisteners) {
+      try {
+        if (typeof off === 'function') off();
+      } catch (_) {
+        // listener already gone
+      }
+    }
+    unlisteners = [];
+    listening = false;
+  },
   initAgents: async () => {
-    if (get().isInitialized) return;
+    if (get().isInitialized) {
+      await get().attachListeners();
+      return;
+    }
 
     try {
       const list = await invoke('agent_list');
@@ -56,29 +101,9 @@ export const useAgentStore = create((set, get) => ({
       }
 
       // Listen for agent updates
-      listen('agent-updated', (updated) => {
-        if (!updated || !updated.id) return;
-        set((state) => {
-          const idx = state.agents.findIndex((a) => a.id === updated.id);
-          let nextAgents;
-          if (idx >= 0) {
-            nextAgents = [...state.agents];
-            nextAgents[idx] = { ...nextAgents[idx], ...updated };
-          } else {
-            nextAgents = [...state.agents, updated];
-          }
-          return {
-            agents: nextAgents,
-            telemetry: computeTelemetry(nextAgents),
-          };
-        });
-      });
 
       // Listen for streamed agent logs
-      listen('agent-log', (logEntry) => {
-        if (!logEntry || !logEntry.agent_id) return;
-        get().appendLog(logEntry.agent_id, logEntry);
-      });
+      await get().attachListeners();
     } catch (err) {
       console.error('[AgentStore] Failed to initialize agents:', err);
     }

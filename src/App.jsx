@@ -5,6 +5,7 @@ import { StatusBar } from './components/layout/StatusBar.jsx';
 import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
+import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useTheme } from './hooks/useTheme.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { useEditorStore } from './stores/editorStore.js';
@@ -15,6 +16,7 @@ export default function App() {
   // Initialize global theme and keyboard shortcuts
   useTheme();
   useKeybindings();
+  useMenuEvents();
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
@@ -27,6 +29,14 @@ export default function App() {
     initEditor();
     initAgents();
     initChat();
+    // Detach event listeners on unmount / HMR so they never stack up;
+    // the bootstrap state (PTY sessions, agents) is kept.
+    return () => {
+      useTerminalStore.getState().dispose?.();
+      useEditorStore.getState().dispose?.();
+      useAgentStore.getState().dispose?.();
+      useChatStore.getState().dispose?.();
+    };
   }, [initTerminal, initEditor, initAgents, initChat]);
 
   return (

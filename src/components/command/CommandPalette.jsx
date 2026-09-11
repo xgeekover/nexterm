@@ -33,6 +33,8 @@ export function CommandPalette() {
   const sendMessage = useChatStore((s) => s.sendMessage);
 
   const [query, setQuery] = useState('');
+
+  const paletteMode = useSettingsStore((st) => st.commandPaletteMode);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
 
@@ -153,7 +155,9 @@ export function CommandPalette() {
     { label: 'files', items: fileItems },
     { label: 'commands', items: commandItems },
     { label: 'ai actions', items: aiItems },
-  ].filter((g) => g.items.length > 0);
+  ]
+    .filter((g) => g.items.length > 0)
+    .filter((g) => paletteMode === 'all' || g.label === 'files');
 
   const allFiltered = [...fileItems, ...commandItems, ...aiItems];
 
@@ -209,7 +213,7 @@ export function CommandPalette() {
                 setSelectedIndex(0);
               }}
               onKeyDown={handleKeyDown}
-              placeholder="Type a command or search files…"
+              placeholder={paletteMode === 'files' ? 'Search files by name…' : 'Type a command or search files…'}
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-ui text-vsc-fg placeholder:text-vsc-placeholder"
             />
           </div>

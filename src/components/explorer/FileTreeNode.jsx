@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
+import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 
 const INDENT_SIZE = 8; // px per depth level
 const ROW_PADDING = 4; // px base gutter before the guides/chevron start
@@ -88,17 +89,29 @@ export function FileTreeNode({ node, depth = 0, allNodes = [] }) {
     }
   };
 
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
   const handleDelete = (e) => {
     e.stopPropagation();
-    if (confirm(`Delete ${node.name}?`)) {
-      deletePath(node.path, isFolder);
-    }
+    setConfirmingDelete(true);
   };
 
   const paddingLeft = depth * INDENT_SIZE + ROW_PADDING;
 
   return (
     <div>
+      <ConfirmDialog
+        open={confirmingDelete}
+        title={isFolder ? 'Delete Folder' : 'Delete File'}
+        message={`Are you sure you want to delete '${node.name}'?${isFolder ? ' Its contents will be deleted too.' : ''}`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => {
+          setConfirmingDelete(false);
+          deletePath(node.path, isFolder);
+        }}
+        onCancel={() => setConfirmingDelete(false)}
+      />
       <div
         role="treeitem"
         tabIndex={0}

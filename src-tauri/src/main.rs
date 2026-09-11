@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod commands;
 pub mod fs;
+pub mod menu;
 pub mod models;
 pub mod pty;
 
@@ -31,6 +32,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(|app| {
             let app_state = app.state::<AppState>();
@@ -38,6 +40,13 @@ fn main() {
             let _ = app_state
                 .fs_watcher
                 .start_watching(app.handle().clone(), &root.to_string_lossy());
+
+            // Native menu; app-specific items are forwarded to the webview by id.
+            let menu = menu::build(app.handle())?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|handle, event| {
+                menu::forward_to_webview(handle, event.id().as_ref());
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
