@@ -1,7 +1,17 @@
 /**
- * Shell integration contract: OSC 133 `pty-command-done` closes the running
- * block with the real exit code, stray output never lands on finished blocks,
- * and PTY resizes are de-duplicated. Registered with the shared runner.
+ * Shell integration contract for the terminal store.
+ *
+ * The terminal UI is now a single persistent xterm per tab (see
+ * `src/components/terminal/TerminalView.jsx`) — it writes raw PTY output
+ * straight to the screen and is the store's only concern is bookkeeping:
+ * `blocks` still records each command's output/exit code/duration for the
+ * command palette, history and any future re-run/inspection UI, entirely
+ * independent of what the live terminal is showing. These tests exercise
+ * that bookkeeping layer directly against the real Zustand store (no
+ * rendering involved): OSC 133's `pty-command-done` still closes the
+ * running block with the right exit code, stray output never lands on a
+ * finished block, PTY resizes are de-duplicated, and `writeRaw`/`closeTab`
+ * behave. Registered with the shared runner.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { useTerminalStore } from '../../src/stores/terminalStore.js';
@@ -27,7 +37,7 @@ function seedRunningBlock(id) {
   }));
 }
 
-describe('Shell integration: OSC 133 command boundaries', () => {
+describe('Shell integration: OSC 133 command boundaries (store bookkeeping)', () => {
   beforeEach(async () => {
     await store.getState().init();
   });
@@ -52,6 +62,9 @@ describe('Shell integration: OSC 133 command boundaries', () => {
   });
 
   test('SI-03: output with no running block is dropped, never appended to a finished block', async () => {
+    // This is a bookkeeping guarantee only — the live xterm always shows the
+    // prompt/echo bytes regardless (osc.rs forwards everything but the OSC
+    // 133 markers), but the `blocks` history must not misattribute them.
     const before = tab().blocks.map((b) => b.output);
     await mockBridge.emit('pty-output', { session_id: sessionId(), data: 'user@host % ' });
     assert.deepEqual(tab().blocks.map((b) => b.output), before);
@@ -63,7 +76,7 @@ describe('Shell integration: OSC 133 command boundaries', () => {
     assert.equal(JSON.stringify(tab().blocks), before);
   });
 
-  test('SI-05: consecutive commands each keep their own output', async () => {
+  test('SI-05: consecutive commands each keep their own output (attribution)', async () => {
     seedRunningBlock('blk-c1');
     await mockBridge.emit('pty-output', { session_id: sessionId(), data: 'first\r\n' });
     await mockBridge.emit('pty-command-done', { session_id: sessionId(), exit_code: 0 });
@@ -74,7 +87,7 @@ describe('Shell integration: OSC 133 command boundaries', () => {
     assert.equal(tab().blocks.find((x) => x.id === 'blk-c2').output, 'second\r\n');
   });
 
-  test('SI-06: resizePty forwards cols/rows once per distinct size', async () => {
+  test('SI-06: resizePty forwards cols/rows once per distinct size (dedupe)', async () => {
     const session = mockBridge.ptySessions.get(sessionId());
     await store.getState().resizePty(tab().id, 132, 40);
     assert.equal(session.cols, 132);
@@ -87,11 +100,13 @@ describe('Shell integration: OSC 133 command boundaries', () => {
   });
 
   test('SI-07: writeRaw sends bytes to the bound session without throwing', async () => {
+    // This is what every keystroke in the live xterm goes through
+    // (`term.onData(d => writeRaw(tabId, d))`).
     await store.getState().writeRaw(tab().id, '\x03');
     await store.getState().writeRaw(tab().id, '');
   });
 
-  test('SI-08: setBlockOutput replaces a block\'s output', async () => {
+  test('SI-08: setBlockOutput replaces a block\'s recorded output only', async () => {
     seedRunningBlock('blk-snap');
     await mockBridge.emit('pty-output', { session_id: sessionId(), data: 'raw ansi bytes' });
     store.getState().setBlockOutput(tab().id, 'blk-snap', 'x');
@@ -100,5 +115,23 @@ describe('Shell integration: OSC 133 command boundaries', () => {
     // Only the output field changes — everything else on the block is untouched.
     assert.equal(b.status, 'running');
     assert.equal(b.command, 'sleep 1');
+  });
+
+  test('SI-09: closeTab kills the PTY, tears down bookkeeping, and never throws without a mounted terminal view', async () => {
+    // `closeTab` also disposes the tab's persistent xterm instance (see
+    // `terminalStore.js`'s guarded dynamic import of
+    // `components/terminal/terminalRegistry.js`). Under this Node test
+    // environment there is no `document`, so that dispose is a guarded
+    // no-op — closeTab must still complete cleanly and drop the tab.
+    const before = tab();
+    const second = await store.getState().createTab('Closable');
+    assert.equal(store.getState().tabs.length, 2);
+
+    await store.getState().closeTab(second.id);
+
+    assert.equal(store.getState().tabs.length, 1);
+    assert.equal(store.getState().tabs.find((t) => t.id === second.id), undefined);
+    assert.equal(mockBridge.ptySessions.has(second.sessionId), false, 'pty_kill must remove the session');
+    assert.equal(store.getState().activeTabId, before.id);
   });
 });

@@ -1,102 +1,34 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { useCallback } from 'react';
 import { Panel, Group, Separator } from 'react-resizable-panels';
 import { SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { TerminalBlock } from './TerminalBlock.jsx';
-import { CommandInput } from './CommandInput.jsx';
+import { TerminalView } from './TerminalView.jsx';
 import { cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
 
-let cachedCell = null;
-/** Width/height of one monospace character cell, measured once from the real font. */
-function measureCell(container) {
-  if (cachedCell) return cachedCell;
-  const probe = document.createElement('span');
-  probe.className = 'font-mono text-code';
-  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;';
-  probe.textContent = 'W'.repeat(20);
-  container.appendChild(probe);
-  const rect = probe.getBoundingClientRect();
-  container.removeChild(probe);
-  cachedCell = { width: rect.width / 20 || 7.2, height: rect.height || 18 };
-  return cachedCell;
-}
-
 /**
  * A single terminal pane (leaf node in the split tree).
- * Renders its own tab strip, blocks, and command input —
- * scoped to its assigned tabId.
+ * Renders its own tab strip and a persistent xterm surface for whichever
+ * tab is bound to it — a real terminal, not a block list with a separate
+ * input. The xterm instance itself is owned by `TerminalView`/the module
+ * -level registry, so switching which tab a pane shows never loses either
+ * side's scrollback.
  */
 function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) {
   const tabs = useTerminalStore((s) => s.tabs);
   const activeTabId = useTerminalStore((s) => s.activeTabId);
   const activePaneId = useTerminalStore((s) => s.activePaneId);
-  const executeCommand = useTerminalStore((s) => s.executeCommand);
   const switchTab = useTerminalStore((s) => s.switchTab);
   const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
-  const writeRaw = useTerminalStore((s) => s.writeRaw);
-  const resizePty = useTerminalStore((s) => s.resizePty);
-  const blocksEndRef = useRef(null);
-  const outputRef = useRef(null);
-
-  const [selectedBlockId, setSelectedBlockId] = useState(null);
-  const [paneHeight, setPaneHeight] = useState(0);
 
   const isActivePane = activePaneId === paneId;
 
   // This pane shows the tab bound to it, or falls back to active tab
   const boundTab = tabs.find((t) => t.id === tabId) || tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
-  const isRunning = !!boundTab?.blocks?.some((b) => b.status === 'running');
-
-  // Read fresh inside the ResizeObserver callback without tearing the
-  // observer down every time a command starts/stops.
-  const isRunningRef = useRef(isRunning);
-  isRunningRef.current = isRunning;
-
-  // Keep the backend PTY sized to this pane so real shell output wraps correctly.
-  useEffect(() => {
-    const el = outputRef.current;
-    const boundId = boundTab?.id;
-    if (!el || !boundId || typeof ResizeObserver === 'undefined') return undefined;
-    let timer = null;
-    const measure = () => {
-      setPaneHeight(el.clientHeight);
-      // While a block is running, its own <XtermSurface> owns PTY sizing —
-      // the pane-level observer must not fight it with a second resize.
-      if (isRunningRef.current) return;
-      const cell = measureCell(el);
-      const cols = Math.max(20, Math.floor((el.clientWidth - 24) / cell.width));
-      const rows = Math.max(5, Math.floor(el.clientHeight / cell.height));
-      resizePty(boundId, cols, rows);
-    };
-    const observer = new ResizeObserver(() => {
-      clearTimeout(timer);
-      timer = setTimeout(measure, 150);
-    });
-    observer.observe(el);
-    measure();
-    return () => {
-      clearTimeout(timer);
-      observer.disconnect();
-    };
-  }, [boundTab?.id, resizePty]);
-
-  useEffect(() => {
-    blocksEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [boundTab?.blocks?.length, boundTab?.blocks?.[boundTab?.blocks?.length - 1]?.output]);
-
-  const handleNavigateBlock = (delta) => {
-    const blocks = boundTab?.blocks || [];
-    if (blocks.length === 0) return;
-    const currentIdx = selectedBlockId ? blocks.findIndex((b) => b.id === selectedBlockId) : -1;
-    const nextIdx =
-      currentIdx === -1 ? (delta < 0 ? blocks.length - 1 : 0) : Math.min(blocks.length - 1, Math.max(0, currentIdx + delta));
-    setSelectedBlockId(blocks[nextIdx].id);
-  };
 
   return (
     <div
@@ -153,46 +85,16 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
         </div>
       </div>
 
-      {/* Blocks */}
-      <div ref={outputRef} className="flex-1 overflow-y-auto">
-        {(!boundTab || boundTab.blocks.length === 0) ? (
-          <div className="h-full flex flex-col items-center justify-center gap-2 text-center select-none">
-            <p className="text-ui-sm text-vsc-muted">Type a command below</p>
-            <div className="flex items-center gap-3 text-ui-sm text-vsc-muted">
-              <span className="inline-flex items-center gap-1">
-                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">{chord('mod', 'd')}</kbd>
-                split right
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">{chord('mod', 'shift', 'd')}</kbd>
-                split down
-              </span>
-            </div>
-          </div>
+      {/* Live terminal surface */}
+      <div className="flex-1 overflow-hidden">
+        {boundTab ? (
+          <TerminalView tabId={boundTab.id} active={isActivePane} />
         ) : (
-          <>
-            {boundTab.blocks.map((block) => (
-              <TerminalBlock
-                key={block.id}
-                block={block}
-                tabId={boundTab.id}
-                selected={block.id === selectedBlockId}
-                onSelect={setSelectedBlockId}
-                paneHeight={paneHeight}
-              />
-            ))}
-            <div ref={blocksEndRef} />
-          </>
+          <div className="h-full flex items-center justify-center text-ui-sm text-vsc-muted select-none">
+            No terminal
+          </div>
         )}
       </div>
-
-      {/* Command Input */}
-      <CommandInput
-        isRunning={isRunning}
-        onRawInput={(data) => writeRaw(boundTab?.id, data)}
-        onExecute={(cmd) => executeCommand(cmd, boundTab?.id)}
-        onNavigateBlock={handleNavigateBlock}
-      />
     </div>
   );
 }

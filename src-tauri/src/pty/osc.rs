@@ -3,9 +3,17 @@
 //! The injected shell hooks (see `shell_integration.rs`) print
 //! `ESC ] 133 ; <marker> [; exit] BEL` around every prompt/command:
 //!
-//! - `A` prompt start        → we stop forwarding output (prompt + typed echo)
-//! - `C` command executed    → we start forwarding output
+//! - `A` prompt start
+//! - `B` command start
+//! - `C` command executed
 //! - `D;<exit>` command done → reported to the frontend as `pty-command-done`
+//!
+//! This is a *real terminal*: every byte the shell writes — prompts, the
+//! echo of what you type, command output — is forwarded to the screen
+//! unchanged. The only bytes this filter ever removes are the OSC 133
+//! marker sequences themselves (so `\e]133;...` never reaches xterm), while
+//! still reporting the markers it recognised so the app can react to command
+//! boundaries (e.g. closing a bookkeeping block on `CommandFinished`).
 //!
 //! Everything else in the byte stream passes through untouched, including
 //! other OSC sequences (window title, hyperlinks) and CSI colour codes.
@@ -27,31 +35,20 @@ pub enum Marker {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Filtered {
-    /// Output bytes that belong to a running command (or to the shell before
-    /// any marker was seen), as lossy UTF-8.
+    /// All non-marker output bytes from this chunk, as lossy UTF-8 — prompts,
+    /// typed-input echo and command output alike.
     pub output: String,
     pub markers: Vec<Marker>,
 }
 
+#[derive(Default)]
 pub struct OscFilter {
     pending: Vec<u8>,
-    forwarding: bool,
-}
-
-impl Default for OscFilter {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl OscFilter {
     pub fn new() -> Self {
-        Self {
-            pending: Vec::new(),
-            // Until the first prompt marker arrives, pass the shell's startup
-            // output through so nothing is silently swallowed.
-            forwarding: true,
-        }
+        Self { pending: Vec::new() }
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> Filtered {
@@ -65,9 +62,7 @@ impl OscFilter {
         while i < buf.len() {
             let b = buf[i];
             if b != ESC {
-                if self.forwarding {
-                    out.push(b);
-                }
+                out.push(b);
                 i += 1;
                 continue;
             }
@@ -80,9 +75,7 @@ impl OscFilter {
 
             if buf[i + 1] != b']' {
                 // Not an OSC (CSI etc.) — forward the ESC and keep scanning.
-                if self.forwarding {
-                    out.push(b);
-                }
+                out.push(b);
                 i += 1;
                 continue;
             }
@@ -116,9 +109,7 @@ impl OscFilter {
             let Some((payload_end, resume)) = end else {
                 if buf.len() - i > MAX_PENDING {
                     // Give up on this sequence; emit it as plain text.
-                    if self.forwarding {
-                        out.extend_from_slice(&buf[i..]);
-                    }
+                    out.extend_from_slice(&buf[i..]);
                 } else {
                     self.pending = buf[i..].to_vec();
                 }
@@ -128,18 +119,14 @@ impl OscFilter {
             let payload = &buf[start..payload_end];
             match parse_marker(payload) {
                 Some(marker) => {
-                    match marker {
-                        Marker::PromptStart | Marker::CommandStart => self.forwarding = false,
-                        Marker::CommandExecuted => self.forwarding = true,
-                        Marker::CommandFinished(_) => self.forwarding = false,
-                    }
+                    // Recognised OSC 133 marker: strip it from the stream but
+                    // report it — never gate the surrounding output on it.
                     markers.push(marker);
                 }
                 None => {
-                    // Foreign OSC — pass through verbatim when forwarding.
-                    if self.forwarding {
-                        out.extend_from_slice(&buf[i..resume]);
-                    }
+                    // Foreign OSC (window title, hyperlinks, ...) — always
+                    // pass through verbatim.
+                    out.extend_from_slice(&buf[i..resume]);
                 }
             }
             i = resume;
@@ -184,13 +171,16 @@ mod tests {
     }
 
     #[test]
-    fn gates_prompt_and_echo_but_forwards_command_output() {
+    fn forwards_prompt_echo_and_command_output_while_stripping_markers() {
+        // Real-terminal behaviour: the prompt text and the echo of what the
+        // user typed must reach the screen, exactly like every other byte —
+        // only the OSC 133 marker sequences themselves are removed.
         let mut f = OscFilter::new();
         let r = feed_str(
             &mut f,
             "\x1b]133;D;0\x07\x1b]133;A\x07user@host % echo hi\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07user@host % ",
         );
-        assert_eq!(r.output, "hi\r\n");
+        assert_eq!(r.output, "user@host % echo hi\r\nhi\r\nuser@host % ");
         assert_eq!(
             r.markers,
             vec![
@@ -218,7 +208,9 @@ mod tests {
         assert_eq!(a.output, "out-1");
         assert_eq!(a.markers, vec![Marker::CommandExecuted]);
         let b = feed_str(&mut f, "3;D;2\x07trailing prompt");
-        assert_eq!(b.output, "");
+        // Text after the (stripped) D marker is still forwarded — nothing
+        // gates output based on marker kind any more.
+        assert_eq!(b.output, "trailing prompt");
         assert_eq!(b.markers, vec![Marker::CommandFinished(Some(2))]);
     }
 
@@ -245,6 +237,17 @@ mod tests {
         let mut f = OscFilter::new();
         let r = feed_str(&mut f, "\x1b]133;C\x07\x1b]0;title\x07\x1b[31mred\x1b[0m\x1b]133;D;0\x07");
         assert_eq!(r.output, "\x1b]0;title\x07\x1b[31mred\x1b[0m");
+    }
+
+    #[test]
+    fn foreign_osc_and_csi_pass_through_outside_any_command_span() {
+        // Before any 133;C and after a 133;D, output used to be gated. Now a
+        // foreign OSC (e.g. window-title) and CSI colour codes in the prompt
+        // itself must still reach the screen.
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]133;A\x07\x1b]0;my-title\x07\x1b[32m$\x1b[0m ");
+        assert_eq!(r.output, "\x1b]0;my-title\x07\x1b[32m$\x1b[0m ");
+        assert_eq!(r.markers, vec![Marker::PromptStart]);
     }
 
     #[test]

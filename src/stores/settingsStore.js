@@ -15,6 +15,17 @@ export const useSettingsStore = create((set, get) => ({
   secondarySidebarVisible: true, // secondary sidebar (Agents)
   secondaryTab: 'agents', // 'agents' (AI Chat was removed)
 
+  // Which region ('left' | 'right' | 'bottom') each draggable view currently
+  // lives in. Not persisted — resets to the default VS Code-style layout on
+  // reload. Region visibility is still governed by sidebarVisible /
+  // panelVisible / secondarySidebarVisible above; this map only controls
+  // which view(s) render inside whichever region is shown.
+  viewLocations: {
+    explorer: 'left',
+    agents: 'right',
+    terminal: 'bottom',
+  },
+
   byokKeys: {
     openaiKey: '',
     claudeKey: '',
@@ -93,6 +104,14 @@ export const useSettingsStore = create((set, get) => ({
     });
   },
   setSecondaryTab: (tab) => set({ secondaryTab: tab }),
+
+  // Drag & drop layout: move a view ('explorer' | 'agents' | 'terminal') to
+  // a region ('left' | 'right' | 'bottom'). Dropping onto the region a view
+  // already occupies is a harmless no-op.
+  moveView: (view, region) =>
+    set((state) => ({
+      viewLocations: { ...state.viewLocations, [view]: region },
+    })),
 
   setApiKey: (provider, key) => {
     set((state) => ({

@@ -176,7 +176,7 @@ impl PtyManager {
             .name(format!("pty-reader-{session_id}"))
             .spawn(move || {
                 let mut buf = [0u8; 4096];
-                // Strips OSC 133 markers, gates prompt/echo text and tells us
+                // Strips OSC 133 markers (everything else is forwarded verbatim) and tells us
                 // when a command finished (see osc.rs / shell_integration.rs).
                 let mut filter = OscFilter::new();
                 loop {

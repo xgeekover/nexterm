@@ -177,9 +177,9 @@ await runTest('TC-ADV-ANSI-01: Standard SGR color tokens and styling', async () 
   const raw = '\x1b[31mRed\x1b[0m \x1b[32mGreen\x1b[0m \x1b[1mBold\x1b[0m';
   const tokens = parseAnsiTokens(raw);
   assert.ok(tokens.length >= 3);
-  assert.ok(tokens[0].className.includes('text-rose'));
+  assert.ok(tokens[0].className.includes('text-ansi-red'));
   assert.equal(tokens[0].text, 'Red');
-  assert.ok(tokens[2].className.includes('text-emerald'));
+  assert.ok(tokens[2].className.includes('text-ansi-green'));
   assert.equal(tokens[2].text, 'Green');
 });
 
@@ -452,3 +452,9 @@ if (findings.length > 0) {
 }
 
 export { findings, totalTests, passedTests, failedTests };
+
+// A failing check must fail the process, otherwise CI and the runner treat a
+// red suite as green (this file previously always exited 0).
+if (failedTests > 0) {
+  process.exitCode = 1;
+}

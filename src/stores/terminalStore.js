@@ -25,6 +25,23 @@ function collectLeaves(node, acc = []) {
 let unlisteners = [];
 let listening = false;
 
+/**
+ * Drop the persistent xterm instance a closed tab owned (see
+ * `components/terminal/terminalRegistry.js`). Guarded by `document` so this
+ * store — imported directly by Node-run tests — never eagerly pulls in
+ * `@xterm/addon-fit`, which throws (`self is not defined`) when evaluated
+ * outside a browser-like environment.
+ */
+async function disposeTerminalView(tabId) {
+  if (typeof document === 'undefined') return;
+  try {
+    const { disposeTerminal } = await import('../components/terminal/TerminalView.jsx');
+    disposeTerminal(tabId);
+  } catch (_) {
+    // Terminal view module unavailable — nothing to dispose.
+  }
+}
+
 export const useTerminalStore = create((set, get) => ({
   tabs: [],
   activeTabId: null,
@@ -144,6 +161,7 @@ export const useTerminalStore = create((set, get) => ({
     } catch (e) {
       console.warn('[TerminalStore] pty_kill failed:', e);
     }
+    await disposeTerminalView(tabId);
 
     set((state) => {
       const nextTabs = state.tabs.filter((t) => t.id !== tabId);
@@ -380,6 +398,7 @@ export const useTerminalStore = create((set, get) => ({
     } catch (e) {
       console.warn('[TerminalStore] pty_kill failed:', e);
     }
+    await disposeTerminalView(tabId);
 
     set((state) => {
       const nextTabs = state.tabs.filter((t) => t.id !== tabId);
@@ -484,8 +503,10 @@ export const useTerminalStore = create((set, get) => ({
     }));
   },
 
-  // Replace a block's output outright (e.g. an xterm snapshot taken when a
-  // running block completes). No other field changes.
+  // Replace a block's recorded output outright. No other field changes.
+  // (Bookkeeping only — the live terminal surface renders straight from PTY
+  // output and never reads `blocks`; this exists for callers that want to
+  // overwrite a block's history entry wholesale, e.g. a future re-run.)
   setBlockOutput: (tabId, blockId, output) => {
     set((state) => ({
       tabs: state.tabs.map((tab) => {
