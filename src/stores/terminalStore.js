@@ -247,19 +247,43 @@ export const useTerminalStore = create((set, get) => ({
                 ...blocks[runningIdx],
                 output: blocks[runningIdx].output + data,
               };
-            } else if (blocks.length > 0) {
-              const lastIdx = blocks.length - 1;
-              blocks[lastIdx] = {
-                ...blocks[lastIdx],
-                output: blocks[lastIdx].output + data,
-              };
             }
+            // No running block: this is prompt/banner noise — never append it
+            // to a finished (possibly pinned) block.
             return { ...tab, blocks };
           }),
         }));
       });
 
       // Register PTY exit listener
+      // Shell integration (OSC 133): the shell reported that a command finished.
+      // This is the real completion signal in the desktop app; `pty-exit`
+      // below only fires when the shell itself dies (or from the browser mock).
+      listen('pty-command-done', (payload) => {
+        const { session_id, exit_code } = payload || {};
+        if (!session_id) return;
+        set((state) => ({
+          tabs: state.tabs.map((tab) => {
+            if (tab.sessionId !== session_id) return tab;
+            const idx = tab.blocks.findIndex((b) => b.status === 'running');
+            if (idx === -1) return tab;
+            const blocks = [...tab.blocks];
+            const running = blocks[idx];
+            const ok = exit_code === null || exit_code === undefined || exit_code === 0;
+            blocks[idx] = {
+              ...running,
+              // zsh pads the last line to the terminal width before the prompt;
+              // drop that trailing whitespace so blocks end cleanly.
+              output: running.output.replace(/[ \t]+\r?$/, ''),
+              status: ok ? 'completed' : 'failed',
+              exitCode: exit_code ?? 0,
+              durationMs: Date.now() - (running.startTime || Date.now()),
+            };
+            return { ...tab, blocks };
+          }),
+        }));
+      });
+
       listen('pty-exit', (payload) => {
         const { session_id, exit_code } = payload || {};
         if (!session_id) return;
@@ -433,6 +457,33 @@ export const useTerminalStore = create((set, get) => ({
         };
       }),
     }));
+  },
+
+  // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
+  writeRaw: async (tabId, data) => {
+    const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
+    if (!tab || !data) return;
+    try {
+      await invoke('pty_write', { session_id: tab.sessionId, data });
+    } catch (err) {
+      console.error('[TerminalStore] Raw write failed:', err);
+    }
+  },
+
+  // Keep the backend PTY's window size in step with the pane (debounced by the caller).
+  resizePty: async (tabId, cols, rows) => {
+    const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
+    if (!tab || !cols || !rows) return;
+    const key = `${cols}x${rows}`;
+    if (tab.lastSize === key) return;
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
+    }));
+    try {
+      await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
+    } catch (err) {
+      console.error('[TerminalStore] Resize failed:', err);
+    }
   },
 
   setCwd: (cwd) => set({ cwd }),

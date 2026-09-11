@@ -4,6 +4,7 @@
 
 import { runnerContext } from '../e2e/harness/testFramework.js';
 import './stress_agent_chat_palette.test.js';
+import './shell_integration.test.js';
 
 async function run() {
   console.log('====================================================');

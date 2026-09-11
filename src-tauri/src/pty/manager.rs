@@ -10,6 +10,10 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter};
 
+use super::osc::{Marker, OscFilter};
+use super::shell_integration;
+use crate::models::PtyCommandDonePayload;
+
 use crate::models::{PtyExitPayload, PtyOutputPayload, PtySessionInfo};
 
 pub struct PtySession {
@@ -90,6 +94,9 @@ impl PtyManager {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("NEXTERM", "1");
+        for (key, value) in shell_integration::env_for_shell(&shell_path) {
+            cmd.env(key, value);
+        }
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -139,16 +146,30 @@ impl PtyManager {
             .name(format!("pty-reader-{session_id}"))
             .spawn(move || {
                 let mut buf = [0u8; 4096];
+                // Strips OSC 133 markers, gates prompt/echo text and tells us
+                // when a command finished (see osc.rs / shell_integration.rs).
+                let mut filter = OscFilter::new();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                            let payload = PtyOutputPayload {
-                                session_id: session_id_clone.clone(),
-                                data,
-                            };
-                            let _ = app_handle_clone.emit("pty-output", &payload);
+                            let filtered = filter.feed(&buf[..n]);
+                            if !filtered.output.is_empty() {
+                                let payload = PtyOutputPayload {
+                                    session_id: session_id_clone.clone(),
+                                    data: filtered.output,
+                                };
+                                let _ = app_handle_clone.emit("pty-output", &payload);
+                            }
+                            for marker in filtered.markers {
+                                if let Marker::CommandFinished(exit_code) = marker {
+                                    let payload = PtyCommandDonePayload {
+                                        session_id: session_id_clone.clone(),
+                                        exit_code,
+                                    };
+                                    let _ = app_handle_clone.emit("pty-command-done", &payload);
+                                }
+                            }
                         }
                         Err(_) => break,
                     }

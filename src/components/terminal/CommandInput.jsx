@@ -2,7 +2,38 @@ import React, { useState, useRef, useEffect } from 'react';
 import { GitBranch, Trash2, Folder } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 
-export function CommandInput({ onExecute, onNavigateBlock = null }) {
+/**
+ * Translate a keydown into the bytes a terminal would receive (raw mode).
+ * Returns null for keys the app should keep handling (⌘ shortcuts etc.).
+ */
+function keyEventToBytes(e) {
+  if (e.metaKey) return null;
+  if (e.ctrlKey && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (k.length === 1 && k >= 'a' && k <= 'z') return String.fromCharCode(k.charCodeAt(0) - 96);
+    if (k === '[') return '\x1b';
+    if (k === '\\') return '\x1c';
+    if (k === ']') return '\x1d';
+    return null;
+  }
+  switch (e.key) {
+    case 'Enter': return '\r';
+    case 'Backspace': return '\x7f';
+    case 'Tab': return '\t';
+    case 'Escape': return '\x1b';
+    case 'ArrowUp': return '\x1b[A';
+    case 'ArrowDown': return '\x1b[B';
+    case 'ArrowRight': return '\x1b[C';
+    case 'ArrowLeft': return '\x1b[D';
+    case 'Home': return '\x1b[H';
+    case 'End': return '\x1b[F';
+    case 'Delete': return '\x1b[3~';
+    default:
+      return e.key.length === 1 && !e.altKey ? e.key : null;
+  }
+}
+
+export function CommandInput({ onExecute, onNavigateBlock = null, isRunning = false, onRawInput = null }) {
   const cwd = useTerminalStore((s) => s.cwd);
   const history = useTerminalStore((s) => s.history);
   const clearBlocks = useTerminalStore((s) => s.clearBlocks);
@@ -17,6 +48,17 @@ export function CommandInput({ onExecute, onNavigateBlock = null }) {
   }, []);
 
   const handleKeyDown = (e) => {
+    // While a command runs, keystrokes go straight to the process (Ctrl-C,
+    // prompt answers, arrow keys) instead of editing the next command.
+    if (isRunning && onRawInput) {
+      const bytes = keyEventToBytes(e);
+      if (bytes !== null) {
+        e.preventDefault();
+        onRawInput(bytes);
+        return;
+      }
+    }
+
     if ((e.metaKey || e.ctrlKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && input.trim() === '') {
       if (onNavigateBlock) {
         e.preventDefault();
@@ -77,7 +119,7 @@ export function CommandInput({ onExecute, onNavigateBlock = null }) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type a shell command..."
+          placeholder={isRunning ? 'Running — keys go to the process · ⌃C to interrupt' : 'Type a shell command...'}
           className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-code text-vsc-fg placeholder:text-vsc-placeholder"
           spellCheck={false}
           autoComplete="off"

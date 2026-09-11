@@ -9,6 +9,21 @@ import { cn } from '../../lib/utils.js';
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
 
+let cachedCell = null;
+/** Width/height of one monospace character cell, measured once from the real font. */
+function measureCell(container) {
+  if (cachedCell) return cachedCell;
+  const probe = document.createElement('span');
+  probe.className = 'font-mono text-code';
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;';
+  probe.textContent = 'W'.repeat(20);
+  container.appendChild(probe);
+  const rect = probe.getBoundingClientRect();
+  container.removeChild(probe);
+  cachedCell = { width: rect.width / 20 || 7.2, height: rect.height || 18 };
+  return cachedCell;
+}
+
 /**
  * A single terminal pane (leaf node in the split tree).
  * Renders its own tab strip, blocks, and command input —
@@ -22,7 +37,10 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
   const switchTab = useTerminalStore((s) => s.switchTab);
   const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
+  const writeRaw = useTerminalStore((s) => s.writeRaw);
+  const resizePty = useTerminalStore((s) => s.resizePty);
   const blocksEndRef = useRef(null);
+  const outputRef = useRef(null);
 
   const [selectedBlockId, setSelectedBlockId] = useState(null);
 
@@ -30,6 +48,31 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
 
   // This pane shows the tab bound to it, or falls back to active tab
   const boundTab = tabs.find((t) => t.id === tabId) || tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
+  const isRunning = !!boundTab?.blocks?.some((b) => b.status === 'running');
+
+  // Keep the backend PTY sized to this pane so real shell output wraps correctly.
+  useEffect(() => {
+    const el = outputRef.current;
+    const boundId = boundTab?.id;
+    if (!el || !boundId || typeof ResizeObserver === 'undefined') return undefined;
+    let timer = null;
+    const measure = () => {
+      const cell = measureCell(el);
+      const cols = Math.max(20, Math.floor((el.clientWidth - 24) / cell.width));
+      const rows = Math.max(5, Math.floor(el.clientHeight / cell.height));
+      resizePty(boundId, cols, rows);
+    };
+    const observer = new ResizeObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(measure, 150);
+    });
+    observer.observe(el);
+    measure();
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [boundTab?.id, resizePty]);
 
   useEffect(() => {
     blocksEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -100,7 +143,7 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
       </div>
 
       {/* Blocks */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={outputRef} className="flex-1 overflow-y-auto">
         {(!boundTab || boundTab.blocks.length === 0) ? (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-center select-none">
             <p className="text-ui-sm text-vsc-muted">Type a command below</p>
@@ -133,6 +176,8 @@ function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) 
 
       {/* Command Input */}
       <CommandInput
+        isRunning={isRunning}
+        onRawInput={(data) => writeRaw(boundTab?.id, data)}
         onExecute={(cmd) => executeCommand(cmd, boundTab?.id)}
         onNavigateBlock={handleNavigateBlock}
       />

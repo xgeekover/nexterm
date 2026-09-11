@@ -13,6 +13,13 @@ pub struct PtyExitPayload {
     pub exit_code: Option<u32>,
 }
 
+/// Emitted when the shell reports (via OSC 133) that a command finished.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PtyCommandDonePayload {
+    pub session_id: String,
+    pub exit_code: Option<u32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PtySessionInfo {
     pub id: String,
