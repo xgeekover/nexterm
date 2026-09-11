@@ -12,8 +12,8 @@ export const useSettingsStore = create((set, get) => ({
   // VS Code Dark Modern shell regions
   sidebarVisible: true, // primary sidebar (Explorer)
   panelVisible: true, // bottom panel (terminal)
-  secondarySidebarVisible: true, // secondary sidebar (AI Chat / Agents)
-  secondaryTab: 'chat', // 'chat' | 'agents'
+  secondarySidebarVisible: true, // secondary sidebar (Agents)
+  secondaryTab: 'agents', // 'agents' (AI Chat was removed)
 
   byokKeys: {
     openaiKey: '',
@@ -61,7 +61,7 @@ export const useSettingsStore = create((set, get) => ({
         set({ panelVisible: true });
         break;
       case 'chat':
-        set({ secondarySidebarVisible: true, secondaryTab: 'chat' });
+        set({ secondarySidebarVisible: true, secondaryTab: 'agents' });
         break;
       case 'agents':
         set({ secondarySidebarVisible: true, secondaryTab: 'agents' });

@@ -3,7 +3,6 @@ import {
   Files,
   Search,
   SquareTerminal,
-  MessageSquare,
   Bot,
   Settings,
   Sun,
@@ -68,13 +67,6 @@ export function Sidebar() {
       icon: SquareTerminal,
       isActive: panelVisible,
       onClick: togglePanel,
-    },
-    {
-      id: 'chat',
-      label: 'AI Chat',
-      icon: MessageSquare,
-      isActive: secondarySidebarVisible && secondaryTab === 'chat',
-      onClick: () => toggleSecondarySidebar('chat'),
     },
     {
       id: 'agents',

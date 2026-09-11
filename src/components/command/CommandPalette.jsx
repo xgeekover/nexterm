@@ -13,7 +13,6 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useAgentStore } from '../../stores/agentStore.js';
-import { useChatStore } from '../../stores/chatStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
 
@@ -31,7 +30,6 @@ export function CommandPalette() {
   const clearTerminalBlocks = useTerminalStore((s) => s.clearBlocks);
 
   const setNewAgentModalOpen = useAgentStore((s) => s.setNewAgentModalOpen);
-  const sendMessage = useChatStore((s) => s.sendMessage);
 
   const [query, setQuery] = useState('');
 
@@ -124,43 +122,14 @@ export function CommandPalette() {
     },
   ].filter((cmd) => fuzzyMatch(q, cmd.title) || fuzzyMatch(q, cmd.subtitle));
 
-  // 3. AI Actions
-  const aiItems = [
-    {
-      type: 'ai_action',
-      hint: 'AI',
-      id: 'ai-explain-error',
-      title: 'Explain Terminal Error with AI',
-      subtitle: 'Analyze failure stack trace and suggest fixes',
-      icon: <Sparkles size={16} />,
-      action: () => {
-        setActiveView('chat');
-        sendMessage('agent-architect-01', 'Explain the most recent terminal error and provide the solution.');
-      },
-    },
-    {
-      type: 'ai_action',
-      hint: 'AI',
-      id: 'ai-generate-tests',
-      title: 'Generate E2E Tests',
-      subtitle: 'Prompt AI Test Engineer to draft test cases',
-      icon: <Cpu size={16} />,
-      action: () => {
-        setActiveView('chat');
-        sendMessage('agent-test-eng-02', 'Generate comprehensive test cases for our recent code changes.');
-      },
-    },
-  ].filter((ai) => fuzzyMatch(q, ai.title) || fuzzyMatch(q, ai.subtitle));
-
   const groups = [
     { label: 'files', items: fileItems },
     { label: 'commands', items: commandItems },
-    { label: 'ai actions', items: aiItems },
   ]
     .filter((g) => g.items.length > 0)
     .filter((g) => paletteMode === 'all' || g.label === 'files');
 
-  const allFiltered = [...fileItems, ...commandItems, ...aiItems];
+  const allFiltered = [...fileItems, ...commandItems];
 
   const handleSelect = async (item) => {
     if (!item) return;

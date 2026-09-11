@@ -5,7 +5,6 @@ import {
   Clock,
   Copy,
   Pin,
-  Sparkles,
   ChevronDown,
   ChevronRight,
   RotateCw,
@@ -15,7 +14,6 @@ import {
   GitBranch,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { useChatStore } from '../../stores/chatStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { AnsiText } from '../../lib/ansiParser.js';
 import { formatDuration, formatTimestamp, cn } from '../../lib/utils.js';
@@ -29,8 +27,6 @@ const toolbarBtn =
 export function TerminalBlock({ block, tabId = null, selected = false, onSelect = null, paneHeight = null }) {
   const pinBlock = useTerminalStore((s) => s.pinBlock);
   const executeCommand = useTerminalStore((s) => s.executeCommand);
-  const attachContext = useChatStore((s) => s.attachContext);
-  const sendMessage = useChatStore((s) => s.sendMessage);
   const setActiveView = useSettingsStore((s) => s.setActiveView);
 
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -76,15 +72,6 @@ export function TerminalBlock({ block, tabId = null, selected = false, onSelect 
 
   const handleRerun = () => {
     executeCommand(block.command, tabId);
-  };
-
-  const handleExplainWithAI = () => {
-    attachContext({
-      title: `Terminal Error: ${block.command}`,
-      content: `Command: ${block.command}\nExit Code: ${block.exitCode}\nOutput:\n${block.output}`,
-    });
-    setActiveView('chat');
-    sendMessage('agent-architect-01', `Explain this terminal error and propose a concrete fix:\n${block.command}`);
   };
 
   return (
@@ -146,18 +133,6 @@ export function TerminalBlock({ block, tabId = null, selected = false, onSelect 
         <span className="hidden md:inline text-ui-sm text-vsc-muted shrink-0">
           {formatTimestamp(block.startTime)}
         </span>
-
-        {isFailed && (
-          <button
-            type="button"
-            onClick={stopAnd(handleExplainWithAI)}
-            className="flex items-center gap-1 px-1.5 py-0.5 rounded-sm text-vsc-info hover:bg-vsc-item-hover text-ui-sm shrink-0"
-            title="Explain error with AI"
-          >
-            <Sparkles size={12} />
-            <span className="hidden lg:inline">Explain</span>
-          </button>
-        )}
 
         {/* Hover toolbar */}
         <div className="hidden group-hover:flex items-center gap-0.5 pl-1 border-l border-vsc-border shrink-0">

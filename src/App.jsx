@@ -4,20 +4,20 @@ import { Sidebar } from './components/layout/Sidebar.jsx';
 import { StatusBar } from './components/layout/StatusBar.jsx';
 import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
+import { SettingsModal } from './components/common/SettingsModal.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useTheme } from './hooks/useTheme.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { useEditorStore } from './stores/editorStore.js';
 import { useAgentStore } from './stores/agentStore.js';
-import { useChatStore } from './stores/chatStore.js';
 import { useSettingsStore } from './stores/settingsStore.js';
 import { mockBridge } from './lib/ipc.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
 if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debug')) {
-  window.__nexterm = { useTerminalStore, useEditorStore, useAgentStore, useChatStore, useSettingsStore, mockBridge };
+  window.__nexterm = { useTerminalStore, useEditorStore, useAgentStore, useSettingsStore, mockBridge };
 }
 
 export default function App() {
@@ -29,23 +29,20 @@ export default function App() {
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
   const initAgents = useAgentStore((s) => s.initAgents);
-  const initChat = useChatStore((s) => s.initChat);
 
   useEffect(() => {
     // Proactively initialize all IDE subsystems
     initTerminal();
     initEditor();
     initAgents();
-    initChat();
     // Detach event listeners on unmount / HMR so they never stack up;
     // the bootstrap state (PTY sessions, agents) is kept.
     return () => {
       useTerminalStore.getState().dispose?.();
       useEditorStore.getState().dispose?.();
       useAgentStore.getState().dispose?.();
-      useChatStore.getState().dispose?.();
     };
-  }, [initTerminal, initEditor, initAgents, initChat]);
+  }, [initTerminal, initEditor, initAgents]);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-vsc-editor text-vsc-fg font-ui">
@@ -68,6 +65,9 @@ export default function App() {
 
       {/* Global ⌘K Command Palette */}
       <CommandPalette />
+
+      {/* App settings (BYOK) — opened from the activity bar / menu */}
+      <SettingsModal />
     </div>
   );
 }

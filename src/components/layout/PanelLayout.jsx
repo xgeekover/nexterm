@@ -6,7 +6,6 @@ import { TerminalSplitContainer } from '../terminal/TerminalSplitContainer.jsx';
 import { EditorPanel } from '../editor/EditorPanel.jsx';
 import { FileExplorer } from '../explorer/FileExplorer.jsx';
 import { MissionControl } from '../agent/MissionControl.jsx';
-import { ChatPanel } from '../chat/ChatPanel.jsx';
 import {
   SquareSplitHorizontal,
   SquareSplitVertical,
@@ -141,7 +140,7 @@ export function PanelLayout() {
             minSize={220}
             className="h-full overflow-hidden bg-vsc-sidebar flex flex-col"
           >
-            {secondaryTab === 'agents' ? <MissionControl /> : <ChatPanel />}
+            <MissionControl />
           </Panel>
         </>
       )}

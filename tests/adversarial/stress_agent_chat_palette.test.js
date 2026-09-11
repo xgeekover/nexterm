@@ -11,7 +11,6 @@ import { AppEnvironment } from '../e2e/harness/appEnvironment.js';
 import { MockIpcBridge } from '../e2e/harness/mockIpc.js';
 import { fuzzyMatch, parseAnsiToSpans, formatBytes, formatDuration } from '../../src/lib/utils.js';
 import { useAgentStore } from '../../src/stores/agentStore.js';
-import { useChatStore } from '../../src/stores/chatStore.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 
@@ -213,124 +212,6 @@ describe('Adversarial Stress: R3 Multi-Agent Mission Control', () => {
     assert.ok(telemetry.totalCost >= 1500.75, 'Total cost should sum correctly');
     assert.equal(typeof telemetry.activeCount, 'number');
     assert.equal(typeof telemetry.waitingCount, 'number');
-  });
-});
-
-describe('Adversarial Stress: R4 AI Chat & Streaming', () => {
-  let app;
-
-  beforeEach(async () => {
-    app = new AppEnvironment();
-    await app.initialize();
-  });
-
-  test('ADV-CHAT-01: Message ID generation collision under sub-millisecond execution', async () => {
-    // Testing the ID collision vulnerability when messages are dispatched in the same millisecond
-    const reply1 = await app.sendChatMessage('agent-architect-01', 'Query 1');
-    const reply2 = await app.sendChatMessage('agent-test-eng-02', 'Query 2');
-
-    assert.ok(reply1.id, 'Reply 1 must have an ID');
-    assert.ok(reply2.id, 'Reply 2 must have an ID');
-    assert.notEqual(reply1.id, reply2.id, 'Message IDs must be strictly unique under sub-millisecond dispatches');
-  });
-
-  test('ADV-CHAT-02: Stop Generating cancellation stops generation and prevents ghost resumes', async () => {
-    const store = useChatStore.getState();
-    await store.initChat();
-
-    // Set streaming active
-    useChatStore.setState({ isStreaming: true, activeStreamingMessageId: 'msg-stream-active' });
-    assert.equal(useChatStore.getState().isStreaming, true);
-
-    // Invoke stopGenerating
-    useChatStore.getState().stopGenerating();
-    assert.equal(useChatStore.getState().isStreaming, false, 'isStreaming must immediately flip to false');
-    assert.equal(useChatStore.getState().activeStreamingMessageId, null, 'activeStreamingMessageId must be cleared');
-  });
-
-  test('ADV-CHAT-02B: In-flight token after stopGenerating causes zombie stream resurrection defect', async () => {
-    const store = useChatStore.getState();
-    await store.initChat();
-
-    const msgId = 'msg-zombie-test';
-    useChatStore.setState({
-      messages: [{ id: msgId, text: 'Initial', sender: 'assistant', isStreaming: true }],
-      isStreaming: true,
-      activeStreamingMessageId: msgId,
-    });
-
-    // User clicks stopGenerating
-    store.stopGenerating();
-    assert.equal(useChatStore.getState().isStreaming, false, 'Stream stopped by user');
-
-    // An in-flight token arrives from background thread
-    await mockBridge.emit('chat-token', { message_id: msgId, token: ' extra token', done: false });
-
-    // Verify stream is NOT resurrected and token is discarded
-    const stateAfterInFlight = useChatStore.getState();
-    assert.ok(stateAfterInFlight.messages.some((m) => m.id === msgId));
-    assert.equal(stateAfterInFlight.isStreaming, false, 'Stream must not be resurrected by in-flight tokens');
-    assert.equal(stateAfterInFlight.messages.find((m) => m.id === msgId).text, 'Initial', 'In-flight token payload must be discarded for cancelled message');
-  });
-
-  test('ADV-CHAT-03: Context injection with complex code and special characters', async () => {
-    const complexSnippet = `
-      function test() {
-        const regex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$/;
-        const template = \`Value is: \${1 + 2}\`;
-        console.log("Quotes: 'single' and \\"double\\" and \`backticks\`");
-        return regex.test("test@example.com");
-      }
-    `;
-
-    app.attachContext({
-      title: 'src/specialChars.js',
-      content: complexSnippet,
-    });
-
-    await app.sendChatMessage('agent-architect-01', 'Please review regex correctness');
-    const lastCall = app.ipc.getCalls('chat_send_message').pop();
-
-    assert.ok(lastCall.args.message.includes('[Context: src/specialChars.js]'));
-    assert.ok(lastCall.args.message.includes('test@example.com'));
-    assert.ok(lastCall.args.message.includes('Please review regex correctness'));
-  });
-
-  test('ADV-CHAT-04: Markdown parser resilience with unclosed fences, nested blocks, and missing language tags', () => {
-    const testCases = [
-      {
-        name: 'Missing language tag',
-        input: '```\nconsole.log(42);\n```',
-        hasFencedCode: true,
-      },
-      {
-        name: 'Unclosed code fence (streaming state)',
-        input: 'Here is unfinished code:\n```javascript\nconst a = 10;\nconst b = 20;',
-        hasFencedCode: true,
-      },
-      {
-        name: 'Nested backticks inside code',
-        input: '```sh\necho `date`\n```',
-        hasFencedCode: true,
-      },
-      {
-        name: 'Empty code fence',
-        input: '```\n```',
-        hasFencedCode: true,
-      },
-      {
-        name: 'Deep markdown formatting with XSS attempts',
-        input: '### Heading\n- Item 1\n  - Subitem 1.1\n\n<script>alert("hack")</script>\n**Bold** and *italic* and `inline_code()`',
-        hasFencedCode: false,
-      },
-    ];
-
-    for (const tc of testCases) {
-      assert.ok(typeof tc.input === 'string', `${tc.name} input must be a valid string`);
-      if (tc.hasFencedCode) {
-        assert.ok(tc.input.includes('```'), `${tc.name} must contain code fence`);
-      }
-    }
   });
 });
 
