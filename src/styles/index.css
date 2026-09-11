@@ -1,0 +1,235 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   NexTerm design tokens — VS Code "Light Modern" (:root) / "Dark Modern" (.dark)
+   Names mirror VS Code's theme keys so the mapping stays auditable.
+   Components consume these through Tailwind (bg-vsc-sidebar, text-vsc-fg, …);
+   never hard-code a hex in a component.
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+
+  --vsc-titlebar-bg:        #f8f8f8;
+  --vsc-activitybar-bg:     #f8f8f8;
+  --vsc-activitybar-fg:     #1f1f1f;
+  --vsc-activitybar-muted:  #616161;
+  --vsc-sidebar-bg:         #f8f8f8;
+  --vsc-editor-bg:          #ffffff;
+  --vsc-tab-active-bg:      #ffffff;
+  --vsc-tab-inactive-bg:    #f8f8f8;
+  --vsc-tab-active-fg:      #3b3b3b;
+  --vsc-tab-inactive-fg:    #868686;
+  --vsc-panel-bg:           #f8f8f8;
+  --vsc-terminal-bg:        #f8f8f8;
+  --vsc-statusbar-bg:       #f8f8f8;
+  --vsc-widget-bg:          #f8f8f8;
+  --vsc-quickinput-bg:      #f8f8f8;
+  --vsc-menu-bg:            #ffffff;
+  --vsc-input-bg:           #ffffff;
+  --vsc-input-border:       #cecece;
+  --vsc-input-placeholder:  #767676;
+  --vsc-button-secondary:   #e5e5e5;
+
+  --vsc-fg:                 #3b3b3b;
+  --vsc-fg-bright:          #000000;
+  --vsc-muted:              #616161;
+  --vsc-border:             #e5e5e5;
+  --vsc-widget-border:      #e5e5e5;
+  --vsc-shadow:             rgba(0, 0, 0, 0.16);
+
+  --vsc-accent:             #005fb8;
+  --vsc-accent-hover:       #0258a8;
+  --vsc-accent-fg:          #ffffff;
+  --vsc-focus:              #005fb8;
+  --vsc-link:               #005fb8;
+  --vsc-badge-bg:           #cccccc;
+  --vsc-badge-fg:           #3b3b3b;
+  --vsc-badge-accent:       #005fb8;
+
+  --vsc-hover:              #f2f2f2;
+  --vsc-selection:          #e8e8e8;
+  --vsc-selection-fg:       #000000;
+  --vsc-inactive-selection: #e4e6f1;
+  --vsc-item-hover:         rgba(0, 0, 0, 0.06);
+  --vsc-item-active:        rgba(0, 0, 0, 0.12);
+
+  --vsc-error:              #f85149;
+  --vsc-warn:               #bf8803;
+  --vsc-ok:                 #2ea043;
+  --vsc-info:               #005fb8;
+  --vsc-git-modified:       #895503;
+  --vsc-git-added:          #587c0c;
+  --vsc-git-deleted:        #ad0707;
+  --vsc-git-untracked:      #587c0c;
+
+  --vsc-line-number:        #6e7681;
+  --vsc-line-number-active: #171184;
+  --vsc-indent-guide:       #d3d3d3;
+  --vsc-indent-guide-active:#939393;
+  --vsc-scrollbar:          rgba(100, 100, 100, 0.4);
+  --vsc-scrollbar-hover:    rgba(100, 100, 100, 0.7);
+
+  --vsc-ansi-black:         #000000;
+  --vsc-ansi-red:           #cd3131;
+  --vsc-ansi-green:         #107c10;
+  --vsc-ansi-yellow:        #949800;
+  --vsc-ansi-blue:          #0451a5;
+  --vsc-ansi-magenta:       #bc05bc;
+  --vsc-ansi-cyan:          #0598bc;
+  --vsc-ansi-white:         #555555;
+  --vsc-ansi-bright-black:  #666666;
+  --vsc-ansi-bright-red:    #cd3131;
+  --vsc-ansi-bright-green:  #14ce14;
+  --vsc-ansi-bright-yellow: #b5ba00;
+  --vsc-ansi-bright-blue:   #0451a5;
+  --vsc-ansi-bright-magenta:#bc05bc;
+  --vsc-ansi-bright-cyan:   #0598bc;
+  --vsc-ansi-bright-white:  #a5a5a5;
+
+  --font-ui:   -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --vsc-titlebar-bg:        #181818;
+  --vsc-activitybar-bg:     #181818;
+  --vsc-activitybar-fg:     #d7d7d7;
+  --vsc-activitybar-muted:  #868686;
+  --vsc-sidebar-bg:         #181818;
+  --vsc-editor-bg:          #1f1f1f;
+  --vsc-tab-active-bg:      #1f1f1f;
+  --vsc-tab-inactive-bg:    #181818;
+  --vsc-tab-active-fg:      #ffffff;
+  --vsc-tab-inactive-fg:    #9d9d9d;
+  --vsc-panel-bg:           #181818;
+  --vsc-terminal-bg:        #181818;
+  --vsc-statusbar-bg:       #181818;
+  --vsc-widget-bg:          #202020;
+  --vsc-quickinput-bg:      #222222;
+  --vsc-menu-bg:            #1f1f1f;
+  --vsc-input-bg:           #313131;
+  --vsc-input-border:       #3c3c3c;
+  --vsc-input-placeholder:  #989898;
+  --vsc-button-secondary:   #313131;
+
+  --vsc-fg:                 #cccccc;
+  --vsc-fg-bright:          #ffffff;
+  --vsc-muted:              #9d9d9d;
+  --vsc-border:             #2b2b2b;
+  --vsc-widget-border:      #313131;
+  --vsc-shadow:             rgba(0, 0, 0, 0.36);
+
+  --vsc-accent:             #0078d4;
+  --vsc-accent-hover:       #026ec1;
+  --vsc-accent-fg:          #ffffff;
+  --vsc-focus:              #0078d4;
+  --vsc-link:               #4daafc;
+  --vsc-badge-bg:           #616161;
+  --vsc-badge-fg:           #f8f8f8;
+  --vsc-badge-accent:       #0078d4;
+
+  --vsc-hover:              #2a2d2e;
+  --vsc-selection:          #04395e;
+  --vsc-selection-fg:       #ffffff;
+  --vsc-inactive-selection: #37373d;
+  --vsc-item-hover:         rgba(255, 255, 255, 0.10);
+  --vsc-item-active:        rgba(255, 255, 255, 0.18);
+
+  --vsc-error:              #f85149;
+  --vsc-warn:               #cca700;
+  --vsc-ok:                 #2ea043;
+  --vsc-info:               #3794ff;
+  --vsc-git-modified:       #e2c08d;
+  --vsc-git-added:          #73c991;
+  --vsc-git-deleted:        #f14c4c;
+  --vsc-git-untracked:      #73c991;
+
+  --vsc-line-number:        #6e7681;
+  --vsc-line-number-active: #cccccc;
+  --vsc-indent-guide:       #404040;
+  --vsc-indent-guide-active:#707070;
+  --vsc-scrollbar:          rgba(121, 121, 121, 0.4);
+  --vsc-scrollbar-hover:    rgba(100, 100, 100, 0.7);
+
+  --vsc-ansi-black:         #000000;
+  --vsc-ansi-red:           #cd3131;
+  --vsc-ansi-green:         #0dbc79;
+  --vsc-ansi-yellow:        #e5e510;
+  --vsc-ansi-blue:          #2472c8;
+  --vsc-ansi-magenta:       #bc3fbc;
+  --vsc-ansi-cyan:          #11a8cd;
+  --vsc-ansi-white:         #e5e5e5;
+  --vsc-ansi-bright-black:  #666666;
+  --vsc-ansi-bright-red:    #f14c4c;
+  --vsc-ansi-bright-green:  #23d18b;
+  --vsc-ansi-bright-yellow: #f5f543;
+  --vsc-ansi-bright-blue:   #3b8eea;
+  --vsc-ansi-bright-magenta:#d670d6;
+  --vsc-ansi-bright-cyan:   #29b8db;
+  --vsc-ansi-bright-white:  #ffffff;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--vsc-editor-bg);
+  color: var(--vsc-fg);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+code, kbd, pre, .font-mono {
+  font-family: var(--font-mono);
+}
+
+/* VS Code keeps focus rings crisp and single-colour */
+:focus-visible {
+  outline: 1px solid var(--vsc-focus);
+  outline-offset: -1px;
+}
+
+/* VS Code-style scrollbars: invisible track, translucent slider */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--vsc-scrollbar);
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vsc-scrollbar-hover);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* react-resizable-panels v4 separators: 1px rule that grows a hit area on hover */
+[data-separator] {
+  background: var(--vsc-border);
+  transition: background-color 120ms ease;
+}
+[data-separator]:hover,
+[data-separator][data-state="dragging"] {
+  background: var(--vsc-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

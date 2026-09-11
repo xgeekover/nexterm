@@ -1,0 +1,9 @@
+{
+  "name": "nexterm-e2e-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "E2E Test Suite for NexTerm Multi-AI Terminal IDE",
+  "scripts": {
+    "test": "node runner.js"
+  }
+}

@@ -1,0 +1,15 @@
+# dependencies / build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# local secrets
+.env
+.env.*

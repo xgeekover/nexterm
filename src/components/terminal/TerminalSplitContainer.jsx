@@ -1,0 +1,212 @@
+import React, { useCallback, useRef, useState, useEffect } from 'react';
+import { Panel, Group, Separator } from 'react-resizable-panels';
+import { SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react';
+import { useTerminalStore } from '../../stores/terminalStore.js';
+import { TerminalBlock } from './TerminalBlock.jsx';
+import { CommandInput } from './CommandInput.jsx';
+import { cn } from '../../lib/utils.js';
+
+const paneHeaderBtn =
+  'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
+
+/**
+ * A single terminal pane (leaf node in the split tree).
+ * Renders its own tab strip, blocks, and command input —
+ * scoped to its assigned tabId.
+ */
+function TerminalPane({ paneId, tabId, onSplitH, onSplitV, onClose, canClose }) {
+  const tabs = useTerminalStore((s) => s.tabs);
+  const activeTabId = useTerminalStore((s) => s.activeTabId);
+  const activePaneId = useTerminalStore((s) => s.activePaneId);
+  const executeCommand = useTerminalStore((s) => s.executeCommand);
+  const switchTab = useTerminalStore((s) => s.switchTab);
+  const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
+  const setActivePane = useTerminalStore((s) => s.setActivePane);
+  const blocksEndRef = useRef(null);
+
+  const [selectedBlockId, setSelectedBlockId] = useState(null);
+
+  const isActivePane = activePaneId === paneId;
+
+  // This pane shows the tab bound to it, or falls back to active tab
+  const boundTab = tabs.find((t) => t.id === tabId) || tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
+
+  useEffect(() => {
+    blocksEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [boundTab?.blocks?.length, boundTab?.blocks?.[boundTab?.blocks?.length - 1]?.output]);
+
+  const handleNavigateBlock = (delta) => {
+    const blocks = boundTab?.blocks || [];
+    if (blocks.length === 0) return;
+    const currentIdx = selectedBlockId ? blocks.findIndex((b) => b.id === selectedBlockId) : -1;
+    const nextIdx =
+      currentIdx === -1 ? (delta < 0 ? blocks.length - 1 : 0) : Math.min(blocks.length - 1, Math.max(0, currentIdx + delta));
+    setSelectedBlockId(blocks[nextIdx].id);
+  };
+
+  return (
+    <div
+      onMouseDown={() => setActivePane(paneId)}
+      onFocusCapture={() => setActivePane(paneId)}
+      className={cn(
+        'flex flex-col h-full w-full bg-vsc-terminal overflow-hidden',
+        isActivePane && 'ring-1 ring-inset ring-vsc-focus'
+      )}
+    >
+      {/* Pane header: bound-tab chips + split / close controls */}
+      <div className="h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none">
+        <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto">
+          {tabs.map((tab) => {
+            const isActive = tab.id === (boundTab?.id);
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  bindPaneToTab(paneId, tab.id);
+                  switchTab(tab.id);
+                }}
+                className={cn(
+                  'flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap transition-colors',
+                  isActive
+                    ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
+                    : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover'
+                )}
+              >
+                <span className="truncate max-w-[100px]">{tab.title}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-0.5 px-1 shrink-0">
+          <button type="button" onClick={onSplitH} className={paneHeaderBtn} title="Split Right (⌘D)">
+            <SplitSquareHorizontal size={14} />
+          </button>
+          <button type="button" onClick={onSplitV} className={paneHeaderBtn} title="Split Down (⌘⇧D)">
+            <SplitSquareVertical size={14} />
+          </button>
+          {canClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
+              title="Close Pane (⌘W)"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Blocks */}
+      <div className="flex-1 overflow-y-auto">
+        {(!boundTab || boundTab.blocks.length === 0) ? (
+          <div className="h-full flex flex-col items-center justify-center gap-2 text-center select-none">
+            <p className="text-ui-sm text-vsc-muted">Type a command below</p>
+            <div className="flex items-center gap-3 text-ui-sm text-vsc-muted">
+              <span className="inline-flex items-center gap-1">
+                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">⌘D</kbd>
+                split right
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <kbd className="px-1 rounded-sm bg-vsc-button-secondary font-mono text-ui-sm">⌘⇧D</kbd>
+                split down
+              </span>
+            </div>
+          </div>
+        ) : (
+          <>
+            {boundTab.blocks.map((block) => (
+              <TerminalBlock
+                key={block.id}
+                block={block}
+                tabId={boundTab.id}
+                selected={block.id === selectedBlockId}
+                onSelect={setSelectedBlockId}
+              />
+            ))}
+            <div ref={blocksEndRef} />
+          </>
+        )}
+      </div>
+
+      {/* Command Input */}
+      <CommandInput
+        onExecute={(cmd) => executeCommand(cmd, boundTab?.id)}
+        onNavigateBlock={handleNavigateBlock}
+      />
+    </div>
+  );
+}
+
+/**
+ * Recursively renders the split tree.
+ * Each node is either a "leaf" (terminal pane) or a "split" (horizontal/vertical with children).
+ */
+function SplitNode({ node, onSplit, onClose, canClose }) {
+  if (node.type === 'leaf') {
+    return (
+      <TerminalPane
+        paneId={node.id}
+        tabId={node.tabId}
+        onSplitH={() => onSplit(node.id, 'horizontal')}
+        onSplitV={() => onSplit(node.id, 'vertical')}
+        onClose={() => onClose(node.id)}
+        canClose={canClose}
+      />
+    );
+  }
+
+  // It's a split node
+  const direction = node.direction; // 'horizontal' | 'vertical'
+  return (
+    <Group orientation={direction} className="h-full w-full">
+      {node.children.map((child, i) => (
+        <React.Fragment key={child.id}>
+          {i > 0 && <Separator className={direction === 'horizontal' ? 'w-px' : 'h-px'} />}
+          <Panel minSize="15" defaultSize={String(100 / node.children.length)}>
+            <SplitNode node={child} onSplit={onSplit} onClose={onClose} canClose={true} />
+          </Panel>
+        </React.Fragment>
+      ))}
+    </Group>
+  );
+}
+
+/**
+ * Top-level container for the terminal split system.
+ * Manages the split tree state and delegates rendering to SplitNode.
+ */
+export function TerminalSplitContainer() {
+  const splitTree = useTerminalStore((s) => s.splitTree);
+  const splitPane = useTerminalStore((s) => s.splitPane);
+  const closePane = useTerminalStore((s) => s.closePane);
+
+  const handleSplit = useCallback((paneId, direction) => {
+    splitPane(paneId, direction);
+  }, [splitPane]);
+
+  const handleClose = useCallback((paneId) => {
+    closePane(paneId);
+  }, [closePane]);
+
+  if (!splitTree) {
+    return null;
+  }
+
+  const canClose = splitTree.type !== 'leaf';
+
+  return (
+    <div className="h-full w-full overflow-hidden">
+      <SplitNode
+        node={splitTree}
+        onSplit={handleSplit}
+        onClose={handleClose}
+        canClose={canClose}
+      />
+    </div>
+  );
+}
+
+export default TerminalSplitContainer;
