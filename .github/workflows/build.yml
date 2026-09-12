@@ -9,6 +9,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bundling Monaco's language workers exceeds node's default heap on the
+  # macOS runner.
+  NODE_OPTIONS: --max-old-space-size=4096
 
 jobs:
   test:
@@ -54,6 +57,10 @@ jobs:
   build:
     name: build (${{ matrix.platform }})
     needs: test
+    # Creating the release and uploading the portable zip both write to the
+    # repository; the default GITHUB_TOKEN is read-only.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
