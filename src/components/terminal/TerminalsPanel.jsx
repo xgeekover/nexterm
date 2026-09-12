@@ -112,6 +112,10 @@ export function TerminalsPanel() {
       value={draft?.value ?? ''}
       onChange={(e) => setDraft((d) => ({ ...d, value: e.target.value }))}
       onKeyDown={(e) => {
+        // The input lives inside a row that also answers Enter (activate /
+        // load). Without this the commit would immediately be followed by the
+        // row's own action.
+        e.stopPropagation();
         if (e.key === 'Enter') {
           e.preventDefault();
           commitDraft();
