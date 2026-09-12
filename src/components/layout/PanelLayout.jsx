@@ -477,6 +477,10 @@ export function PanelLayout() {
   const handleToggleMaximize = useCallback(() => {
     const handle = editorPanelGroupRef.current;
     if (!handle) return;
+    // With no file open the editor group is not rendered, so the vertical group
+    // holds a single panel and setLayout with two ids throws
+    // ("Invalid 1 panel layout"). There is nothing to maximize against anyway.
+    if (!hasEditorTabs) return;
 
     const applyLayout = (layout) => {
       handle.setLayout(layout);
@@ -498,7 +502,7 @@ export function PanelLayout() {
       preMaximizeLayoutRef.current = null;
       setPanelMaximized(false);
     }
-  }, [panelMaximized, editorPanelGroupRef, presenceDuration]);
+  }, [panelMaximized, editorPanelGroupRef, presenceDuration, hasEditorTabs]);
 
   useEffect(() => () => window.clearTimeout(maximizeTransitionTimeoutRef.current), []);
 
@@ -592,7 +596,7 @@ export function PanelLayout() {
                     onSelectView={(view) => handleSelectView('bottom', view)}
                     onHide={togglePanel}
                     extra={
-                      bottomActive === 'terminal' ? (
+                      bottomActive === 'terminal' && hasEditorTabs ? (
                         <TerminalExtraControls maximized={panelMaximized} onToggleMaximize={handleToggleMaximize} />
                       ) : null
                     }

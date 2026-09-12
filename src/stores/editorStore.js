@@ -6,6 +6,100 @@ let unlisteners = [];
 let listening = false;
 let refreshTimer = null;
 
+// --- Editor split tree ------------------------------------------------------
+// Mirrors src/stores/terminalStore.js's split-tree model so the editor
+// workspace can be arranged the same way the terminal already is:
+//   { type: 'leaf', id, tabIds: [], activeTabId } |
+//   { type: 'split', id, direction: 'horizontal'|'vertical', children: [...] }
+// Each leaf is an editor group holding its own file tabs, so a tab can be
+// dragged into another group or dropped on a group's edge to split it.
+
+let editorPaneCounter = 1;
+const makeEditorPaneId = () => `editor-pane-${editorPaneCounter++}`;
+
+/** Walks a split-tree node and returns the id of its first leaf (DOM order). */
+function firstLeafId(node) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node.id;
+  return firstLeafId(node.children[0]);
+}
+
+/** Collects every leaf node of a split-tree, in DOM order. */
+function collectLeaves(node, acc = []) {
+  if (!node) return acc;
+  if (node.type === 'leaf') {
+    acc.push(node);
+    return acc;
+  }
+  for (const child of node.children) collectLeaves(child, acc);
+  return acc;
+}
+
+/**
+ * Rebuild a tree, letting `fn` replace any node. A leaf that `fn` turns into a
+ * split is returned as-is (we must not recurse into the replacement, which
+ * still contains the original leaf).
+ */
+function mapTree(node, fn) {
+  if (!node) return null;
+  if (node.type === 'leaf') return fn(node);
+  const replaced = fn(node);
+  if (replaced !== node) return replaced;
+  return { ...node, children: node.children.map((child) => mapTree(child, fn)) };
+}
+
+/** The leaf that currently hosts `tabId`, or null. */
+function leafHoldingTab(node, tabId) {
+  return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
+}
+
+/** Remove a tab from whichever leaf holds it, keeping that leaf's active tab valid. */
+function removeTabFromTree(node, tabId) {
+  return mapTree(node, (n) => {
+    if (n.type !== 'leaf' || !n.tabIds.includes(tabId)) return n;
+    const tabIds = n.tabIds.filter((id) => id !== tabId);
+    return {
+      ...n,
+      tabIds,
+      activeTabId: n.activeTabId === tabId ? tabIds[0] ?? null : n.activeTabId,
+    };
+  });
+}
+
+/**
+ * Drop leaves that hold no tabs and collapse splits left with a single child.
+ * Returns null when the whole tree is empty.
+ */
+function pruneTree(node) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node.tabIds.length > 0 ? node : null;
+  const children = node.children.map(pruneTree).filter(Boolean);
+  if (children.length === 0) return null;
+  if (children.length === 1) return children[0];
+  return { ...node, children };
+}
+
+/** Append a tab to a pane (falling back to the first leaf) and make it active there. */
+function addTabToPane(node, paneId, tabId) {
+  let placed = false;
+  const next = mapTree(node, (n) => {
+    if (n.type !== 'leaf' || n.id !== paneId) return n;
+    placed = true;
+    return { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId };
+  });
+  if (placed) return next;
+  const first = collectLeaves(node)[0];
+  if (!first) return { type: 'leaf', id: paneId || makeEditorPaneId(), tabIds: [tabId], activeTabId: tabId };
+  return mapTree(node, (n) =>
+    n.type === 'leaf' && n.id === first.id
+      ? { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId }
+      : n
+  );
+}
+
+/** An empty root, used when the last editor tab goes away. */
+const emptyEditorTree = () => ({ type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null });
+
 // --- Path helpers shared by the move/rename/duplicate flows below ---------
 
 function parentDirOf(path) {
@@ -82,6 +176,13 @@ export const useEditorStore = create((set, get) => ({
   isLoadingTree: false,
   diffView: null,
 
+  // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
+  // See the "Editor split tree" comment near the top of this file.
+  editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
+
+  // The pane currently focused for "open file lands here" / split-origin.
+  activeEditorPaneId: 'editor-pane-root',
+
   // --- Context-menu-driven UI state ---------------------------------------
   selectedPath: null,   // row highlighted by click or right-click
   clipboard: null,      // { mode: 'copy' | 'cut', path, isDir } | null
@@ -143,7 +244,15 @@ export const useEditorStore = create((set, get) => ({
     try {
       const rootPath = await invoke('fs_pick_root');
       if (!rootPath) return null;
-      set({ rootPath, expandedFolders: new Set([rootPath]), tabs: [], activeTabId: null, diffView: null });
+      set({
+        rootPath,
+        expandedFolders: new Set([rootPath]),
+        tabs: [],
+        activeTabId: null,
+        diffView: null,
+        editorSplitTree: emptyEditorTree(),
+        activeEditorPaneId: 'editor-pane-root',
+      });
       await get().refreshExplorer();
       return rootPath;
     } catch (err) {
@@ -165,10 +274,21 @@ export const useEditorStore = create((set, get) => ({
   },
 
   openFile: async (filePath) => {
-    // Check if already open
+    // Check if already open — reveal it in whichever group already shows it
+    // (VS Code's "revealIfOpen") rather than yanking it into the active
+    // group, which would be surprising if the user deliberately split panes.
     const existing = get().tabs.find((t) => t.filePath === filePath);
     if (existing) {
-      set({ activeTabId: existing.id });
+      set((state) => {
+        const holder = leafHoldingTab(state.editorSplitTree, existing.id);
+        const paneId = holder ? holder.id : state.activeEditorPaneId;
+        const tree = holder
+          ? mapTree(state.editorSplitTree, (n) =>
+              n.type === 'leaf' && n.id === holder.id ? { ...n, activeTabId: existing.id } : n
+            )
+          : addTabToPane(state.editorSplitTree, paneId, existing.id);
+        return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree };
+      });
       return existing;
     }
 
@@ -191,6 +311,8 @@ export const useEditorStore = create((set, get) => ({
       set((state) => ({
         tabs: [...state.tabs, newTab],
         activeTabId: tabId,
+        // A newly opened file joins the active group so it is visible immediately.
+        editorSplitTree: addTabToPane(state.editorSplitTree, state.activeEditorPaneId, tabId),
       }));
 
       return newTab;
@@ -251,15 +373,182 @@ export const useEditorStore = create((set, get) => ({
       if (state.activeTabId === tabId) {
         nextActive = nextTabs[0]?.id || null;
       }
+      // Drop it from its group too, collapsing the group if it was the last tab.
+      const editorSplitTree = pruneTree(removeTabFromTree(state.editorSplitTree, tabId)) || emptyEditorTree();
+      const paneStillThere = collectLeaves(editorSplitTree).some((l) => l.id === state.activeEditorPaneId);
       return {
         tabs: nextTabs,
         activeTabId: nextActive,
+        editorSplitTree,
+        activeEditorPaneId: paneStillThere ? state.activeEditorPaneId : firstLeafId(editorSplitTree) || 'editor-pane-root',
       };
     });
   },
 
   switchTab: (tabId) => {
     set({ activeTabId: tabId });
+  },
+
+  // --- Editor split tree: panes, drag-and-drop placement ------------------
+
+  /** Mark a pane as the active one (called on click/focus of a pane). */
+  setActiveEditorPane: (paneId) => set({ activeEditorPaneId: paneId }),
+
+  /**
+   * Split a leaf pane into two children (horizontal or vertical). The new
+   * pane starts empty — unlike a terminal, a file tab can't be conjured up
+   * out of thin air — and becomes active, so the next file opened (or tab
+   * dragged in) lands there. Returns the new pane's id.
+   */
+  splitEditorPane: (paneId, direction = 'horizontal') => {
+    const newPaneId = makeEditorPaneId();
+
+    const splitNode = (node) => {
+      if (node.type === 'leaf' && node.id === paneId) {
+        return {
+          type: 'split',
+          id: `editor-split-${Date.now()}`,
+          direction,
+          children: [
+            { ...node },
+            { type: 'leaf', id: newPaneId, tabIds: [], activeTabId: null },
+          ],
+        };
+      }
+      if (node.type === 'split') {
+        return { ...node, children: node.children.map(splitNode) };
+      }
+      return node;
+    };
+
+    set((state) => ({ editorSplitTree: splitNode(state.editorSplitTree), activeEditorPaneId: newPaneId }));
+    return newPaneId;
+  },
+
+  /**
+   * Close a pane (an editor group). The sibling takes over the parent split.
+   * Every tab that pane held is closed too, UNLESS another remaining leaf
+   * still shows that same tabId.
+   */
+  closeEditorPane: (paneId) => {
+    const { editorSplitTree } = get();
+
+    const closingLeaf = collectLeaves(editorSplitTree).find((leaf) => leaf.id === paneId);
+    const closingTabIds = closingLeaf ? [...closingLeaf.tabIds] : [];
+
+    let replacementLeafId = null;
+
+    const removeNode = (node) => {
+      if (node.type !== 'split') return node;
+
+      const idx = node.children.findIndex(
+        (child) => child.type === 'leaf' && child.id === paneId
+      );
+
+      if (idx !== -1) {
+        const remaining = node.children.filter((_, i) => i !== idx);
+        if (remaining.length === 1) {
+          replacementLeafId = firstLeafId(remaining[0]);
+          return remaining[0];
+        }
+        const neighbourIdx = Math.min(idx, remaining.length - 1);
+        replacementLeafId = firstLeafId(remaining[neighbourIdx]);
+        return { ...node, children: remaining };
+      }
+
+      return { ...node, children: node.children.map(removeNode) };
+    };
+
+    // Closing the only pane empties it rather than removing the root.
+    const nextTree =
+      editorSplitTree.type === 'leaf' && editorSplitTree.id === paneId
+        ? emptyEditorTree()
+        : removeNode(editorSplitTree);
+    set({ editorSplitTree: nextTree });
+
+    if (get().activeEditorPaneId === paneId && replacementLeafId) {
+      set({ activeEditorPaneId: replacementLeafId });
+    }
+
+    for (const tabId of closingTabIds) {
+      if (leafHoldingTab(get().editorSplitTree, tabId)) continue;
+      get().closeTab(tabId);
+    }
+  },
+
+  /**
+   * Make `tabId` the visible tab of `paneId`. If the tab lives in another
+   * group, move it here first (clicking a tab chip never splits).
+   */
+  bindEditorPaneToTab: (paneId, tabId) => {
+    set((state) => {
+      const holder = leafHoldingTab(state.editorSplitTree, tabId);
+      let tree = state.editorSplitTree;
+      if (!holder || holder.id !== paneId) {
+        tree =
+          pruneTree(addTabToPane(removeTabFromTree(tree, tabId), paneId, tabId)) || emptyEditorTree();
+      } else {
+        tree = mapTree(tree, (n) =>
+          n.type === 'leaf' && n.id === paneId ? { ...n, activeTabId: tabId } : n
+        );
+      }
+      return { editorSplitTree: tree, activeEditorPaneId: paneId, activeTabId: tabId };
+    });
+  },
+
+  /**
+   * Drag & drop a file tab onto a pane.
+   *
+   * `zone` is where inside the target pane it was dropped:
+   *   'center'                  → move the tab into that group
+   *   'left' | 'right'          → split the group horizontally, tab on that side
+   *   'top'  | 'bottom'         → split the group vertically, tab on that side
+   */
+  dropEditorTabOnPane: (tabId, targetPaneId, zone = 'center') => {
+    const state = get();
+    const target = collectLeaves(state.editorSplitTree).find((l) => l.id === targetPaneId);
+    if (!target || !state.tabs.some((t) => t.id === tabId)) return;
+
+    const source = leafHoldingTab(state.editorSplitTree, tabId);
+
+    // Dropping a tab back on its own group: just focus it. Splitting a group
+    // off its only tab would leave the source empty and is a no-op too.
+    if (source && source.id === targetPaneId) {
+      if (zone === 'center' || source.tabIds.length === 1) {
+        get().bindEditorPaneToTab(targetPaneId, tabId);
+        return;
+      }
+    }
+
+    const withoutTab = removeTabFromTree(state.editorSplitTree, tabId);
+
+    if (zone === 'center') {
+      const tree = pruneTree(addTabToPane(withoutTab, targetPaneId, tabId)) || emptyEditorTree();
+      set({ editorSplitTree: tree, activeEditorPaneId: targetPaneId, activeTabId: tabId });
+      return;
+    }
+
+    const newPaneId = makeEditorPaneId();
+    const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
+    const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
+    const insertFirst = zone === 'left' || zone === 'top';
+
+    const split = mapTree(withoutTab, (n) =>
+      n.type === 'leaf' && n.id === targetPaneId
+        ? {
+            type: 'split',
+            id: `editor-split-${Date.now()}`,
+            direction,
+            children: insertFirst ? [newLeaf, n] : [n, newLeaf],
+          }
+        : n
+    );
+
+    set({
+      editorSplitTree: pruneTree(split) || emptyEditorTree(),
+      activeEditorPaneId: newPaneId,
+      activeTabId: tabId,
+    });
   },
 
   createFile: async (path) => {

@@ -19,6 +19,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
+import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
 
 const instances = new Map();
 
@@ -31,6 +32,7 @@ const LIVE_TERMINAL_SETTINGS_KEYS = [
   'terminalCursorStyle',
   'terminalCursorBlink',
   'terminalScrollback',
+  'terminalTheme',
 ];
 
 /**
@@ -67,6 +69,20 @@ export function readTheme() {
     brightCyan: v('--vsc-ansi-bright-cyan'),
     brightWhite: v('--vsc-ansi-bright-white'),
   };
+}
+
+/**
+ * Resolve the settings store's `terminalTheme` id into an actual xterm
+ * `ITheme` — either a fixed published palette from terminalThemes.js, or (for
+ * `followsAppTheme` entries, e.g. the default "Dark Modern") the live
+ * `readTheme()` snapshot of the app's own --vsc-* tokens. Tolerant of the
+ * setting being undefined (older persisted state, or this store key not
+ * having loaded yet) by falling back to the default theme id.
+ */
+export function resolveTerminalTheme(themeId) {
+  const id = themeId ?? DEFAULT_TERMINAL_THEME_ID;
+  const entry = TERMINAL_THEMES[id] || TERMINAL_THEMES[DEFAULT_TERMINAL_THEME_ID];
+  return entry.followsAppTheme ? readTheme() : entry.theme;
 }
 
 export function readFontFamily() {
@@ -110,10 +126,14 @@ function ensureThemeObserverStarted() {
   if (typeof MutationObserver === 'undefined') return;
   const rootEl = document.documentElement;
   const observer = new MutationObserver(() => {
-    const theme = readTheme();
+    // A fixed (non-followsAppTheme) terminal theme deliberately ignores the
+    // app's own light/dark flip — only re-read the live tokens when the
+    // selected theme is the one that is supposed to track them.
+    const themeId = useSettingsStore.getState().terminalTheme ?? DEFAULT_TERMINAL_THEME_ID;
+    const entryDef = TERMINAL_THEMES[themeId] || TERMINAL_THEMES[DEFAULT_TERMINAL_THEME_ID];
     const fontFamily = resolveTerminalFontFamily();
     for (const entry of instances.values()) {
-      entry.term.options.theme = theme;
+      if (entryDef.followsAppTheme) entry.term.options.theme = readTheme();
       entry.term.options.fontFamily = fontFamily;
     }
   });
@@ -128,6 +148,7 @@ function ensureThemeObserverStarted() {
  */
 function applyLiveTerminalSettings(state) {
   const fontFamily = state.terminalFontFamily?.trim() ? state.terminalFontFamily.trim() : readFontFamily();
+  const theme = resolveTerminalTheme(state.terminalTheme);
   for (const entry of instances.values()) {
     entry.term.options.fontFamily = fontFamily;
     entry.term.options.fontSize = state.terminalFontSize;
@@ -135,6 +156,7 @@ function applyLiveTerminalSettings(state) {
     entry.term.options.cursorStyle = state.terminalCursorStyle;
     entry.term.options.cursorBlink = state.terminalCursorBlink;
     entry.term.options.scrollback = state.terminalScrollback;
+    entry.term.options.theme = theme;
     if (isFittable(entry.container)) {
       try {
         entry.fitAddon.fit();
@@ -181,7 +203,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     cursorBlink: settingsState.terminalCursorBlink,
     scrollback: settingsState.terminalScrollback,
     allowProposedApi: true,
-    theme: readTheme(),
+    theme: resolveTerminalTheme(settingsState.terminalTheme),
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);

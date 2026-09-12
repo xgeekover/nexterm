@@ -2,8 +2,9 @@
  * Terminal tab layout: each pane is a group holding its own tabs, and a tab can
  * be dragged into another group or onto a group's edge to split it.
  */
-import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { useTerminalStore } from '../../src/stores/terminalStore.js';
+import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
+import { useTerminalStore, PERSIST_KEY } from '../../src/stores/terminalStore.js';
+import { saveState, loadState } from '../../src/lib/persistence.js';
 
 const S = useTerminalStore;
 const tree = () => S.getState().splitTree;
@@ -140,5 +141,136 @@ describe('Terminal layout: tab groups and drag-drop placement', () => {
       leaves().every((l) => l.tabIds.includes(l.activeTabId)),
       'each group shows one of its own tabs'
     );
+  });
+});
+
+describe('Terminal layout: rename, group names, and persistence', () => {
+  // Node has no localStorage — shim it per test so these cases never see
+  // another test's leftovers, and restore whatever was there (nothing, in
+  // this runner) afterwards so the plain drag/drop suite above stays exactly
+  // as it was.
+  let savedGlobalLocalStorage;
+
+  beforeEach(async () => {
+    savedGlobalLocalStorage = globalThis.localStorage;
+    const backing = new Map();
+    globalThis.localStorage = {
+      getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+      setItem: (k, v) => backing.set(k, String(v)),
+      removeItem: (k) => backing.delete(k),
+      clear: () => backing.clear(),
+    };
+
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+    });
+    await S.getState().init();
+  });
+
+  afterEach(() => {
+    if (savedGlobalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = savedGlobalLocalStorage;
+  });
+
+  test('TL-11: renaming a tab sets its title; an empty name resets to the default', () => {
+    const tabId = leaves()[0].tabIds[0];
+    S.getState().renameTab(tabId, '  My Shell  ');
+    assert.equal(S.getState().tabs.find((t) => t.id === tabId).title, 'My Shell', 'trimmed and applied');
+
+    S.getState().renameTab(tabId, '   ');
+    assert.equal(
+      S.getState().tabs.find((t) => t.id === tabId).title,
+      'Terminal 1',
+      'blank name falls back to the auto-generated default'
+    );
+  });
+
+  test('TL-12: naming a group sets the leaf\'s name; an empty name clears it', () => {
+    const paneId = leaves()[0].id;
+    assert.equal(leaves()[0].name, undefined, 'unnamed by default');
+
+    S.getState().renameGroup(paneId, 'Server Logs');
+    assert.equal(leaves().find((l) => l.id === paneId).name, 'Server Logs');
+
+    S.getState().renameGroup(paneId, '   ');
+    assert.equal(leaves().find((l) => l.id === paneId).name, undefined, 'blank name clears it back to unnamed');
+  });
+
+  test('TL-13: saveState/loadState round-trip an equal structure', () => {
+    const payload = { splitTree: { a: 1, list: [1, 2, 3] }, tabs: [{ id: 't1', title: 'X' }], activePaneId: 'p1' };
+    assert.equal(saveState('test:roundtrip', payload), true);
+    assert.deepEqual(loadState('test:roundtrip', 'FALLBACK'), payload);
+  });
+
+  test('TL-14: a corrupted payload is ignored and returns the fallback', () => {
+    globalThis.localStorage.setItem('test:corrupt', 'not even json{{{');
+    assert.equal(loadState('test:corrupt', 'FALLBACK'), 'FALLBACK');
+  });
+
+  test('TL-15: an old-version payload is ignored and returns the fallback', () => {
+    globalThis.localStorage.setItem('test:old-version', JSON.stringify({ version: -1, data: { x: 1 } }));
+    assert.equal(loadState('test:old-version', 'FALLBACK'), 'FALLBACK');
+  });
+
+  test('TL-16: a saved workspace (tree shape, group name, tab title) is restored on relaunch', async () => {
+    const a = leaves()[0].tabIds[0];
+    S.getState().renameTab(a, 'Main');
+    const newPaneId = await S.getState().splitPane(S.getState().activePaneId, 'horizontal');
+    S.getState().renameGroup(newPaneId, 'Logs');
+
+    // Let the ~300ms debounced write-behind flush to (shimmed) localStorage.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.ok(loadState(PERSIST_KEY, null), 'something was persisted');
+
+    // Simulate an app relaunch: reset to the pristine pre-init shape and
+    // call init() again — it should rebuild from what was just saved.
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+    });
+    await S.getState().init();
+
+    assert.equal(leaves().length, 2, 'both groups come back');
+    assert.ok(S.getState().tabs.some((t) => t.title === 'Main'), 'tab title survives');
+    assert.ok(leaves().some((l) => l.name === 'Logs'), 'group name survives');
+    assert.ok(
+      leaves().every((l) => l.tabIds.every((id) => S.getState().tabs.some((t) => t.id === id))),
+      'every restored tab id resolves to a real tab'
+    );
+  });
+
+  test('TL-17: a corrupted saved layout falls back to the single-terminal default instead of crashing', async () => {
+    globalThis.localStorage.setItem(PERSIST_KEY, 'not even json{{{');
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+    });
+    await S.getState().init();
+
+    assert.equal(leaves().length, 1);
+    assert.equal(S.getState().tabs.length, 1);
+    assert.equal(S.getState().tabs[0].title, 'Terminal 1');
+  });
+
+  test('TL-18: a saved layout with no valid tabs falls back to the single-terminal default', async () => {
+    saveState(PERSIST_KEY, {
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      tabs: [],
+      activePaneId: 'pane-root',
+    });
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+    });
+    await S.getState().init();
+
+    assert.equal(leaves().length, 1);
+    assert.equal(S.getState().tabs.length, 1);
+    assert.equal(S.getState().tabs[0].title, 'Terminal 1');
   });
 });

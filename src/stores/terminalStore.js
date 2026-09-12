@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
+import { loadState, saveState } from '../lib/persistence.js';
 
 let paneCounter = 1;
 const makePaneId = () => `pane-${paneCounter++}`;
@@ -87,6 +88,93 @@ function addTabToPane(node, paneId, tabId) {
 /** An empty root, used when the last terminal goes away. */
 const emptyTree = () => ({ type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null });
 
+// --- Persistence (Task: remember the layout across relaunches) -----------
+//
+// We persist only what can be meaningfully restored: the split tree's shape
+// (pane ids, optional names, tab order, each pane's active tab) and each
+// tab's `title`/`cwd`. PTY sessions and scrollback are process state and
+// cannot survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
+export const PERSIST_KEY = 'nexterm.terminal.workspace';
+const PERSIST_DEBOUNCE_MS = 300;
+
+let persistTimer = null;
+
+/** Strip a split-tree node down to the fields worth persisting. */
+function serializeTreeForPersist(node) {
+  if (!node) return null;
+  if (node.type === 'leaf') {
+    return {
+      type: 'leaf',
+      id: node.id,
+      ...(node.name ? { name: node.name } : {}),
+      tabIds: [...node.tabIds],
+      activeTabId: node.activeTabId,
+    };
+  }
+  return {
+    type: 'split',
+    id: node.id,
+    direction: node.direction,
+    children: node.children.map(serializeTreeForPersist),
+  };
+}
+
+function buildPersistedPayload(state) {
+  return {
+    splitTree: serializeTreeForPersist(state.splitTree),
+    tabs: state.tabs.map((t) => ({ id: t.id, title: t.title, cwd: t.cwd })),
+    activePaneId: state.activePaneId,
+  };
+}
+
+/** Debounced write-behind so a burst of state changes only saves once. */
+function schedulePersist(state) {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    saveState(PERSIST_KEY, buildPersistedPayload(state));
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+/**
+ * Rebuild a saved split-tree, dropping any reference to a tab that failed to
+ * restore and defaulting malformed/missing ids. `pruneTree` (below) then
+ * removes any leaf that ends up empty and collapses single-child splits.
+ */
+function sanitizeRestoredTree(node, validTabIds) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.type === 'leaf') {
+    const tabIds = Array.isArray(node.tabIds) ? node.tabIds.filter((id) => validTabIds.has(id)) : [];
+    const activeTabId = tabIds.includes(node.activeTabId) ? node.activeTabId : tabIds[0] ?? null;
+    return {
+      type: 'leaf',
+      id: typeof node.id === 'string' && node.id ? node.id : makePaneId(),
+      ...(typeof node.name === 'string' && node.name ? { name: node.name } : {}),
+      tabIds,
+      activeTabId,
+    };
+  }
+  if (node.type === 'split' && Array.isArray(node.children)) {
+    return {
+      type: 'split',
+      id: typeof node.id === 'string' && node.id ? node.id : `split-${Date.now()}`,
+      direction: node.direction === 'vertical' ? 'vertical' : 'horizontal',
+      children: node.children.map((c) => sanitizeRestoredTree(c, validTabIds)).filter(Boolean),
+    };
+  }
+  return null;
+}
+
+/** Bump the pane id counter past anything found in a restored tree so freshly split panes never collide with restored ones. */
+function bumpPaneCounterPastRestoredIds(node) {
+  for (const leaf of collectLeaves(node)) {
+    const match = /^pane-(\d+)$/.exec(leaf.id);
+    if (match) {
+      const n = Number(match[1]);
+      if (n >= paneCounter) paneCounter = n + 1;
+    }
+  }
+}
+
 let unlisteners = [];
 let listening = false;
 
@@ -107,119 +195,571 @@ async function disposeTerminalView(tabId) {
   }
 }
 
-export const useTerminalStore = create((set, get) => ({
-  tabs: [],
-  activeTabId: null,
-  history: [],
-  historyIndex: -1,
-  cwd: '/workspace',
-  isInitialized: false,
+export const useTerminalStore = create((set, get) => {
+  /**
+   * Spawn a PTY-backed tab and register it in `tabs`, WITHOUT placing it
+   * anywhere in the split tree — callers decide where it goes. Keeping tree
+   * placement out of tab creation is what lets `splitPane` put the new tab
+   * only in the freshly-created pane, instead of it also lingering in
+   * whichever pane happened to be active when the PTY finished spawning.
+   */
+  const spawnTab = async (title = null) => {
+    try {
+      const ptySession = await invoke('pty_spawn', {
+        cols: 80,
+        rows: 24,
+        cwd: get().cwd || '/workspace',
+      });
 
-  // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
-  // Each leaf is a terminal group holding its own tabs, so a tab can be dragged
-  // between groups or dropped on a group's edge to split it.
-  splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      const nextIndex = get().tabs.length + 1;
+      const defaultTitle = `Terminal ${nextIndex}`;
+      const newTab = {
+        id: `tab-term-${Date.now()}-${nextIndex}`,
+        title: title || defaultTitle,
+        defaultTitle,
+        sessionId: ptySession.session_id,
+        cwd: ptySession.cwd || get().cwd,
+        blocks: [],
+        activePrompt: '',
+      };
 
-  // The pane currently focused for keyboard shortcuts / block-selection / split-origin.
-  activePaneId: 'pane-root',
+      set((state) => ({ tabs: [...state.tabs, newTab] }));
+      return newTab;
+    } catch (err) {
+      console.error('[TerminalStore] Failed to create terminal tab:', err);
+      return null;
+    }
+  };
 
   /**
-   * Mark a pane as the active one (called on click/focus of a pane).
+   * Spawn one fresh PTY per saved tab (processes cannot be restored) and
+   * rebuild the saved split tree around the new tab ids. Throws if nothing
+   * usable could be restored — the caller falls back to the single-terminal
+   * default in that case.
    */
-  setActivePane: (paneId) => set({ activePaneId: paneId }),
-
-  /**
-   * Split a leaf pane into two children (horizontal or vertical).
-   * Returns the new pane's id (or null if the split could not be created).
-   */
-  splitPane: async (paneId, direction = 'horizontal') => {
-    const { createTab } = get();
-    const newTab = await createTab();
-    if (!newTab) return null;
-
-    const newPaneId = makePaneId();
-
-    const splitNode = (node) => {
-      if (node.type === 'leaf' && node.id === paneId) {
-        return {
-          type: 'split',
-          id: `split-${Date.now()}`,
-          direction,
-          children: [
-            { ...node },
-            { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id },
-          ],
-        };
-      }
-      if (node.type === 'split') {
-        return { ...node, children: node.children.map(splitNode) };
-      }
-      return node;
-    };
-
-    set((state) => ({ splitTree: splitNode(state.splitTree) }));
-    return newPaneId;
-  },
-
-  /**
-   * Split the currently active pane and focus the newly created one.
-   */
-  splitActivePane: async (direction = 'horizontal') => {
-    const { activePaneId, splitPane, setActivePane } = get();
-    const newPaneId = await splitPane(activePaneId, direction);
-    if (newPaneId) setActivePane(newPaneId);
-    return newPaneId;
-  },
-
-  /**
-   * Close a pane. The sibling takes over the parent split.
-   * Kills the pane's PTY and drops its tab UNLESS another remaining leaf
-   * still references that same tabId.
-   */
-  closePane: async (paneId) => {
-    const { splitTree } = get();
-
-    const closingLeaf = collectLeaves(splitTree).find((leaf) => leaf.id === paneId);
-    const closingTabIds = closingLeaf ? [...closingLeaf.tabIds] : [];
-
-    let replacementLeafId = null;
-
-    const removeNode = (node) => {
-      if (node.type !== 'split') return node;
-
-      const idx = node.children.findIndex(
-        (child) => child.type === 'leaf' && child.id === paneId
-      );
-
-      if (idx !== -1) {
-        const remaining = node.children.filter((_, i) => i !== idx);
-        if (remaining.length === 1) {
-          replacementLeafId = firstLeafId(remaining[0]);
-          return remaining[0];
-        }
-        const neighbourIdx = Math.min(idx, remaining.length - 1);
-        replacementLeafId = firstLeafId(remaining[neighbourIdx]);
-        return { ...node, children: remaining };
-      }
-
-      return { ...node, children: node.children.map(removeNode) };
-    };
-
-    // Closing the only pane empties it rather than removing the root.
-    const nextTree =
-      splitTree.type === 'leaf' && splitTree.id === paneId ? emptyTree() : removeNode(splitTree);
-    set({ splitTree: nextTree });
-
-    if (get().activePaneId === paneId && replacementLeafId) {
-      set({ activePaneId: replacementLeafId });
+  const restoreSavedLayout = async (saved, rootPath) => {
+    if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0 || !saved.splitTree) {
+      throw new Error('No saved terminal layout to restore');
     }
 
-    // Kill each tab this pane owned that no other pane still shows.
-    for (const tabId of closingTabIds) {
-      if (leafHoldingTab(get().splitTree, tabId)) continue;
+    const newTabs = [];
+    for (const savedTab of saved.tabs) {
+      if (!savedTab || !savedTab.id) continue;
+      const wantedCwd = savedTab.cwd || rootPath;
 
+      let ptySession;
+      try {
+        ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: wantedCwd });
+      } catch (_) {
+        // The saved directory may no longer exist — retry at the workspace root.
+        ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: rootPath });
+      }
+
+      const defaultTitle = `Terminal ${newTabs.length + 1}`;
+      newTabs.push({
+        id: savedTab.id,
+        title: savedTab.title || defaultTitle,
+        defaultTitle,
+        sessionId: ptySession.session_id,
+        cwd: ptySession.cwd || wantedCwd,
+        blocks: [],
+        activePrompt: '',
+      });
+    }
+
+    if (newTabs.length === 0) throw new Error('No terminal tabs could be restored');
+
+    const validIds = new Set(newTabs.map((t) => t.id));
+    const tree = pruneTree(sanitizeRestoredTree(saved.splitTree, validIds));
+    if (!tree) throw new Error('Saved layout had no valid panes once sanitized');
+
+    bumpPaneCounterPastRestoredIds(tree);
+
+    const leaves = collectLeaves(tree);
+    const activePaneId = leaves.some((l) => l.id === saved.activePaneId)
+      ? saved.activePaneId
+      : firstLeafId(tree) || leaves[0]?.id;
+    const activeLeaf = leaves.find((l) => l.id === activePaneId);
+    const activeTabId = activeLeaf?.activeTabId || activeLeaf?.tabIds?.[0] || newTabs[0].id;
+    const activeTab = newTabs.find((t) => t.id === activeTabId) || newTabs[0];
+
+    return {
+      tabs: newTabs,
+      splitTree: tree,
+      activePaneId: activePaneId || 'pane-root',
+      activeTabId,
+      cwd: activeTab.cwd || rootPath,
+    };
+  };
+
+  return {
+    tabs: [],
+    activeTabId: null,
+    history: [],
+    historyIndex: -1,
+    cwd: '/workspace',
+    isInitialized: false,
+
+    // Split tree: { type: 'leaf', id, name?, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
+    // Each leaf is a terminal group holding its own tabs, so a tab can be dragged
+    // between groups or dropped on a group's edge to split it. `name` is an
+    // optional user-assigned label for the group (see `renameGroup`).
+    splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+
+    // The pane currently focused for keyboard shortcuts / block-selection / split-origin.
+    activePaneId: 'pane-root',
+
+    /**
+     * Mark a pane as the active one (called on click/focus of a pane).
+     */
+    setActivePane: (paneId) => set({ activePaneId: paneId }),
+
+    /**
+     * Split a leaf pane into two children (horizontal or vertical). The new
+     * tab is spawned directly into the new pane, never into the pane being
+     * split, so the same tab can never end up listed in two panes at once.
+     * Returns the new pane's id (or null if the split could not be created).
+     */
+    splitPane: async (paneId, direction = 'horizontal') => {
+      const newTab = await spawnTab();
+      if (!newTab) return null;
+
+      const newPaneId = makePaneId();
+
+      const splitNode = (node) => {
+        if (node.type === 'leaf' && node.id === paneId) {
+          return {
+            type: 'split',
+            id: `split-${Date.now()}`,
+            direction,
+            children: [
+              { ...node },
+              { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id },
+            ],
+          };
+        }
+        if (node.type === 'split') {
+          return { ...node, children: node.children.map(splitNode) };
+        }
+        return node;
+      };
+
+      set((state) => ({ splitTree: splitNode(state.splitTree) }));
+      return newPaneId;
+    },
+
+    /**
+     * Split the currently active pane and focus the newly created one.
+     */
+    splitActivePane: async (direction = 'horizontal') => {
+      const { activePaneId, splitPane, setActivePane } = get();
+      const newPaneId = await splitPane(activePaneId, direction);
+      if (newPaneId) setActivePane(newPaneId);
+      return newPaneId;
+    },
+
+    /**
+     * Close a pane. The sibling takes over the parent split.
+     * Kills the pane's PTY and drops its tab UNLESS another remaining leaf
+     * still references that same tabId.
+     */
+    closePane: async (paneId) => {
+      const { splitTree } = get();
+
+      const closingLeaf = collectLeaves(splitTree).find((leaf) => leaf.id === paneId);
+      const closingTabIds = closingLeaf ? [...closingLeaf.tabIds] : [];
+
+      let replacementLeafId = null;
+
+      const removeNode = (node) => {
+        if (node.type !== 'split') return node;
+
+        const idx = node.children.findIndex(
+          (child) => child.type === 'leaf' && child.id === paneId
+        );
+
+        if (idx !== -1) {
+          const remaining = node.children.filter((_, i) => i !== idx);
+          if (remaining.length === 1) {
+            replacementLeafId = firstLeafId(remaining[0]);
+            return remaining[0];
+          }
+          const neighbourIdx = Math.min(idx, remaining.length - 1);
+          replacementLeafId = firstLeafId(remaining[neighbourIdx]);
+          return { ...node, children: remaining };
+        }
+
+        return { ...node, children: node.children.map(removeNode) };
+      };
+
+      // Closing the only pane empties it rather than removing the root.
+      const nextTree =
+        splitTree.type === 'leaf' && splitTree.id === paneId ? emptyTree() : removeNode(splitTree);
+      set({ splitTree: nextTree });
+
+      if (get().activePaneId === paneId && replacementLeafId) {
+        set({ activePaneId: replacementLeafId });
+      }
+
+      // Kill each tab this pane owned that no other pane still shows.
+      for (const tabId of closingTabIds) {
+        if (leafHoldingTab(get().splitTree, tabId)) continue;
+
+        const tab = get().tabs.find((t) => t.id === tabId);
+        if (!tab) continue;
+
+        try {
+          await invoke('pty_kill', { session_id: tab.sessionId });
+        } catch (e) {
+          console.warn('[TerminalStore] pty_kill failed:', e);
+        }
+        await disposeTerminalView(tabId);
+
+        set((state) => {
+          const nextTabs = state.tabs.filter((t) => t.id !== tabId);
+          return {
+            tabs: nextTabs,
+            activeTabId: state.activeTabId === tabId ? nextTabs[0]?.id || null : state.activeTabId,
+          };
+        });
+      }
+    },
+
+    /**
+     * Close whichever pane is currently active.
+     */
+    closeActivePane: () => {
+      const { activePaneId, closePane } = get();
+      return closePane(activePaneId);
+    },
+
+    /**
+     * Move pane focus by `delta` (±1) through the split-tree's leaves in DOM
+     * order, wrapping around at the ends.
+     */
+    focusNextPane: (delta = 1) => {
+      const { splitTree, activePaneId } = get();
+      const leaves = collectLeaves(splitTree);
+      if (leaves.length === 0) return;
+
+      const ids = leaves.map((l) => l.id);
+      const currentIdx = ids.indexOf(activePaneId);
+      const fromIdx = currentIdx === -1 ? 0 : currentIdx;
+      const nextIdx = (fromIdx + delta + ids.length) % ids.length;
+
+      set({ activePaneId: ids[nextIdx] });
+    },
+
+    /**
+     * Make `tabId` the visible tab of `paneId`. If the tab lives in another
+     * group, move it here first (clicking a tab chip never splits).
+     */
+    bindPaneToTab: (paneId, tabId) => {
+      set((state) => {
+        const holder = leafHoldingTab(state.splitTree, tabId);
+        let tree = state.splitTree;
+        if (!holder || holder.id !== paneId) {
+          tree = pruneTree(addTabToPane(removeTabFromTree(tree, tabId), paneId, tabId)) || emptyTree();
+        } else {
+          tree = mapTree(tree, (n) =>
+            n.type === 'leaf' && n.id === paneId ? { ...n, activeTabId: tabId } : n
+          );
+        }
+        return { splitTree: tree, activePaneId: paneId, activeTabId: tabId };
+      });
+    },
+
+    /**
+     * Drag & drop a terminal tab onto a pane.
+     *
+     * `zone` is where inside the target pane it was dropped:
+     *   'center'                  → move the tab into that group
+     *   'left' | 'right'          → split the group horizontally, tab on that side
+     *   'top'  | 'bottom'         → split the group vertically, tab on that side
+     */
+    dropTabOnPane: (tabId, targetPaneId, zone = 'center') => {
+      const state = get();
+      const target = collectLeaves(state.splitTree).find((l) => l.id === targetPaneId);
+      if (!target || !state.tabs.some((t) => t.id === tabId)) return;
+
+      const source = leafHoldingTab(state.splitTree, tabId);
+
+      // Dropping a tab back on its own group: just focus it. Splitting a group
+      // off its only tab would leave the source empty and is a no-op too.
+      if (source && source.id === targetPaneId) {
+        if (zone === 'center' || source.tabIds.length === 1) {
+          get().bindPaneToTab(targetPaneId, tabId);
+          return;
+        }
+      }
+
+      const withoutTab = removeTabFromTree(state.splitTree, tabId);
+
+      if (zone === 'center') {
+        const tree = pruneTree(addTabToPane(withoutTab, targetPaneId, tabId)) || emptyTree();
+        set({ splitTree: tree, activePaneId: targetPaneId, activeTabId: tabId });
+        return;
+      }
+
+      const newPaneId = makePaneId();
+      const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
+      const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
+      const insertFirst = zone === 'left' || zone === 'top';
+
+      const split = mapTree(withoutTab, (n) =>
+        n.type === 'leaf' && n.id === targetPaneId
+          ? {
+              type: 'split',
+              id: `split-${Date.now()}`,
+              direction,
+              children: insertFirst ? [newLeaf, n] : [n, newLeaf],
+            }
+          : n
+      );
+
+      set({
+        splitTree: pruneTree(split) || emptyTree(),
+        activePaneId: newPaneId,
+        activeTabId: tabId,
+      });
+    },
+
+    /**
+     * Rename a tab (double-click its chip, or "Rename" from its right-click
+     * menu). An empty/whitespace-only name resets it to its auto-generated
+     * default (`Terminal N`) rather than leaving a blank label.
+     */
+    renameTab: (tabId, title) => {
+      set((state) => ({
+        tabs: state.tabs.map((t) => {
+          if (t.id !== tabId) return t;
+          const trimmed = typeof title === 'string' ? title.trim() : '';
+          return { ...t, title: trimmed || t.defaultTitle || t.title };
+        }),
+      }));
+    },
+
+    /**
+     * Name (or rename) a group/pane — reachable from a right-click on the
+     * pane strip's empty area. An empty name clears it back to unnamed.
+     */
+    renameGroup: (paneId, name) => {
+      set((state) => ({
+        splitTree: mapTree(state.splitTree, (n) => {
+          if (n.type !== 'leaf' || n.id !== paneId) return n;
+          const trimmed = typeof name === 'string' ? name.trim() : '';
+          if (!trimmed) {
+            const { name: _drop, ...rest } = n;
+            return rest;
+          }
+          return { ...n, name: trimmed };
+        }),
+      }));
+    },
+
+    // Event listeners are attached once and can be torn down (HMR, unmount)
+    // without losing the bootstrap state.
+    attachListeners: async () => {
+      if (listening) return;
+      listening = true;
+      unlisteners.push(await listen('pty-output', (payload) => {
+        const { session_id, data } = payload || {};
+        if (!session_id || !data) return;
+
+        set((state) => ({
+          tabs: state.tabs.map((tab) => {
+            if (tab.sessionId !== session_id) return tab;
+            const blocks = [...tab.blocks];
+            const runningIdx = blocks.findIndex((b) => b.status === 'running');
+            if (runningIdx !== -1) {
+              blocks[runningIdx] = {
+                ...blocks[runningIdx],
+                output: blocks[runningIdx].output + data,
+              };
+            }
+            // No running block: this is prompt/banner noise — never append it
+            // to a finished (possibly pinned) block.
+            return { ...tab, blocks };
+          }),
+        }));
+      }));
+      unlisteners.push(await listen('pty-command-done', (payload) => {
+        const { session_id, exit_code } = payload || {};
+        if (!session_id) return;
+        set((state) => ({
+          tabs: state.tabs.map((tab) => {
+            if (tab.sessionId !== session_id) return tab;
+            const idx = tab.blocks.findIndex((b) => b.status === 'running');
+            if (idx === -1) return tab;
+            const blocks = [...tab.blocks];
+            const running = blocks[idx];
+            const ok = exit_code === null || exit_code === undefined || exit_code === 0;
+            blocks[idx] = {
+              ...running,
+              // zsh pads the last line to the terminal width before the prompt;
+              // drop that trailing whitespace so blocks end cleanly.
+              output: running.output.replace(/[ \t]+\r?$/, ''),
+              status: ok ? 'completed' : 'failed',
+              exitCode: exit_code ?? 0,
+              durationMs: Date.now() - (running.startTime || Date.now()),
+            };
+            return { ...tab, blocks };
+          }),
+        }));
+      }));
+      unlisteners.push(await listen('pty-exit', (payload) => {
+        const { session_id, exit_code } = payload || {};
+        if (!session_id) return;
+
+        set((state) => ({
+          tabs: state.tabs.map((tab) => {
+            if (tab.sessionId !== session_id) return tab;
+            const blocks = [...tab.blocks];
+            const runningIdx = blocks.findIndex((b) => b.status === 'running');
+            if (runningIdx !== -1) {
+              const blk = blocks[runningIdx];
+              blocks[runningIdx] = {
+                ...blk,
+                status: exit_code === 0 ? 'completed' : 'failed',
+                exitCode: exit_code,
+                durationMs: Math.max(1, Date.now() - (blk.startTime || Date.now())),
+              };
+            }
+            return { ...tab, blocks };
+          }),
+        }));
+      }));
+    },
+
+    dispose: () => {
+      for (const off of unlisteners) {
+        try {
+          if (typeof off === 'function') off();
+        } catch (_) {
+          // listener already gone
+        }
+      }
+      unlisteners = [];
+      listening = false;
+      clearTimeout(persistTimer);
+    },
+
+    init: async () => {
+      if (get().isInitialized) {
+        await get().attachListeners();
+        return;
+      }
+
+      try {
+        let rootPath = '/workspace';
+        try {
+          rootPath = (await invoke('fs_get_root')) || rootPath;
+        } catch (_) {
+          // browser mock or backend unavailable — keep the virtual default
+        }
+        set({ cwd: rootPath });
+
+        // Try to bring back last session's groups/tabs/names. Any failure
+        // here (corrupt payload, every pty_spawn rejecting, ...) must fall
+        // back to the plain single-terminal bootstrap below rather than
+        // leaving the app with a half-built tree.
+        const saved = loadState(PERSIST_KEY, null);
+        let restored = null;
+        if (saved) {
+          try {
+            restored = await restoreSavedLayout(saved, rootPath);
+          } catch (err) {
+            console.error(
+              '[TerminalStore] Failed to restore saved terminal layout — falling back to a single terminal:',
+              err
+            );
+            restored = null;
+          }
+        }
+
+        if (restored) {
+          set({
+            tabs: restored.tabs,
+            activeTabId: restored.activeTabId,
+            cwd: restored.cwd,
+            isInitialized: true,
+            splitTree: restored.splitTree,
+            activePaneId: restored.activePaneId,
+          });
+          await get().attachListeners();
+          return;
+        }
+
+        const ptySession = await invoke('pty_spawn', {
+          cols: 80,
+          rows: 24,
+          cwd: rootPath,
+        });
+
+        const defaultTitle = 'Terminal 1';
+        const initialTab = {
+          id: 'tab-term-1',
+          title: defaultTitle,
+          defaultTitle,
+          sessionId: ptySession.session_id,
+          cwd: ptySession.cwd || rootPath,
+          blocks: [],
+          activePrompt: '',
+        };
+
+        set({
+          tabs: [initialTab],
+          activeTabId: initialTab.id,
+          cwd: initialTab.cwd,
+          isInitialized: true,
+          splitTree: { type: 'leaf', id: 'pane-root', tabIds: [initialTab.id], activeTabId: initialTab.id },
+          activePaneId: 'pane-root',
+        });
+
+        await get().attachListeners();
+      } catch (err) {
+        console.error('[TerminalStore] Failed to initialize terminal session:', err);
+      }
+    },
+
+    createTab: async (titleOrOptions = null, options = {}) => {
+      // Backward/forward-compatible signature: createTab(), createTab('Title'),
+      // createTab({ title, paneId }), or createTab('Title', { paneId }). A
+      // caller-supplied paneId targets that pane's group directly instead of
+      // whichever pane happens to be active (see TerminalSplitContainer's
+      // per-pane "+" button).
+      let title = null;
+      let paneId = null;
+      if (titleOrOptions && typeof titleOrOptions === 'object') {
+        title = titleOrOptions.title ?? null;
+        paneId = titleOrOptions.paneId ?? null;
+      } else {
+        title = titleOrOptions;
+        paneId = options?.paneId ?? null;
+      }
+
+      const newTab = await spawnTab(title);
+      if (!newTab) return null;
+
+      const targetPaneId = paneId || get().activePaneId;
+      set((state) => ({
+        activeTabId: newTab.id,
+        activePaneId: targetPaneId,
+        splitTree: addTabToPane(state.splitTree, targetPaneId, newTab.id),
+      }));
+
+      return newTab;
+    },
+
+    switchTab: (tabId) => {
       const tab = get().tabs.find((t) => t.id === tabId);
-      if (!tab) continue;
+      if (!tab) return;
+      set({ activeTabId: tabId, cwd: tab.cwd });
+    },
+
+    closeTab: async (tabId) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) return;
 
       try {
         await invoke('pty_kill', { session_id: tab.sessionId });
@@ -230,455 +770,179 @@ export const useTerminalStore = create((set, get) => ({
 
       set((state) => {
         const nextTabs = state.tabs.filter((t) => t.id !== tabId);
+        let nextActiveId = state.activeTabId;
+        if (state.activeTabId === tabId) {
+          nextActiveId = nextTabs[0]?.id || null;
+        }
+        // Drop it from its group too, collapsing the group if it was the last tab.
+        const splitTree = pruneTree(removeTabFromTree(state.splitTree, tabId)) || emptyTree();
+        const paneStillThere = collectLeaves(splitTree).some((l) => l.id === state.activePaneId);
         return {
           tabs: nextTabs,
-          activeTabId: state.activeTabId === tabId ? nextTabs[0]?.id || null : state.activeTabId,
+          activeTabId: nextActiveId,
+          splitTree,
+          activePaneId: paneStillThere ? state.activePaneId : firstLeafId(splitTree) || 'pane-root',
         };
       });
-    }
-  },
+    },
 
-  /**
-   * Close whichever pane is currently active.
-   */
-  closeActivePane: () => {
-    const { activePaneId, closePane } = get();
-    return closePane(activePaneId);
-  },
+    executeCommand: async (commandText, tabId = null) => {
+      const trimmed = (commandText || '').trim();
+      if (!trimmed) return null;
 
-  /**
-   * Move pane focus by `delta` (±1) through the split-tree's leaves in DOM
-   * order, wrapping around at the ends.
-   */
-  focusNextPane: (delta = 1) => {
-    const { splitTree, activePaneId } = get();
-    const leaves = collectLeaves(splitTree);
-    if (leaves.length === 0) return;
+      const targetTabId = tabId || get().activeTabId;
+      const tab = get().tabs.find((t) => t.id === targetTabId);
+      if (!tab) return null;
 
-    const ids = leaves.map((l) => l.id);
-    const currentIdx = ids.indexOf(activePaneId);
-    const fromIdx = currentIdx === -1 ? 0 : currentIdx;
-    const nextIdx = (fromIdx + delta + ids.length) % ids.length;
-
-    set({ activePaneId: ids[nextIdx] });
-  },
-
-  /**
-   * Make `tabId` the visible tab of `paneId`. If the tab lives in another
-   * group, move it here first (clicking a tab chip never splits).
-   */
-  bindPaneToTab: (paneId, tabId) => {
-    set((state) => {
-      const holder = leafHoldingTab(state.splitTree, tabId);
-      let tree = state.splitTree;
-      if (!holder || holder.id !== paneId) {
-        tree = pruneTree(addTabToPane(removeTabFromTree(tree, tabId), paneId, tabId)) || emptyTree();
-      } else {
-        tree = mapTree(tree, (n) =>
-          n.type === 'leaf' && n.id === paneId ? { ...n, activeTabId: tabId } : n
-        );
-      }
-      return { splitTree: tree, activePaneId: paneId, activeTabId: tabId };
-    });
-  },
-
-  /**
-   * Drag & drop a terminal tab onto a pane.
-   *
-   * `zone` is where inside the target pane it was dropped:
-   *   'center'                  → move the tab into that group
-   *   'left' | 'right'          → split the group horizontally, tab on that side
-   *   'top'  | 'bottom'         → split the group vertically, tab on that side
-   */
-  dropTabOnPane: (tabId, targetPaneId, zone = 'center') => {
-    const state = get();
-    const target = collectLeaves(state.splitTree).find((l) => l.id === targetPaneId);
-    if (!target || !state.tabs.some((t) => t.id === tabId)) return;
-
-    const source = leafHoldingTab(state.splitTree, tabId);
-
-    // Dropping a tab back on its own group: just focus it. Splitting a group
-    // off its only tab would leave the source empty and is a no-op too.
-    if (source && source.id === targetPaneId) {
-      if (zone === 'center' || source.tabIds.length === 1) {
-        get().bindPaneToTab(targetPaneId, tabId);
-        return;
-      }
-    }
-
-    const withoutTab = removeTabFromTree(state.splitTree, tabId);
-
-    if (zone === 'center') {
-      const tree = pruneTree(addTabToPane(withoutTab, targetPaneId, tabId)) || emptyTree();
-      set({ splitTree: tree, activePaneId: targetPaneId, activeTabId: tabId });
-      return;
-    }
-
-    const newPaneId = makePaneId();
-    const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
-    const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
-    const insertFirst = zone === 'left' || zone === 'top';
-
-    const split = mapTree(withoutTab, (n) =>
-      n.type === 'leaf' && n.id === targetPaneId
-        ? {
-            type: 'split',
-            id: `split-${Date.now()}`,
-            direction,
-            children: insertFirst ? [newLeaf, n] : [n, newLeaf],
-          }
-        : n
-    );
-
-    set({
-      splitTree: pruneTree(split) || emptyTree(),
-      activePaneId: newPaneId,
-      activeTabId: tabId,
-    });
-  },
-
-  // Event listeners are attached once and can be torn down (HMR, unmount)
-  // without losing the bootstrap state.
-  attachListeners: async () => {
-    if (listening) return;
-    listening = true;
-    unlisteners.push(await listen('pty-output', (payload) => {
-      const { session_id, data } = payload || {};
-      if (!session_id || !data) return;
-
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.sessionId !== session_id) return tab;
-          const blocks = [...tab.blocks];
-          const runningIdx = blocks.findIndex((b) => b.status === 'running');
-          if (runningIdx !== -1) {
-            blocks[runningIdx] = {
-              ...blocks[runningIdx],
-              output: blocks[runningIdx].output + data,
-            };
-          }
-          // No running block: this is prompt/banner noise — never append it
-          // to a finished (possibly pinned) block.
-          return { ...tab, blocks };
-        }),
-      }));
-    }));
-    unlisteners.push(await listen('pty-command-done', (payload) => {
-      const { session_id, exit_code } = payload || {};
-      if (!session_id) return;
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.sessionId !== session_id) return tab;
-          const idx = tab.blocks.findIndex((b) => b.status === 'running');
-          if (idx === -1) return tab;
-          const blocks = [...tab.blocks];
-          const running = blocks[idx];
-          const ok = exit_code === null || exit_code === undefined || exit_code === 0;
-          blocks[idx] = {
-            ...running,
-            // zsh pads the last line to the terminal width before the prompt;
-            // drop that trailing whitespace so blocks end cleanly.
-            output: running.output.replace(/[ \t]+\r?$/, ''),
-            status: ok ? 'completed' : 'failed',
-            exitCode: exit_code ?? 0,
-            durationMs: Date.now() - (running.startTime || Date.now()),
-          };
-          return { ...tab, blocks };
-        }),
-      }));
-    }));
-    unlisteners.push(await listen('pty-exit', (payload) => {
-      const { session_id, exit_code } = payload || {};
-      if (!session_id) return;
-
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.sessionId !== session_id) return tab;
-          const blocks = [...tab.blocks];
-          const runningIdx = blocks.findIndex((b) => b.status === 'running');
-          if (runningIdx !== -1) {
-            const blk = blocks[runningIdx];
-            blocks[runningIdx] = {
-              ...blk,
-              status: exit_code === 0 ? 'completed' : 'failed',
-              exitCode: exit_code,
-              durationMs: Math.max(1, Date.now() - (blk.startTime || Date.now())),
-            };
-          }
-          return { ...tab, blocks };
-        }),
-      }));
-    }));
-  },
-
-  dispose: () => {
-    for (const off of unlisteners) {
-      try {
-        if (typeof off === 'function') off();
-      } catch (_) {
-        // listener already gone
-      }
-    }
-    unlisteners = [];
-    listening = false;
-  },
-  init: async () => {
-    if (get().isInitialized) {
-      await get().attachListeners();
-      return;
-    }
-
-    try {
-      let rootPath = '/workspace';
-      try {
-        rootPath = (await invoke('fs_get_root')) || rootPath;
-      } catch (_) {
-        // browser mock or backend unavailable — keep the virtual default
-      }
-      set({ cwd: rootPath });
-
-      const ptySession = await invoke('pty_spawn', {
-        cols: 80,
-        rows: 24,
-        cwd: rootPath,
-      });
-
-      const initialTab = {
-        id: 'tab-term-1',
-        title: 'Terminal 1',
-        sessionId: ptySession.session_id,
-        cwd: ptySession.cwd || rootPath,
-        blocks: [],
-        activePrompt: '',
+      const blockId = `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const block = {
+        id: blockId,
+        command: trimmed,
+        cwd: tab.cwd || get().cwd,
+        output: '',
+        exitCode: null,
+        durationMs: 0,
+        startTime: Date.now(),
+        status: 'running',
+        pinned: false,
       };
 
-      set({
-        tabs: [initialTab],
-        activeTabId: initialTab.id,
-        cwd: initialTab.cwd,
-        isInitialized: true,
-        splitTree: { type: 'leaf', id: 'pane-root', tabIds: [initialTab.id], activeTabId: initialTab.id },
-        activePaneId: 'pane-root',
-      });
-
-      // Register PTY output listener
-
-      // Register PTY exit listener
-      // Shell integration (OSC 133): the shell reported that a command finished.
-      // This is the real completion signal in the desktop app; `pty-exit`
-      // below only fires when the shell itself dies (or from the browser mock).
-
-      await get().attachListeners();
-    } catch (err) {
-      console.error('[TerminalStore] Failed to initialize terminal session:', err);
-    }
-  },
-
-  createTab: async (title = null) => {
-    try {
-      const ptySession = await invoke('pty_spawn', {
-        cols: 80,
-        rows: 24,
-        cwd: get().cwd || '/workspace',
-      });
-
-      const nextIndex = get().tabs.length + 1;
-      const newTab = {
-        id: `tab-term-${Date.now()}-${nextIndex}`,
-        title: title || `Terminal ${nextIndex}`,
-        sessionId: ptySession.session_id,
-        cwd: ptySession.cwd || get().cwd,
-        blocks: [],
-        activePrompt: '',
-      };
-
-      set((state) => ({
-        tabs: [...state.tabs, newTab],
-        activeTabId: newTab.id,
-        // A new terminal joins the active group so it is visible immediately.
-        splitTree: addTabToPane(state.splitTree, state.activePaneId, newTab.id),
-      }));
-
-      return newTab;
-    } catch (err) {
-      console.error('[TerminalStore] Failed to create terminal tab:', err);
-    }
-  },
-
-  switchTab: (tabId) => {
-    const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab) return;
-    set({ activeTabId: tabId, cwd: tab.cwd });
-  },
-
-  closeTab: async (tabId) => {
-    const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab) return;
-
-    try {
-      await invoke('pty_kill', { session_id: tab.sessionId });
-    } catch (e) {
-      console.warn('[TerminalStore] pty_kill failed:', e);
-    }
-    await disposeTerminalView(tabId);
-
-    set((state) => {
-      const nextTabs = state.tabs.filter((t) => t.id !== tabId);
-      let nextActiveId = state.activeTabId;
-      if (state.activeTabId === tabId) {
-        nextActiveId = nextTabs[0]?.id || null;
-      }
-      // Drop it from its group too, collapsing the group if it was the last tab.
-      const splitTree = pruneTree(removeTabFromTree(state.splitTree, tabId)) || emptyTree();
-      const paneStillThere = collectLeaves(splitTree).some((l) => l.id === state.activePaneId);
-      return {
-        tabs: nextTabs,
-        activeTabId: nextActiveId,
-        splitTree,
-        activePaneId: paneStillThere ? state.activePaneId : firstLeafId(splitTree) || 'pane-root',
-      };
-    });
-  },
-
-  executeCommand: async (commandText, tabId = null) => {
-    const trimmed = (commandText || '').trim();
-    if (!trimmed) return null;
-
-    const targetTabId = tabId || get().activeTabId;
-    const tab = get().tabs.find((t) => t.id === targetTabId);
-    if (!tab) return null;
-
-    const blockId = `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const block = {
-      id: blockId,
-      command: trimmed,
-      cwd: tab.cwd || get().cwd,
-      output: '',
-      exitCode: null,
-      durationMs: 0,
-      startTime: Date.now(),
-      status: 'running',
-      pinned: false,
-    };
-
-    set((state) => {
-      const nextTabs = state.tabs.map((t) => {
-        if (t.id !== targetTabId) return t;
-        return {
-          ...t,
-          blocks: [...t.blocks, block],
-        };
-      });
-      const nextHistory = [...state.history, trimmed];
-      return {
-        tabs: nextTabs,
-        history: nextHistory,
-        historyIndex: nextHistory.length,
-      };
-    });
-
-    try {
-      await invoke('pty_write', {
-        session_id: tab.sessionId,
-        data: `${trimmed}\n`,
-      });
-    } catch (err) {
-      console.error('[TerminalStore] Failed to write to PTY:', err);
-      set((state) => ({
-        tabs: state.tabs.map((t) => {
+      set((state) => {
+        const nextTabs = state.tabs.map((t) => {
           if (t.id !== targetTabId) return t;
           return {
             ...t,
-            blocks: t.blocks.map((b) =>
-              b.id === blockId ? { ...b, status: 'failed', exitCode: 1, output: `Error: ${err.message}\n` } : b
-            ),
+            blocks: [...t.blocks, block],
+          };
+        });
+        const nextHistory = [...state.history, trimmed];
+        return {
+          tabs: nextTabs,
+          history: nextHistory,
+          historyIndex: nextHistory.length,
+        };
+      });
+
+      try {
+        await invoke('pty_write', {
+          session_id: tab.sessionId,
+          data: `${trimmed}\n`,
+        });
+      } catch (err) {
+        console.error('[TerminalStore] Failed to write to PTY:', err);
+        set((state) => ({
+          tabs: state.tabs.map((t) => {
+            if (t.id !== targetTabId) return t;
+            return {
+              ...t,
+              blocks: t.blocks.map((b) =>
+                b.id === blockId ? { ...b, status: 'failed', exitCode: 1, output: `Error: ${err.message}\n` } : b
+              ),
+            };
+          }),
+        }));
+      }
+
+      return block;
+    },
+
+    pinBlock: (blockId) => {
+      let resultPinned = false;
+      set((state) => ({
+        tabs: state.tabs.map((tab) => ({
+          ...tab,
+          blocks: tab.blocks.map((b) => {
+            if (b.id === blockId) {
+              resultPinned = !b.pinned;
+              return { ...b, pinned: resultPinned };
+            }
+            return b;
+          }),
+        })),
+      }));
+      return resultPinned;
+    },
+
+    clearBlocks: (tabId = null) => {
+      const targetTabId = tabId || get().activeTabId;
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.id !== targetTabId) return tab;
+          return {
+            ...tab,
+            blocks: tab.blocks.filter((b) => b.pinned),
           };
         }),
       }));
-    }
+    },
 
-    return block;
-  },
-
-  pinBlock: (blockId) => {
-    let resultPinned = false;
-    set((state) => ({
-      tabs: state.tabs.map((tab) => ({
-        ...tab,
-        blocks: tab.blocks.map((b) => {
-          if (b.id === blockId) {
-            resultPinned = !b.pinned;
-            return { ...b, pinned: resultPinned };
-          }
-          return b;
+    // Replace a block's recorded output outright. No other field changes.
+    // (Bookkeeping only — the live terminal surface renders straight from PTY
+    // output and never reads `blocks`; this exists for callers that want to
+    // overwrite a block's history entry wholesale, e.g. a future re-run.)
+    setBlockOutput: (tabId, blockId, output) => {
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.id !== tabId) return tab;
+          return {
+            ...tab,
+            blocks: tab.blocks.map((b) => (b.id === blockId ? { ...b, output } : b)),
+          };
         }),
-      })),
-    }));
-    return resultPinned;
-  },
+      }));
+    },
 
-  clearBlocks: (tabId = null) => {
-    const targetTabId = tabId || get().activeTabId;
-    set((state) => ({
-      tabs: state.tabs.map((tab) => {
-        if (tab.id !== targetTabId) return tab;
-        return {
-          ...tab,
-          blocks: tab.blocks.filter((b) => b.pinned),
-        };
-      }),
-    }));
-  },
+    // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
+    writeRaw: async (tabId, data) => {
+      const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
+      if (!tab || !data) return;
+      try {
+        await invoke('pty_write', { session_id: tab.sessionId, data });
+      } catch (err) {
+        console.error('[TerminalStore] Raw write failed:', err);
+      }
+    },
 
-  // Replace a block's recorded output outright. No other field changes.
-  // (Bookkeeping only — the live terminal surface renders straight from PTY
-  // output and never reads `blocks`; this exists for callers that want to
-  // overwrite a block's history entry wholesale, e.g. a future re-run.)
-  setBlockOutput: (tabId, blockId, output) => {
-    set((state) => ({
-      tabs: state.tabs.map((tab) => {
-        if (tab.id !== tabId) return tab;
-        return {
-          ...tab,
-          blocks: tab.blocks.map((b) => (b.id === blockId ? { ...b, output } : b)),
-        };
-      }),
-    }));
-  },
+    // Keep the backend PTY's window size in step with the pane (debounced by the caller).
+    resizePty: async (tabId, cols, rows) => {
+      const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
+      if (!tab || !cols || !rows) return;
+      const key = `${cols}x${rows}`;
+      if (tab.lastSize === key) return;
+      set((state) => ({
+        tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
+      }));
+      try {
+        await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
+      } catch (err) {
+        console.error('[TerminalStore] Resize failed:', err);
+      }
+    },
 
-  // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
-  writeRaw: async (tabId, data) => {
-    const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
-    if (!tab || !data) return;
-    try {
-      await invoke('pty_write', { session_id: tab.sessionId, data });
-    } catch (err) {
-      console.error('[TerminalStore] Raw write failed:', err);
-    }
-  },
+    setCwd: (cwd) => set({ cwd }),
 
-  // Keep the backend PTY's window size in step with the pane (debounced by the caller).
-  resizePty: async (tabId, cols, rows) => {
-    const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
-    if (!tab || !cols || !rows) return;
-    const key = `${cols}x${rows}`;
-    if (tab.lastSize === key) return;
-    set((state) => ({
-      tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
-    }));
-    try {
-      await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
-    } catch (err) {
-      console.error('[TerminalStore] Resize failed:', err);
-    }
-  },
+    getActiveTab: () => {
+      const { tabs, activeTabId } = get();
+      return tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
+    },
+  };
+});
 
-  setCwd: (cwd) => set({ cwd }),
-
-  getActiveTab: () => {
-    const { tabs, activeTabId } = get();
-    return tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
-  },
-}));
+// Debounced write-behind: any change to the tree shape, tab identity, or
+// focused pane schedules a save. Guarded on `isInitialized` so the store's
+// own bootstrap (or a restore) never immediately overwrites what it just
+// loaded, and gated to changes that actually matter to the persisted shape
+// so typing into a running command doesn't thrash localStorage.
+useTerminalStore.subscribe((state, prevState) => {
+  if (!state.isInitialized) return;
+  if (
+    state.splitTree === prevState.splitTree &&
+    state.tabs === prevState.tabs &&
+    state.activePaneId === prevState.activePaneId
+  ) {
+    return;
+  }
+  schedulePersist(state);
+});
 
 export default useTerminalStore;

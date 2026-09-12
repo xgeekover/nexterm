@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { Panel, Group, Separator } from 'react-resizable-panels';
 import Editor from '@monaco-editor/react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { EditorTabs } from './EditorTabs.jsx';
+import { EditorTabs, EditorDragContext, markEditorDragEnded } from './EditorTabs.jsx';
 import { DiffViewer } from './DiffViewer.jsx';
 import { cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
@@ -22,35 +23,122 @@ const MONACO_OPTIONS = {
   automaticLayout: true,
 };
 
-export function EditorPanel() {
+/** Pointer travel before a press turns into a drag. */
+const DRAG_THRESHOLD_PX = 4;
+/** How deep into a pane counts as an edge (split) rather than the centre (move). */
+const EDGE_FRACTION = 0.25;
+
+/**
+ * Dragging is done with pointer events rather than HTML5 drag & drop — same
+ * reasoning as TerminalSplitContainer.jsx: WKWebView (what Tauri uses on
+ * macOS) refuses to start a native drag on an element inside a
+ * `user-select: none` subtree, which the tab strip is. Pointer events behave
+ * the same in every webview and let us draw our own preview and drop zones.
+ */
+
+/** Which edge (or the centre) of a rect the point is in. */
+function zoneFromPoint(rect, clientX, clientY) {
+  const x = (clientX - rect.left) / rect.width;
+  const y = (clientY - rect.top) / rect.height;
+  const candidates = [
+    { zone: 'left', d: x },
+    { zone: 'right', d: 1 - x },
+    { zone: 'top', d: y },
+    { zone: 'bottom', d: 1 - y },
+  ].sort((a, b) => a.d - b.d);
+  return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
+}
+
+/** Resolve the editor pane body under the pointer, if any. */
+function paneAtPoint(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  const body = el?.closest?.('[data-editor-pane-body]');
+  if (!body) return null;
+  return { paneId: body.getAttribute('data-editor-pane-body'), rect: body.getBoundingClientRect() };
+}
+
+/** Translucent overlay showing where the dropped tab will land. */
+function DropIndicator({ zone }) {
+  if (!zone) return null;
+  const box = {
+    center: 'inset-0',
+    left: 'left-0 top-0 bottom-0 w-1/2',
+    right: 'right-0 top-0 bottom-0 w-1/2',
+    top: 'left-0 right-0 top-0 h-1/2',
+    bottom: 'left-0 right-0 bottom-0 h-1/2',
+  }[zone];
+  return (
+    <div
+      aria-hidden="true"
+      className={cn(
+        'absolute z-20 pointer-events-none border border-vsc-focus',
+        'bg-[color-mix(in_srgb,var(--vsc-accent)_18%,transparent)]',
+        box
+      )}
+    />
+  );
+}
+
+/** The chip that follows the cursor while dragging. */
+function DragPreview({ drag }) {
+  if (!drag?.active) return null;
+  return (
+    <div
+      aria-hidden="true"
+      className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
+                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
+      style={{ left: drag.x + 12, top: drag.y + 12 }}
+    >
+      <FileCode2 size={12} />
+      <span className="truncate max-w-[140px]">{drag.title}</span>
+    </div>
+  );
+}
+
+/** Breadcrumb segments = file path relative to the workspace root. */
+function relativeSegments(filePath, rootPath) {
+  const base = (rootPath || '').replace(/\/+$/, '');
+  let relativePath = base && filePath.startsWith(base) ? filePath.slice(base.length) : filePath;
+  relativePath = relativePath.replace(/^\/+/, '');
+  return relativePath ? relativePath.split('/').filter(Boolean) : [];
+}
+
+/**
+ * One editor group (leaf of the split tree): its own tab strip plus the
+ * Monaco editor for whichever of *its* tabs is active. Tabs can be dragged
+ * between groups, or onto a group's edge to split it.
+ */
+function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
+  const paneId = node.id;
   const tabs = useEditorStore((s) => s.tabs);
-  const activeTabId = useEditorStore((s) => s.activeTabId);
+  const activeEditorPaneId = useEditorStore((s) => s.activeEditorPaneId);
+  const setActiveEditorPane = useEditorStore((s) => s.setActiveEditorPane);
   const editBuffer = useEditorStore((s) => s.editBuffer);
   const saveFile = useEditorStore((s) => s.saveFile);
-  const diffView = useEditorStore((s) => s.diffView);
   const rootPath = useEditorStore((s) => s.rootPath);
   const monacoTheme = useSettingsStore((s) => s.monacoTheme);
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) || null;
+  const { drag } = useContext(EditorDragContext);
 
-  if (diffView && diffView.open) {
-    return <DiffViewer />;
-  }
+  const isActivePane = activeEditorPaneId === paneId;
+  const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
 
-  // Breadcrumb segments = file path relative to the workspace root.
-  let relativePath = '';
-  if (activeTab) {
-    const base = (rootPath || '').replace(/\/+$/, '');
-    relativePath = base && activeTab.filePath.startsWith(base)
-      ? activeTab.filePath.slice(base.length)
-      : activeTab.filePath;
-    relativePath = relativePath.replace(/^\/+/, '');
-  }
-  const segments = relativePath ? relativePath.split('/').filter(Boolean) : [];
+  // Only the tabs that belong to this group, in its own order.
+  const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
+  const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
+
+  const segments = activeTab ? relativeSegments(activeTab.filePath, rootPath) : [];
 
   return (
-    <div className="flex flex-col h-full w-full bg-vsc-editor overflow-hidden">
-      <EditorTabs />
+    <div
+      onMouseDown={() => setActiveEditorPane(paneId)}
+      onFocusCapture={() => setActiveEditorPane(paneId)}
+      className={cn(
+        'flex flex-col h-full w-full bg-vsc-editor overflow-hidden',
+        isActivePane && 'ring-1 ring-inset ring-vsc-focus'
+      )}
+    >
+      <EditorTabs node={node} onSplitH={onSplitH} onSplitV={onSplitV} onClose={onClose} canClose={canClose} />
 
       {activeTab ? (
         <div className="flex flex-col flex-1 overflow-hidden">
@@ -79,9 +167,16 @@ export function EditorPanel() {
             )}
           </div>
 
-          {/* Monaco Editor */}
-          <div className="flex-1 overflow-hidden">
+          {/* Monaco Editor — one instance per visible group, keyed by that
+              group's active tab path. Remounting on tab switch is cheap and
+              lossless: @monaco-editor/react caches text models by `path` at
+              module scope, so moving a tab between groups (or switching back
+              to it) reuses its model — undo history, scroll position, and
+              all — instead of losing it. */}
+          <div data-editor-pane-body={paneId} className="relative flex-1 overflow-hidden">
             <Editor
+              key={activeTab.filePath}
+              path={activeTab.filePath}
               height="100%"
               language={activeTab.language || 'javascript'}
               theme={monacoTheme}
@@ -89,10 +184,173 @@ export function EditorPanel() {
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
               options={MONACO_OPTIONS}
             />
+            {/* While dragging, swallow pointer events so Monaco cannot eat them. */}
+            {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
+            <DropIndicator zone={dropZone} />
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div data-editor-pane-body={paneId} className="relative flex-1 flex items-center justify-center text-ui-sm text-vsc-muted select-none">
+          No file open
+          {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
+          <DropIndicator zone={dropZone} />
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * Recursively renders the split tree: a "leaf" is an editor group, a "split"
+ * is a resizable row/column of children.
+ */
+function SplitNode({ node, onSplit, onClose, canClose }) {
+  if (node.type === 'leaf') {
+    return (
+      <EditorPane
+        node={node}
+        onSplitH={() => onSplit(node.id, 'horizontal')}
+        onSplitV={() => onSplit(node.id, 'vertical')}
+        onClose={() => onClose(node.id)}
+        canClose={canClose}
+      />
+    );
+  }
+
+  const direction = node.direction; // 'horizontal' | 'vertical'
+  return (
+    <Group orientation={direction} className="h-full w-full">
+      {node.children.map((child, i) => (
+        <React.Fragment key={child.id}>
+          {i > 0 && <Separator className={direction === 'horizontal' ? 'w-px' : 'h-px'} />}
+          <Panel minSize="15" defaultSize={String(100 / node.children.length)}>
+            <SplitNode node={child} onSplit={onSplit} onClose={onClose} canClose={true} />
+          </Panel>
+        </React.Fragment>
+      ))}
+    </Group>
+  );
+}
+
+/**
+ * Top-level container for the editor split system. Owns the drag gesture so
+ * every pane can render the drop indicator for the pointer's current target
+ * — mirrors TerminalSplitContainer.jsx exactly (see its comments for the
+ * WKWebView/pointer-events rationale).
+ */
+export function EditorPanel() {
+  const diffView = useEditorStore((s) => s.diffView);
+  const editorSplitTree = useEditorStore((s) => s.editorSplitTree);
+  const splitEditorPane = useEditorStore((s) => s.splitEditorPane);
+  const closeEditorPane = useEditorStore((s) => s.closeEditorPane);
+  const dropEditorTabOnPane = useEditorStore((s) => s.dropEditorTabOnPane);
+
+  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
+  const [drag, setDrag] = useState(null);
+  const dragRef = useRef(null);
+  const cleanupRef = useRef(null);
+
+  /**
+   * Listeners are attached synchronously here rather than from an effect: a
+   * quick flick delivers pointermove/up before React has committed the state
+   * change, so an effect-bound listener would miss the whole gesture.
+   */
+  const beginDrag = useCallback(
+    (tab, e) => {
+      const detach = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+        cleanupRef.current = null;
+      };
+
+      const onMove = (ev) => {
+        const cur = dragRef.current;
+        if (!cur) return;
+        const movedEnough =
+          cur.active ||
+          Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
+        if (!movedEnough) return;
+
+        const hit = paneAtPoint(ev.clientX, ev.clientY);
+        const next = {
+          ...cur,
+          active: true,
+          x: ev.clientX,
+          y: ev.clientY,
+          targetPaneId: hit?.paneId ?? null,
+          zone: hit ? zoneFromPoint(hit.rect, ev.clientX, ev.clientY) : null,
+        };
+        dragRef.current = next;
+        setDrag(next);
+      };
+
+      const onUp = () => {
+        const cur = dragRef.current;
+        detach();
+        dragRef.current = null;
+        setDrag(null);
+        if (cur?.active) markEditorDragEnded();
+        if (!cur?.active || !cur.targetPaneId) return;
+        dropEditorTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+      };
+
+      const onCancel = () => {
+        detach();
+        dragRef.current = null;
+        setDrag(null);
+      };
+
+      const started = {
+        tabId: tab.id,
+        title: tab.fileName,
+        startX: e.clientX,
+        startY: e.clientY,
+        x: e.clientX,
+        y: e.clientY,
+        active: false,
+        targetPaneId: null,
+        zone: null,
+      };
+      dragRef.current = started;
+      setDrag(started);
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onCancel);
+      cleanupRef.current = detach;
+    },
+    [dropEditorTabOnPane]
+  );
+
+  // Never leave listeners behind if the editor unmounts mid-gesture.
+  useEffect(() => () => cleanupRef.current?.(), []);
+
+  const handleSplit = useCallback((paneId, direction) => {
+    splitEditorPane(paneId, direction);
+  }, [splitEditorPane]);
+
+  const handleClose = useCallback((paneId) => {
+    closeEditorPane(paneId);
+  }, [closeEditorPane]);
+
+  if (diffView && diffView.open) {
+    return <DiffViewer />;
+  }
+
+  if (!editorSplitTree) return null;
+
+  const canClose = editorSplitTree.type !== 'leaf';
+
+  return (
+    <EditorDragContext.Provider value={{ drag, beginDrag }}>
+      <div className={cn('h-full w-full flex flex-col overflow-hidden bg-vsc-editor', drag?.active && 'cursor-grabbing')}>
+        <div className="flex-1 overflow-hidden">
+          <SplitNode node={editorSplitTree} onSplit={handleSplit} onClose={handleClose} canClose={canClose} />
+        </div>
+        <DragPreview drag={drag} />
+      </div>
+    </EditorDragContext.Provider>
   );
 }
 

@@ -17,6 +17,8 @@ export const useSettingsStore = create((set, get) => ({
   terminalCursorStyle: 'bar',    // 'bar' | 'block' | 'underline'
   terminalCursorBlink: true,
   terminalScrollback: 5000,
+  terminalTheme: 'dark-modern',   // src/lib/terminalThemes.js
+  terminalSuggestions: true,      // inline command intellisense
   // Editor
   editorFontSize: 12,
   editorTabSize: 2,
@@ -131,6 +133,8 @@ export const useSettingsStore = create((set, get) => ({
     terminalCursorStyle: 'bar',
     terminalCursorBlink: true,
     terminalScrollback: 5000,
+    terminalTheme: 'dark-modern',
+    terminalSuggestions: true,
     editorFontSize: 12,
     editorTabSize: 2,
     editorWordWrap: false,

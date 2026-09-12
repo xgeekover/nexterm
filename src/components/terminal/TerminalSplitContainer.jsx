@@ -1,8 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Panel, Group, Separator } from 'react-resizable-panels';
-import { SplitSquareHorizontal, SplitSquareVertical, X, Plus, TerminalSquare } from 'lucide-react';
+import { SplitSquareHorizontal, SplitSquareVertical, X, Plus, TerminalSquare, Pencil } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
+import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
 
@@ -101,8 +102,20 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
   const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
   const createTab = useTerminalStore((s) => s.createTab);
+  const renameTab = useTerminalStore((s) => s.renameTab);
+  const renameGroup = useTerminalStore((s) => s.renameGroup);
 
-  const { drag, beginDrag } = useContext(DragContext);
+  const { drag, beginDrag, cancelActiveDrag } = useContext(DragContext);
+
+  // Inline "rename a tab" editor state — which tab (if any) is being edited.
+  const [renamingTabId, setRenamingTabId] = useState(null);
+  const [tabDraft, setTabDraft] = useState('');
+  // Inline "name this group" editor state.
+  const [isRenamingGroup, setIsRenamingGroup] = useState(false);
+  const [groupDraft, setGroupDraft] = useState('');
+  // Right-click menus: a tab chip's "Rename", and the strip's empty-area "Name Group".
+  const [chipMenu, setChipMenu] = useState(null); // { x, y, tabId }
+  const [paneMenu, setPaneMenu] = useState(null); // { x, y }
 
   const isActivePane = activePaneId === paneId;
   const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
@@ -110,6 +123,33 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
   // Only the tabs that belong to this group, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const boundTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
+
+  const beginRenameTab = (tab) => {
+    setRenamingTabId(tab.id);
+    setTabDraft(tab.title);
+  };
+  const commitRenameTab = () => {
+    setRenamingTabId((id) => {
+      if (id) renameTab(id, tabDraft);
+      return null;
+    });
+  };
+  const cancelRenameTab = () => setRenamingTabId(null);
+
+  const beginRenameGroup = () => {
+    setGroupDraft(node.name || '');
+    setIsRenamingGroup(true);
+  };
+  const commitRenameGroup = () => {
+    // Functional update, mirroring commitRenameTab: guards against a stray
+    // extra blur firing (e.g. the input unmounting right after Enter already
+    // committed) re-applying the same rename a second time.
+    setIsRenamingGroup((was) => {
+      if (was) renameGroup(paneId, groupDraft);
+      return false;
+    });
+  };
+  const cancelRenameGroup = () => setIsRenamingGroup(false);
 
   return (
     <div
@@ -120,12 +160,68 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
         isActivePane && 'ring-1 ring-inset ring-vsc-focus'
       )}
     >
-      {/* Tab strip — each chip is a drag handle */}
-      <div className="h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none">
+      {/* Tab strip — each chip is a drag handle. Right-clicking empty space
+          in the strip (not a chip or a button) opens "Name Group". */}
+      <div
+        className="h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setPaneMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
         <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto">
+          {isRenamingGroup ? (
+            <input
+              autoFocus
+              value={groupDraft}
+              onFocus={(e) => e.target.select()}
+              onChange={(e) => setGroupDraft(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') commitRenameGroup();
+                else if (e.key === 'Escape') cancelRenameGroup();
+              }}
+              onBlur={commitRenameGroup}
+              placeholder="Group name"
+              className="shrink-0 w-24 h-[20px] px-1 mr-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
+            />
+          ) : node.name ? (
+            <span
+              className="shrink-0 pl-1 pr-2 text-ui-sm text-vsc-muted uppercase truncate max-w-[100px]"
+              title={node.name}
+            >
+              {node.name}
+            </span>
+          ) : null}
+
           {paneTabs.map((tab) => {
             const isActive = tab.id === boundTab?.id;
             const isBeingDragged = drag?.active && drag.tabId === tab.id;
+
+            if (renamingTabId === tab.id) {
+              return (
+                <div key={tab.id} className="flex items-center h-[22px]">
+                  <input
+                    autoFocus
+                    value={tabDraft}
+                    onFocus={(e) => e.target.select()}
+                    onChange={(e) => setTabDraft(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === 'Enter') commitRenameTab();
+                      else if (e.key === 'Escape') cancelRenameTab();
+                    }}
+                    onBlur={commitRenameTab}
+                    className="w-[110px] h-[20px] px-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
+                  />
+                </div>
+              );
+            }
+
             return (
               <div
                 key={tab.id}
@@ -134,7 +230,7 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
                 aria-selected={isActive}
                 aria-grabbed={isBeingDragged}
                 data-tab-chip={tab.id}
-                title={`${tab.title} — drag onto a terminal to move or split it`}
+                title={`${tab.title} — drag onto a terminal to move or split it, double-click to rename`}
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   beginDrag(tab, e);
@@ -143,6 +239,20 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
                   if (Date.now() - lastDragEndAt < 200) return;
                   bindPaneToTab(paneId, tab.id);
                   switchTab(tab.id);
+                }}
+                onDoubleClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  // A dblclick is two down/up cycles under the same 4px
+                  // threshold that gates a real drag, so neither should ever
+                  // arm one — this just guarantees it, defensively.
+                  cancelActiveDrag();
+                  beginRenameTab(tab);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setChipMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -167,25 +277,39 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
 
           <button
             type="button"
-            onClick={() => createTab()}
+            onClick={() => createTab(null, { paneId })}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
             className={cn(paneHeaderBtn, 'shrink-0')}
-            title={`New Terminal (${chord('ctrl', 'shift', '`')})`}
+            title={`New Terminal in this group (${chord('ctrl', 'shift', '`')})`}
           >
             <Plus size={14} />
           </button>
         </div>
 
         <div className="flex items-center gap-0.5 px-1 shrink-0">
-          <button type="button" onClick={onSplitH} className={paneHeaderBtn} title={`Split Right (${chord('mod', 'd')})`}>
+          <button
+            type="button"
+            onClick={onSplitH}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            className={paneHeaderBtn}
+            title={`Split Right (${chord('mod', 'd')})`}
+          >
             <SplitSquareHorizontal size={14} />
           </button>
-          <button type="button" onClick={onSplitV} className={paneHeaderBtn} title={`Split Down (${chord('mod', 'shift', 'd')})`}>
+          <button
+            type="button"
+            onClick={onSplitV}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            className={paneHeaderBtn}
+            title={`Split Down (${chord('mod', 'shift', 'd')})`}
+          >
             <SplitSquareVertical size={14} />
           </button>
           {canClose && (
             <button
               type="button"
               onClick={onClose}
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
               className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
               title={`Close Group (${chord('mod', 'w')})`}
             >
@@ -197,6 +321,43 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
           {headerSlot}
         </div>
       </div>
+
+      <ContextMenu
+        open={Boolean(chipMenu)}
+        x={chipMenu?.x ?? 0}
+        y={chipMenu?.y ?? 0}
+        onClose={() => setChipMenu(null)}
+        items={
+          chipMenu
+            ? [
+                {
+                  key: 'rename',
+                  label: 'Rename',
+                  icon: Pencil,
+                  onSelect: () => {
+                    const target = paneTabs.find((t) => t.id === chipMenu.tabId);
+                    if (target) beginRenameTab(target);
+                  },
+                },
+              ]
+            : []
+        }
+      />
+
+      <ContextMenu
+        open={Boolean(paneMenu)}
+        x={paneMenu?.x ?? 0}
+        y={paneMenu?.y ?? 0}
+        onClose={() => setPaneMenu(null)}
+        items={[
+          {
+            key: 'rename-group',
+            label: node.name ? 'Rename Group…' : 'Name Group…',
+            icon: Pencil,
+            onSelect: beginRenameGroup,
+          },
+        ]}
+      />
 
       {/* Live terminal surface — also the drop target */}
       <div data-pane-body={paneId} className="relative flex-1 overflow-hidden">
@@ -257,6 +418,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const splitPane = useTerminalStore((s) => s.splitPane);
   const closePane = useTerminalStore((s) => s.closePane);
   const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
+  const setActivePane = useTerminalStore((s) => s.setActivePane);
 
   // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
   const [drag, setDrag] = useState(null);
@@ -339,9 +501,21 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   // Never leave listeners behind if the terminal unmounts mid-gesture.
   useEffect(() => () => cleanupRef.current?.(), []);
 
-  const handleSplit = useCallback((paneId, direction) => {
-    splitPane(paneId, direction);
-  }, [splitPane]);
+  // Lets a chip's double-click (rename) guarantee no drag is left armed,
+  // regardless of pointer-event timing.
+  const cancelActiveDrag = useCallback(() => {
+    cleanupRef.current?.();
+    dragRef.current = null;
+    setDrag(null);
+  }, []);
+
+  // Split whichever pane's own button was clicked, then focus the pane it
+  // creates — a clear, visible sign the click did something, even when the
+  // pane split wasn't already the focused one.
+  const handleSplit = useCallback(async (paneId, direction) => {
+    const newPaneId = await splitPane(paneId, direction);
+    if (newPaneId) setActivePane(newPaneId);
+  }, [splitPane, setActivePane]);
 
   const handleClose = useCallback((paneId) => {
     closePane(paneId);
@@ -352,7 +526,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const canClose = splitTree.type !== 'leaf';
 
   return (
-    <DragContext.Provider value={{ drag, beginDrag }}>
+    <DragContext.Provider value={{ drag, beginDrag, cancelActiveDrag }}>
       <div className={cn('h-full w-full flex flex-col overflow-hidden', drag?.active && 'cursor-grabbing')}>
         {/* One pane: the chrome lives in that pane's tab strip. Split: a single
             slim bar carries it for the whole group. */}

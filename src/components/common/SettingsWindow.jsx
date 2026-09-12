@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useId } from 'react';
 import { X, Search, RotateCcw } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
+import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
 
 /**
  * VS Code's Settings editor reads the live `--font-mono` token so the text
@@ -135,6 +136,25 @@ function buildItems(monoPlaceholder) {
       min: 100,
       max: 100000,
       step: 100,
+    },
+    {
+      id: 'terminalTheme',
+      section: 'terminal',
+      key: 'terminalTheme',
+      settingKey: 'terminal.integrated.theme',
+      title: 'Color Theme',
+      description: 'Specifies the color theme used in the terminal.',
+      control: 'select',
+      options: TERMINAL_THEME_IDS.map((id) => ({ value: id, label: TERMINAL_THEMES[id].label })),
+    },
+    {
+      id: 'terminalSuggestions',
+      section: 'terminal',
+      key: 'terminalSuggestions',
+      settingKey: 'terminal.integrated.suggestions',
+      title: 'Command Suggestions',
+      description: 'Controls whether inline command suggestions and the completion popup are shown as you type in the terminal.',
+      control: 'checkbox',
     },
     // ---- Workbench ----
     {
@@ -282,6 +302,8 @@ export function SettingsWindow() {
   const terminalCursorStyle = useSettingsStore((s) => s.terminalCursorStyle);
   const terminalCursorBlink = useSettingsStore((s) => s.terminalCursorBlink);
   const terminalScrollback = useSettingsStore((s) => s.terminalScrollback);
+  const terminalTheme = useSettingsStore((s) => s.terminalTheme);
+  const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
@@ -296,6 +318,8 @@ export function SettingsWindow() {
     terminalCursorStyle,
     terminalCursorBlink,
     terminalScrollback,
+    terminalTheme,
+    terminalSuggestions,
     editorFontSize,
     editorTabSize,
     editorWordWrap,
