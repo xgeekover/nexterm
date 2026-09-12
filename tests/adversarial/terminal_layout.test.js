@@ -399,3 +399,127 @@ describe('Terminal layout: rename, group names, and persistence', () => {
     assert.equal(S.getState().focusedPaneId, null);
   });
 });
+
+describe('Terminal groups panel: saved groups and tab management', () => {
+  let savedLocalStorage;
+
+  beforeEach(async () => {
+    // Node has no localStorage; shim it so saved groups round-trip in-memory.
+    savedLocalStorage = globalThis.localStorage;
+    const store = new Map();
+    globalThis.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    };
+
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false, savedGroups: [] });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+      groupViewMode: 'split',
+      focusedPaneId: null,
+    });
+    await S.getState().init();
+  });
+
+  const restoreLocalStorage = () => {
+    if (savedLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = savedLocalStorage;
+  };
+
+  test('SG-01: saveGroup snapshots the group’s terminals with their live cwd', async () => {
+    const group = leaves()[0];
+    const tabId = group.tabIds[0];
+    // The shell reporting a new cwd (OSC 7) must be what gets saved.
+    S.setState((st) => ({ tabs: st.tabs.map((t) => (t.id === tabId ? { ...t, cwd: '/srv/api' } : t)) }));
+    S.getState().renameTab(tabId, 'api');
+
+    const entry = S.getState().saveGroup(group.id, 'backend');
+    assert.ok(entry, 'a snapshot is returned');
+    assert.equal(entry.name, 'backend');
+    assert.deepEqual(entry.tabs, [{ title: 'api', cwd: '/srv/api' }]);
+    assert.equal(S.getState().savedGroups.length, 1);
+    restoreLocalStorage();
+  });
+
+  test('SG-02: loadSavedGroup re-opens it as a new group, leaving the original alone', async () => {
+    const group = leaves()[0];
+    const tabId = group.tabIds[0];
+    S.setState((st) => ({ tabs: st.tabs.map((t) => (t.id === tabId ? { ...t, cwd: '/srv/api' } : t)) }));
+    const entry = S.getState().saveGroup(group.id, 'backend');
+
+    const newPaneId = await S.getState().loadSavedGroup(entry.id);
+    const loaded = leaves().find((l) => l.id === newPaneId);
+    assert.equal(leaves().length, 2, 'the saved group is added beside the original');
+    assert.equal(loaded.tabIds.length, 1);
+    assert.equal(S.getState().tabs.find((t) => t.id === loaded.tabIds[0]).cwd, '/srv/api');
+    assert.ok(leaves().some((l) => l.id === group.id), 'the original group survives');
+    restoreLocalStorage();
+  });
+
+  test('SG-03: rename and delete round-trip through storage', async () => {
+    const entry = S.getState().saveGroup(leaves()[0].id, 'first');
+    S.getState().renameSavedGroup(entry.id, 'renamed');
+    assert.equal(S.getState().savedGroups[0].name, 'renamed');
+    S.getState().deleteSavedGroup(entry.id);
+    assert.equal(S.getState().savedGroups.length, 0);
+    restoreLocalStorage();
+  });
+
+  test('SG-04: a corrupt saved-groups payload yields an empty list, not a throw', async () => {
+    globalThis.localStorage.setItem('nexterm.terminal.savedGroups', '{{{ not json');
+    const { loadState } = await import('../../src/lib/persistence.js');
+    assert.deepEqual(loadState('nexterm.terminal.savedGroups', []), []);
+    restoreLocalStorage();
+  });
+
+  test('SG-05: closeOthersInGroup leaves exactly the target terminal', async () => {
+    const keep = leaves()[0].tabIds[0];
+    await S.getState().createTab();
+    await S.getState().createTab();
+    assert.equal(leaves()[0].tabIds.length, 3);
+
+    await S.getState().closeOthersInGroup(keep);
+    assert.deepEqual(leaves()[0].tabIds, [keep]);
+    restoreLocalStorage();
+  });
+
+  test('SG-06: closeTabsToTheRight keeps everything up to and including the target', async () => {
+    const first = leaves()[0].tabIds[0];
+    const second = (await S.getState().createTab()).id;
+    await S.getState().createTab();
+    assert.equal(leaves()[0].tabIds.length, 3);
+
+    await S.getState().closeTabsToTheRight(second);
+    assert.deepEqual(leaves()[0].tabIds, [first, second]);
+    restoreLocalStorage();
+  });
+
+  test('SG-07: moveTabToNewGroup splits a terminal out; a lone terminal is a no-op', async () => {
+    const solo = leaves()[0].tabIds[0];
+    assert.equal(S.getState().moveTabToNewGroup(solo), null, 'the only terminal is already its own group');
+    assert.equal(leaves().length, 1);
+
+    const second = (await S.getState().createTab()).id;
+    S.getState().moveTabToNewGroup(second);
+    assert.equal(leaves().length, 2);
+    const holder = leaves().find((l) => l.tabIds.includes(second));
+    assert.deepEqual(holder.tabIds, [second], 'the moved terminal is alone in its new group');
+    restoreLocalStorage();
+  });
+
+  test('SG-08: every terminal still belongs to exactly one group after a save/load/close shuffle', async () => {
+    await S.getState().createTab();
+    const entry = S.getState().saveGroup(leaves()[0].id, 'snapshot');
+    await S.getState().loadSavedGroup(entry.id);
+    const someTab = leaves()[0].tabIds[0];
+    S.getState().moveTabToNewGroup(someTab);
+
+    const counts = S.getState().tabs.map((t) => leaves().filter((l) => l.tabIds.includes(t.id)).length);
+    assert.ok(counts.every((c) => c === 1), `every tab in exactly one group, got ${counts}`);
+    assert.ok(leaves().every((l) => l.tabIds.length > 0), 'no empty group survives');
+    restoreLocalStorage();
+  });
+});

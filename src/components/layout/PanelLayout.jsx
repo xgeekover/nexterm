@@ -3,6 +3,7 @@ import { Group, Panel, Separator, useGroupRef } from 'react-resizable-panels';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TerminalSplitContainer } from '../terminal/index.js';
+import { TerminalsPanel } from '../terminal/index.js';
 import { EditorPanel } from '../editor/EditorPanel.jsx';
 import { FileExplorer } from '../explorer/FileExplorer.jsx';
 import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react';
@@ -23,13 +24,15 @@ const PANEL_TRANSITION_MS = 180;
 
 // The three draggable views and where each one is allowed to render.
 // Order here also controls tab order within a region.
-const VIEW_ORDER = ['explorer', 'terminal'];
+const VIEW_ORDER = ['explorer', 'terminal', 'terminals'];
 
 const VIEW_META = {
   explorer: { title: 'Explorer', Component: FileExplorer },
   // The terminal renders its own tab strip, so the region chrome is merged
   // into it instead of stacking a second bar above it.
   terminal: { title: 'Terminal', Component: TerminalSplitContainer, providesOwnHeader: true },
+  // The groups/terminals tree — its own header, so it absorbs the region chrome.
+  terminals: { title: 'Terminals', Component: TerminalsPanel, providesOwnHeader: true },
 };
 
 const REGION_LABEL = { left: 'primary sidebar', right: 'secondary sidebar', bottom: 'panel' };

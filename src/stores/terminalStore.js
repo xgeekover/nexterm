@@ -95,6 +95,15 @@ const emptyTree = () => ({ type: 'leaf', id: 'pane-root', tabIds: [], activeTabI
 // tab's `title`/`cwd`. PTY sessions and scrollback are process state and
 // cannot survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
 export const PERSIST_KEY = 'nexterm.terminal.workspace';
+/** Named group snapshots the user saves explicitly (separate from the live layout). */
+export const SAVED_GROUPS_KEY = 'nexterm.terminal.savedGroups';
+
+/** Read the saved-group list, tolerating a corrupt or stale payload. */
+function loadSavedGroups() {
+  const list = loadState(SAVED_GROUPS_KEY, []);
+  return Array.isArray(list) ? list.filter((g) => g && typeof g.id === 'string' && Array.isArray(g.tabs)) : [];
+}
+
 const PERSIST_DEBOUNCE_MS = 300;
 
 let persistTimer = null;
@@ -326,6 +335,10 @@ export const useTerminalStore = create((set, get) => {
     groupViewMode: 'split',
     focusedPaneId: null,
 
+    // Named group snapshots the user saved explicitly. Unlike the live layout
+    // (auto-persisted), these are kept until deleted and can be loaded any time.
+    savedGroups: loadSavedGroups(),
+
     /**
      * Mark a pane as the active one (called on click/focus of a pane).
      */
@@ -342,6 +355,132 @@ export const useTerminalStore = create((set, get) => {
      * Return to the normal side-by-side split view.
      */
     showAllGroups: () => set({ groupViewMode: 'split' }),
+
+    // ---- Tab management used by the Terminals panel's context menus ----
+    /** Close every other terminal in the group that holds `tabId`. */
+    closeOthersInGroup: async (tabId) => {
+      const leaf = leafHoldingTab(get().splitTree, tabId);
+      if (!leaf) return;
+      for (const id of leaf.tabIds.filter((x) => x !== tabId)) {
+        await get().closeTab(id);
+      }
+    },
+
+    /** Close the terminals that sit after `tabId` in its group. */
+    closeTabsToTheRight: async (tabId) => {
+      const leaf = leafHoldingTab(get().splitTree, tabId);
+      if (!leaf) return;
+      const idx = leaf.tabIds.indexOf(tabId);
+      if (idx === -1) return;
+      for (const id of leaf.tabIds.slice(idx + 1)) {
+        await get().closeTab(id);
+      }
+    },
+
+    /** Split a terminal out of its group into a new one beside it. */
+    moveTabToNewGroup: (tabId, direction = 'horizontal') => {
+      const source = leafHoldingTab(get().splitTree, tabId);
+      // A group's only tab is already "its own group".
+      if (!source || source.tabIds.length <= 1) return null;
+      get().dropTabOnPane(tabId, source.id, direction === 'vertical' ? 'bottom' : 'right');
+      return get().activePaneId;
+    },
+
+    // ---- Saved groups -------------------------------------------------
+    /** Snapshot a group's terminals (titles + their live cwd) under a name. */
+    saveGroup: (paneId, name) => {
+      const state = get();
+      const leaf = collectLeaves(state.splitTree).find((l) => l.id === paneId);
+      if (!leaf) return null;
+
+      const entry = {
+        id: `saved-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: (name || '').trim() || leaf.name || 'Saved group',
+        savedAt: Date.now(),
+        tabs: leaf.tabIds
+          .map((id) => state.tabs.find((t) => t.id === id))
+          .filter(Boolean)
+          .map((t) => ({ title: t.title, cwd: t.cwd })),
+      };
+      if (entry.tabs.length === 0) return null;
+
+      const savedGroups = [...state.savedGroups, entry];
+      set({ savedGroups });
+      saveState(SAVED_GROUPS_KEY, savedGroups);
+      return entry;
+    },
+
+    renameSavedGroup: (savedId, name) => {
+      const next = get().savedGroups.map((g) =>
+        g.id === savedId ? { ...g, name: (name || '').trim() || g.name } : g
+      );
+      set({ savedGroups: next });
+      saveState(SAVED_GROUPS_KEY, next);
+    },
+
+    deleteSavedGroup: (savedId) => {
+      const next = get().savedGroups.filter((g) => g.id !== savedId);
+      set({ savedGroups: next });
+      saveState(SAVED_GROUPS_KEY, next);
+    },
+
+    /**
+     * Re-open a saved group. `mode: 'new-group'` (default) puts its terminals
+     * in a brand-new group beside the active one; `'replace'` adds them to the
+     * active group. Each terminal respawns at its saved cwd, falling back to
+     * the workspace root when that directory is gone.
+     */
+    loadSavedGroup: async (savedId, { mode = 'new-group' } = {}) => {
+      const entry = get().savedGroups.find((g) => g.id === savedId);
+      if (!entry || entry.tabs.length === 0) return null;
+
+      const spawned = [];
+      for (const saved of entry.tabs) {
+        const tab = await spawnTab(saved.title, saved.cwd);
+        if (tab) spawned.push(tab);
+      }
+      if (spawned.length === 0) return null;
+
+      if (mode === 'replace') {
+        const target = get().activePaneId;
+        set((state) => {
+          let tree = state.splitTree;
+          for (const t of spawned) tree = addTabToPane(tree, target, t.id);
+          return { splitTree: tree, activeTabId: spawned[0].id };
+        });
+        return target;
+      }
+
+      const newPaneId = makePaneId();
+      const newLeaf = {
+        type: 'leaf',
+        id: newPaneId,
+        name: entry.name,
+        tabIds: spawned.map((t) => t.id),
+        activeTabId: spawned[0].id,
+      };
+
+      set((state) => {
+        const target = state.activePaneId;
+        const split = mapTree(state.splitTree, (n) =>
+          n.type === 'leaf' && n.id === target
+            ? {
+                type: 'split',
+                id: `split-${Date.now()}`,
+                direction: 'horizontal',
+                children: [n, newLeaf],
+              }
+            : n
+        );
+        return {
+          splitTree: pruneTree(split) || newLeaf,
+          activePaneId: newPaneId,
+          activeTabId: spawned[0].id,
+        };
+      });
+      return newPaneId;
+    },
+
 
     /**
      * Split a leaf pane into two children (horizontal or vertical). The new

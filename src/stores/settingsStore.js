@@ -39,6 +39,7 @@ export const useSettingsStore = create((set, get) => ({
   viewLocations: {
     explorer: 'left',
     terminal: 'bottom',
+    terminals: 'right',
   },
 
   // Legacy view switcher — kept because other subsystems still call it to
