@@ -93,7 +93,7 @@ function DragPreview({ drag }) {
  * persistent xterm for whichever of *its* tabs is active. Tabs can be dragged
  * between groups, or onto a group's edge to split it.
  */
-function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
+function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot = null }) {
   const paneId = node.id;
   const tabs = useTerminalStore((s) => s.tabs);
   const activePaneId = useTerminalStore((s) => s.activePaneId);
@@ -192,6 +192,9 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               <X size={14} />
             </button>
           )}
+          {/* Region chrome (drag handle, maximize, hide) merged in from the
+              layout so a single-pane terminal shows one bar, not two. */}
+          {headerSlot}
         </div>
       </div>
 
@@ -216,7 +219,7 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
  * Recursively renders the split tree: a "leaf" is a terminal group, a "split"
  * is a resizable row/column of children.
  */
-function SplitNode({ node, onSplit, onClose, canClose }) {
+function SplitNode({ node, onSplit, onClose, canClose, headerSlot = null }) {
   if (node.type === 'leaf') {
     return (
       <TerminalPane
@@ -225,6 +228,7 @@ function SplitNode({ node, onSplit, onClose, canClose }) {
         onSplitV={() => onSplit(node.id, 'vertical')}
         onClose={() => onClose(node.id)}
         canClose={canClose}
+        headerSlot={headerSlot}
       />
     );
   }
@@ -248,7 +252,7 @@ function SplitNode({ node, onSplit, onClose, canClose }) {
  * Top-level container for the terminal split system. Owns the drag gesture so
  * every pane can render the drop indicator for the pointer's current target.
  */
-export function TerminalSplitContainer() {
+export function TerminalSplitContainer({ headerSlot = null }) {
   const splitTree = useTerminalStore((s) => s.splitTree);
   const splitPane = useTerminalStore((s) => s.splitPane);
   const closePane = useTerminalStore((s) => s.closePane);
@@ -349,8 +353,24 @@ export function TerminalSplitContainer() {
 
   return (
     <DragContext.Provider value={{ drag, beginDrag }}>
-      <div className={cn('h-full w-full overflow-hidden', drag?.active && 'cursor-grabbing')}>
-        <SplitNode node={splitTree} onSplit={handleSplit} onClose={handleClose} canClose={canClose} />
+      <div className={cn('h-full w-full flex flex-col overflow-hidden', drag?.active && 'cursor-grabbing')}>
+        {/* One pane: the chrome lives in that pane's tab strip. Split: a single
+            slim bar carries it for the whole group. */}
+        {headerSlot && splitTree.type !== 'leaf' && (
+          <div className="h-panel-header shrink-0 flex items-center justify-end gap-0.5 px-1 bg-vsc-panel border-b border-vsc-border select-none">
+            <span className="mr-auto pl-1.5 text-ui-sm font-medium tracking-wide uppercase text-vsc-fg">Terminal</span>
+            {headerSlot}
+          </div>
+        )}
+        <div className="flex-1 overflow-hidden">
+          <SplitNode
+            node={splitTree}
+            onSplit={handleSplit}
+            onClose={handleClose}
+            canClose={canClose}
+            headerSlot={splitTree.type === 'leaf' ? headerSlot : null}
+          />
+        </div>
         <DragPreview drag={drag} />
       </div>
     </DragContext.Provider>

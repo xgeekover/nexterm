@@ -9,6 +9,22 @@ export const useSettingsStore = create((set, get) => ({
   commandPaletteMode: 'all', // 'all' | 'files' (⌘P quick open)
   isSettingsModalOpen: false,
 
+  // ---- Workspace settings (the Settings window edits these) ----
+  // Terminal
+  terminalFontFamily: '',        // '' = follow the app's --font-mono token
+  terminalFontSize: 12,
+  terminalLineHeight: 1.5,
+  terminalCursorStyle: 'bar',    // 'bar' | 'block' | 'underline'
+  terminalCursorBlink: true,
+  terminalScrollback: 5000,
+  // Editor
+  editorFontSize: 12,
+  editorTabSize: 2,
+  editorWordWrap: false,
+  editorMinimap: true,
+  // Workbench
+  reducedMotion: false,
+
   // VS Code Dark Modern shell regions
   sidebarVisible: true, // primary sidebar (Explorer)
   panelVisible: true, // bottom panel (terminal)
@@ -22,18 +38,8 @@ export const useSettingsStore = create((set, get) => ({
   // which view(s) render inside whichever region is shown.
   viewLocations: {
     explorer: 'left',
-    agents: 'right',
     terminal: 'bottom',
   },
-
-  byokKeys: {
-    openaiKey: '',
-    claudeKey: '',
-    geminiKey: '',
-    ollamaUrl: 'http://localhost:11434',
-  },
-
-  modelPreference: 'claude-3-7-sonnet',
 
   setTheme: (theme) => {
     if (theme !== 'dark' && theme !== 'light') {
@@ -113,19 +119,30 @@ export const useSettingsStore = create((set, get) => ({
       viewLocations: { ...state.viewLocations, [view]: region },
     })),
 
-  setApiKey: (provider, key) => {
-    set((state) => ({
-      byokKeys: {
-        ...state.byokKeys,
-        [provider]: key,
-      },
-    }));
-  },
-
-  setModelPreference: (modelPreference) => set({ modelPreference }),
   setCommandPaletteOpen: (open, mode = 'all') =>
     set({ isCommandPaletteOpen: open, commandPaletteMode: open ? mode : 'all' }),
   setSettingsModalOpen: (open) => set({ isSettingsModalOpen: open }),
+
+  /** Defaults for every key the Settings window exposes. */
+  settingsDefaults: {
+    terminalFontFamily: '',
+    terminalFontSize: 12,
+    terminalLineHeight: 1.5,
+    terminalCursorStyle: 'bar',
+    terminalCursorBlink: true,
+    terminalScrollback: 5000,
+    editorFontSize: 12,
+    editorTabSize: 2,
+    editorWordWrap: false,
+    editorMinimap: true,
+    reducedMotion: false,
+  },
+
+  /** Update one setting by key. */
+  setSetting: (key, value) => set({ [key]: value }),
+
+  /** Restore every setting to its default. */
+  resetSettings: () => set((state) => ({ ...state.settingsDefaults })),
 }));
 
 export default useSettingsStore;

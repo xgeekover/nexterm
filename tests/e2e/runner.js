@@ -79,8 +79,6 @@ async function loadSuites(tierOption) {
     './tier1-features/terminal.test.js',
     './tier1-features/editor.test.js',
     './tier1-features/explorer.test.js',
-    './tier1-features/missionControl.test.js',
-    './tier1-features/chat.test.js',
     './tier1-features/commandPalette.test.js',
     './tier1-features/theme.test.js',
   ];

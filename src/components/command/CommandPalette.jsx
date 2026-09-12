@@ -12,7 +12,6 @@ import {
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { useAgentStore } from '../../stores/agentStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
 
@@ -28,8 +27,6 @@ export function CommandPalette() {
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminalBlocks = useTerminalStore((s) => s.clearBlocks);
-
-  const setNewAgentModalOpen = useAgentStore((s) => s.setNewAgentModalOpen);
 
   const [query, setQuery] = useState('');
 
@@ -98,18 +95,6 @@ export function CommandPalette() {
       subtitle: 'Purges unpinned blocks in current terminal tab',
       icon: <Terminal size={16} />,
       action: () => clearTerminalBlocks(),
-    },
-    {
-      type: 'command',
-      hint: '',
-      id: 'cmd-new-agent',
-      title: 'Deploy New Agent',
-      subtitle: 'Opens modal to create and launch an autonomous agent',
-      icon: <Plus size={16} />,
-      action: () => {
-        setNewAgentModalOpen(true);
-        setActiveView('agents');
-      },
     },
     {
       type: 'command',

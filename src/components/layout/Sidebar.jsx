@@ -3,7 +3,6 @@ import {
   Files,
   Search,
   SquareTerminal,
-  Bot,
   Settings,
   Sun,
   Moon,
@@ -67,13 +66,6 @@ export function Sidebar() {
       icon: SquareTerminal,
       isActive: panelVisible,
       onClick: togglePanel,
-    },
-    {
-      id: 'agents',
-      label: 'Agents',
-      icon: Bot,
-      isActive: secondarySidebarVisible && secondaryTab === 'agents',
-      onClick: () => toggleSecondarySidebar('agents'),
     },
   ];
 

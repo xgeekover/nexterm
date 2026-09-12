@@ -4,20 +4,19 @@ import { Sidebar } from './components/layout/Sidebar.jsx';
 import { StatusBar } from './components/layout/StatusBar.jsx';
 import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
-import { SettingsModal } from './components/common/SettingsModal.jsx';
+import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useTheme } from './hooks/useTheme.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { useEditorStore } from './stores/editorStore.js';
-import { useAgentStore } from './stores/agentStore.js';
 import { useSettingsStore } from './stores/settingsStore.js';
 import { mockBridge } from './lib/ipc.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
 if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debug')) {
-  window.__nexterm = { useTerminalStore, useEditorStore, useAgentStore, useSettingsStore, mockBridge };
+  window.__nexterm = { useTerminalStore, useEditorStore, useSettingsStore, mockBridge };
 }
 
 export default function App() {
@@ -28,21 +27,18 @@ export default function App() {
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
-  const initAgents = useAgentStore((s) => s.initAgents);
 
   useEffect(() => {
     // Proactively initialize all IDE subsystems
     initTerminal();
     initEditor();
-    initAgents();
     // Detach event listeners on unmount / HMR so they never stack up;
     // the bootstrap state (PTY sessions, agents) is kept.
     return () => {
       useTerminalStore.getState().dispose?.();
       useEditorStore.getState().dispose?.();
-      useAgentStore.getState().dispose?.();
     };
-  }, [initTerminal, initEditor, initAgents]);
+  }, [initTerminal, initEditor]);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-vsc-editor text-vsc-fg font-ui">
@@ -66,8 +62,8 @@ export default function App() {
       {/* Global ⌘K Command Palette */}
       <CommandPalette />
 
-      {/* App settings (BYOK) — opened from the activity bar / menu */}
-      <SettingsModal />
+      {/* VS Code-style Settings window — opened from the activity bar / menu */}
+      <SettingsWindow />
     </div>
   );
 }

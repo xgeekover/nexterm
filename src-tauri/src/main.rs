@@ -1,6 +1,5 @@
 #![deny(warnings)]
 
-pub mod agent;
 pub mod commands;
 pub mod fs;
 pub mod menu;
@@ -13,20 +12,17 @@ use tauri::Manager;
 pub struct AppState {
     pub pty_manager: Arc<pty::PtyManager>,
     pub fs_watcher: Arc<fs::FsWatcherManager>,
-    pub agent_runtime: Arc<agent::AgentRuntime>,
     pub workspace: Arc<fs::Workspace>,
 }
 
 fn main() {
     let pty_manager = Arc::new(pty::PtyManager::new());
     let fs_watcher = Arc::new(fs::FsWatcherManager::new());
-    let agent_runtime = Arc::new(agent::AgentRuntime::new());
     let workspace = Arc::new(fs::Workspace::new());
 
     let state = AppState {
         pty_manager,
         fs_watcher,
-        agent_runtime,
         workspace,
     };
 
@@ -63,11 +59,6 @@ fn main() {
             commands::fs::fs_create_file,
             commands::fs::fs_create_dir,
             commands::fs::fs_delete_path,
-            commands::agent::agent_list,
-            commands::agent::agent_create,
-            commands::agent::agent_update_status,
-            commands::agent::agent_get_logs,
-            commands::agent::chat_send_message,
             commands::system::system_get_info,
         ])
         .run(tauri::generate_context!())

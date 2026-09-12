@@ -227,9 +227,68 @@ code, kbd, pre, .font-mono {
   background: var(--vsc-focus);
 }
 
+/* ---------------------------------------------------------------------------
+   Shell motion — panel/region mount+unmount, drag overlays, maximize/restore.
+   Everything here is neutralized by EITHER the OS `prefers-reduced-motion`
+   media query below, OR the Workbench "Reduced motion" setting
+   (settingsStore.reducedMotion), which PanelLayout mirrors onto `<html>` as
+   the `reduce-motion` class since a media query can't read zustand state.
+   --------------------------------------------------------------------------- */
+@keyframes panel-fade-in {
+  from { opacity: 0; transform: scale(0.98) translateY(2px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes panel-fade-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to   { opacity: 0; transform: scale(0.98) translateY(2px); }
+}
+@keyframes overlay-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Applied to a region/panel's content wrapper while it is mounted/mounting. */
+.animate-panel-in {
+  animation: panel-fade-in 180ms ease-out both;
+}
+/* Applied instead, for a brief grace period, while a region/panel is being
+   unmounted so the disappearance fades instead of popping. */
+.animate-panel-out {
+  animation: panel-fade-out 180ms ease-out both;
+  pointer-events: none;
+}
+/* Drag-and-drop overlays (region drop highlight, edge drop zones). */
+.animate-overlay-in {
+  animation: overlay-fade-in 150ms ease-out both;
+}
+/* The isOver highlight swap on those overlays should fade, not pop. */
+.drop-zone-fade {
+  transition: background-color 150ms ease-out, outline-color 150ms ease-out;
+}
+
+/* Programmatic maximize/restore of the editor|panel Group only (the
+   `useGroupRef().setLayout` call in PanelLayout) gets a brief flex-grow
+   transition, scoped to that Group's own direct Panel children via `>` so it
+   never reaches a nested Group (e.g. the terminal's own split panes). This
+   class is toggled on for ~180ms and then removed, so a live Separator drag
+   — which never gets this class — always tracks the pointer 1:1. */
+.panel-maximize-transition > [data-panel] {
+  transition: flex-grow 180ms ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Workbench "Reduced motion" setting — same neutralization as the OS media
+   query above, driven by app state instead of the system preference. */
+:root.reduce-motion,
+:root.reduce-motion *,
+:root.reduce-motion *::before,
+:root.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  transition-duration: 0.01ms !important;
 }

@@ -1,6 +1,4 @@
-import { INITIAL_AGENTS, SAMPLE_CHAT_MESSAGES } from '../fixtures/mockAgents.js';
 import { SAMPLE_PROJECT_FILES } from '../fixtures/sampleFiles.js';
-import { generateDynamicAgentResponse } from '../../../src/lib/ipc.js';
 
 function parseCommandLine(cmdLine) {
   const tokens = [];
@@ -49,16 +47,9 @@ export class MockIpcBridge {
     this.directories = new Set(['/workspace', '/workspace/src', '/workspace/tests']);
 
     // In-memory Agents
-    this.agents = new Map(
-      JSON.parse(JSON.stringify(INITIAL_AGENTS)).map((agent) => [agent.id, agent])
-    );
     this.agentLogs = new Map();
-    for (const [id, agent] of this.agents.entries()) {
-      this.agentLogs.set(id, agent.logs ? [...agent.logs] : []);
-    }
 
     // In-memory Chat
-    this.chatMessages = JSON.parse(JSON.stringify(SAMPLE_CHAT_MESSAGES));
 
     // System Info
     this.systemInfo = {
@@ -431,110 +422,6 @@ export class MockIpcBridge {
           throw new Error(`Path does not exist: ${path}`);
         }
         return null;
-      }
-
-      // 12. agent_list
-      case 'agent_list': {
-        return Array.from(this.agents.values());
-      }
-
-      // 13. agent_create
-      case 'agent_create': {
-        const { name, role, model, systemPrompt = '', dependency = null } = args;
-        if (!name || !name.trim()) {
-          throw new Error('Agent name is required');
-        }
-        if (!model) {
-          throw new Error('Agent model is required');
-        }
-        const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        const newAgent = {
-          id,
-          name: name.trim(),
-          role: role || 'Assistant',
-          model,
-          status: dependency ? 'waiting' : 'active',
-          progress: 0,
-          tokens: 0,
-          cost: 0.0,
-          dependency,
-          systemPrompt,
-          logs: [],
-        };
-        this.agents.set(id, newAgent);
-        this.agentLogs.set(id, []);
-        await this.emit('agent-updated', newAgent);
-        return newAgent;
-      }
-
-      // 14. agent_update_status
-      case 'agent_update_status': {
-        const { agent_id, status } = args;
-        const validStatuses = ['active', 'idle', 'waiting', 'error', 'completed', 'paused'];
-        if (!validStatuses.includes(status)) {
-          throw new Error(`Invalid agent status: ${status}`);
-        }
-        const agent = this.agents.get(agent_id);
-        if (!agent) throw new Error(`Agent not found: ${agent_id}`);
-        agent.status = status;
-        if (status === 'completed') {
-          agent.progress = 100;
-          // Trigger dependent agents
-          for (const other of this.agents.values()) {
-            if (other.dependency === agent_id && other.status === 'waiting') {
-              other.status = 'active';
-              await this.emit('agent-updated', other);
-            }
-          }
-        }
-        await this.emit('agent-updated', agent);
-        return agent;
-      }
-
-      // 15. agent_get_logs
-      case 'agent_get_logs': {
-        const { agent_id } = args;
-        return this.agentLogs.get(agent_id) || [];
-      }
-
-      // 16. chat_send_message
-      case 'chat_send_message': {
-        const { agent_id, message } = args;
-        const userMsg = {
-          id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-user`,
-          sender: 'user',
-          text: message,
-          timestamp: Date.now(),
-        };
-        this.chatMessages.push(userMsg);
-
-        // Assistant response simulation
-        const replyId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-asst`;
-        const agent = this.agents.get(agent_id) || { name: 'Assistant', role: 'AI Specialist', model: 'Default' };
-        const { fullText, tokens } = generateDynamicAgentResponse(agent, message);
-
-        setTimeout(async () => {
-          for (let i = 0; i < tokens.length; i++) {
-            const isDone = i === tokens.length - 1;
-            await this.emit('chat-token', {
-              message_id: replyId,
-              agent_id,
-              token: tokens[i],
-              done: isDone,
-            });
-          }
-        }, 10);
-
-        const asstMsg = {
-          id: replyId,
-          sender: 'assistant',
-          agentId: agent_id,
-          agentName: agent.name,
-          text: fullText,
-          timestamp: Date.now() + 50,
-        };
-        this.chatMessages.push(asstMsg);
-        return asstMsg;
       }
 
       // 17. system_get_info

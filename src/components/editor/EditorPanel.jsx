@@ -1,6 +1,6 @@
 import React from 'react';
 import Editor from '@monaco-editor/react';
-import { Code2, ChevronRight } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs } from './EditorTabs.jsx';
@@ -21,21 +21,6 @@ const MONACO_OPTIONS = {
   padding: { top: 8 },
   automaticLayout: true,
 };
-
-const WATERMARK_SHORTCUTS = [
-  ['Show All Commands', chord('mod', 'k')],
-  ['Open File', chord('mod', 'p')],
-  ['Toggle Terminal', chord('ctrl', '`')],
-  ['New Terminal', chord('ctrl', 'shift', '`')],
-];
-
-function Kbd({ children }) {
-  return (
-    <kbd className="bg-vsc-button-secondary border border-vsc-border rounded-sm px-1.5 py-0.5 font-mono text-ui-sm">
-      {children}
-    </kbd>
-  );
-}
 
 export function EditorPanel() {
   const tabs = useEditorStore((s) => s.tabs);
@@ -106,24 +91,7 @@ export function EditorPanel() {
             />
           </div>
         </div>
-      ) : (
-        /* Empty state — VS Code watermark */
-        <div className="flex-1 flex flex-col items-center justify-center select-none">
-          <Code2 size={96} className="text-vsc-border mb-6" />
-          <table className="text-vsc-muted text-ui">
-            <tbody>
-              {WATERMARK_SHORTCUTS.map(([label, keys]) => (
-                <tr key={label}>
-                  <td className="pr-3 py-1 text-right">{label}</td>
-                  <td className="py-1">
-                    <Kbd>{keys}</Kbd>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -61,45 +61,6 @@ describe('Tier 2: Boundary & Corner Cases', () => {
     );
   });
 
-  test('TC-BND-06: Submitting agent creation with empty name throws validation error', async () => {
-    await assert.rejects(
-      async () => {
-        await app.createAgent({
-          name: '',
-          role: 'Architect',
-          model: 'GPT-4o',
-        });
-      },
-      /Agent name is required/,
-      'Must reject empty agent name'
-    );
-  });
-
-  test('TC-BND-07: Submitting agent creation with missing model throws validation error', async () => {
-    await assert.rejects(
-      async () => {
-        await app.createAgent({
-          name: 'Validator',
-          role: 'Tester',
-          model: null,
-        });
-      },
-      /Agent model is required/,
-      'Must reject missing agent model'
-    );
-  });
-
-  test('TC-BND-08: Updating agent status to an unsupported state throws invalid status error', async () => {
-    const architect = app.agents[0];
-    await assert.rejects(
-      async () => {
-        await app.updateAgentStatus(architect.id, 'kaboom_status');
-      },
-      /Invalid agent status/,
-      'Must reject invalid status value'
-    );
-  });
-
   test('TC-BND-09: Rapid theme switching completes without state corruption or race conditions', () => {
     for (let i = 0; i < 50; i++) {
       app.toggleTheme();

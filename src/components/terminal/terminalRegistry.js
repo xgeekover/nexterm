@@ -5,19 +5,33 @@
  * `TerminalView` just attaches/detaches an entry's DOM node into whichever
  * wrapper is currently mounted; it never recreates the underlying Terminal.
  *
- * Deliberately has zero dependency on the app store — it only knows how to
- * spin up an xterm instance, wire its `onData` to a caller-supplied callback,
- * and pipe PTY output (given a session id to filter on) into it. This keeps
- * `disposeTerminal` safe to import lazily from `terminalStore.js` without
- * that module ever eagerly loading `@xterm/*` (which throws when evaluated
- * outside a browser — see the guard at the `terminalStore.js` call site).
+ * Deliberately has zero dependency on `terminalStore.js` — it only knows how
+ * to spin up an xterm instance, wire its `onData` to a caller-supplied
+ * callback, and pipe PTY output (given a session id to filter on) into it.
+ * This keeps `disposeTerminal` safe to import lazily from `terminalStore.js`
+ * without that module ever eagerly loading `@xterm/*` (which throws when
+ * evaluated outside a browser — see the guard at the `terminalStore.js` call
+ * site). It does read `settingsStore.js` (font/cursor/scrollback prefs) —
+ * that store never touches `@xterm/*` itself, so no such cycle exists there.
  */
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
+import { useSettingsStore } from '../../stores/settingsStore.js';
 
 const instances = new Map();
+
+/** Keys the Settings window exposes that should update every live terminal
+ * instance in place, without recreating it. */
+const LIVE_TERMINAL_SETTINGS_KEYS = [
+  'terminalFontFamily',
+  'terminalFontSize',
+  'terminalLineHeight',
+  'terminalCursorStyle',
+  'terminalCursorBlink',
+  'terminalScrollback',
+];
 
 /**
  * Reads the current ANSI/base palette from the design-token CSS variables so
@@ -61,6 +75,16 @@ export function readFontFamily() {
 }
 
 /**
+ * The Settings window's `terminalFontFamily` overrides the app's mono token
+ * when set; '' means "follow --font-mono", same convention the store's own
+ * doc comment describes.
+ */
+export function resolveTerminalFontFamily() {
+  const custom = useSettingsStore.getState().terminalFontFamily;
+  return custom && custom.trim() ? custom.trim() : readFontFamily();
+}
+
+/**
  * xterm's FitAddon measures the container and, when it is detached or has
  * zero size, leaves the render dimensions undefined — a viewport sync
  * scheduled on the next frame then throws asynchronously (outside any
@@ -87,13 +111,50 @@ function ensureThemeObserverStarted() {
   const rootEl = document.documentElement;
   const observer = new MutationObserver(() => {
     const theme = readTheme();
-    const fontFamily = readFontFamily();
+    const fontFamily = resolveTerminalFontFamily();
     for (const entry of instances.values()) {
       entry.term.options.theme = theme;
       entry.term.options.fontFamily = fontFamily;
     }
   });
   observer.observe(rootEl, { attributes: true, attributeFilter: ['class'] });
+}
+
+/**
+ * Push every terminal-related Settings-window value onto every live xterm
+ * instance's `.options`, then refit (reusing `FitAddon`, the same one
+ * `TerminalView`'s own resize-observer calls) so a font/line-height change
+ * takes effect immediately instead of only on the next natural resize.
+ */
+function applyLiveTerminalSettings(state) {
+  const fontFamily = state.terminalFontFamily?.trim() ? state.terminalFontFamily.trim() : readFontFamily();
+  for (const entry of instances.values()) {
+    entry.term.options.fontFamily = fontFamily;
+    entry.term.options.fontSize = state.terminalFontSize;
+    entry.term.options.lineHeight = state.terminalLineHeight;
+    entry.term.options.cursorStyle = state.terminalCursorStyle;
+    entry.term.options.cursorBlink = state.terminalCursorBlink;
+    entry.term.options.scrollback = state.terminalScrollback;
+    if (isFittable(entry.container)) {
+      try {
+        entry.fitAddon.fit();
+      } catch (_) {
+        // container not laid out yet — the next natural resize retries
+      }
+    }
+  }
+}
+
+// One subscription for every terminal instance, started lazily on first use
+// — mirrors `ensureThemeObserverStarted` above.
+let settingsSubscriptionStarted = false;
+function ensureSettingsSubscriptionStarted() {
+  if (settingsSubscriptionStarted) return;
+  settingsSubscriptionStarted = true;
+  useSettingsStore.subscribe((state, prevState) => {
+    const changed = LIVE_TERMINAL_SETTINGS_KEYS.some((key) => state[key] !== prevState[key]);
+    if (changed) applyLiveTerminalSettings(state);
+  });
 }
 
 /**
@@ -110,13 +171,15 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   container.style.width = '100%';
   container.style.height = '100%';
 
+  const settingsState = useSettingsStore.getState();
   const term = new Terminal({
-    fontFamily: readFontFamily(),
-    fontSize: 12,
-    // xterm's lineHeight is a multiplier of fontSize; 1.5 * 12px = 18px.
-    lineHeight: 1.5,
-    cursorBlink: true,
-    scrollback: 5000,
+    fontFamily: resolveTerminalFontFamily(),
+    fontSize: settingsState.terminalFontSize,
+    // xterm's lineHeight is a multiplier of fontSize.
+    lineHeight: settingsState.terminalLineHeight,
+    cursorStyle: settingsState.terminalCursorStyle,
+    cursorBlink: settingsState.terminalCursorBlink,
+    scrollback: settingsState.terminalScrollback,
     allowProposedApi: true,
     theme: readTheme(),
   });
@@ -144,6 +207,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   }
 
   ensureThemeObserverStarted();
+  ensureSettingsSubscriptionStarted();
 
   entry = {
     term,

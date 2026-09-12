@@ -65,70 +65,9 @@ export const DEFAULT_KEYBINDINGS = {
   TOGGLE_CHAT: 'Mod+Shift+c'
 };
 
-export const DEFAULT_AGENTS = [
-  {
-    id: 'agent-architect-01',
-    name: 'Architect',
-    role: 'System Architect',
-    model: 'Claude Opus 4.6',
-    status: 'active',
-    progress: 78,
-    tokens: 12431,
-    cost: 0.186,
-    dependency: null,
-    systemPrompt: 'Analyze system architecture, interface contracts, and module boundaries.',
-    logs: [
-      { id: 'log-1', timestamp: Date.now() - 60000, level: 'INFO', message: 'Analyzing project directory tree...' },
-      { id: 'log-2', timestamp: Date.now() - 30000, level: 'INFO', message: 'Parsing IPC contract schemas (17 commands, 6 events).' },
-      { id: 'log-3', timestamp: Date.now() - 10000, level: 'DEBUG', message: 'Architecture validation 78% completed.' },
-    ],
-  },
-  {
-    id: 'agent-test-eng-02',
-    name: 'Test Engineer',
-    role: 'QA & E2E Specialist',
-    model: 'Gemini 3.8 Flash',
-    status: 'waiting',
-    progress: 0,
-    tokens: 3520,
-    cost: 0.007,
-    dependency: 'agent-architect-01',
-    systemPrompt: 'Execute comprehensive 4-tier E2E testing suite and report defects.',
-    logs: [
-      { id: 'log-4', timestamp: Date.now() - 50000, level: 'INFO', message: 'Queued waiting for Architect completion.' },
-    ],
-  },
-  {
-    id: 'agent-code-rev-03',
-    name: 'Code Reviewer',
-    role: 'Senior Reviewer',
-    model: 'GPT-4o',
-    status: 'idle',
-    progress: 0,
-    tokens: 0,
-    cost: 0.000,
-    dependency: null,
-    systemPrompt: 'Perform senior code review, check invariants, and audit security.',
-    logs: [],
-  },
-];
 
-export const DEFAULT_CHAT_MESSAGES = [
-  {
-    id: 'chat-msg-01',
-    sender: 'user',
-    text: 'How do I run the terminal test suite in NexTerm?',
-    timestamp: Date.now() - 120000,
-  },
-  {
-    id: 'chat-msg-02',
-    sender: 'assistant',
-    agentId: 'agent-architect-01',
-    agentName: 'Architect',
-    text: `You can execute the pure JavaScript E2E test runner directly with:\n\n\`\`\`bash\nnode ${['tests', 'e2e', 'runner.js'].join('/')}\n\`\`\`\n\nThis executes all **4 test tiers** with zero external dependencies.`,
-    timestamp: Date.now() - 110000,
-  },
-];
+
+
 
 export const DEFAULT_PROJECT_FILES = {
   '/workspace/package.json': JSON.stringify(
@@ -151,7 +90,5 @@ export const DEFAULT_PROJECT_FILES = {
 };
 
 // Backward compatibility exports
-export const INITIAL_AGENTS = DEFAULT_AGENTS;
-export const SAMPLE_CHAT_MESSAGES = DEFAULT_CHAT_MESSAGES;
 export const SAMPLE_PROJECT_FILES = DEFAULT_PROJECT_FILES;
 

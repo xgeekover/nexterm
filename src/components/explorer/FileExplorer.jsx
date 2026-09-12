@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   FolderPlus,
   FolderOpen,
@@ -12,6 +12,28 @@ import {
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { FileTreeNode } from './FileTreeNode.jsx';
+import { ContextMenu } from '../common/ContextMenu.jsx';
+import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
+
+function parentPathOf(path) {
+  const idx = path.lastIndexOf('/');
+  return idx <= 0 ? '/' : path.slice(0, idx);
+}
+
+function relativeTo(rootPath, path) {
+  const base = rootPath.replace(/\/+$/, '');
+  if (path === base) return '.';
+  if (path.startsWith(`${base}/`)) return path.slice(base.length + 1);
+  return path;
+}
+
+async function writeToSystemClipboard(text) {
+  try {
+    await navigator?.clipboard?.writeText?.(text);
+  } catch (err) {
+    console.error('[FileExplorer] Failed to write to the system clipboard:', err);
+  }
+}
 
 export function FileExplorer() {
   const fileTree = useEditorStore((s) => s.fileTree);
@@ -21,44 +43,175 @@ export function FileExplorer() {
   const pickRoot = useEditorStore((s) => s.pickRoot);
   const createFile = useEditorStore((s) => s.createFile);
   const createFolder = useEditorStore((s) => s.createFolder);
+  const deletePath = useEditorStore((s) => s.deletePath);
   const expandedFolders = useEditorStore((s) => s.expandedFolders);
   const toggleFolder = useEditorStore((s) => s.toggleFolder);
+  const openFile = useEditorStore((s) => s.openFile);
+  const setSelectedPath = useEditorStore((s) => s.setSelectedPath);
+  const creatingEntry = useEditorStore((s) => s.creatingEntry);
+  const setCreatingEntry = useEditorStore((s) => s.setCreatingEntry);
+  const beginRename = useEditorStore((s) => s.beginRename);
+  const clipboard = useEditorStore((s) => s.clipboard);
+  const copyToClipboard = useEditorStore((s) => s.copyToClipboard);
+  const cutToClipboard = useEditorStore((s) => s.cutToClipboard);
+  const pasteClipboard = useEditorStore((s) => s.pasteClipboard);
 
-  const [creatingType, setCreatingType] = useState(null); // 'file' | 'folder' | null
   const [newItemName, setNewItemName] = useState('');
-  const [createError, setCreateError] = useState('');
+  const [explorerError, setExplorerError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
+  const [contextMenu, setContextMenu] = useState(null); // { x, y, target }
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, name }
 
   useEffect(() => {
     refreshExplorer();
   }, [refreshExplorer]);
 
+  const isCreatingAtRoot = creatingEntry?.parentPath === rootPath;
+
   const handleCreateSubmit = async (e) => {
     e?.preventDefault();
     const trimmed = newItemName.trim();
     if (!trimmed) {
-      setCreatingType(null);
+      setCreatingEntry(null);
       return;
     }
 
     const base = rootPath.replace(/\/+$/, '');
     const fullPath = `${base}/${trimmed.replace(/^\/+/, '')}`;
     try {
-      if (creatingType === 'file') {
+      if (creatingEntry.type === 'file') {
         await createFile(fullPath);
-      } else if (creatingType === 'folder') {
+      } else if (creatingEntry.type === 'folder') {
         await createFolder(fullPath);
       }
       setNewItemName('');
-      setCreatingType(null);
-      setCreateError('');
+      setCreatingEntry(null);
+      setExplorerError('');
     } catch (err) {
-      setCreateError(`Could not create ${creatingType}: ${err.message}`);
+      setExplorerError(`Could not create ${creatingEntry.type}: ${err.message}`);
     }
   };
 
   const handleCollapseAll = () => {
     Array.from(expandedFolders).forEach((path) => toggleFolder(path));
+  };
+
+  // A single context menu instance lives here (rather than per-row) so only
+  // one can ever be open, and it can see clipboard/rootPath state directly.
+  const handleTreeContextMenu = useCallback((e, target) => {
+    setContextMenu({ x: e.clientX, y: e.clientY, target });
+  }, []);
+
+  const handleEmptyAreaContextMenu = (e) => {
+    // Rows call stopPropagation() on their own context menu, so this only
+    // fires for a right-click on the empty space below the tree.
+    e.preventDefault();
+    setSelectedPath(null);
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { type: 'empty', path: rootPath, isDir: true, name: rootPath },
+    });
+  };
+
+  const buildMenuItems = (target) => {
+    const isEmpty = target.type === 'empty';
+    const isFile = target.type === 'file';
+    const isFolderish = !isFile; // folder row or the empty area (== workspace root)
+    const newParent = isFile ? parentPathOf(target.path) : target.path;
+
+    const items = [];
+    const pushSeparator = () => {
+      if (items.length > 0 && items[items.length - 1].type !== 'separator') {
+        items.push({ type: 'separator', key: `sep-${items.length}` });
+      }
+    };
+    const noSelectionReason = isEmpty ? 'No file or folder selected' : undefined;
+
+    items.push({
+      key: 'new-file',
+      label: 'New File…',
+      onSelect: () => setCreatingEntry({ parentPath: newParent, type: 'file' }),
+    });
+    items.push({
+      key: 'new-folder',
+      label: 'New Folder…',
+      onSelect: () => setCreatingEntry({ parentPath: newParent, type: 'folder' }),
+    });
+
+    if (isFile) {
+      pushSeparator();
+      items.push({
+        key: 'open',
+        label: 'Open',
+        onSelect: () => openFile(target.path),
+      });
+    }
+
+    pushSeparator();
+    items.push({
+      key: 'cut',
+      label: 'Cut',
+      disabled: isEmpty,
+      disabledReason: noSelectionReason,
+      onSelect: () => cutToClipboard(target.path, target.isDir),
+    });
+    items.push({
+      key: 'copy',
+      label: 'Copy',
+      disabled: isEmpty,
+      disabledReason: noSelectionReason,
+      onSelect: () => copyToClipboard(target.path, target.isDir),
+    });
+    const canPaste = Boolean(clipboard) && isFolderish;
+    items.push({
+      key: 'paste',
+      label: 'Paste',
+      disabled: !canPaste,
+      disabledReason: !clipboard
+        ? 'Nothing to cut or copy yet'
+        : !isFolderish
+          ? 'Cannot paste into a file'
+          : undefined,
+      onSelect: () => {
+        pasteClipboard(target.path).catch((err) => setExplorerError(err.message));
+      },
+    });
+
+    pushSeparator();
+    items.push({
+      key: 'copy-path',
+      label: 'Copy Path',
+      disabled: isEmpty,
+      disabledReason: noSelectionReason,
+      onSelect: () => writeToSystemClipboard(target.path),
+    });
+    items.push({
+      key: 'copy-relative-path',
+      label: 'Copy Relative Path',
+      disabled: isEmpty,
+      disabledReason: noSelectionReason,
+      onSelect: () => writeToSystemClipboard(relativeTo(rootPath, target.path)),
+    });
+
+    pushSeparator();
+    items.push({
+      key: 'rename',
+      label: 'Rename…',
+      disabled: isEmpty,
+      disabledReason: noSelectionReason,
+      onSelect: () => beginRename(target.path),
+    });
+    items.push({
+      key: 'delete',
+      label: 'Delete',
+      disabled: isEmpty,
+      disabledReason: noSelectionReason,
+      danger: true,
+      onSelect: () => setDeleteConfirm({ path: target.path, isDir: target.isDir, name: target.name }),
+    });
+
+    return items;
   };
 
   if (!rootPath) {
@@ -130,8 +283,8 @@ export function FileExplorer() {
           <button
             type="button"
             onClick={() => {
-              setCreatingType('file');
               setNewItemName('');
+              setCreatingEntry({ parentPath: rootPath, type: 'file' });
             }}
             className="p-1 rounded-sm hover:bg-vsc-item-hover text-vsc-muted hover:text-vsc-fg transition"
             title="New File"
@@ -142,8 +295,8 @@ export function FileExplorer() {
           <button
             type="button"
             onClick={() => {
-              setCreatingType('folder');
               setNewItemName('');
+              setCreatingEntry({ parentPath: rootPath, type: 'folder' });
             }}
             className="p-1 rounded-sm hover:bg-vsc-item-hover text-vsc-muted hover:text-vsc-fg transition"
             title="New Folder"
@@ -172,8 +325,9 @@ export function FileExplorer() {
         </div>
       </div>
 
-      {/* Inline Creation Input */}
-      {creatingType && (
+      {/* Inline Creation Input (workspace root only — nested folders get an
+          inline row inside the tree itself, see FileTreeNode) */}
+      {isCreatingAtRoot && (
         <form onSubmit={handleCreateSubmit} className="px-2 py-1 border-b border-vsc-border shrink-0">
           <div className="flex items-center gap-1 bg-vsc-input border border-vsc-focus rounded-sm px-2 py-1">
             <span className="text-ui-sm font-mono text-vsc-muted">/</span>
@@ -182,7 +336,7 @@ export function FileExplorer() {
               autoFocus
               value={newItemName}
               onChange={(e) => setNewItemName(e.target.value)}
-              placeholder={`New ${creatingType} name…`}
+              placeholder={`New ${creatingEntry.type} name…`}
               className="flex-1 bg-transparent border-none outline-none font-mono text-ui-sm text-vsc-fg placeholder-vsc-placeholder"
             />
             <button type="submit" className="text-vsc-ok hover:text-vsc-fg p-0.5">
@@ -190,7 +344,7 @@ export function FileExplorer() {
             </button>
             <button
               type="button"
-              onClick={() => setCreatingType(null)}
+              onClick={() => setCreatingEntry(null)}
               className="text-vsc-muted hover:text-vsc-error p-0.5"
             >
               <X size={14} />
@@ -201,15 +355,25 @@ export function FileExplorer() {
 
       {/* Directory Tree */}
       {rootExpanded && (
-        <div className="flex-1 overflow-y-auto">
-          {createError && (
+        <div
+          className="flex-1 overflow-y-auto"
+          onClick={() => setSelectedPath(null)}
+          onContextMenu={handleEmptyAreaContextMenu}
+        >
+          {explorerError && (
             <div role="alert" className="px-3 py-1 text-ui-sm text-vsc-error border-b border-vsc-border">
-              {createError}
+              {explorerError}
             </div>
           )}
           {rootNodes.length > 0 ? (
             rootNodes.map((node) => (
-              <FileTreeNode key={node.path} node={node} depth={0} allNodes={fileTree} />
+              <FileTreeNode
+                key={node.path}
+                node={node}
+                depth={0}
+                allNodes={fileTree}
+                onContextMenuRequest={handleTreeContextMenu}
+              />
             ))
           ) : (
             <div className="px-4 py-3 text-center text-vsc-muted text-ui-sm italic">
@@ -218,6 +382,29 @@ export function FileExplorer() {
           )}
         </div>
       )}
+
+      <ContextMenu
+        open={Boolean(contextMenu)}
+        x={contextMenu?.x ?? 0}
+        y={contextMenu?.y ?? 0}
+        items={contextMenu ? buildMenuItems(contextMenu.target) : []}
+        onClose={() => setContextMenu(null)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteConfirm)}
+        title={deleteConfirm?.isDir ? 'Delete Folder' : 'Delete File'}
+        message={`Are you sure you want to delete '${deleteConfirm?.name}'?${deleteConfirm?.isDir ? ' Its contents will be deleted too.' : ''}`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => {
+          const target = deleteConfirm;
+          setDeleteConfirm(null);
+          if (!target) return;
+          deletePath(target.path, target.isDir).catch((err) => setExplorerError(err.message));
+        }}
+        onCancel={() => setDeleteConfirm(null)}
+      />
     </div>
   );
 }

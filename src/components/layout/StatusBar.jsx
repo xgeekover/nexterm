@@ -1,6 +1,5 @@
 import React from 'react';
 import { GitBranch, Cpu, Sun, Moon, Bell } from 'lucide-react';
-import { useAgentStore } from '../../stores/agentStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useTheme } from '../../hooks/useTheme.js';
 import { cn } from '../../lib/utils.js';
@@ -8,7 +7,6 @@ import { cn } from '../../lib/utils.js';
 const item = 'h-full px-2 flex items-center gap-1.5 hover:bg-vsc-item-hover cursor-default';
 
 export function StatusBar() {
-  const telemetry = useAgentStore((s) => s.telemetry);
   const cwd = useTerminalStore((s) => s.cwd);
   const { theme, toggleTheme } = useTheme();
 
@@ -34,24 +32,6 @@ export function StatusBar() {
 
       {/* Right items */}
       <div className="flex items-center h-full shrink-0">
-        <div className={item}>
-          <span
-            className={cn(
-              'w-1.5 h-1.5 rounded-full',
-              telemetry.activeCount > 0 ? 'bg-vsc-ok animate-pulse' : 'bg-vsc-muted'
-            )}
-          />
-          <span>{telemetry.activeCount} Active</span>
-          {telemetry.waitingCount > 0 && (
-            <span className="text-vsc-warn">({telemetry.waitingCount} Waiting)</span>
-          )}
-        </div>
-
-        <div className={item}>
-          <Cpu size={14} />
-          <span>{telemetry.totalTokens.toLocaleString()} tokens</span>
-        </div>
-
         <div className={item}>
           <span>zsh</span>
         </div>

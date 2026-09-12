@@ -1,12 +1,10 @@
 /**
  * NexTerm IPC Bridge
  * Provides transparent communication to Tauri v2 Rust backend when running in desktop shell,
- * and seamless in-memory mock PTY, FS, Agent runtime, and Chat when running in browser mode.
+ * and a seamless in-memory mock PTY + FS when running in browser mode.
  */
 
 import {
-  DEFAULT_AGENTS,
-  DEFAULT_CHAT_MESSAGES,
   DEFAULT_PROJECT_FILES,
 } from './constants.js';
 
@@ -42,64 +40,6 @@ function resolvePath(baseDir, relOrAbs) {
   return normalizePath(`${baseDir.replace(/\/+$/, '')}/${relOrAbs}`);
 }
 
-export function generateDynamicAgentResponse(agent, userPrompt) {
-  const agentName = agent?.name || 'Assistant';
-  const agentRole = agent?.role || 'AI Specialist';
-  const agentModel = agent?.model || 'Default';
-
-  let contextTitle = null;
-  let contextContent = null;
-  let cleanPrompt = userPrompt;
-
-  const contextMatch = userPrompt.match(/\[Context:\s*([^\]]+)\]\s*(?:```(?:\w+)?\n([\s\S]*?)\n```)?\s*([\s\S]*)/i);
-  if (contextMatch) {
-    contextTitle = contextMatch[1].trim();
-    contextContent = contextMatch[2] ? contextMatch[2].trim() : '';
-    cleanPrompt = contextMatch[3] ? contextMatch[3].trim() : '';
-  }
-
-  const lowerPrompt = cleanPrompt.toLowerCase();
-  const lowerContext = (contextContent || '').toLowerCase();
-  const combined = `${lowerPrompt} ${lowerContext} ${contextTitle ? contextTitle.toLowerCase() : ''}`;
-
-  let replyText = '';
-
-  if (combined.includes('fail') || combined.includes('error') || combined.includes('diagnos') || combined.includes('bug') || combined.includes('fix') || combined.includes('calculator') || combined.includes('calculat')) {
-    const fileHint = contextTitle || 'the reported issue';
-    replyText += `### 🔍 Diagnostic Report by ${agentName} (${agentRole})\n\n`;
-    replyText += `I analyzed the failure in **${fileHint}**.\n\n`;
-
-    if (combined.includes('calculator') || combined.includes('expected 30') || combined.includes('calculatetotal')) {
-      replyText += `**Root Cause:** The calculation logic in \`calculateTotal\` is multiplying the accumulator by item price starting at 0, which results in 0 instead of the cumulative sum.\n\n`;
-      replyText += `**Recommended Fix:**\n`;
-      replyText += `\`\`\`javascript\n`;
-      replyText += `export function calculateTotal(items) {\n`;
-      replyText += `  return items.reduce((acc, item) => acc + item.price, 0);\n`;
-      replyText += `}\n`;
-      replyText += `\`\`\`\n\n`;
-      replyText += `Apply this correction to \`src/calculator.js\` and re-run your test suite to verify.`;
-    } else {
-      replyText += `**Analysis:** An assertion mismatch or unexpected state transition occurred:\n`;
-      if (contextContent) {
-        replyText += `> \`${contextContent.slice(0, 100).replace(/\n/g, ' ')}...\`\n\n`;
-      }
-      replyText += `**Recommended Action:**\n\`\`\`bash\nnpm test\n\`\`\`\n`;
-    }
-  } else if (combined.includes('optimize') || combined.includes('performance') || combined.includes('render')) {
-    replyText += `### ⚡ Performance Optimization Plan (${agentName})\n\n`;
-    replyText += `To optimize rendering performance:\n1. Virtualize terminal block rendering.\n2. Wrap high-churn components in React.memo.\n3. Batch high-frequency stdout events.\n\n`;
-    replyText += `\`\`\`javascript\nconst scheduleUpdate = debounce(dispatch, 16);\n\`\`\`\n`;
-  } else if (combined.includes('test') || combined.includes('runner') || combined.includes('how do i')) {
-    replyText += `### 🧪 Test Execution Guide (${agentName})\n\n`;
-    replyText += `Execute the pure JavaScript test runner directly with:\n\n\`\`\`bash\nnode ${['tests', 'e2e', 'runner.js'].join('/')}\n\`\`\`\n`;
-  } else {
-    replyText += `### 💡 Response from ${agentName} (${agentRole} - ${agentModel})\n\n`;
-    replyText += `I reviewed your inquiry: *"${cleanPrompt.slice(0, 80)}"*\n\nReady to assist with system architecture, code editing, and verification.\n`;
-  }
-
-  const tokens = replyText.match(/\S+\s*|\n/g) || [replyText];
-  return { fullText: replyText, tokens };
-}
 
 export function isTauri() {
   if (typeof window === 'undefined') return false;
@@ -113,14 +53,7 @@ class BrowserMockBridge {
     this.eventListeners = new Map();
     this.files = new Map(Object.entries(DEFAULT_PROJECT_FILES));
     this.directories = new Set(['/workspace', '/workspace/src', '/workspace/tests']);
-    this.agents = new Map(
-      JSON.parse(JSON.stringify(DEFAULT_AGENTS)).map((a) => [a.id, a])
-    );
     this.agentLogs = new Map();
-    for (const [id, agent] of this.agents.entries()) {
-      this.agentLogs.set(id, agent.logs ? [...agent.logs] : []);
-    }
-    this.chatMessages = JSON.parse(JSON.stringify(DEFAULT_CHAT_MESSAGES));
     this.systemInfo = {
       os: 'macos',
       arch: 'aarch64',
@@ -484,108 +417,6 @@ class BrowserMockBridge {
           throw new Error(`Path does not exist: ${path}`);
         }
         return null;
-      }
-
-      // 12. agent_list
-      case 'agent_list': {
-        return Array.from(this.agents.values());
-      }
-
-      // 13. agent_create
-      case 'agent_create': {
-        const { name, role, model, systemPrompt = '', dependency = null } = args.input ?? args;
-        if (!name || !name.trim()) {
-          throw new Error('Agent name is required');
-        }
-        if (!model) {
-          throw new Error('Agent model is required');
-        }
-        const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        const newAgent = {
-          id,
-          name: name.trim(),
-          role: role || 'Assistant',
-          model,
-          status: dependency ? 'waiting' : 'active',
-          progress: 0,
-          tokens: 0,
-          cost: 0.0,
-          dependency,
-          systemPrompt,
-          logs: [],
-        };
-        this.agents.set(id, newAgent);
-        this.agentLogs.set(id, []);
-        await this.emit('agent-updated', newAgent);
-        return newAgent;
-      }
-
-      // 14. agent_update_status
-      case 'agent_update_status': {
-        const { agent_id, status } = args;
-        const validStatuses = ['active', 'idle', 'waiting', 'error', 'completed', 'paused'];
-        if (!validStatuses.includes(status)) {
-          throw new Error(`Invalid agent status: ${status}`);
-        }
-        const agent = this.agents.get(agent_id);
-        if (!agent) throw new Error(`Agent not found: ${agent_id}`);
-        agent.status = status;
-        if (status === 'completed') {
-          agent.progress = 100;
-          for (const other of this.agents.values()) {
-            if (other.dependency === agent_id && other.status === 'waiting') {
-              other.status = 'active';
-              await this.emit('agent-updated', other);
-            }
-          }
-        }
-        await this.emit('agent-updated', agent);
-        return agent;
-      }
-
-      // 15. agent_get_logs
-      case 'agent_get_logs': {
-        const { agent_id } = args;
-        return this.agentLogs.get(agent_id) || [];
-      }
-
-      // 16. chat_send_message
-      case 'chat_send_message': {
-        const { agent_id, message } = args;
-        const userMsg = {
-          id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-user`,
-          sender: 'user',
-          text: message,
-          timestamp: Date.now(),
-        };
-        this.chatMessages.push(userMsg);
-
-        const replyId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-asst`;
-        const agent = this.agents.get(agent_id) || { name: 'Architect', role: 'System Architect', model: 'Claude Opus 4.6' };
-        const { fullText, tokens } = generateDynamicAgentResponse(agent, message);
-
-        setTimeout(async () => {
-          for (let i = 0; i < tokens.length; i++) {
-            const isDone = i === tokens.length - 1;
-            await this.emit('chat-token', {
-              message_id: replyId,
-              agent_id,
-              token: tokens[i],
-              done: isDone,
-            });
-          }
-        }, 10);
-
-        const asstMsg = {
-          id: replyId,
-          sender: 'assistant',
-          agentId: agent_id,
-          agentName: agent.name,
-          text: fullText,
-          timestamp: Date.now() + 50,
-        };
-        this.chatMessages.push(asstMsg);
-        return asstMsg;
       }
 
       // 17. system_get_info

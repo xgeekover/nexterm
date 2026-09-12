@@ -21,11 +21,9 @@ export class AppEnvironment {
     this.expandedFolders = new Set(['/workspace']);
 
     // Mission Control subsystem
-    this.agents = [];
     this.agentLogs = new Map();
 
     // AI Chat subsystem
-    this.chatMessages = [];
     this.chatContext = null;
     this.byokSettings = {
       openaiKey: '',
@@ -65,13 +63,8 @@ export class AppEnvironment {
     await this.refreshExplorer();
 
     // 3. Load Agents
-    this.agents = await this.ipc.invoke('agent_list');
-    for (const agent of this.agents) {
-      this.agentLogs.set(agent.id, agent.logs ? [...agent.logs] : []);
-    }
 
     // 4. Load Chat Messages
-    this.chatMessages = [...this.ipc.chatMessages];
 
     // 5. Setup event subscriptions
     this.setupSubscriptions();
@@ -109,25 +102,8 @@ export class AppEnvironment {
     this.unlisteners.push(unlistenPtyExit);
 
     // agent-updated
-    const unlistenAgentUpdated = this.ipc.listen('agent-updated', (updated) => {
-      const idx = this.agents.findIndex((a) => a.id === updated.id);
-      if (idx >= 0) {
-        this.agents[idx] = { ...this.agents[idx], ...updated };
-      } else {
-        this.agents.push(updated);
-      }
-    });
-    this.unlisteners.push(unlistenAgentUpdated);
 
     // chat-token
-    const unlistenChatToken = this.ipc.listen('chat-token', (payload) => {
-      const { message_id, token, done } = payload;
-      const msg = this.chatMessages.find((m) => m.id === message_id);
-      if (msg) {
-        msg.isStreaming = !done;
-      }
-    });
-    this.unlisteners.push(unlistenChatToken);
   }
 
   destroy() {
@@ -338,26 +314,6 @@ export class AppEnvironment {
   }
 
   // --- MISSION CONTROL ---
-  async createAgent({ name, role, model, systemPrompt, dependency }) {
-    const agent = await this.ipc.invoke('agent_create', {
-      name,
-      role,
-      model,
-      systemPrompt,
-      dependency,
-    });
-    this.agents = await this.ipc.invoke('agent_list');
-    return agent;
-  }
-
-  async updateAgentStatus(agentId, status) {
-    const updated = await this.ipc.invoke('agent_update_status', {
-      agent_id: agentId,
-      status,
-    });
-    this.agents = await this.ipc.invoke('agent_list');
-    return updated;
-  }
 
   getTelemetry() {
     let totalTokens = 0;
@@ -365,35 +321,15 @@ export class AppEnvironment {
     let activeCount = 0;
     let waitingCount = 0;
 
-    for (const a of this.agents) {
-      totalTokens += a.tokens || 0;
-      totalCost += a.cost || 0;
-      if (a.status === 'active') activeCount++;
-      if (a.status === 'waiting') waitingCount++;
-    }
-
     return {
       totalTokens,
       totalCost,
       activeCount,
       waitingCount,
-      totalAgents: this.agents.length,
     };
   }
 
   // --- AI CHAT ---
-  async sendChatMessage(agentId, messageText) {
-    let fullPrompt = messageText;
-    if (this.chatContext) {
-      fullPrompt = `[Context: ${this.chatContext.title}]\n\`\`\`\n${this.chatContext.content}\n\`\`\`\n\n${messageText}`;
-    }
-    const response = await this.ipc.invoke('chat_send_message', {
-      agent_id: agentId,
-      message: fullPrompt,
-    });
-    this.chatMessages = [...this.ipc.chatMessages];
-    return response;
-  }
 
   attachContext(contextObj) {
     this.chatContext = contextObj;
