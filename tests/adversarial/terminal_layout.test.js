@@ -5,6 +5,7 @@
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
 import { useTerminalStore, PERSIST_KEY } from '../../src/stores/terminalStore.js';
 import { saveState, loadState } from '../../src/lib/persistence.js';
+import { mockBridge } from '../../src/lib/ipc.js';
 
 const S = useTerminalStore;
 const tree = () => S.getState().splitTree;
@@ -272,5 +273,129 @@ describe('Terminal layout: rename, group names, and persistence', () => {
     assert.equal(leaves().length, 1);
     assert.equal(S.getState().tabs.length, 1);
     assert.equal(S.getState().tabs[0].title, 'Terminal 1');
+  });
+
+  test("TL-19: a pty-cwd event updates only the emitting tab's cwd, and the store cwd only when it is active", async () => {
+    const a = leaves()[0].tabIds[0];
+    const b = (await S.getState().createTab()).id; // createTab makes b the active tab
+    const sessionA = S.getState().tabs.find((t) => t.id === a).sessionId;
+    const sessionB = S.getState().tabs.find((t) => t.id === b).sessionId;
+    const originalACwd = S.getState().tabs.find((t) => t.id === a).cwd;
+    const originalBCwd = S.getState().tabs.find((t) => t.id === b).cwd;
+
+    assert.equal(S.getState().activeTabId, b, 'sanity: b is the active tab');
+
+    // b is active — updating a's (inactive) session must not touch b or the store cwd.
+    await mockBridge.emit('pty-cwd', { session_id: sessionA, cwd: '/workspace/a-moved' });
+    assert.equal(S.getState().tabs.find((t) => t.id === a).cwd, '/workspace/a-moved', "a's own cwd updates");
+    assert.equal(S.getState().tabs.find((t) => t.id === b).cwd, originalBCwd, "b's cwd is untouched by a's event");
+    assert.notEqual(S.getState().cwd, '/workspace/a-moved', 'an inactive tab moving must not change the store cwd');
+    assert.notEqual(originalACwd, '/workspace/a-moved', 'sanity: this really was a change');
+
+    // b is active — updating its session must also update the store's cwd.
+    await mockBridge.emit('pty-cwd', { session_id: sessionB, cwd: '/workspace/b-moved' });
+    assert.equal(S.getState().tabs.find((t) => t.id === b).cwd, '/workspace/b-moved');
+    assert.equal(S.getState().cwd, '/workspace/b-moved', "the active tab's cwd change updates the store cwd too");
+    assert.equal(S.getState().tabs.find((t) => t.id === a).cwd, '/workspace/a-moved', "a is untouched by b's event");
+  });
+
+  test('TL-20: an unknown session id in a pty-cwd event is ignored', async () => {
+    const before = JSON.stringify(S.getState().tabs);
+    await mockBridge.emit('pty-cwd', { session_id: 'pty-does-not-exist', cwd: '/nowhere' });
+    assert.equal(JSON.stringify(S.getState().tabs), before, 'tabs must be unchanged');
+  });
+
+  test('TL-21: the persisted payload carries a cwd updated via pty-cwd', async () => {
+    const a = leaves()[0].tabIds[0];
+    const sessionA = S.getState().tabs.find((t) => t.id === a).sessionId;
+    await mockBridge.emit('pty-cwd', { session_id: sessionA, cwd: '/workspace/persisted-cwd' });
+
+    // Let the debounced write-behind flush to (shimmed) localStorage.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const saved = loadState(PERSIST_KEY, null);
+    assert.ok(saved, 'something was persisted');
+    const savedTab = saved.tabs.find((t) => t.id === a);
+    assert.ok(savedTab, 'the tab is present in the persisted payload');
+    assert.equal(savedTab.cwd, '/workspace/persisted-cwd', 'the persisted cwd reflects the OSC 7 update');
+  });
+
+  test("TL-22: duplicateTab opens a new terminal in the same group, at the source tab's live cwd, and activates it", async () => {
+    const a = leaves()[0].tabIds[0];
+    const sessionA = S.getState().tabs.find((t) => t.id === a).sessionId;
+    await mockBridge.emit('pty-cwd', { session_id: sessionA, cwd: '/workspace/deep/dir' });
+
+    const dup = await S.getState().duplicateTab(a);
+    assert.ok(dup, 'duplicateTab returns the new tab');
+    assert.equal(dup.cwd, '/workspace/deep/dir', "duplicate opens in the source tab's live (not original) cwd");
+    assert.equal(leafOf(dup.id).id, leafOf(a).id, 'lands in the same group as the source tab');
+    assert.equal(S.getState().activeTabId, dup.id, 'the duplicate becomes the active tab');
+    assert.equal(leaves().length, 1, 'duplicating never splits');
+  });
+
+  test('TL-23: group focus mode round-trips through persistence', async () => {
+    const a = leaves()[0].tabIds[0];
+    const b = (await S.getState().createTab()).id;
+    S.getState().dropTabOnPane(b, 'pane-root', 'right');
+    const paneB = leafOf(b).id;
+
+    assert.equal(S.getState().groupViewMode, 'split', 'starts in split view');
+    S.getState().focusGroup(paneB);
+    assert.equal(S.getState().groupViewMode, 'focus');
+    assert.equal(S.getState().focusedPaneId, paneB);
+    assert.equal(S.getState().activePaneId, paneB, 'focusing a group also makes it the active pane');
+
+    // Let the debounced write-behind flush to (shimmed) localStorage.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.ok(loadState(PERSIST_KEY, null), 'something was persisted');
+
+    // Simulate an app relaunch.
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+    });
+    await S.getState().init();
+
+    assert.equal(S.getState().groupViewMode, 'focus', 'focus mode survives a relaunch');
+    assert.ok(
+      leaves().some((l) => l.id === S.getState().focusedPaneId),
+      'the restored focused pane id resolves to a real group'
+    );
+
+    // "All" returns to the normal split view without touching the tree.
+    const treeBeforeShowAll = tree();
+    S.getState().showAllGroups();
+    assert.equal(S.getState().groupViewMode, 'split');
+    assert.equal(tree(), treeBeforeShowAll, 'showing all groups does not rebuild the split tree');
+  });
+
+  test('TL-24: a stale/closed focus target is dropped on restore instead of restoring into a dead focus mode', async () => {
+    saveState(PERSIST_KEY, {
+      splitTree: {
+        type: 'split',
+        id: 'split-1',
+        direction: 'horizontal',
+        children: [
+          { type: 'leaf', id: 'pane-root', tabIds: ['tab-x'], activeTabId: 'tab-x' },
+          { type: 'leaf', id: 'pane-2', tabIds: ['tab-y'], activeTabId: 'tab-y' },
+        ],
+      },
+      tabs: [
+        { id: 'tab-x', title: 'X', cwd: '/workspace' },
+        { id: 'tab-y', title: 'Y', cwd: '/workspace' },
+      ],
+      activePaneId: 'pane-root',
+      groupViewMode: 'focus',
+      focusedPaneId: 'pane-that-no-longer-exists',
+    });
+    S.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    S.setState({
+      splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+      activePaneId: 'pane-root',
+    });
+    await S.getState().init();
+
+    assert.equal(S.getState().groupViewMode, 'split', 'falls back to split view rather than a dead focus target');
+    assert.equal(S.getState().focusedPaneId, null);
   });
 });

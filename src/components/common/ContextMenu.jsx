@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '../../lib/utils.js';
 
 /**
@@ -116,7 +117,16 @@ export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
 
   if (!open) return null;
 
-  return (
+  // Rendered through a portal straight onto <body> — never as a descendant of
+  // whichever panel happened to invoke it. Several panels (see PanelLayout.jsx
+  // / src/styles/index.css `.animate-panel-in`) keep a non-`none` `transform`
+  // on themselves permanently (`animation-fill-mode: both` retains the final
+  // keyframe, which is `transform: scale(1) translateY(0)` — not `none`). A
+  // transformed ancestor becomes the containing block for `position: fixed`
+  // descendants, which silently breaks `left`/`top` being viewport-relative.
+  // Portaling to `document.body` sidesteps that regardless of which panel
+  // (present or future) triggers this menu.
+  return createPortal(
     <div
       ref={menuRef}
       role="menu"
@@ -170,7 +180,8 @@ export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
           </div>
         );
       })}
-    </div>
+    </div>,
+    document.body
   );
 }
 

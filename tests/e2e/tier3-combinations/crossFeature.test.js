@@ -58,22 +58,22 @@ describe('Tier 3: Cross-Feature Combinations (Pairwise Interactions)', () => {
     assert.equal(activeTab.isDirty, false, 'Tab should be saved after palette Save All action');
   });
 
-  test('TC-XF-05: Theme Switch -> Monaco Theme Sync -> Terminal Theme Sync', async () => {
-    // 1. Initial dark state
+  test('TC-XF-05: Dark theme stays consistent across Monaco and Terminal (no toggle exists)', async () => {
+    // 1. Initial (and only) dark state
     assert.equal(app.theme, 'dark');
     assert.equal(app.monacoTheme, 'nexterm-dark');
 
     // 2. Open an editor tab and execute a terminal command
     await app.openFile('/workspace/src/App.jsx');
     const block = await app.executeTerminalCommand('ls');
+    assert.equal(block.status, 'completed');
 
-    // 3. Switch theme to light
-    app.toggleTheme();
-    assert.equal(app.theme, 'light');
-    assert.equal(app.monacoTheme, 'nexterm-light', 'Monaco must update to vs-light');
+    // 3. Theme is still dark — there is no toggle to invoke
+    assert.equal(app.theme, 'dark');
+    assert.equal(app.monacoTheme, 'nexterm-dark', 'Monaco must remain nexterm-dark');
 
-    // 4. Verify terminal remains interactive and accepts commands under light theme
-    const lightBlock = await app.executeTerminalCommand('pwd');
-    assert.equal(lightBlock.status, 'completed');
+    // 4. Terminal remains interactive
+    const secondBlock = await app.executeTerminalCommand('pwd');
+    assert.equal(secondBlock.status, 'completed');
   });
 });

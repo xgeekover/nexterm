@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter};
 use super::osc::{Marker, OscFilter};
 use super::shell_integration;
 use crate::models::PtyCommandDonePayload;
+use crate::models::PtyCwdPayload;
 
 use crate::models::{PtyExitPayload, PtyOutputPayload, PtySessionInfo};
 
@@ -192,12 +193,22 @@ impl PtyManager {
                                 let _ = app_handle_clone.emit("pty-output", &payload);
                             }
                             for marker in filtered.markers {
-                                if let Marker::CommandFinished(exit_code) = marker {
-                                    let payload = PtyCommandDonePayload {
-                                        session_id: session_id_clone.clone(),
-                                        exit_code,
-                                    };
-                                    let _ = app_handle_clone.emit("pty-command-done", &payload);
+                                match marker {
+                                    Marker::CommandFinished(exit_code) => {
+                                        let payload = PtyCommandDonePayload {
+                                            session_id: session_id_clone.clone(),
+                                            exit_code,
+                                        };
+                                        let _ = app_handle_clone.emit("pty-command-done", &payload);
+                                    }
+                                    Marker::WorkingDirectory(cwd) => {
+                                        let payload = PtyCwdPayload {
+                                            session_id: session_id_clone.clone(),
+                                            cwd,
+                                        };
+                                        let _ = app_handle_clone.emit("pty-cwd", &payload);
+                                    }
+                                    Marker::PromptStart | Marker::CommandStart | Marker::CommandExecuted => {}
                                 }
                             }
                         }

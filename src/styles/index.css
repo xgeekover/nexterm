@@ -3,96 +3,13 @@
 @tailwind utilities;
 
 /* ---------------------------------------------------------------------------
-   NexTerm design tokens — VS Code "Light Modern" (:root) / "Dark Modern" (.dark)
-   Names mirror VS Code's theme keys so the mapping stays auditable.
-   Components consume these through Tailwind (bg-vsc-sidebar, text-vsc-fg, …);
-   never hard-code a hex in a component.
+   NexTerm design tokens — VS Code "Dark Modern" palette.
+   The app is dark-only (light mode was removed); these are the only values
+   these tokens ever take. Names still mirror VS Code's theme keys so the
+   mapping stays auditable. Components consume these through Tailwind
+   (bg-vsc-sidebar, text-vsc-fg, …); never hard-code a hex in a component.
    --------------------------------------------------------------------------- */
 :root {
-  color-scheme: light;
-
-  --vsc-titlebar-bg:        #f8f8f8;
-  --vsc-activitybar-bg:     #f8f8f8;
-  --vsc-activitybar-fg:     #1f1f1f;
-  --vsc-activitybar-muted:  #616161;
-  --vsc-sidebar-bg:         #f8f8f8;
-  --vsc-editor-bg:          #ffffff;
-  --vsc-tab-active-bg:      #ffffff;
-  --vsc-tab-inactive-bg:    #f8f8f8;
-  --vsc-tab-active-fg:      #3b3b3b;
-  --vsc-tab-inactive-fg:    #868686;
-  --vsc-panel-bg:           #f8f8f8;
-  --vsc-terminal-bg:        #f8f8f8;
-  --vsc-statusbar-bg:       #f8f8f8;
-  --vsc-widget-bg:          #f8f8f8;
-  --vsc-quickinput-bg:      #f8f8f8;
-  --vsc-menu-bg:            #ffffff;
-  --vsc-input-bg:           #ffffff;
-  --vsc-input-border:       #cecece;
-  --vsc-input-placeholder:  #767676;
-  --vsc-button-secondary:   #e5e5e5;
-
-  --vsc-fg:                 #3b3b3b;
-  --vsc-fg-bright:          #000000;
-  --vsc-muted:              #616161;
-  --vsc-border:             #e5e5e5;
-  --vsc-widget-border:      #e5e5e5;
-  --vsc-shadow:             rgba(0, 0, 0, 0.16);
-
-  --vsc-accent:             #005fb8;
-  --vsc-accent-hover:       #0258a8;
-  --vsc-accent-fg:          #ffffff;
-  --vsc-focus:              #005fb8;
-  --vsc-link:               #005fb8;
-  --vsc-badge-bg:           #cccccc;
-  --vsc-badge-fg:           #3b3b3b;
-  --vsc-badge-accent:       #005fb8;
-
-  --vsc-hover:              #f2f2f2;
-  --vsc-selection:          #e8e8e8;
-  --vsc-selection-fg:       #000000;
-  --vsc-inactive-selection: #e4e6f1;
-  --vsc-item-hover:         rgba(0, 0, 0, 0.06);
-  --vsc-item-active:        rgba(0, 0, 0, 0.12);
-
-  --vsc-error:              #f85149;
-  --vsc-warn:               #bf8803;
-  --vsc-ok:                 #2ea043;
-  --vsc-info:               #005fb8;
-  --vsc-git-modified:       #895503;
-  --vsc-git-added:          #587c0c;
-  --vsc-git-deleted:        #ad0707;
-  --vsc-git-untracked:      #587c0c;
-
-  --vsc-line-number:        #6e7681;
-  --vsc-line-number-active: #171184;
-  --vsc-indent-guide:       #d3d3d3;
-  --vsc-indent-guide-active:#939393;
-  --vsc-scrollbar:          rgba(100, 100, 100, 0.4);
-  --vsc-scrollbar-hover:    rgba(100, 100, 100, 0.7);
-
-  --vsc-ansi-black:         #000000;
-  --vsc-ansi-red:           #cd3131;
-  --vsc-ansi-green:         #107c10;
-  --vsc-ansi-yellow:        #949800;
-  --vsc-ansi-blue:          #0451a5;
-  --vsc-ansi-magenta:       #bc05bc;
-  --vsc-ansi-cyan:          #0598bc;
-  --vsc-ansi-white:         #555555;
-  --vsc-ansi-bright-black:  #666666;
-  --vsc-ansi-bright-red:    #cd3131;
-  --vsc-ansi-bright-green:  #14ce14;
-  --vsc-ansi-bright-yellow: #b5ba00;
-  --vsc-ansi-bright-blue:   #0451a5;
-  --vsc-ansi-bright-magenta:#bc05bc;
-  --vsc-ansi-bright-cyan:   #0598bc;
-  --vsc-ansi-bright-white:  #a5a5a5;
-
-  --font-ui:   -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
-  --font-mono: "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
-}
-
-.dark {
   color-scheme: dark;
 
   --vsc-titlebar-bg:        #181818;
@@ -171,6 +88,9 @@
   --vsc-ansi-bright-magenta:#d670d6;
   --vsc-ansi-bright-cyan:   #29b8db;
   --vsc-ansi-bright-white:  #ffffff;
+
+  --font-ui:   -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
 }
 
 html, body, #root {

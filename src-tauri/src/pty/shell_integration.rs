@@ -1,4 +1,5 @@
-//! Shell integration: make the user's shell announce command boundaries.
+//! Shell integration: make the user's shell announce command boundaries and
+//! its live working directory.
 //!
 //! For zsh we point `ZDOTDIR` at a generated directory whose rc files first
 //! source the user's real rc files and then register `preexec`/`precmd`
@@ -10,8 +11,19 @@
 //! markers into `pty-command-done` events, which is what lets a command
 //! block close with a real exit code.
 //!
+//! The same `precmd`/`PROMPT_COMMAND`/`prompt` hooks also print an OSC 7
+//! sequence (`ESC ] 7 ; file://<host><path> BEL`) on every prompt, reporting
+//! the shell's current directory. None of the three hooks percent-encode
+//! `$PWD`/`$PWD.Path` before splicing it in — they emit the raw path and let
+//! the Rust-side parser (`osc.rs::parse_osc7_path`) handle decoding, since a
+//! raw (unencoded) path round-trips through percent-decoding unchanged for
+//! the overwhelming majority of real directory names, and doing the
+//! encoding in three different shell dialects would be considerably more
+//! fragile than doing the (already-implemented, already-tested) decoding
+//! once in Rust. The PTY reader turns this into a `pty-cwd` event.
+//!
 //! Every other shell falls back to plain spawning (no markers, blocks only
-//! close when the shell exits).
+//! close when the shell exits, and the tab's cwd never updates after spawn).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,12 +107,16 @@ fi
 PROMPT_EOL_MARK=''
 
 # OSC 133: A = prompt start, C = command output starts, D;<code> = command done
+# OSC 7: report the live working directory on every prompt (raw path, see
+# the module doc comment in shell_integration.rs for why this is not
+# percent-encoded here).
 __nexterm_preexec() {
   builtin printf '\e]133;C\a'
 }
 __nexterm_precmd() {
   local __nexterm_status=$?
   builtin printf '\e]133;D;%d\a' "$__nexterm_status"
+  builtin printf '\e]7;file://%s%s\a' "$HOST" "$PWD"
   builtin printf '\e]133;A\a'
 }
 autoload -Uz add-zsh-hook
@@ -200,9 +216,13 @@ __nexterm_preexec() {
   builtin printf '\e]133;C\a'
 }
 
+# OSC 7: report the live working directory on every prompt (raw path, see
+# the module doc comment above for why this is not percent-encoded here).
+# bash's hostname variable is $HOSTNAME (zsh/csh use $HOST instead).
 __nexterm_precmd() {
   local __nexterm_status=$?
   builtin printf '\e]133;D;%d\a' "$__nexterm_status"
+  builtin printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD"
   builtin printf '\e]133;A\a'
   __nexterm_pending_preexec=1
 }
@@ -243,12 +263,18 @@ pub fn prepare_bash_rcfile() -> Result<PathBuf, String> {
 
 const PWSH_INTEGRATION: &str = r#"# NexTerm shell integration (PowerShell) — generated file, do not edit.
 # OSC 133: A = prompt start, C = command output starts, D;<code> = command done
+# OSC 7: report the live working directory on every prompt (raw path — see
+# the module doc comment in shell_integration.rs for why this is not
+# percent-encoded here). No host is reported (an empty host is valid OSC 7);
+# a Windows drive-letter path is given a leading '/' (e.g. "/C:/Users/dev")
+# so it parses the same way a POSIX path does on the Rust side.
 #
 # PowerShell has no preexec/precmd hooks either, so — following VS Code's
 # shell integration pattern — we wrap two functions instead:
 #   - `prompt` runs every time PowerShell is about to draw a prompt. Its
-#     *return value* becomes the prompt text, so we splice the D/A markers
-#     onto the front of whatever the original prompt would have printed.
+#     *return value* becomes the prompt text, so we splice the D/A/OSC7
+#     markers onto the front of whatever the original prompt would have
+#     printed.
 #   - PSReadLine's `PSConsoleHostReadLine` runs once per line the user
 #     submits (after Enter, before it executes) — the closest thing to a
 #     preexec hook — so we wrap it to print C as a side effect via
@@ -265,7 +291,9 @@ function Global:prompt {
     if (-not $?) {
         $__nextermCode = if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
     }
-    $__nextermMarker = "$([char]27)]133;D;$__nextermCode$([char]7)$([char]27)]133;A$([char]7)"
+    $__nextermPath = $PWD.Path -replace '\\', '/'
+    if ($__nextermPath -notmatch '^/') { $__nextermPath = "/$__nextermPath" }
+    $__nextermMarker = "$([char]27)]133;D;$__nextermCode$([char]7)$([char]27)]7;file://$__nextermPath$([char]7)$([char]27)]133;A$([char]7)"
     "$__nextermMarker$(& $Global:__NextermOriginalPrompt)"
 }
 
@@ -335,7 +363,9 @@ mod tests {
             let body = fs::read_to_string(dir.join(name)).unwrap();
             assert!(body.contains("NexTerm shell integration"), "{name} missing header");
         }
-        assert!(fs::read_to_string(dir.join(".zshrc")).unwrap().contains("133;D;%d"));
+        let zshrc = fs::read_to_string(dir.join(".zshrc")).unwrap();
+        assert!(zshrc.contains("133;D;%d"));
+        assert!(zshrc.contains("]7;file://"));
     }
 
     #[test]
@@ -402,6 +432,7 @@ mod tests {
         assert!(combined.contains("\x1b]133;D;0\x07"), "no D;0 marker: {combined:?}");
         assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
         assert!(combined.contains("\x1b]133;A\x07"), "no A marker: {combined:?}");
+        assert!(combined.contains("\x1b]7;file://"), "no OSC 7 cwd marker: {combined:?}");
     }
 
     #[test]
@@ -416,6 +447,7 @@ mod tests {
         let contents = fs::read_to_string(&result.args[1]).unwrap();
         assert!(contents.contains("133;C"));
         assert!(contents.contains("133;D;"));
+        assert!(contents.contains("]7;file://"));
         assert!(contents.contains("PROMPT_COMMAND"));
     }
 
@@ -468,6 +500,7 @@ mod tests {
         assert!(combined.contains("\x1b]133;D;0\x07"), "no D;0 marker: {combined:?}");
         assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
         assert!(combined.contains("\x1b]133;A\x07"), "no A marker: {combined:?}");
+        assert!(combined.contains("\x1b]7;file://"), "no OSC 7 cwd marker: {combined:?}");
     }
 
     #[test]
@@ -490,6 +523,7 @@ mod tests {
             let contents = fs::read_to_string(script_path).unwrap();
             assert!(contents.contains("133;C"));
             assert!(contents.contains("133;D;"));
+            assert!(contents.contains("]7;file://"));
             assert!(contents.contains("function Global:prompt"));
             assert!(contents.contains("PSConsoleHostReadLine"));
         }

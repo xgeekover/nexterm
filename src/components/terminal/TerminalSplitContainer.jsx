@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Panel, Group, Separator } from 'react-resizable-panels';
-import { SplitSquareHorizontal, SplitSquareVertical, X, Plus, TerminalSquare, Pencil } from 'lucide-react';
+import { SplitSquareHorizontal, SplitSquareVertical, X, Plus, TerminalSquare, Pencil, Copy, Files, LayoutGrid } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
@@ -51,6 +52,50 @@ function paneAtPoint(clientX, clientY) {
   return { paneId: body.getAttribute('data-pane-body'), rect: body.getBoundingClientRect() };
 }
 
+/** Collects every leaf (group) of a split-tree, in DOM order. Mirrors
+ * terminalStore.js's own `collectLeaves`, kept local here since this
+ * component only ever needs read-only traversal for the group switcher. */
+function collectLeafNodes(node, acc = []) {
+  if (!node) return acc;
+  if (node.type === 'leaf') {
+    acc.push(node);
+    return acc;
+  }
+  node.children.forEach((child) => collectLeafNodes(child, acc));
+  return acc;
+}
+
+/**
+ * Copy text to the clipboard. Prefers the async Clipboard API (works inside
+ * Tauri's webview for a click-triggered call); falls back to the classic
+ * hidden-textarea + execCommand trick for any environment where that API is
+ * unavailable or throws (e.g. an insecure context).
+ */
+async function copyToClipboard(text) {
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch (_) {
+    // fall through to the legacy fallback below
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch (_) {
+    // Best effort — nothing else we can do without a clipboard API.
+  }
+}
+
 /** Translucent overlay showing where the dropped tab will land. */
 function DropIndicator({ zone }) {
   if (!zone) return null;
@@ -73,10 +118,18 @@ function DropIndicator({ zone }) {
   );
 }
 
-/** The chip that follows the cursor while dragging. */
+/**
+ * The chip that follows the cursor while dragging. Portaled straight onto
+ * <body> — this pane is a descendant of a panel that keeps a permanent
+ * non-`none` `transform` on itself after its mount animation finishes
+ * (`.animate-panel-in` + `animation-fill-mode: both`, see index.css), which
+ * makes that panel the containing block for `position: fixed` descendants
+ * and would otherwise offset this chip away from the actual cursor — the
+ * same bug ContextMenu.jsx works around the same way.
+ */
 function DragPreview({ drag }) {
   if (!drag?.active) return null;
-  return (
+  return createPortal(
     <div
       aria-hidden="true"
       className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
@@ -85,7 +138,8 @@ function DragPreview({ drag }) {
     >
       <TerminalSquare size={12} />
       <span className="truncate max-w-[140px]">{drag.title}</span>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -102,6 +156,7 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
   const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
   const createTab = useTerminalStore((s) => s.createTab);
+  const duplicateTab = useTerminalStore((s) => s.duplicateTab);
   const renameTab = useTerminalStore((s) => s.renameTab);
   const renameGroup = useTerminalStore((s) => s.renameGroup);
 
@@ -339,6 +394,23 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
                     if (target) beginRenameTab(target);
                   },
                 },
+                {
+                  key: 'duplicate-tab',
+                  label: 'Copy Tab',
+                  icon: Files,
+                  onSelect: () => {
+                    duplicateTab(chipMenu.tabId);
+                  },
+                },
+                {
+                  key: 'copy-path',
+                  label: 'Copy Path',
+                  icon: Copy,
+                  onSelect: () => {
+                    const target = paneTabs.find((t) => t.id === chipMenu.tabId);
+                    if (target?.cwd) copyToClipboard(target.cwd);
+                  },
+                },
               ]
             : []
         }
@@ -410,6 +482,55 @@ function SplitNode({ node, onSplit, onClose, canClose, headerSlot = null }) {
 }
 
 /**
+ * Warp-style group switcher: a compact bar listing every group (named or
+ * not) alongside an "All" entry. Selecting a group shows only it, full-size;
+ * "All" returns to the normal side-by-side split view. Only rendered when
+ * there is more than one group — with a single group there is nothing to
+ * switch between.
+ */
+function GroupSwitcher({ leaves, groupViewMode, focusedPaneId, onShowAll, onFocusGroup }) {
+  if (leaves.length < 2) return null;
+  return (
+    <div className="h-6 shrink-0 flex items-center gap-0.5 px-1 bg-vsc-panel border-b border-vsc-border overflow-x-auto select-none">
+      <LayoutGrid size={12} className="shrink-0 mr-1 text-vsc-muted" />
+      <button
+        type="button"
+        onClick={onShowAll}
+        className={cn(
+          'shrink-0 px-2 h-[20px] rounded-sm text-ui-sm transition-colors',
+          groupViewMode === 'split'
+            ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
+            : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover'
+        )}
+        title="Show all groups side by side"
+      >
+        All
+      </button>
+      {leaves.map((leaf, i) => {
+        const label = leaf.name || `Group ${i + 1}`;
+        const isFocused = groupViewMode === 'focus' && focusedPaneId === leaf.id;
+        return (
+          <button
+            key={leaf.id}
+            type="button"
+            onClick={() => onFocusGroup(leaf.id)}
+            title={`Show only "${label}"`}
+            className={cn(
+              'shrink-0 px-2 h-[20px] rounded-sm text-ui-sm truncate max-w-[140px] transition-colors',
+              isFocused
+                ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
+                : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover'
+            )}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * Top-level container for the terminal split system. Owns the drag gesture so
  * every pane can render the drop indicator for the pointer's current target.
  */
@@ -419,6 +540,10 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const closePane = useTerminalStore((s) => s.closePane);
   const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
+  const groupViewMode = useTerminalStore((s) => s.groupViewMode);
+  const focusedPaneId = useTerminalStore((s) => s.focusedPaneId);
+  const focusGroup = useTerminalStore((s) => s.focusGroup);
+  const showAllGroups = useTerminalStore((s) => s.showAllGroups);
 
   // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
   const [drag, setDrag] = useState(null);
@@ -524,6 +649,14 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   if (!splitTree) return null;
 
   const canClose = splitTree.type !== 'leaf';
+  const leaves = collectLeafNodes(splitTree);
+  // Ignore a stale/closed focus target (e.g. its group was closed) rather
+  // than rendering a blank pane — falls back to the normal split view, same
+  // as having fewer than two groups.
+  const focusedLeaf =
+    groupViewMode === 'focus' && leaves.length > 1
+      ? leaves.find((l) => l.id === focusedPaneId) || null
+      : null;
 
   return (
     <DragContext.Provider value={{ drag, beginDrag, cancelActiveDrag }}>
@@ -536,14 +669,35 @@ export function TerminalSplitContainer({ headerSlot = null }) {
             {headerSlot}
           </div>
         )}
+        <GroupSwitcher
+          leaves={leaves}
+          groupViewMode={groupViewMode}
+          focusedPaneId={focusedPaneId}
+          onShowAll={showAllGroups}
+          onFocusGroup={focusGroup}
+        />
         <div className="flex-1 overflow-hidden">
-          <SplitNode
-            node={splitTree}
-            onSplit={handleSplit}
-            onClose={handleClose}
-            canClose={canClose}
-            headerSlot={splitTree.type === 'leaf' ? headerSlot : null}
-          />
+          {focusedLeaf ? (
+            // Focus mode: render only the selected group, full-size. The rest
+            // of the split tree is left completely untouched — just not
+            // mounted — so switching back to "All" (or splitting/closing this
+            // very group) resumes exactly where the tree left off.
+            <TerminalPane
+              node={focusedLeaf}
+              onSplitH={() => handleSplit(focusedLeaf.id, 'horizontal')}
+              onSplitV={() => handleSplit(focusedLeaf.id, 'vertical')}
+              onClose={() => handleClose(focusedLeaf.id)}
+              canClose={true}
+            />
+          ) : (
+            <SplitNode
+              node={splitTree}
+              onSplit={handleSplit}
+              onClose={handleClose}
+              canClose={canClose}
+              headerSlot={splitTree.type === 'leaf' ? headerSlot : null}
+            />
+          )}
         </div>
         <DragPreview drag={drag} />
       </div>

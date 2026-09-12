@@ -23,7 +23,6 @@ const MONACO_DIFF_OPTIONS = {
 export function DiffViewer() {
   const diffView = useEditorStore((s) => s.diffView);
   const closeDiffView = useEditorStore((s) => s.closeDiffView);
-  const monacoTheme = useSettingsStore((s) => s.monacoTheme);
 
   if (!diffView || !diffView.open) return null;
 
@@ -85,7 +84,7 @@ export function DiffViewer() {
           original={diffView.original || ''}
           modified={diffView.modified || ''}
           language="javascript"
-          theme={monacoTheme}
+          theme="nexterm-dark"
           options={MONACO_DIFF_OPTIONS}
         />
       </div>

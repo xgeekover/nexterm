@@ -124,6 +124,8 @@ function buildPersistedPayload(state) {
     splitTree: serializeTreeForPersist(state.splitTree),
     tabs: state.tabs.map((t) => ({ id: t.id, title: t.title, cwd: t.cwd })),
     activePaneId: state.activePaneId,
+    groupViewMode: state.groupViewMode,
+    focusedPaneId: state.focusedPaneId,
   };
 }
 
@@ -203,12 +205,12 @@ export const useTerminalStore = create((set, get) => {
    * only in the freshly-created pane, instead of it also lingering in
    * whichever pane happened to be active when the PTY finished spawning.
    */
-  const spawnTab = async (title = null) => {
+  const spawnTab = async (title = null, cwd = null) => {
     try {
       const ptySession = await invoke('pty_spawn', {
         cols: 80,
         rows: 24,
-        cwd: get().cwd || '/workspace',
+        cwd: cwd || get().cwd || '/workspace',
       });
 
       const nextIndex = get().tabs.length + 1;
@@ -283,12 +285,21 @@ export const useTerminalStore = create((set, get) => {
     const activeTabId = activeLeaf?.activeTabId || activeLeaf?.tabIds?.[0] || newTabs[0].id;
     const activeTab = newTabs.find((t) => t.id === activeTabId) || newTabs[0];
 
+    // A saved focus target only means anything if that group still exists
+    // and there is more than one group to switch between — otherwise fall
+    // back to the normal split view rather than restoring into a focus mode
+    // with nothing valid to focus.
+    const wantsFocus = saved.groupViewMode === 'focus' && leaves.length > 1 &&
+      leaves.some((l) => l.id === saved.focusedPaneId);
+
     return {
       tabs: newTabs,
       splitTree: tree,
       activePaneId: activePaneId || 'pane-root',
       activeTabId,
       cwd: activeTab.cwd || rootPath,
+      groupViewMode: wantsFocus ? 'focus' : 'split',
+      focusedPaneId: wantsFocus ? saved.focusedPaneId : null,
     };
   };
 
@@ -309,10 +320,28 @@ export const useTerminalStore = create((set, get) => {
     // The pane currently focused for keyboard shortcuts / block-selection / split-origin.
     activePaneId: 'pane-root',
 
+    // Warp-style group view: 'split' shows every group side by side (the
+    // split tree as-is); 'focus' shows only `focusedPaneId`'s group,
+    // full-size, while the rest of the tree stays intact but unrendered.
+    groupViewMode: 'split',
+    focusedPaneId: null,
+
     /**
      * Mark a pane as the active one (called on click/focus of a pane).
      */
     setActivePane: (paneId) => set({ activePaneId: paneId }),
+
+    /**
+     * Switch to focus view on a single group — everything else in the split
+     * tree stays exactly as it is, just unmounted. Also focuses that pane so
+     * keyboard shortcuts and split-origin follow the visible group.
+     */
+    focusGroup: (paneId) => set({ groupViewMode: 'focus', focusedPaneId: paneId, activePaneId: paneId }),
+
+    /**
+     * Return to the normal side-by-side split view.
+     */
+    showAllGroups: () => set({ groupViewMode: 'split' }),
 
     /**
      * Split a leaf pane into two children (horizontal or vertical). The new
@@ -629,6 +658,24 @@ export const useTerminalStore = create((set, get) => {
           }),
         }));
       }));
+      // OSC 7 (see src-tauri/src/pty/osc.rs / shell_integration.rs): the
+      // shell reports its live working directory on every prompt. Update
+      // only the tab that owns this session — and the store's own `cwd`
+      // (used as the default spawn dir for new tabs/panes) only when that
+      // tab happens to be the active one — so restoring/duplicating always
+      // uses where the user actually is, not just where the tab started.
+      unlisteners.push(await listen('pty-cwd', (payload) => {
+        const { session_id, cwd } = payload || {};
+        if (!session_id || typeof cwd !== 'string' || !cwd) return;
+        set((state) => {
+          const tab = state.tabs.find((t) => t.sessionId === session_id);
+          if (!tab || tab.cwd === cwd) return {};
+          return {
+            tabs: state.tabs.map((t) => (t.sessionId === session_id ? { ...t, cwd } : t)),
+            cwd: tab.id === state.activeTabId ? cwd : state.cwd,
+          };
+        });
+      }));
     },
 
     dispose: () => {
@@ -685,6 +732,8 @@ export const useTerminalStore = create((set, get) => {
             isInitialized: true,
             splitTree: restored.splitTree,
             activePaneId: restored.activePaneId,
+            groupViewMode: restored.groupViewMode,
+            focusedPaneId: restored.focusedPaneId,
           });
           await get().attachListeners();
           return;
@@ -714,6 +763,8 @@ export const useTerminalStore = create((set, get) => {
           isInitialized: true,
           splitTree: { type: 'leaf', id: 'pane-root', tabIds: [initialTab.id], activeTabId: initialTab.id },
           activePaneId: 'pane-root',
+          groupViewMode: 'split',
+          focusedPaneId: null,
         });
 
         await get().attachListeners();
@@ -742,6 +793,32 @@ export const useTerminalStore = create((set, get) => {
       if (!newTab) return null;
 
       const targetPaneId = paneId || get().activePaneId;
+      set((state) => ({
+        activeTabId: newTab.id,
+        activePaneId: targetPaneId,
+        splitTree: addTabToPane(state.splitTree, targetPaneId, newTab.id),
+      }));
+
+      return newTab;
+    },
+
+    /**
+     * "Copy Tab": open a new terminal in the SAME (live) working directory as
+     * `tabId`, placed in that same tab's group, and make it the active tab
+     * there. `tab.cwd` is kept current by the `pty-cwd` listener below (OSC
+     * 7), so this lands wherever the user actually `cd`'d to — not just
+     * where the original tab was first spawned.
+     */
+    duplicateTab: async (tabId) => {
+      const source = get().tabs.find((t) => t.id === tabId);
+      if (!source) return null;
+
+      const holder = leafHoldingTab(get().splitTree, tabId);
+      const targetPaneId = holder?.id || get().activePaneId;
+
+      const newTab = await spawnTab(null, source.cwd);
+      if (!newTab) return null;
+
       set((state) => ({
         activeTabId: newTab.id,
         activePaneId: targetPaneId,
@@ -938,7 +1015,9 @@ useTerminalStore.subscribe((state, prevState) => {
   if (
     state.splitTree === prevState.splitTree &&
     state.tabs === prevState.tabs &&
-    state.activePaneId === prevState.activePaneId
+    state.activePaneId === prevState.activePaneId &&
+    state.groupViewMode === prevState.groupViewMode &&
+    state.focusedPaneId === prevState.focusedPaneId
   ) {
     return;
   }

@@ -59,16 +59,10 @@ describe('Tier 1: Monaco Editor & File Tabs Feature Coverage', () => {
     assert.equal(writeCalls[writeCalls.length - 1].args.path, '/workspace/README.md');
   });
 
-  test('TC-EDIT-05: Monaco editor theme synchronizes with application dark/light mode', () => {
+  test('TC-EDIT-05: Monaco editor theme is pinned to nexterm-dark (no light mode)', () => {
     assert.equal(app.theme, 'dark');
     assert.equal(app.monacoTheme, 'nexterm-dark');
-
-    app.setTheme('light');
-    assert.equal(app.theme, 'light');
-    assert.equal(app.monacoTheme, 'nexterm-light', 'Monaco theme must switch to vs-light in light mode');
-
-    app.setTheme('dark');
-    assert.equal(app.monacoTheme, 'nexterm-dark', 'Monaco theme must switch back to vs-dark in dark mode');
+    assert.equal(typeof app.setTheme, 'undefined', 'setTheme must not exist; light mode was removed');
   });
 
   test('TC-EDIT-06: Opening an already opened file focuses the existing tab without duplication', async () => {

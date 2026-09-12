@@ -137,8 +137,6 @@ pub fn spec() -> Vec<Submenu> {
             custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
             custom("toggle-secondary", "Toggle AI Side Bar", "CmdOrCtrl+Alt+B"),
             Sep,
-            custom("toggle-theme", "Toggle Light/Dark Theme", "CmdOrCtrl+Shift+T"),
-            Sep,
             P(Fullscreen),
         ],
     });
@@ -291,7 +289,7 @@ mod tests {
         // Mirrors the `case` labels in src/hooks/useMenuEvents.js.
         let expected = [
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
-            "toggle-sidebar", "toggle-panel", "toggle-secondary", "toggle-theme",
+            "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "split-right", "split-down", "close-pane", "clear-terminal",
         ];
         for e in expected {

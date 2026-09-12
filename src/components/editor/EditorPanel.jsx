@@ -1,13 +1,17 @@
 import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Panel, Group, Separator } from 'react-resizable-panels';
 import Editor from '@monaco-editor/react';
 import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
-import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs, EditorDragContext, markEditorDragEnded } from './EditorTabs.jsx';
 import { DiffViewer } from './DiffViewer.jsx';
 import { cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
+
+// The app is dark-only (light mode was removed from settingsStore), so the
+// Monaco theme is a fixed constant instead of a live settingsStore read.
+const MONACO_THEME = 'nexterm-dark';
 
 const MONACO_OPTIONS = {
   fontFamily: '"SF Mono", Menlo, Monaco, "Cascadia Code", Consolas, monospace',
@@ -79,10 +83,17 @@ function DropIndicator({ zone }) {
   );
 }
 
-/** The chip that follows the cursor while dragging. */
+/**
+ * The chip that follows the cursor while dragging. Portaled straight onto
+ * <body> — this pane is a descendant of a panel that keeps a permanent
+ * non-`none` `transform` on itself after its mount animation finishes
+ * (`.animate-panel-in` + `animation-fill-mode: both`, see index.css), which
+ * makes that panel the containing block for `position: fixed` descendants
+ * and would otherwise offset this chip away from the actual cursor.
+ */
 function DragPreview({ drag }) {
   if (!drag?.active) return null;
-  return (
+  return createPortal(
     <div
       aria-hidden="true"
       className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
@@ -91,7 +102,8 @@ function DragPreview({ drag }) {
     >
       <FileCode2 size={12} />
       <span className="truncate max-w-[140px]">{drag.title}</span>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -116,7 +128,6 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const editBuffer = useEditorStore((s) => s.editBuffer);
   const saveFile = useEditorStore((s) => s.saveFile);
   const rootPath = useEditorStore((s) => s.rootPath);
-  const monacoTheme = useSettingsStore((s) => s.monacoTheme);
 
   const { drag } = useContext(EditorDragContext);
 
@@ -179,7 +190,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               path={activeTab.filePath}
               height="100%"
               language={activeTab.language || 'javascript'}
-              theme={monacoTheme}
+              theme={MONACO_THEME}
               value={activeTab.content}
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
               options={MONACO_OPTIONS}

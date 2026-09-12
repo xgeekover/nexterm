@@ -22,29 +22,22 @@ describe('Tier 4: Real-World Scenarios (End-to-End User Journeys)', () => {
     assert.equal(activeTab.fileName, 'package.json');
     assert.equal(activeTab.language, 'json');
 
-    // Step 3: Switch Theme to Light via Command Palette
-    app.openCommandPalette();
-    const themeCmd = app.searchPalette('switch').commands.find((c) => c.action === 'switch_theme');
-    await app.executePaletteItem(themeCmd);
-    assert.equal(app.theme, 'light');
-    assert.equal(app.monacoTheme, 'nexterm-light');
-
-    // Step 4: Create a dedicated build terminal tab
+    // Step 3: Create a dedicated build terminal tab
     const buildTab = await app.createTerminalTab('Build & Lint');
     assert.equal(app.activeTerminalTabId, buildTab.id);
 
-    // Step 5: Execute build commands
+    // Step 4: Execute build commands
     const b1 = await app.executeTerminalCommand('echo building');
     const b2 = await app.executeTerminalCommand('echo linting');
     assert.equal(buildTab.blocks.length, 2);
 
-    // Step 6: Pin the important build block and clear others
+    // Step 5: Pin the important build block and clear others
     app.pinBlock(b1.id);
     app.clearTerminalBlocks(buildTab.id);
     assert.equal(buildTab.blocks.length, 1);
     assert.equal(buildTab.blocks[0].id, b1.id);
 
-    // Step 7: Switch back to default terminal tab
+    // Step 6: Switch back to default terminal tab
     app.switchTerminalTab('tab-term-1');
     assert.equal(app.activeTerminalTabId, 'tab-term-1');
   });

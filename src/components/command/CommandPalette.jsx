@@ -18,7 +18,6 @@ import { chord } from '../../lib/platform.js';
 export function CommandPalette() {
   const isOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
   const setOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
-  const toggleTheme = useSettingsStore((s) => s.toggleTheme);
   const setActiveView = useSettingsStore((s) => s.setActiveView);
 
   const fileTree = useEditorStore((s) => s.fileTree);
@@ -66,15 +65,6 @@ export function CommandPalette() {
 
   // 2. Built-in Commands
   const commandItems = [
-    {
-      type: 'command',
-      hint: chord('mod', 'k'),
-      id: 'cmd-switch-theme',
-      title: 'Switch Dark / Light Theme',
-      subtitle: 'Toggles global theme color palette',
-      icon: <Sun size={16} />,
-      action: () => toggleTheme(),
-    },
     {
       type: 'command',
       hint: chord('ctrl', 'shift', '`'),

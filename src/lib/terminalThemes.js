@@ -8,10 +8,14 @@
  * Dark/Tomorrow Night terminal ports, etc.) — never an invented
  * approximation. `dark-modern` is the one exception: it is not a fixed
  * palette at all, it is "whatever the app's own --vsc-* tokens currently
- * resolve to", so it keeps tracking the app's own light/dark flip exactly
- * like the terminal did before this file existed. `light-modern` is the
- * fixed snapshot of the app's own :root (light) tokens, so picking it forces
- * VS Code's Light Modern terminal look even while the app shell is dark.
+ * resolve to". The app is dark-only (light mode was removed), so those
+ * tokens are now a constant — `followsAppTheme` just means "read the live
+ * CSS custom properties instead of a literal below" rather than "track a
+ * light/dark flip" (there is no flip anymore). `light-modern` and
+ * `solarized-light` remain as fixed, explicitly-selectable terminal colour
+ * schemes independent of the (now single) app theme — picking one of them
+ * still forces that terminal look even though the app shell itself is
+ * always dark.
  *
  * Shape: every `theme` object is a complete xterm `ITheme` — background,
  * foreground, cursor, cursorAccent, selectionBackground, and all 16 ANSI
@@ -29,14 +33,17 @@ export const TERMINAL_THEMES = {
     label: 'Dark Modern',
     // No literal palette: terminalRegistry.js's readTheme() supplies the
     // live --vsc-* values at apply time, which is exactly today's terminal
-    // behaviour — this is what makes it the default and what makes it keep
-    // following the app's own light/dark toggle.
+    // behaviour — this is what makes it the default. The app has no light
+    // mode, so those tokens are effectively constant; this just avoids
+    // duplicating them as a second literal here.
     followsAppTheme: true,
     theme: null,
   },
 
-  // A fixed snapshot of this app's own :root (light) design tokens — VS
-  // Code's actual built-in "Light Modern" terminal ANSI palette.
+  // VS Code's built-in "Light Modern" terminal ANSI palette, fixed here as a
+  // literal (the app's own tokens are dark-only now, so this can no longer
+  // be sourced by snapshotting :root — it is a standalone, user-selectable
+  // terminal colour scheme like every other fixed entry below).
   'light-modern': {
     label: 'Light Modern',
     theme: {

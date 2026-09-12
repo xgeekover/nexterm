@@ -20,6 +20,15 @@ pub struct PtyCommandDonePayload {
     pub exit_code: Option<u32>,
 }
 
+/// Emitted when the shell reports (via OSC 7) its live working directory —
+/// on every prompt, so this always reflects wherever the user last `cd`'d
+/// to, not just where the session was originally spawned.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PtyCwdPayload {
+    pub session_id: String,
+    pub cwd: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PtySessionInfo {
     pub id: String,

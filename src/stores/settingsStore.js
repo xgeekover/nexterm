@@ -1,8 +1,6 @@
 import { create } from 'zustand';
 
 export const useSettingsStore = create((set, get) => ({
-  theme: 'dark',
-  monacoTheme: 'nexterm-dark',
   activeView: 'terminal', // 'terminal' | 'editor' | 'agents' | 'chat' | 'all' — legacy, mapped onto shell flags below
   layoutMode: 'split', // 'split' | 'single'
   isCommandPaletteOpen: false,
@@ -41,30 +39,6 @@ export const useSettingsStore = create((set, get) => ({
   viewLocations: {
     explorer: 'left',
     terminal: 'bottom',
-  },
-
-  setTheme: (theme) => {
-    if (theme !== 'dark' && theme !== 'light') {
-      throw new Error(`Invalid theme: ${theme}`);
-    }
-
-    if (typeof document !== 'undefined') {
-      if (theme === 'dark') {
-        document.documentElement.classList.add('dark');
-      } else {
-        document.documentElement.classList.remove('dark');
-      }
-    }
-
-    set({
-      theme,
-      monacoTheme: theme === 'dark' ? 'nexterm-dark' : 'nexterm-light',
-    });
-  },
-
-  toggleTheme: () => {
-    const nextTheme = get().theme === 'dark' ? 'light' : 'dark';
-    get().setTheme(nextTheme);
   },
 
   // Legacy view switcher — kept because other subsystems still call it to

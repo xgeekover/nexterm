@@ -30,11 +30,11 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
 
   test('TC-PAL-03: Searching commands filters built-in IDE actions', () => {
     app.openCommandPalette();
-    const results = app.searchPalette('theme');
+    const results = app.searchPalette('terminal');
 
-    assert.ok(results.commands.length > 0, 'Should find matching command for "theme"');
-    assert.equal(results.commands[0].title, 'Switch Dark/Light Theme');
-    assert.equal(results.commands[0].action, 'switch_theme');
+    assert.ok(results.commands.length > 0, 'Should find matching command for "terminal"');
+    assert.equal(results.commands[0].title, 'Toggle Terminal');
+    assert.equal(results.commands[0].action, 'toggle_terminal');
   });
 
   test('TC-PAL-04: Searching AI actions filters quick prompt actions', () => {
@@ -58,15 +58,12 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
   });
 
   test('TC-PAL-06: Selecting an IDE command from palette executes corresponding action', async () => {
-    assert.equal(app.theme, 'dark');
-
     app.openCommandPalette();
-    const results = app.searchPalette('switch');
-    const themeCmd = results.commands.find((c) => c.action === 'switch_theme');
-    assert.ok(themeCmd, 'Theme switch command must exist');
+    const results = app.searchPalette('save all');
+    const saveAllCmd = results.commands.find((c) => c.action === 'save_all');
+    assert.ok(saveAllCmd, 'Save All command must exist');
 
-    await app.executePaletteItem(themeCmd);
-    assert.equal(app.theme, 'light', 'Theme should switch to light');
+    await app.executePaletteItem(saveAllCmd);
     assert.equal(app.paletteOpen, false, 'Palette should close');
   });
 });

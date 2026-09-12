@@ -6,7 +6,6 @@ import { useTerminalStore } from '../stores/terminalStore.js';
 export function useKeybindings() {
   const setCommandPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
   const isCommandPaletteOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
-  const toggleTheme = useSettingsStore((s) => s.toggleTheme);
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
   const saveFile = useEditorStore((s) => s.saveFile);
@@ -46,13 +45,6 @@ export function useKeybindings() {
         if (activeEditorTabId) {
           saveFile(activeEditorTabId);
         }
-        return;
-      }
-
-      // ⌘Shift+T: Toggle Theme
-      if (isMod && e.shiftKey && e.key.toLowerCase() === 't') {
-        e.preventDefault();
-        toggleTheme();
         return;
       }
 
@@ -132,7 +124,6 @@ export function useKeybindings() {
     activeEditorTabId,
     saveFile,
     setCommandPaletteOpen,
-    toggleTheme,
     toggleSidebar,
     togglePanel,
     splitActivePane,

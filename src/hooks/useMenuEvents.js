@@ -46,9 +46,6 @@ export function useMenuEvents() {
         case 'toggle-secondary':
           settings.toggleSecondarySidebar?.();
           break;
-        case 'toggle-theme':
-          settings.toggleTheme?.();
-          break;
         case 'split-right':
           terminal.splitActivePane?.('horizontal');
           break;

@@ -158,20 +158,6 @@ function buildItems(monoPlaceholder) {
     },
     // ---- Workbench ----
     {
-      id: 'theme',
-      section: 'workbench',
-      key: 'theme',
-      settingKey: 'workbench.colorTheme',
-      title: 'Color Theme',
-      description: 'Specifies the color theme used in the workbench.',
-      control: 'select',
-      options: [
-        { value: 'dark', label: 'Dark Modern' },
-        { value: 'light', label: 'Light Modern' },
-      ],
-      isTheme: true,
-    },
-    {
       id: 'reducedMotion',
       section: 'workbench',
       key: 'reducedMotion',
@@ -290,8 +276,6 @@ function SettingRow({ item, value, isDefault, onChange, onReset }) {
 export function SettingsWindow() {
   const isOpen = useSettingsStore((s) => s.isSettingsModalOpen);
   const setOpen = useSettingsStore((s) => s.setSettingsModalOpen);
-  const theme = useSettingsStore((s) => s.theme);
-  const setTheme = useSettingsStore((s) => s.setTheme);
   const setSetting = useSettingsStore((s) => s.setSetting);
   const resetSettings = useSettingsStore((s) => s.resetSettings);
   const settingsDefaults = useSettingsStore((s) => s.settingsDefaults);
@@ -311,7 +295,6 @@ export function SettingsWindow() {
   const reducedMotion = useSettingsStore((s) => s.reducedMotion);
 
   const values = {
-    theme,
     terminalFontFamily,
     terminalFontSize,
     terminalLineHeight,
@@ -428,15 +411,10 @@ export function SettingsWindow() {
   };
 
   const handleChange = (item, raw) => {
-    if (item.isTheme) {
-      setTheme(raw);
-      return;
-    }
     setSetting(item.key, raw);
   };
 
   const handleReset = (item) => {
-    if (item.isTheme) return;
     setSetting(item.key, settingsDefaults[item.key]);
   };
 
@@ -535,9 +513,7 @@ export function SettingsWindow() {
                   .filter((item) => item.section === section.id)
                   .map((item) => {
                     const value = values[item.key];
-                    const isDefault = item.isTheme
-                      ? true
-                      : Object.is(value, settingsDefaults[item.key]);
+                    const isDefault = Object.is(value, settingsDefaults[item.key]);
                     return (
                       <SettingRow
                         key={item.id}

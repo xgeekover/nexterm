@@ -4,11 +4,8 @@ import {
   Search,
   SquareTerminal,
   Settings,
-  Sun,
-  Moon,
 } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { useTheme } from '../../hooks/useTheme.js';
 import { cn } from '../../lib/utils.js';
 
 function ActivityBarButton({ icon: Icon, label, isActive, onClick }) {
@@ -37,15 +34,19 @@ export function Sidebar() {
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const panelVisible = useSettingsStore((s) => s.panelVisible);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
-  const secondarySidebarVisible = useSettingsStore((s) => s.secondarySidebarVisible);
-  const secondaryTab = useSettingsStore((s) => s.secondaryTab);
-  const toggleSecondarySidebar = useSettingsStore((s) => s.toggleSecondarySidebar);
   const isCommandPaletteOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
   const setCommandPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
   const setSettingsModalOpen = useSettingsStore((s) => s.setSettingsModalOpen);
-  const { theme, toggleTheme } = useTheme();
 
+  // Order: 1) Terminal, 2) Explorer, 3) Search.
   const topItems = [
+    {
+      id: 'terminal',
+      label: 'Terminal',
+      icon: SquareTerminal,
+      isActive: panelVisible,
+      onClick: togglePanel,
+    },
     {
       id: 'explorer',
       label: 'Explorer',
@@ -59,13 +60,6 @@ export function Sidebar() {
       icon: Search,
       isActive: isCommandPaletteOpen,
       onClick: () => setCommandPaletteOpen(true),
-    },
-    {
-      id: 'terminal',
-      label: 'Terminal',
-      icon: SquareTerminal,
-      isActive: panelVisible,
-      onClick: togglePanel,
     },
   ];
 
@@ -91,14 +85,6 @@ export function Sidebar() {
           className="w-full h-activitybar flex items-center justify-center text-vsc-activitybar-muted hover:text-vsc-activitybar-fg transition-colors"
         >
           <Settings size={24} strokeWidth={1.75} />
-        </button>
-        <button
-          type="button"
-          onClick={toggleTheme}
-          title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Theme`}
-          className="w-full h-activitybar flex items-center justify-center text-vsc-activitybar-muted hover:text-vsc-activitybar-fg transition-colors"
-        >
-          {theme === 'dark' ? <Sun size={24} strokeWidth={1.75} /> : <Moon size={24} strokeWidth={1.75} />}
         </button>
       </div>
     </aside>

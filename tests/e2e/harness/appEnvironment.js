@@ -4,7 +4,9 @@ export class AppEnvironment {
   constructor(ipc = null) {
     this.ipc = ipc || new MockIpcBridge();
 
-    // Theme state
+    // Theme state — the app is dark-only (light mode was removed); these are
+    // fixed constants, not mutable state. There is deliberately no
+    // setTheme/toggleTheme on this mock, mirroring the real app.
     this.theme = 'dark';
     this.monacoTheme = 'nexterm-dark';
 
@@ -110,19 +112,6 @@ export class AppEnvironment {
     for (const unlisten of this.unlisteners) {
       if (typeof unlisten === 'function') unlisten();
     }
-  }
-
-  // --- THEME ---
-  setTheme(theme) {
-    if (theme !== 'dark' && theme !== 'light') {
-      throw new Error(`Invalid theme: ${theme}`);
-    }
-    this.theme = theme;
-    this.monacoTheme = theme === 'dark' ? 'nexterm-dark' : 'nexterm-light';
-  }
-
-  toggleTheme() {
-    this.setTheme(this.theme === 'dark' ? 'light' : 'dark');
   }
 
   // --- TERMINAL ---
@@ -369,7 +358,6 @@ export class AppEnvironment {
     const commands = [
       { type: 'command', id: 'cmd_toggle_term', title: 'Toggle Terminal', action: 'toggle_terminal' },
       { type: 'command', id: 'cmd_new_agent', title: 'New Agent', action: 'new_agent' },
-      { type: 'command', id: 'cmd_switch_theme', title: 'Switch Dark/Light Theme', action: 'switch_theme' },
       { type: 'command', id: 'cmd_save_all', title: 'Save All Files', action: 'save_all' },
     ].filter((c) => c.title.toLowerCase().includes(q));
 
@@ -386,9 +374,7 @@ export class AppEnvironment {
     if (item.type === 'file') {
       result = await this.openFile(item.path);
     } else if (item.type === 'command') {
-      if (item.action === 'switch_theme') {
-        this.toggleTheme();
-      } else if (item.action === 'new_agent') {
+      if (item.action === 'new_agent') {
         // opens agent create modal or registers agent
       } else if (item.action === 'save_all') {
         for (const tab of this.editorTabs) {

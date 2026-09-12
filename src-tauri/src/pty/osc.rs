@@ -1,4 +1,4 @@
-//! OSC 133 shell-integration filter.
+//! OSC 133 / OSC 7 shell-integration filter.
 //!
 //! The injected shell hooks (see `shell_integration.rs`) print
 //! `ESC ] 133 ; <marker> [; exit] BEL` around every prompt/command:
@@ -8,12 +8,21 @@
 //! - `C` command executed
 //! - `D;<exit>` command done → reported to the frontend as `pty-command-done`
 //!
+//! The same hooks also print `ESC ] 7 ; file://<host><path> BEL` (OSC 7,
+//! the same "report the live working directory" convention VS Code, iTerm2
+//! and Warp use) on every prompt, so the app always knows where the shell
+//! actually is — not just where it was originally spawned. `<path>` is
+//! percent-encoded per RFC 3986; this filter percent-decodes it before
+//! reporting it as `Marker::WorkingDirectory` → the frontend sees it as a
+//! `pty-cwd` event (see `manager.rs`). `<host>` is accepted but ignored —
+//! only the path is meaningful here.
+//!
 //! This is a *real terminal*: every byte the shell writes — prompts, the
 //! echo of what you type, command output — is forwarded to the screen
-//! unchanged. The only bytes this filter ever removes are the OSC 133
-//! marker sequences themselves (so `\e]133;...` never reaches xterm), while
-//! still reporting the markers it recognised so the app can react to command
-//! boundaries (e.g. closing a bookkeeping block on `CommandFinished`).
+//! unchanged. The only bytes this filter ever removes are the OSC 133/OSC 7
+//! marker sequences themselves (so neither `\e]133;...` nor `\e]7;...` ever
+//! reaches xterm), while still reporting the markers it recognised so the
+//! app can react to command boundaries and cwd changes.
 //!
 //! Everything else in the byte stream passes through untouched, including
 //! other OSC sequences (window title, hyperlinks) and CSI colour codes.
@@ -31,6 +40,9 @@ pub enum Marker {
     CommandStart,
     CommandExecuted,
     CommandFinished(Option<u32>),
+    /// OSC 7: the shell's live working directory, percent-decoded, host
+    /// component (if any) stripped.
+    WorkingDirectory(String),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -141,15 +153,66 @@ impl OscFilter {
 
 fn parse_marker(payload: &[u8]) -> Option<Marker> {
     let text = std::str::from_utf8(payload).ok()?;
-    let rest = text.strip_prefix("133;")?;
-    let mut parts = rest.splitn(2, ';');
-    let kind = parts.next()?;
-    let arg = parts.next();
-    match kind {
-        "A" => Some(Marker::PromptStart),
-        "B" => Some(Marker::CommandStart),
-        "C" => Some(Marker::CommandExecuted),
-        "D" => Some(Marker::CommandFinished(arg.and_then(|a| a.trim().parse::<u32>().ok()))),
+
+    if let Some(rest) = text.strip_prefix("133;") {
+        let mut parts = rest.splitn(2, ';');
+        let kind = parts.next()?;
+        let arg = parts.next();
+        return match kind {
+            "A" => Some(Marker::PromptStart),
+            "B" => Some(Marker::CommandStart),
+            "C" => Some(Marker::CommandExecuted),
+            "D" => Some(Marker::CommandFinished(arg.and_then(|a| a.trim().parse::<u32>().ok()))),
+            _ => None,
+        };
+    }
+
+    if let Some(rest) = text.strip_prefix("7;") {
+        return parse_osc7_path(rest).map(Marker::WorkingDirectory);
+    }
+
+    None
+}
+
+/// Parse an OSC 7 payload's `file://<host><path>` URI — `<host>` is optional
+/// (an empty string is fine, e.g. `file:///Users/dev`) and always discarded,
+/// since only the absolute path matters to callers. Returns `None` for
+/// anything that isn't a `file://` URI with an absolute path, so a foreign
+/// use of OSC 7 falls through to the "pass it through unchanged" path
+/// alongside every other unrecognised OSC sequence.
+fn parse_osc7_path(rest: &str) -> Option<String> {
+    let uri = rest.strip_prefix("file://")?;
+    let path_start = uri.find('/')?;
+    Some(percent_decode(&uri[path_start..]))
+}
+
+/// RFC 3986 percent-decoding. Invalid/incomplete `%XX` escapes are copied
+/// through literally rather than rejected outright — a real path should
+/// never contain one, but there is no reason to lose the rest of an
+/// otherwise-good path over it.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
 }
@@ -255,5 +318,73 @@ mod tests {
         let mut f = OscFilter::new();
         let r = feed_str(&mut f, "\x1b]133;D\x07");
         assert_eq!(r.markers, vec![Marker::CommandFinished(None)]);
+    }
+
+    #[test]
+    fn osc7_parsed_and_stripped() {
+        let mut f = OscFilter::new();
+        let r = feed_str(
+            &mut f,
+            "\x1b]7;file://myhost/Users/dev/project\x07user@host % ",
+        );
+        assert_eq!(r.output, "user@host % ", "the OSC 7 sequence itself must never reach the screen");
+        assert_eq!(r.markers, vec![Marker::WorkingDirectory("/Users/dev/project".to_string())]);
+    }
+
+    #[test]
+    fn osc7_percent_encoded_path_is_decoded() {
+        let mut f = OscFilter::new();
+        // A space and a literal '%' in the directory name, percent-encoded.
+        let r = feed_str(&mut f, "\x1b]7;file://myhost/Users/dev/My%20Project%2520\x07");
+        assert_eq!(
+            r.markers,
+            vec![Marker::WorkingDirectory("/Users/dev/My Project%20".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc7_with_no_host() {
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]7;file:///Users/dev\x07");
+        assert_eq!(r.markers, vec![Marker::WorkingDirectory("/Users/dev".to_string())]);
+    }
+
+    #[test]
+    fn osc7_split_across_chunks() {
+        let mut f = OscFilter::new();
+        let a = feed_str(&mut f, "before\x1b]7;file://host/Users/d");
+        assert_eq!(a.output, "before");
+        assert!(a.markers.is_empty());
+        let b = feed_str(&mut f, "ev/proj\x07after");
+        assert_eq!(b.output, "after");
+        assert_eq!(b.markers, vec![Marker::WorkingDirectory("/Users/dev/proj".to_string())]);
+    }
+
+    #[test]
+    fn osc7_alongside_osc133_markers() {
+        let mut f = OscFilter::new();
+        let r = feed_str(
+            &mut f,
+            "\x1b]133;D;0\x07\x1b]7;file://h/work\x07\x1b]133;A\x07user@host % ",
+        );
+        assert_eq!(r.output, "user@host % ");
+        assert_eq!(
+            r.markers,
+            vec![
+                Marker::CommandFinished(Some(0)),
+                Marker::WorkingDirectory("/work".to_string()),
+                Marker::PromptStart,
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_osc7_falls_through_as_foreign_osc() {
+        // Not a `file://` URI — not our marker, so it must pass through
+        // untouched, same as any other unrecognised OSC sequence.
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]7;not-a-uri\x07ok");
+        assert_eq!(r.output, "\x1b]7;not-a-uri\x07ok");
+        assert!(r.markers.is_empty());
     }
 }

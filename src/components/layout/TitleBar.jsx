@@ -4,7 +4,7 @@ import { APP_NAME } from '../../lib/constants.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
-import { chord } from '../../lib/platform.js';
+import { chord, isMac } from '../../lib/platform.js';
 
 const layoutButton =
   'w-6 h-6 flex items-center justify-center rounded transition-colors';
@@ -24,7 +24,12 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className="h-[35px] shrink-0 flex items-center px-3 bg-vsc-titlebar border-b border-vsc-border select-none text-ui-sm"
+      className={cn(
+        "h-[35px] shrink-0 flex items-center px-3 bg-vsc-titlebar border-b border-vsc-border select-none text-ui-sm",
+        // macOS draws the traffic lights over the webview (titleBarStyle: Overlay),
+        // so keep their corner clear instead of letting them cover our content.
+        isMac && "pl-[78px]"
+      )}
     >
       {/* Left: app name + workspace folder */}
       <div className="flex items-center gap-2 flex-1 min-w-0">

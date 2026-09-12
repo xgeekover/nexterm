@@ -1,29 +1,21 @@
+/**
+ * No-op now that NexTerm is dark-only (light mode was removed from
+ * settingsStore — there is no more `theme`/`setTheme`/`toggleTheme`/
+ * `monacoTheme` to read). App.jsx still calls `useTheme()` on mount; that
+ * call site lives outside this worker's file scope, so this hook is kept
+ * (rather than deleted) purely so that import doesn't break. It still
+ * ensures the `dark` class is present on <html> in case any legacy/external
+ * CSS selector keys off it. Safe to delete this file and its call site in
+ * App.jsx together in a future pass.
+ */
 import { useEffect } from 'react';
-import { useSettingsStore } from '../stores/settingsStore.js';
 
 export function useTheme() {
-  const theme = useSettingsStore((s) => s.theme);
-  const monacoTheme = useSettingsStore((s) => s.monacoTheme);
-  const setTheme = useSettingsStore((s) => s.setTheme);
-  const toggleTheme = useSettingsStore((s) => s.toggleTheme);
-
   useEffect(() => {
     if (typeof document !== 'undefined') {
-      if (theme === 'dark') {
-        document.documentElement.classList.add('dark');
-      } else {
-        document.documentElement.classList.remove('dark');
-      }
+      document.documentElement.classList.add('dark');
     }
-  }, [theme]);
-
-  return {
-    theme,
-    monacoTheme,
-    isDark: theme === 'dark',
-    setTheme,
-    toggleTheme,
-  };
+  }, []);
 }
 
 export default useTheme;

@@ -61,18 +61,12 @@ describe('Tier 2: Boundary & Corner Cases', () => {
     );
   });
 
-  test('TC-BND-09: Rapid theme switching completes without state corruption or race conditions', () => {
+  test('TC-BND-09: Theme stays a fixed dark constant across repeated reads (no toggle exists)', () => {
     for (let i = 0; i < 50; i++) {
-      app.toggleTheme();
+      assert.equal(app.theme, 'dark');
+      assert.equal(app.monacoTheme, 'nexterm-dark');
     }
-    // 50 toggles from 'dark' should end back at 'dark'
-    assert.equal(app.theme, 'dark');
-    assert.equal(app.monacoTheme, 'nexterm-dark');
-
-    // 1 more toggle -> 'light'
-    app.toggleTheme();
-    assert.equal(app.theme, 'light');
-    assert.equal(app.monacoTheme, 'nexterm-light');
+    assert.equal(typeof app.toggleTheme, 'undefined', 'toggleTheme must not exist');
   });
 
   test('TC-BND-10: PTY resize bounds clamp extreme column and row dimensions', async () => {

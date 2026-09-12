@@ -1,14 +1,12 @@
 import React from 'react';
-import { GitBranch, Cpu, Sun, Moon, Bell } from 'lucide-react';
+import { GitBranch, Cpu, Bell } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { useTheme } from '../../hooks/useTheme.js';
 import { cn } from '../../lib/utils.js';
 
 const item = 'h-full px-2 flex items-center gap-1.5 hover:bg-vsc-item-hover cursor-default';
 
 export function StatusBar() {
   const cwd = useTerminalStore((s) => s.cwd);
-  const { theme, toggleTheme } = useTheme();
 
   const formattedCwd = (cwd || '/workspace').replace('/workspace', '~/workspace');
 
@@ -35,11 +33,6 @@ export function StatusBar() {
         <div className={item}>
           <span>zsh</span>
         </div>
-
-        <button type="button" onClick={toggleTheme} className={item} title="Toggle Theme">
-          {theme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
-          <span>{theme === 'dark' ? 'Dark Modern' : 'Light Modern'}</span>
-        </button>
 
         <button type="button" className={item} title="Notifications">
           <Bell size={14} />
