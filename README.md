@@ -51,10 +51,13 @@ Grab a build from the [Releases](../../releases) page:
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| macOS (Apple Silicon / Intel) | `NexTerm_<version>_*.dmg` | Unsigned — first launch needs right-click → Open, or `xattr -dr com.apple.quarantine /Applications/NexTerm.app` |
+| macOS (Apple Silicon) | `NexTerm_<version>_aarch64.dmg` | Unsigned — first launch needs right-click → Open, or `xattr -dr com.apple.quarantine /Applications/NexTerm.app` |
 | Windows — installer | `NexTerm_<version>_x64-setup.exe` / `_x64_en-US.msi` | Installs WebView2 if missing (needs internet on first run) |
 | Windows — portable | `NexTerm-windows-x64-portable.zip` | Unzip and run `NexTerm.exe`, no installation |
-| Linux | `.AppImage` / `.deb` | Built on Ubuntu 22.04 |
+| Linux (x86_64) | `.AppImage` / `.deb` / `.rpm` | Built on Ubuntu 22.04 |
+
+There is no Intel macOS build yet — CI runs on `macos-latest`, which is Apple
+Silicon. Build one locally with `npm run tauri build -- --target x86_64-apple-darwin`.
 
 ## Using it
 
