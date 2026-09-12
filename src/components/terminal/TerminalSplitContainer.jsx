@@ -1,6 +1,6 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Panel, Group, Separator } from 'react-resizable-panels';
-import { SplitSquareHorizontal, SplitSquareVertical, X, Plus } from 'lucide-react';
+import { SplitSquareHorizontal, SplitSquareVertical, X, Plus, TerminalSquare } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { cn } from '../../lib/utils.js';
@@ -9,31 +9,48 @@ import { chord } from '../../lib/platform.js';
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
 
-const DRAG_MIME = 'application/x-nexterm-tab';
+/**
+ * When a drag ends the browser may still deliver a `click` to the chip the
+ * gesture started on; ignore clicks that land right after a real drag.
+ */
+let lastDragEndAt = 0;
+
+/** Pointer travel before a press turns into a drag. */
+const DRAG_THRESHOLD_PX = 4;
+/** How deep into a pane counts as an edge (split) rather than the centre (move). */
+const EDGE_FRACTION = 0.25;
 
 /**
- * The tab being dragged. `dataTransfer` only exposes its payload on `drop`,
- * but the drop zones need to know a drag is in progress during `dragover`, so
- * the id is mirrored here for the duration of the gesture.
+ * Dragging is done with pointer events rather than HTML5 drag & drop.
+ * WKWebView (what Tauri uses on macOS) refuses to start a native drag on an
+ * element inside a `user-select: none` subtree — which the tab strip is — so
+ * the native pipeline silently does nothing there. Pointer events behave the
+ * same in every webview and let us draw our own preview and drop zones.
  */
-let draggingTabId = null;
+const DragContext = createContext(null);
 
-/** Which edge (or the centre) of a pane the pointer is over, as a fraction. */
+/** Which edge (or the centre) of a rect the point is in. */
 function zoneFromPoint(rect, clientX, clientY) {
   const x = (clientX - rect.left) / rect.width;
   const y = (clientY - rect.top) / rect.height;
-  const edge = 0.25;
-  // Whichever edge the pointer is deepest into wins; the middle stays 'center'.
-  const distances = [
+  const candidates = [
     { zone: 'left', d: x },
     { zone: 'right', d: 1 - x },
     { zone: 'top', d: y },
     { zone: 'bottom', d: 1 - y },
   ].sort((a, b) => a.d - b.d);
-  return distances[0].d < edge ? distances[0].zone : 'center';
+  return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
 }
 
-/** Translucent overlay showing where a dropped tab will land. */
+/** Resolve the pane body under the pointer, if any. */
+function paneAtPoint(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  const body = el?.closest?.('[data-pane-body]');
+  if (!body) return null;
+  return { paneId: body.getAttribute('data-pane-body'), rect: body.getBoundingClientRect() };
+}
+
+/** Translucent overlay showing where the dropped tab will land. */
 function DropIndicator({ zone }) {
   if (!zone) return null;
   const box = {
@@ -55,6 +72,22 @@ function DropIndicator({ zone }) {
   );
 }
 
+/** The chip that follows the cursor while dragging. */
+function DragPreview({ drag }) {
+  if (!drag?.active) return null;
+  return (
+    <div
+      aria-hidden="true"
+      className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
+                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
+      style={{ left: drag.x + 12, top: drag.y + 12 }}
+    >
+      <TerminalSquare size={12} />
+      <span className="truncate max-w-[140px]">{drag.title}</span>
+    </div>
+  );
+}
+
 /**
  * One terminal group (leaf of the split tree): its own tab strip plus the
  * persistent xterm for whichever of *its* tabs is active. Tabs can be dragged
@@ -67,35 +100,16 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const switchTab = useTerminalStore((s) => s.switchTab);
   const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
-  const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
   const createTab = useTerminalStore((s) => s.createTab);
 
-  const [dropZone, setDropZone] = useState(null);
-  const bodyRef = useRef(null);
+  const { drag, beginDrag } = useContext(DragContext);
 
   const isActivePane = activePaneId === paneId;
+  const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
 
   // Only the tabs that belong to this group, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const boundTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
-
-  const handleDragOver = (e) => {
-    if (!draggingTabId) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const rect = bodyRef.current?.getBoundingClientRect();
-    if (rect) setDropZone(zoneFromPoint(rect, e.clientX, e.clientY));
-  };
-
-  const handleDrop = (e) => {
-    const tabId = e.dataTransfer.getData(DRAG_MIME) || draggingTabId;
-    const zone = dropZone;
-    setDropZone(null);
-    if (!tabId) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dropTabOnPane(tabId, paneId, zone || 'center');
-  };
 
   return (
     <div
@@ -111,26 +125,22 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
         <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto">
           {paneTabs.map((tab) => {
             const isActive = tab.id === boundTab?.id;
+            const isBeingDragged = drag?.active && drag.tabId === tab.id;
             return (
               <div
                 key={tab.id}
                 role="tab"
                 tabIndex={0}
                 aria-selected={isActive}
-                aria-grabbed={draggingTabId === tab.id}
-                draggable
-                title={`${tab.title} — drag to rearrange`}
-                onDragStart={(e) => {
-                  draggingTabId = tab.id;
-                  e.dataTransfer.effectAllowed = 'move';
-                  e.dataTransfer.setData(DRAG_MIME, tab.id);
-                  // Some browsers require text/plain for a drag to start at all.
-                  e.dataTransfer.setData('text/plain', tab.title);
-                }}
-                onDragEnd={() => {
-                  draggingTabId = null;
+                aria-grabbed={isBeingDragged}
+                data-tab-chip={tab.id}
+                title={`${tab.title} — drag onto a terminal to move or split it`}
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  beginDrag(tab, e);
                 }}
                 onClick={() => {
+                  if (Date.now() - lastDragEndAt < 200) return;
                   bindPaneToTab(paneId, tab.id);
                   switchTab(tab.id);
                 }}
@@ -142,10 +152,12 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
                   }
                 }}
                 className={cn(
-                  'flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap cursor-grab active:cursor-grabbing transition-colors',
+                  'flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
+                  'cursor-grab active:cursor-grabbing touch-none transition-colors',
                   isActive
                     ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
-                    : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover'
+                    : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover',
+                  isBeingDragged && 'opacity-40'
                 )}
               >
                 <span className="truncate max-w-[120px]">{tab.title}</span>
@@ -183,18 +195,8 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
         </div>
       </div>
 
-      {/* Live terminal surface + drop target */}
-      <div
-        ref={bodyRef}
-        className="relative flex-1 overflow-hidden"
-        aria-dropeffect={draggingTabId ? 'move' : 'none'}
-        onDragOver={handleDragOver}
-        onDragLeave={(e) => {
-          // Ignore drags moving between children of this pane.
-          if (!bodyRef.current?.contains(e.relatedTarget)) setDropZone(null);
-        }}
-        onDrop={handleDrop}
-      >
+      {/* Live terminal surface — also the drop target */}
+      <div data-pane-body={paneId} className="relative flex-1 overflow-hidden">
         {boundTab ? (
           <TerminalView tabId={boundTab.id} active={isActivePane} />
         ) : (
@@ -202,6 +204,8 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose }) {
             No terminal
           </div>
         )}
+        {/* While dragging, swallow pointer events so the xterm cannot eat them. */}
+        {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
         <DropIndicator zone={dropZone} />
       </div>
     </div>
@@ -241,12 +245,95 @@ function SplitNode({ node, onSplit, onClose, canClose }) {
 }
 
 /**
- * Top-level container for the terminal split system.
+ * Top-level container for the terminal split system. Owns the drag gesture so
+ * every pane can render the drop indicator for the pointer's current target.
  */
 export function TerminalSplitContainer() {
   const splitTree = useTerminalStore((s) => s.splitTree);
   const splitPane = useTerminalStore((s) => s.splitPane);
   const closePane = useTerminalStore((s) => s.closePane);
+  const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
+
+  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
+  const [drag, setDrag] = useState(null);
+  const dragRef = useRef(null);
+  const cleanupRef = useRef(null);
+
+  /**
+   * Listeners are attached synchronously here rather than from an effect: a
+   * quick flick delivers pointermove/up before React has committed the state
+   * change, so an effect-bound listener would miss the whole gesture.
+   */
+  const beginDrag = useCallback(
+    (tab, e) => {
+      const detach = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+        cleanupRef.current = null;
+      };
+
+      const onMove = (ev) => {
+        const cur = dragRef.current;
+        if (!cur) return;
+        const movedEnough =
+          cur.active ||
+          Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
+        if (!movedEnough) return;
+
+        const hit = paneAtPoint(ev.clientX, ev.clientY);
+        const next = {
+          ...cur,
+          active: true,
+          x: ev.clientX,
+          y: ev.clientY,
+          targetPaneId: hit?.paneId ?? null,
+          zone: hit ? zoneFromPoint(hit.rect, ev.clientX, ev.clientY) : null,
+        };
+        dragRef.current = next;
+        setDrag(next);
+      };
+
+      const onUp = () => {
+        const cur = dragRef.current;
+        detach();
+        dragRef.current = null;
+        setDrag(null);
+        if (cur?.active) lastDragEndAt = Date.now();
+        if (!cur?.active || !cur.targetPaneId) return;
+        dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+      };
+
+      const onCancel = () => {
+        detach();
+        dragRef.current = null;
+        setDrag(null);
+      };
+
+      const started = {
+        tabId: tab.id,
+        title: tab.title,
+        startX: e.clientX,
+        startY: e.clientY,
+        x: e.clientX,
+        y: e.clientY,
+        active: false,
+        targetPaneId: null,
+        zone: null,
+      };
+      dragRef.current = started;
+      setDrag(started);
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onCancel);
+      cleanupRef.current = detach;
+    },
+    [dropTabOnPane]
+  );
+
+  // Never leave listeners behind if the terminal unmounts mid-gesture.
+  useEffect(() => () => cleanupRef.current?.(), []);
 
   const handleSplit = useCallback((paneId, direction) => {
     splitPane(paneId, direction);
@@ -261,9 +348,12 @@ export function TerminalSplitContainer() {
   const canClose = splitTree.type !== 'leaf';
 
   return (
-    <div className="h-full w-full overflow-hidden">
-      <SplitNode node={splitTree} onSplit={handleSplit} onClose={handleClose} canClose={canClose} />
-    </div>
+    <DragContext.Provider value={{ drag, beginDrag }}>
+      <div className={cn('h-full w-full overflow-hidden', drag?.active && 'cursor-grabbing')}>
+        <SplitNode node={splitTree} onSplit={handleSplit} onClose={handleClose} canClose={canClose} />
+        <DragPreview drag={drag} />
+      </div>
+    </DragContext.Provider>
   );
 }
 
