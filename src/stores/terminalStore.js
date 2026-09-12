@@ -22,6 +22,71 @@ function collectLeaves(node, acc = []) {
   return acc;
 }
 
+/**
+ * Rebuild a tree, letting `fn` replace any node. A leaf that `fn` turns into a
+ * split is returned as-is (we must not recurse into the replacement, which
+ * still contains the original leaf).
+ */
+function mapTree(node, fn) {
+  if (!node) return null;
+  if (node.type === 'leaf') return fn(node);
+  const replaced = fn(node);
+  if (replaced !== node) return replaced;
+  return { ...node, children: node.children.map((child) => mapTree(child, fn)) };
+}
+
+/** The leaf that currently hosts `tabId`, or null. */
+function leafHoldingTab(node, tabId) {
+  return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
+}
+
+/** Remove a tab from whichever leaf holds it, keeping that leaf's active tab valid. */
+function removeTabFromTree(node, tabId) {
+  return mapTree(node, (n) => {
+    if (n.type !== 'leaf' || !n.tabIds.includes(tabId)) return n;
+    const tabIds = n.tabIds.filter((id) => id !== tabId);
+    return {
+      ...n,
+      tabIds,
+      activeTabId: n.activeTabId === tabId ? tabIds[0] ?? null : n.activeTabId,
+    };
+  });
+}
+
+/**
+ * Drop leaves that hold no tabs and collapse splits left with a single child.
+ * Returns null when the whole tree is empty.
+ */
+function pruneTree(node) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node.tabIds.length > 0 ? node : null;
+  const children = node.children.map(pruneTree).filter(Boolean);
+  if (children.length === 0) return null;
+  if (children.length === 1) return children[0];
+  return { ...node, children };
+}
+
+/** Append a tab to a pane (falling back to the first leaf) and make it active there. */
+function addTabToPane(node, paneId, tabId) {
+  let placed = false;
+  const next = mapTree(node, (n) => {
+    if (n.type !== 'leaf' || n.id !== paneId) return n;
+    placed = true;
+    return { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId };
+  });
+  if (placed) return next;
+  const first = collectLeaves(node)[0];
+  if (!first) return { type: 'leaf', id: paneId || makePaneId(), tabIds: [tabId], activeTabId: tabId };
+  return mapTree(node, (n) =>
+    n.type === 'leaf' && n.id === first.id
+      ? { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId }
+      : n
+  );
+}
+
+/** An empty root, used when the last terminal goes away. */
+const emptyTree = () => ({ type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null });
+
 let unlisteners = [];
 let listening = false;
 
@@ -50,8 +115,10 @@ export const useTerminalStore = create((set, get) => ({
   cwd: '/workspace',
   isInitialized: false,
 
-  // Split tree: recursive tree of { type: 'leaf', id, tabId } or { type: 'split', id, direction, children }
-  splitTree: { type: 'leaf', id: 'pane-root', tabId: null },
+  // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
+  // Each leaf is a terminal group holding its own tabs, so a tab can be dragged
+  // between groups or dropped on a group's edge to split it.
+  splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
 
   // The pane currently focused for keyboard shortcuts / block-selection / split-origin.
   activePaneId: 'pane-root',
@@ -80,7 +147,7 @@ export const useTerminalStore = create((set, get) => ({
           direction,
           children: [
             { ...node },
-            { type: 'leaf', id: newPaneId, tabId: newTab.id },
+            { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id },
           ],
         };
       }
@@ -113,7 +180,7 @@ export const useTerminalStore = create((set, get) => ({
     const { splitTree } = get();
 
     const closingLeaf = collectLeaves(splitTree).find((leaf) => leaf.id === paneId);
-    const tabId = closingLeaf ? closingLeaf.tabId : null;
+    const closingTabIds = closingLeaf ? [...closingLeaf.tabIds] : [];
 
     let replacementLeafId = null;
 
@@ -138,39 +205,37 @@ export const useTerminalStore = create((set, get) => ({
       return { ...node, children: node.children.map(removeNode) };
     };
 
-    const nextTree = removeNode(splitTree);
+    // Closing the only pane empties it rather than removing the root.
+    const nextTree =
+      splitTree.type === 'leaf' && splitTree.id === paneId ? emptyTree() : removeNode(splitTree);
     set({ splitTree: nextTree });
 
-    // Re-focus active pane if we just closed it — hand focus to the sibling
-    // that took its place.
     if (get().activePaneId === paneId && replacementLeafId) {
       set({ activePaneId: replacementLeafId });
     }
 
-    if (!tabId) return;
+    // Kill each tab this pane owned that no other pane still shows.
+    for (const tabId of closingTabIds) {
+      if (leafHoldingTab(get().splitTree, tabId)) continue;
 
-    const stillReferenced = collectLeaves(nextTree).some((leaf) => leaf.tabId === tabId);
-    if (stillReferenced) return;
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) continue;
 
-    // No pane references this tab anymore — kill its PTY and drop it.
-    const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab) return;
-
-    try {
-      await invoke('pty_kill', { session_id: tab.sessionId });
-    } catch (e) {
-      console.warn('[TerminalStore] pty_kill failed:', e);
-    }
-    await disposeTerminalView(tabId);
-
-    set((state) => {
-      const nextTabs = state.tabs.filter((t) => t.id !== tabId);
-      let nextActiveId = state.activeTabId;
-      if (state.activeTabId === tabId) {
-        nextActiveId = nextTabs[0]?.id || null;
+      try {
+        await invoke('pty_kill', { session_id: tab.sessionId });
+      } catch (e) {
+        console.warn('[TerminalStore] pty_kill failed:', e);
       }
-      return { tabs: nextTabs, activeTabId: nextActiveId };
-    });
+      await disposeTerminalView(tabId);
+
+      set((state) => {
+        const nextTabs = state.tabs.filter((t) => t.id !== tabId);
+        return {
+          tabs: nextTabs,
+          activeTabId: state.activeTabId === tabId ? nextTabs[0]?.id || null : state.activeTabId,
+        };
+      });
+    }
   },
 
   /**
@@ -199,22 +264,77 @@ export const useTerminalStore = create((set, get) => ({
   },
 
   /**
-   * Bind a pane to a specific tab.
+   * Make `tabId` the visible tab of `paneId`. If the tab lives in another
+   * group, move it here first (clicking a tab chip never splits).
    */
   bindPaneToTab: (paneId, tabId) => {
-    const { splitTree } = get();
-
-    const updateBinding = (node) => {
-      if (node.type === 'leaf' && node.id === paneId) {
-        return { ...node, tabId };
+    set((state) => {
+      const holder = leafHoldingTab(state.splitTree, tabId);
+      let tree = state.splitTree;
+      if (!holder || holder.id !== paneId) {
+        tree = pruneTree(addTabToPane(removeTabFromTree(tree, tabId), paneId, tabId)) || emptyTree();
+      } else {
+        tree = mapTree(tree, (n) =>
+          n.type === 'leaf' && n.id === paneId ? { ...n, activeTabId: tabId } : n
+        );
       }
-      if (node.type === 'split') {
-        return { ...node, children: node.children.map(updateBinding) };
-      }
-      return node;
-    };
+      return { splitTree: tree, activePaneId: paneId, activeTabId: tabId };
+    });
+  },
 
-    set({ splitTree: updateBinding(splitTree) });
+  /**
+   * Drag & drop a terminal tab onto a pane.
+   *
+   * `zone` is where inside the target pane it was dropped:
+   *   'center'                  → move the tab into that group
+   *   'left' | 'right'          → split the group horizontally, tab on that side
+   *   'top'  | 'bottom'         → split the group vertically, tab on that side
+   */
+  dropTabOnPane: (tabId, targetPaneId, zone = 'center') => {
+    const state = get();
+    const target = collectLeaves(state.splitTree).find((l) => l.id === targetPaneId);
+    if (!target || !state.tabs.some((t) => t.id === tabId)) return;
+
+    const source = leafHoldingTab(state.splitTree, tabId);
+
+    // Dropping a tab back on its own group: just focus it. Splitting a group
+    // off its only tab would leave the source empty and is a no-op too.
+    if (source && source.id === targetPaneId) {
+      if (zone === 'center' || source.tabIds.length === 1) {
+        get().bindPaneToTab(targetPaneId, tabId);
+        return;
+      }
+    }
+
+    const withoutTab = removeTabFromTree(state.splitTree, tabId);
+
+    if (zone === 'center') {
+      const tree = pruneTree(addTabToPane(withoutTab, targetPaneId, tabId)) || emptyTree();
+      set({ splitTree: tree, activePaneId: targetPaneId, activeTabId: tabId });
+      return;
+    }
+
+    const newPaneId = makePaneId();
+    const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
+    const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
+    const insertFirst = zone === 'left' || zone === 'top';
+
+    const split = mapTree(withoutTab, (n) =>
+      n.type === 'leaf' && n.id === targetPaneId
+        ? {
+            type: 'split',
+            id: `split-${Date.now()}`,
+            direction,
+            children: insertFirst ? [newLeaf, n] : [n, newLeaf],
+          }
+        : n
+    );
+
+    set({
+      splitTree: pruneTree(split) || emptyTree(),
+      activePaneId: newPaneId,
+      activeTabId: tabId,
+    });
   },
 
   // Event listeners are attached once and can be torn down (HMR, unmount)
@@ -337,7 +457,7 @@ export const useTerminalStore = create((set, get) => ({
         activeTabId: initialTab.id,
         cwd: initialTab.cwd,
         isInitialized: true,
-        splitTree: { type: 'leaf', id: 'pane-root', tabId: initialTab.id },
+        splitTree: { type: 'leaf', id: 'pane-root', tabIds: [initialTab.id], activeTabId: initialTab.id },
         activePaneId: 'pane-root',
       });
 
@@ -375,6 +495,8 @@ export const useTerminalStore = create((set, get) => ({
       set((state) => ({
         tabs: [...state.tabs, newTab],
         activeTabId: newTab.id,
+        // A new terminal joins the active group so it is visible immediately.
+        splitTree: addTabToPane(state.splitTree, state.activePaneId, newTab.id),
       }));
 
       return newTab;
@@ -406,9 +528,14 @@ export const useTerminalStore = create((set, get) => ({
       if (state.activeTabId === tabId) {
         nextActiveId = nextTabs[0]?.id || null;
       }
+      // Drop it from its group too, collapsing the group if it was the last tab.
+      const splitTree = pruneTree(removeTabFromTree(state.splitTree, tabId)) || emptyTree();
+      const paneStillThere = collectLeaves(splitTree).some((l) => l.id === state.activePaneId);
       return {
         tabs: nextTabs,
         activeTabId: nextActiveId,
+        splitTree,
+        activePaneId: paneStillThere ? state.activePaneId : firstLeafId(splitTree) || 'pane-root',
       };
     });
   },
