@@ -5,7 +5,12 @@ use crate::AppState;
 
 /// The webview never chooses the shell binary and can only start a session
 /// inside the workspace root; anything else falls back to the root itself.
-#[tauri::command(rename_all = "snake_case")]
+///
+/// `async` here does not make the body asynchronous — it tells Tauri to run
+/// this command off the IPC thread. Spawning forks a shell and writes the
+/// shell-integration rc files, which is not work to do on the thread that
+/// paints the window.
+#[tauri::command(rename_all = "snake_case", async)]
 pub fn pty_spawn(
     app: AppHandle,
     state: State<AppState>,
@@ -24,6 +29,8 @@ pub fn pty_spawn(
     state.pty_manager.spawn(app, cols, rows, Some(cwd), None)
 }
 
+/// Stays synchronous on purpose: the manager hands the bytes to the session's
+/// writer thread and returns, so there is nothing here to block on.
 #[tauri::command(rename_all = "snake_case")]
 pub fn pty_write(
     state: State<AppState>,
@@ -43,7 +50,9 @@ pub fn pty_resize(
     state.pty_manager.resize(&session_id, cols, rows)
 }
 
-#[tauri::command(rename_all = "snake_case")]
+/// Also off the IPC thread: portable-pty's `kill` waits for the child in 50ms
+/// steps, and closing a group kills its terminals one after another.
+#[tauri::command(rename_all = "snake_case", async)]
 pub fn pty_kill(state: State<AppState>, session_id: String) -> Result<(), String> {
     state.pty_manager.kill(&session_id)
 }
