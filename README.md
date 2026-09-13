@@ -6,9 +6,14 @@ macOS, Windows and Linux from one codebase.
 
 ![NexTerm in use](docs/nexterm-demo.gif)
 
-> The recording above is driven through the app's UI in a browser preview, so the
-> shell output in it is simulated. In the packaged desktop app the same panes run
-> real `zsh` / `bash` / `pwsh` processes.
+> Two groups — `app` and `tests` — each with their own arrangement; switching
+> between them, saving the whole session, and putting it back after it was taken
+> apart. This is the Windows chrome (NexTerm draws its own title bar there);
+> macOS keeps its traffic lights and the system menu bar.
+>
+> The recording is driven through the app's UI in a browser preview, so the shell
+> output in it is simulated. In the packaged desktop app the same panes run real
+> `zsh` / `bash` / `pwsh` processes.
 
 ## Why
 
@@ -19,15 +24,23 @@ that layout the next time you open it.
 
 ## What it does
 
+- **A group is a whole screen.** Each group owns its own arrangement of panes,
+  and the active one fills the terminal area. Click another group and its
+  arrangement replaces it — the terminals you left behind keep running. Think
+  of it as several desks rather than one crowded one.
 - **Split panes by dragging a tab.** Drop a terminal tab on the left, right, top
   or bottom quarter of any pane to split there; drop it in the middle to move it
-  into that group. Splits nest arbitrarily and every divider is draggable.
-- **Tabs and groups, named by you.** Double-click a tab to rename it. Each split
-  pane is a *group* that can be renamed, focused (hiding the rest), or saved.
-- **Saved groups.** Save a group's terminals — names and working directories —
-  and reload them later into a new group or over the current one.
-- **Session restore.** Tab layout, tab names, group names and each terminal's
-  `cwd` are written to local storage and restored on next launch.
+  into that pane. Splits nest arbitrarily and every divider is draggable, and
+  where you drag a divider is where it stays — across a group switch and across
+  a restart.
+- **Move terminals between groups.** Drag a tab onto another group's chip, or
+  use *Move to Group* in the TERMINALS panel.
+- **Save a group, or the whole desk.** *Save Group…* keeps one group's layout
+  and each terminal's current directory. *Save All Groups…* snapshots every
+  group at once under a name, and restoring it brings the entire session back —
+  same groups, same arrangements, same directories.
+- **Session restore.** Groups, layouts, names and each terminal's `cwd` are
+  written to local storage and restored on next launch, without being asked.
 - **A real terminal.** xterm.js over a native PTY, with OSC 133 shell
   integration (command start/end + exit status) and OSC 7 so the status bar and
   new splits follow the shell's actual working directory.
@@ -44,6 +57,11 @@ that layout the next time you open it.
 - **Filesystem confinement.** Every file command is resolved against the
   workspace root, with the deepest existing ancestor canonicalised so symlinks
   cannot escape it.
+- **One title row.** On Windows and Linux the window is frameless and NexTerm
+  draws its own compact title bar — menu, command centre, layout toggles and
+  window buttons in a single 35px row, VS Code style, instead of a native
+  title bar with a native menu bar under it. macOS keeps its traffic lights
+  and the system menu bar.
 
 ## Install
 
@@ -61,21 +79,35 @@ Silicon. Build one locally with `npm run tauri build -- --target x86_64-apple-da
 
 ## Using it
 
-Everything below is what the recording walks through, in order.
+The recording above walks through most of this.
 
-**Open a terminal.** The window starts as a single terminal group. `⌃⇧\`` adds a
-tab to the current group; the `+` in the tab bar does the same.
+**Open a terminal.** The window starts as one group holding one terminal.
+`⌃⇧\`` adds a tab to the current group; the `+` in the tab bar does the same.
 
 **Split.** Use the split buttons in the panel header, `⌘D` (right) / `⌘⇧D`
 (down), or drag a tab onto an edge of any pane. While dragging, the target
 quarter lights up so you can see where it will land before you let go.
 
-**Rename.** Double-click a terminal tab, or right-click it → *Rename*. Groups
-rename the same way from the TERMINALS panel on the right.
+**Work in groups.** The chips above the terminals are your groups; `+` makes a
+new one. Clicking a chip swaps the whole arrangement to that group's. Set up
+one group for the app and another for tests, and switch between them instead of
+cramming both onto one screen.
 
-**Save a group.** Right-click a group in the TERMINALS panel → *Save Group…*,
-give it a name, and it lands under SAVED with its terminal count and age.
-Right-click a saved entry to *Load in New Group* or *Load into Current Group*.
+**Move a terminal to another group.** Drag its tab onto the target group's chip,
+or right-click it in the TERMINALS panel → *Move to Group*.
+
+**Rename.** Double-click a terminal tab, or right-click it → *Rename*. Groups
+rename the same way, from their chip or from the TERMINALS panel.
+
+**Save a group.** Right-click a group in the TERMINALS panel → *Save Group…*.
+It lands under SAVED with its terminal count and age; right-click it to *Load
+in New Group* or *Load into Current Group*.
+
+**Save the whole session.** The 💾 on the WORKSPACES section (or *Save All
+Groups…* from the empty-area menu) snapshots every group — layouts and
+directories included. Double-click a saved workspace to put the session back
+the way it was, or right-click → *Add Its Groups to This Session* to bring them
+in alongside what you already have.
 
 **Open a file.** Click a file in the Explorer. The Monaco editor opens above the
 terminal panel as a normal tab; the terminals keep running underneath.
@@ -100,6 +132,14 @@ scrollback, colour theme, and command suggestions.
 | `⌘S` | Save the active editor file |
 
 On Windows and Linux use `Ctrl` wherever `⌘` is listed.
+
+**Shortcuts yield to the shell.** A chord the terminal needs goes to the
+terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K` kills to end of line,
+`Ctrl+C` interrupts, and the app does nothing. The same chord elsewhere in the
+window does what the table says. On Windows and Linux the items that would
+otherwise collide are reachable from the menu bar as well, because a native
+menu accelerator is resolved before the webview and would take the key away
+from every shell in the app.
 
 ## Develop
 

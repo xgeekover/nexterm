@@ -5,13 +5,17 @@
 import { runnerContext } from '../e2e/harness/testFramework.js';
 import './stress_agent_chat_palette.test.js';
 import './shell_integration.test.js';
+import './terminal_groups.test.js';
 import './terminal_layout.test.js';
+import './persist_robustness.test.js';
 import './editor_layout.test.js';
 import './explorer_actions.test.js';
 import './settings.test.js';
 import './terminal_intellisense.test.js';
 import './ipc_contract.test.js';
 import './editor_unsaved.test.js';
+import './keybindings_platform.test.js';
+import './menu_contract.test.js';
 
 async function run() {
   console.log('====================================================');

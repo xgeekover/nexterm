@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { hasMod } from '../lib/platform.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
@@ -22,7 +23,16 @@ export function useKeybindings() {
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      const isMod = e.metaKey || e.ctrlKey;
+      // The app modifier is ⌘ on macOS and Ctrl elsewhere — never both.
+      // Treating Ctrl as a modifier on macOS stole ^K/^B/^A from every text
+      // field in the app; treating only ⌘ as one on Windows meant half these
+      // shortcuts never fired at all.
+      //
+      // Nothing here needs a "is the terminal focused?" test: xterm binds its
+      // own keydown on the textarea in the capture phase and calls
+      // preventDefault + stopPropagation for any chord it turns into a control
+      // byte, so a window-level listener like this one simply never sees it.
+      const isMod = hasMod(e);
       const isInMonacoEditor = Boolean(e.target && e.target.closest && e.target.closest('.monaco-editor'));
 
       // ⌘P: Go to File (quick open) · ⌘⇧P: all commands
@@ -40,7 +50,7 @@ export function useKeybindings() {
       }
 
       // ⌘S / Ctrl+S: Save active file
-      if (isMod && e.key.toLowerCase() === 's') {
+      if (isMod && !e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
         if (activeEditorTabId) {
           saveFile(activeEditorTabId);
@@ -49,7 +59,7 @@ export function useKeybindings() {
       }
 
       // ⌘Shift+D: Split active terminal pane down (vertical)
-      if (e.metaKey && e.shiftKey && e.key.toLowerCase() === 'd') {
+      if (isMod && e.shiftKey && e.key.toLowerCase() === 'd') {
         e.preventDefault();
         splitActivePane?.('vertical');
         return;
@@ -57,7 +67,7 @@ export function useKeybindings() {
 
       // ⌘D: Split active terminal pane right (horizontal)
       // Monaco binds ⌘D to "add selection to next find match" — don't fight it.
-      if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'd') {
+      if (isMod && !e.shiftKey && e.key.toLowerCase() === 'd') {
         if (isInMonacoEditor) return;
         e.preventDefault();
         splitActivePane?.('horizontal');
@@ -66,7 +76,7 @@ export function useKeybindings() {
 
       // ⌘W: Close the active terminal pane. Guarded so it doesn't hijack
       // whatever ⌘W does while focus is inside Monaco.
-      if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'w') {
+      if (isMod && !e.shiftKey && e.key.toLowerCase() === 'w') {
         if (isInMonacoEditor) return;
         e.preventDefault();
         closeActivePane?.();
@@ -74,7 +84,7 @@ export function useKeybindings() {
       }
 
       // ⌥⌘→ / ⌥⌘←: Focus next / previous terminal pane
-      if (e.metaKey && e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+      if (isMod && e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
         e.preventDefault();
         focusNextPane?.(e.key === 'ArrowRight' ? 1 : -1);
         return;
@@ -96,7 +106,7 @@ export function useKeybindings() {
       }
 
       // ⌘B: Toggle primary sidebar
-      if (isMod && e.key.toLowerCase() === 'b') {
+      if (isMod && !e.altKey && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         toggleSidebar();
         return;

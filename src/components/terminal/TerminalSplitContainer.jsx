@@ -1,12 +1,45 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
-import { Panel, Group, Separator } from 'react-resizable-panels';
-import { SplitSquareHorizontal, SplitSquareVertical, X, Plus, TerminalSquare, Pencil, Copy, Files, LayoutGrid } from 'lucide-react';
+import { Panel, Group, Separator, useGroupRef } from 'react-resizable-panels';
+import {
+  SplitSquareHorizontal,
+  SplitSquareVertical,
+  X,
+  Plus,
+  TerminalSquare,
+  Pencil,
+  Copy,
+  Files,
+  LayoutGrid,
+} from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
+
+// ---------------------------------------------------------------------------
+// The two-level model this renders (see terminalStore.js's header):
+//
+//   Pane  = { type:'leaf',  id, tabIds, activeTabId }
+//   Split = { type:'split', id, direction, children, sizes }
+//   Group = { id, name, createdAt, tree: Pane|Split, activePaneId }
+//
+// Exactly ONE group is on screen at a time and fills the whole terminal area:
+// this component renders `getActiveGroup().tree` and nothing else. The other
+// groups' terminals keep running (their xterm instances live in
+// terminalRegistry, not in React), they are simply not mounted. The group
+// switcher at the top is the only way to move between them.
+// ---------------------------------------------------------------------------
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
@@ -21,6 +54,8 @@ let lastDragEndAt = 0;
 const DRAG_THRESHOLD_PX = 4;
 /** How deep into a pane counts as an edge (split) rather than the centre (move). */
 const EDGE_FRACTION = 0.25;
+/** Percentage-point slack before a stored layout counts as "different". */
+const SIZE_EPSILON = 0.25;
 
 /**
  * Dragging is done with pointer events rather than HTML5 drag & drop.
@@ -52,17 +87,45 @@ function paneAtPoint(clientX, clientY) {
   return { paneId: body.getAttribute('data-pane-body'), rect: body.getBoundingClientRect() };
 }
 
-/** Collects every leaf (group) of a split-tree, in DOM order. Mirrors
+/** Resolve the group-switcher chip under the pointer, if any. */
+function groupChipAtPoint(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  const chip = el?.closest?.('[data-group-chip]');
+  if (!chip) return null;
+  return { groupId: chip.getAttribute('data-group-chip') };
+}
+
+/** Collects every pane of one group's tree, in DOM order. Mirrors
  * terminalStore.js's own `collectLeaves`, kept local here since this
- * component only ever needs read-only traversal for the group switcher. */
-function collectLeafNodes(node, acc = []) {
+ * component only ever needs read-only traversal. */
+function collectPanes(node, acc = []) {
   if (!node) return acc;
   if (node.type === 'leaf') {
     acc.push(node);
     return acc;
   }
-  node.children.forEach((child) => collectLeafNodes(child, acc));
+  node.children.forEach((child) => collectPanes(child, acc));
   return acc;
+}
+
+/** How many terminals a whole group holds — shown on its switcher chip. */
+function countTerminals(tree) {
+  return collectPanes(tree).reduce((sum, pane) => sum + pane.tabIds.length, 0);
+}
+
+/**
+ * A split's child sizes as percentages summing to 100, falling back to an even
+ * split for anything missing or malformed (the store normalizes on write, so
+ * this only matters for hand-edited/older persisted state).
+ */
+function sizesOf(node) {
+  const count = node.children.length;
+  const raw = Array.isArray(node.sizes) && node.sizes.length === count ? node.sizes : null;
+  const usable =
+    raw && raw.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0) ? raw : null;
+  if (!usable) return new Array(count).fill(100 / count);
+  const total = usable.reduce((a, b) => a + b, 0);
+  return usable.map((v) => (v / total) * 100);
 }
 
 /**
@@ -144,38 +207,33 @@ function DragPreview({ drag }) {
 }
 
 /**
- * One terminal group (leaf of the split tree): its own tab strip plus the
- * persistent xterm for whichever of *its* tabs is active. Tabs can be dragged
- * between groups, or onto a group's edge to split it.
+ * One pane of the active group's tree: its own tab strip plus the persistent
+ * xterm for whichever of *its* tabs is active. Tabs can be dragged between
+ * panes, onto a pane's edge to split it, or onto another group's switcher chip
+ * to move them to that group.
  */
-function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot = null }) {
+function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose, canClose, onRenameGroup }) {
   const paneId = node.id;
   const tabs = useTerminalStore((s) => s.tabs);
-  const activePaneId = useTerminalStore((s) => s.activePaneId);
   const switchTab = useTerminalStore((s) => s.switchTab);
   const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
   const createTab = useTerminalStore((s) => s.createTab);
   const duplicateTab = useTerminalStore((s) => s.duplicateTab);
   const renameTab = useTerminalStore((s) => s.renameTab);
-  const renameGroup = useTerminalStore((s) => s.renameGroup);
 
   const { drag, beginDrag, cancelActiveDrag } = useContext(DragContext);
 
   // Inline "rename a tab" editor state — which tab (if any) is being edited.
   const [renamingTabId, setRenamingTabId] = useState(null);
   const [tabDraft, setTabDraft] = useState('');
-  // Inline "name this group" editor state.
-  const [isRenamingGroup, setIsRenamingGroup] = useState(false);
-  const [groupDraft, setGroupDraft] = useState('');
-  // Right-click menus: a tab chip's "Rename", and the strip's empty-area "Name Group".
+  // Right-click menus: a tab chip's "Rename", and the strip's empty area.
   const [chipMenu, setChipMenu] = useState(null); // { x, y, tabId }
   const [paneMenu, setPaneMenu] = useState(null); // { x, y }
 
-  const isActivePane = activePaneId === paneId;
   const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
 
-  // Only the tabs that belong to this group, in its own order.
+  // Only the tabs that belong to this pane, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const boundTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
 
@@ -191,32 +249,17 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
   };
   const cancelRenameTab = () => setRenamingTabId(null);
 
-  const beginRenameGroup = () => {
-    setGroupDraft(node.name || '');
-    setIsRenamingGroup(true);
-  };
-  const commitRenameGroup = () => {
-    // Functional update, mirroring commitRenameTab: guards against a stray
-    // extra blur firing (e.g. the input unmounting right after Enter already
-    // committed) re-applying the same rename a second time.
-    setIsRenamingGroup((was) => {
-      if (was) renameGroup(paneId, groupDraft);
-      return false;
-    });
-  };
-  const cancelRenameGroup = () => setIsRenamingGroup(false);
-
   return (
     <div
-      onMouseDown={() => setActivePane(paneId)}
-      onFocusCapture={() => setActivePane(paneId)}
+      onMouseDown={() => setActivePane(paneId, groupId)}
+      onFocusCapture={() => setActivePane(paneId, groupId)}
       className={cn(
         'flex flex-col h-full w-full bg-vsc-terminal overflow-hidden',
         isActivePane && 'ring-1 ring-inset ring-vsc-focus'
       )}
     >
       {/* Tab strip — each chip is a drag handle. Right-clicking empty space
-          in the strip (not a chip or a button) opens "Name Group". */}
+          in the strip (not a chip or a button) opens the pane menu. */}
       <div
         className="h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none"
         onContextMenu={(e) => {
@@ -225,32 +268,6 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
         }}
       >
         <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto">
-          {isRenamingGroup ? (
-            <input
-              autoFocus
-              value={groupDraft}
-              onFocus={(e) => e.target.select()}
-              onChange={(e) => setGroupDraft(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === 'Enter') commitRenameGroup();
-                else if (e.key === 'Escape') cancelRenameGroup();
-              }}
-              onBlur={commitRenameGroup}
-              placeholder="Group name"
-              className="shrink-0 w-24 h-[20px] px-1 mr-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
-            />
-          ) : node.name ? (
-            <span
-              className="shrink-0 pl-1 pr-2 text-ui-sm text-vsc-muted uppercase truncate max-w-[100px]"
-              title={node.name}
-            >
-              {node.name}
-            </span>
-          ) : null}
-
           {paneTabs.map((tab) => {
             const isActive = tab.id === boundTab?.id;
             const isBeingDragged = drag?.active && drag.tabId === tab.id;
@@ -285,14 +302,14 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
                 aria-selected={isActive}
                 aria-grabbed={isBeingDragged}
                 data-tab-chip={tab.id}
-                title={`${tab.title} — drag onto a terminal to move or split it, double-click to rename`}
+                title={`${tab.title} — drag onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`}
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   beginDrag(tab, e);
                 }}
                 onClick={() => {
                   if (Date.now() - lastDragEndAt < 200) return;
-                  bindPaneToTab(paneId, tab.id);
+                  bindPaneToTab(paneId, tab.id, groupId);
                   switchTab(tab.id);
                 }}
                 onDoubleClick={(e) => {
@@ -312,7 +329,7 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    bindPaneToTab(paneId, tab.id);
+                    bindPaneToTab(paneId, tab.id, groupId);
                     switchTab(tab.id);
                   }
                 }}
@@ -332,10 +349,10 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
 
           <button
             type="button"
-            onClick={() => createTab(null, { paneId })}
+            onClick={() => createTab(null, { paneId, groupId })}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
             className={cn(paneHeaderBtn, 'shrink-0')}
-            title={`New Terminal in this group (${chord('ctrl', 'shift', '`')})`}
+            title={`New Terminal in this pane (${chord('ctrl', 'shift', '`')})`}
           >
             <Plus size={14} />
           </button>
@@ -366,14 +383,11 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
               onClick={onClose}
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
               className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
-              title={`Close Group (${chord('mod', 'w')})`}
+              title={`Close Pane (${chord('mod', 'w')})`}
             >
               <X size={14} />
             </button>
           )}
-          {/* Region chrome (drag handle, maximize, hide) merged in from the
-              layout so a single-pane terminal shows one bar, not two. */}
-          {headerSlot}
         </div>
       </div>
 
@@ -416,6 +430,9 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
         }
       />
 
+      {/* A pane has no name of its own any more — the only nameable thing is
+          the group it belongs to, so this points at the switcher's own inline
+          editor rather than duplicating one down here. */}
       <ContextMenu
         open={Boolean(paneMenu)}
         x={paneMenu?.x ?? 0}
@@ -424,9 +441,9 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
         items={[
           {
             key: 'rename-group',
-            label: node.name ? 'Rename Group…' : 'Name Group…',
+            label: 'Rename Group…',
             icon: Pencil,
-            onSelect: beginRenameGroup,
+            onSelect: () => onRenameGroup?.(groupId),
           },
         ]}
       />
@@ -449,31 +466,94 @@ function TerminalPane({ node, onSplitH, onSplitV, onClose, canClose, headerSlot 
 }
 
 /**
- * Recursively renders the split tree: a "leaf" is a terminal group, a "split"
- * is a resizable row/column of children.
+ * One resizable row/column of a group's tree.
+ *
+ * Sizes are OWNED BY THE STORE (`node.sizes`, percentages) because every group
+ * switch unmounts the whole tree, which throws away everything
+ * react-resizable-panels keeps in component state. Three things keep the two
+ * in sync:
+ *
+ *  1. `defaultLayout` (+ a matching `defaultSize` per Panel) seeds the layout
+ *     at mount — the only time the library reads a "default" at all.
+ *  2. `onLayoutChanged` writes a user-driven resize back with `setPaneSizes`.
+ *     `meta.isUserInteraction === false` (mount, constraint recompute, our own
+ *     `setLayout`) is ignored so the library can never clobber the store.
+ *  3. A layout effect reconciles the live Group to `node.sizes` whenever those
+ *     change without a matching user drag — a restored/undone layout, or React
+ *     reusing this Group instance across a group switch (children change but
+ *     the component does not remount, so step 1 never re-runs).
  */
-function SplitNode({ node, onSplit, onClose, canClose, headerSlot = null }) {
-  if (node.type === 'leaf') {
-    return (
-      <TerminalPane
-        node={node}
-        onSplitH={() => onSplit(node.id, 'horizontal')}
-        onSplitV={() => onSplit(node.id, 'vertical')}
-        onClose={() => onClose(node.id)}
-        canClose={canClose}
-        headerSlot={headerSlot}
-      />
-    );
-  }
+function ResizableSplit({ node, groupId, renderChild }) {
+  const setPaneSizes = useTerminalStore((s) => s.setPaneSizes);
+  const groupRef = useGroupRef();
 
-  const direction = node.direction; // 'horizontal' | 'vertical'
+  const childIds = node.children.map((c) => c.id);
+  const sizes = sizesOf(node);
+  // Cheap structural identity for the memo/effect below: ids + sizes.
+  const layoutKey = childIds.map((id, i) => `${id}:${sizes[i].toFixed(2)}`).join(',');
+
+  const layout = useMemo(() => {
+    const next = {};
+    childIds.forEach((id, i) => {
+      next[id] = sizes[i];
+    });
+    return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutKey]);
+
+  useLayoutEffect(() => {
+    const handle = groupRef.current;
+    if (!handle) return;
+    let current;
+    try {
+      current = handle.getLayout();
+    } catch (_) {
+      return;
+    }
+    const ids = Object.keys(layout);
+    // `setLayout` throws unless the layout names exactly the Group's panels.
+    if (Object.keys(current).length !== ids.length) return;
+    if (!ids.every((id) => typeof current[id] === 'number')) return;
+    if (ids.every((id) => Math.abs(current[id] - layout[id]) <= SIZE_EPSILON)) return;
+    try {
+      handle.setLayout(layout);
+    } catch (_) {
+      // A transient mismatch (panels mid-registration) — the next store
+      // change, or the next mount's `defaultLayout`, puts it right.
+    }
+  }, [layout, groupRef]);
+
+  const handleLayoutChanged = useCallback(
+    (nextLayout, meta) => {
+      // Only a real separator drag / resize keypress writes back; every other
+      // trigger is the library echoing what we just told it.
+      if (meta && meta.isUserInteraction === false) return;
+      const next = childIds.map((id) => nextLayout?.[id]);
+      if (!next.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) return;
+      setPaneSizes(groupId, node.id, next);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [childIds.join(','), groupId, node.id, setPaneSizes]
+  );
+
+  const direction = node.direction === 'vertical' ? 'vertical' : 'horizontal';
+  // A pane may never be squeezed to nothing, but "15%" stops being satisfiable
+  // past six children, which the library rejects — scale it down instead.
+  const minSize = String(Math.max(4, Math.min(15, Math.floor(90 / node.children.length))));
+
   return (
-    <Group orientation={direction} className="h-full w-full">
+    <Group
+      orientation={direction}
+      className="h-full w-full"
+      groupRef={groupRef}
+      defaultLayout={layout}
+      onLayoutChanged={handleLayoutChanged}
+    >
       {node.children.map((child, i) => (
         <React.Fragment key={child.id}>
           {i > 0 && <Separator className={direction === 'horizontal' ? 'w-px' : 'h-px'} />}
-          <Panel minSize="15" defaultSize={String(100 / node.children.length)}>
-            <SplitNode node={child} onSplit={onSplit} onClose={onClose} canClose={true} />
+          <Panel id={child.id} minSize={minSize} defaultSize={String(sizes[i])}>
+            {renderChild(child)}
           </Panel>
         </React.Fragment>
       ))}
@@ -482,73 +562,281 @@ function SplitNode({ node, onSplit, onClose, canClose, headerSlot = null }) {
 }
 
 /**
- * Warp-style group switcher: a compact bar listing every group (named or
- * not) alongside an "All" entry. Selecting a group shows only it, full-size;
- * "All" returns to the normal side-by-side split view. Only rendered when
- * there is more than one group — with a single group there is nothing to
- * switch between.
+ * Recursively renders ONE group's tree: a "leaf" is a pane (a terminal with
+ * its own tab strip), a "split" is a resizable row/column of children.
  */
-function GroupSwitcher({ leaves, groupViewMode, focusedPaneId, onShowAll, onFocusGroup }) {
-  if (leaves.length < 2) return null;
+function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, onRenameGroup }) {
+  if (node.type === 'leaf') {
+    return (
+      <TerminalPane
+        node={node}
+        groupId={groupId}
+        isActivePane={activePaneId === node.id}
+        onSplitH={() => onSplit(node.id, 'horizontal')}
+        onSplitV={() => onSplit(node.id, 'vertical')}
+        onClose={() => onClose(node.id)}
+        canClose={canClose}
+        onRenameGroup={onRenameGroup}
+      />
+    );
+  }
+
   return (
-    <div className="h-6 shrink-0 flex items-center gap-0.5 px-1 bg-vsc-panel border-b border-vsc-border overflow-x-auto select-none">
-      <LayoutGrid size={12} className="shrink-0 mr-1 text-vsc-muted" />
-      <button
-        type="button"
-        onClick={onShowAll}
-        className={cn(
-          'shrink-0 px-2 h-[20px] rounded-sm text-ui-sm transition-colors',
-          groupViewMode === 'split'
-            ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
-            : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover'
-        )}
-        title="Show all groups side by side"
-      >
-        All
-      </button>
-      {leaves.map((leaf, i) => {
-        const label = leaf.name || `Group ${i + 1}`;
-        const isFocused = groupViewMode === 'focus' && focusedPaneId === leaf.id;
-        return (
-          <button
-            key={leaf.id}
-            type="button"
-            onClick={() => onFocusGroup(leaf.id)}
-            title={`Show only "${label}"`}
-            className={cn(
-              'shrink-0 px-2 h-[20px] rounded-sm text-ui-sm truncate max-w-[140px] transition-colors',
-              isFocused
-                ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
-                : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover'
-            )}
-          >
-            {label}
-          </button>
-        );
-      })}
+    <ResizableSplit
+      node={node}
+      groupId={groupId}
+      renderChild={(child) => (
+        <SplitNode
+          node={child}
+          groupId={groupId}
+          activePaneId={activePaneId}
+          onSplit={onSplit}
+          onClose={onClose}
+          canClose={true}
+          onRenameGroup={onRenameGroup}
+        />
+      )}
+    />
+  );
+}
+
+/**
+ * The group switcher: the primary UI for `state.groups`. One chip per group —
+ * click to bring that group's whole arrangement on screen, double-click (or
+ * the context menu) to rename it inline, × to close it, "+" to create one.
+ *
+ * Each chip is also a DROP TARGET: dragging a terminal tab onto another
+ * group's chip moves the terminal into that group (`moveTabToGroup`), which
+ * also switches to it. Hit-testing goes through `data-group-chip`, the same
+ * `elementFromPoint` path the panes' `data-pane-body` uses.
+ */
+function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGroupId, headerSlot }) {
+  const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
+  const createGroup = useTerminalStore((s) => s.createGroup);
+  const closeGroup = useTerminalStore((s) => s.closeGroup);
+  const renameGroup = useTerminalStore((s) => s.renameGroup);
+
+  const { drag } = useContext(DragContext);
+
+  const [draft, setDraft] = useState('');
+  const [menu, setMenu] = useState(null); // { x, y, groupId }
+  const [creating, setCreating] = useState(false);
+
+  const beginRename = (group) => {
+    setDraft(group.name || '');
+    setRenamingGroupId(group.id);
+  };
+
+  // The editor can also be opened from outside (a pane's "Rename Group…"),
+  // which cannot seed the draft itself — do it here for both paths.
+  useEffect(() => {
+    if (!renamingGroupId) return;
+    const target = groups.find((g) => g.id === renamingGroupId);
+    setDraft(target?.name ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renamingGroupId]);
+
+  const commitRename = (groupId) => {
+    // Functional update so a stray second blur (the input unmounting right
+    // after Enter already committed) cannot re-apply the same rename.
+    setRenamingGroupId((was) => {
+      if (was === groupId) renameGroup(groupId, draft);
+      return null;
+    });
+  };
+
+  const handleCreate = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      await createGroup({});
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const canClose = groups.length > 1;
+
+  return (
+    <div
+      data-group-switcher=""
+      className="h-7 shrink-0 flex items-center gap-1 px-1 bg-vsc-panel border-b border-vsc-border select-none"
+    >
+      <LayoutGrid size={12} className="shrink-0 ml-0.5 text-vsc-muted" />
+      <div role="tablist" aria-label="Terminal groups" className="flex-1 flex items-center gap-0.5 overflow-x-auto">
+        {groups.map((group) => {
+          const isActive = group.id === activeGroupId;
+          const isDropTarget = Boolean(drag?.active) && drag.targetGroupId === group.id;
+          const terminals = countTerminals(group.tree);
+
+          if (renamingGroupId === group.id) {
+            return (
+              <input
+                key={group.id}
+                autoFocus
+                value={draft}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setDraft(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') commitRename(group.id);
+                  else if (e.key === 'Escape') setRenamingGroupId(null);
+                }}
+                onBlur={() => commitRename(group.id)}
+                placeholder="Group name"
+                className="shrink-0 w-28 h-[20px] px-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
+              />
+            );
+          }
+
+          return (
+            <div
+              key={group.id}
+              data-group-chip={group.id}
+              role="tab"
+              tabIndex={0}
+              aria-selected={isActive}
+              title={`${group.name} — ${terminals} terminal${terminals === 1 ? '' : 's'}. Click to switch, drop a terminal here to move it, double-click to rename.`}
+              onClick={() => {
+                if (Date.now() - lastDragEndAt < 200) return;
+                setActiveGroup(group.id);
+              }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                beginRename(group);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenu({ x: e.clientX, y: e.clientY, groupId: group.id });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActiveGroup(group.id);
+                } else if (e.key === 'F2') {
+                  e.preventDefault();
+                  beginRename(group);
+                }
+              }}
+              className={cn(
+                'shrink-0 flex items-center gap-1 pl-2 pr-1 h-[20px] rounded-sm text-ui-sm cursor-pointer transition-colors',
+                isActive
+                  ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
+                  : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover',
+                isDropTarget &&
+                  'ring-1 ring-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]'
+              )}
+            >
+              <span className="truncate max-w-[140px]">{group.name}</span>
+              <span className="text-[10px] tabular-nums opacity-60">{terminals}</span>
+              {canClose && (
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  title={`Close ${group.name}`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeGroup(group.id);
+                  }}
+                  className="p-0.5 rounded-sm opacity-50 hover:opacity-100 hover:bg-vsc-item-hover hover:text-vsc-error"
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+          );
+        })}
+
+        <button
+          type="button"
+          onClick={handleCreate}
+          disabled={creating}
+          className={cn(paneHeaderBtn, 'shrink-0 disabled:opacity-40')}
+          title="New Terminal Group"
+        >
+          <Plus size={14} />
+        </button>
+      </div>
+
+      {/* Region chrome (drag handle, maximize, hide) merged in from the layout
+          so the terminal shows one bar of chrome, not two. */}
+      {headerSlot ? <div className="flex items-center gap-0.5 shrink-0">{headerSlot}</div> : null}
+
+      <ContextMenu
+        open={Boolean(menu)}
+        x={menu?.x ?? 0}
+        y={menu?.y ?? 0}
+        onClose={() => setMenu(null)}
+        items={
+          menu
+            ? [
+                {
+                  key: 'rename-group',
+                  label: 'Rename Group…',
+                  icon: Pencil,
+                  onSelect: () => {
+                    const target = groups.find((g) => g.id === menu.groupId);
+                    if (target) beginRename(target);
+                  },
+                },
+                {
+                  key: 'new-group',
+                  label: 'New Group',
+                  icon: Plus,
+                  onSelect: handleCreate,
+                },
+                { type: 'separator', key: 'sep' },
+                {
+                  key: 'close-group',
+                  label: 'Close Group',
+                  icon: X,
+                  danger: true,
+                  disabled: !canClose,
+                  disabledReason: canClose ? undefined : 'This is the only group',
+                  onSelect: () => closeGroup(menu.groupId),
+                },
+              ]
+            : []
+        }
+      />
     </div>
   );
 }
 
 /**
- * Top-level container for the terminal split system. Owns the drag gesture so
- * every pane can render the drop indicator for the pointer's current target.
+ * Top-level container for the terminal area. Renders the group switcher plus
+ * the ACTIVE group's split tree, full size — never more than one group at a
+ * time. Owns the drag gesture so every pane (and every group chip) can render
+ * the drop indicator for the pointer's current target.
  */
 export function TerminalSplitContainer({ headerSlot = null }) {
-  const splitTree = useTerminalStore((s) => s.splitTree);
+  const groups = useTerminalStore((s) => s.groups);
+  const activeGroupId = useTerminalStore((s) => s.activeGroupId);
   const splitPane = useTerminalStore((s) => s.splitPane);
   const closePane = useTerminalStore((s) => s.closePane);
   const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
+  const moveTabToGroup = useTerminalStore((s) => s.moveTabToGroup);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
-  const groupViewMode = useTerminalStore((s) => s.groupViewMode);
-  const focusedPaneId = useTerminalStore((s) => s.focusedPaneId);
-  const focusGroup = useTerminalStore((s) => s.focusGroup);
-  const showAllGroups = useTerminalStore((s) => s.showAllGroups);
 
-  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
+  const activeGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
+
+  // Which group's switcher chip is currently being renamed inline. Lifted here
+  // so a pane's "Rename Group…" menu item can open the switcher's editor
+  // rather than duplicating one inside the pane.
+  const [renamingGroupId, setRenamingGroupId] = useState(null);
+
+  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone, targetGroupId }
   const [drag, setDrag] = useState(null);
   const dragRef = useRef(null);
   const cleanupRef = useRef(null);
+  // Read inside the pointer handlers, which are created once per gesture.
+  const activeGroupIdRef = useRef(activeGroupId);
+  activeGroupIdRef.current = activeGroup?.id ?? null;
 
   /**
    * Listeners are attached synchronously here rather than from an effect: a
@@ -573,6 +861,9 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         if (!movedEnough) return;
 
         const hit = paneAtPoint(ev.clientX, ev.clientY);
+        // A group chip is only considered when the pointer isn't over a pane —
+        // the switcher sits above the panes, never on top of one.
+        const chip = hit ? null : groupChipAtPoint(ev.clientX, ev.clientY);
         const next = {
           ...cur,
           active: true,
@@ -580,6 +871,11 @@ export function TerminalSplitContainer({ headerSlot = null }) {
           y: ev.clientY,
           targetPaneId: hit?.paneId ?? null,
           zone: hit ? zoneFromPoint(hit.rect, ev.clientX, ev.clientY) : null,
+          // Dropping on the chip of the group the tab already lives in (the
+          // active one — only its tabs are on screen) is a no-op, so it is
+          // never highlighted as a target.
+          targetGroupId:
+            chip && chip.groupId !== activeGroupIdRef.current ? chip.groupId : null,
         };
         dragRef.current = next;
         setDrag(next);
@@ -591,8 +887,12 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         dragRef.current = null;
         setDrag(null);
         if (cur?.active) lastDragEndAt = Date.now();
-        if (!cur?.active || !cur.targetPaneId) return;
-        dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+        if (!cur?.active) return;
+        if (cur.targetPaneId) {
+          dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+        } else if (cur.targetGroupId) {
+          moveTabToGroup(cur.tabId, cur.targetGroupId);
+        }
       };
 
       const onCancel = () => {
@@ -611,6 +911,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         active: false,
         targetPaneId: null,
         zone: null,
+        targetGroupId: null,
       };
       dragRef.current = started;
       setDrag(started);
@@ -620,7 +921,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
       window.addEventListener('pointercancel', onCancel);
       cleanupRef.current = detach;
     },
-    [dropTabOnPane]
+    [dropTabOnPane, moveTabToGroup]
   );
 
   // Never leave listeners behind if the terminal unmounts mid-gesture.
@@ -637,67 +938,54 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   // Split whichever pane's own button was clicked, then focus the pane it
   // creates — a clear, visible sign the click did something, even when the
   // pane split wasn't already the focused one.
-  const handleSplit = useCallback(async (paneId, direction) => {
-    const newPaneId = await splitPane(paneId, direction);
-    if (newPaneId) setActivePane(newPaneId);
-  }, [splitPane, setActivePane]);
+  const handleSplit = useCallback(
+    async (paneId, direction) => {
+      const groupId = activeGroupIdRef.current;
+      const newPaneId = await splitPane(paneId, direction, groupId);
+      if (newPaneId) setActivePane(newPaneId, groupId);
+    },
+    [splitPane, setActivePane]
+  );
 
-  const handleClose = useCallback((paneId) => {
-    closePane(paneId);
-  }, [closePane]);
+  const handleClose = useCallback(
+    (paneId) => {
+      closePane(paneId, activeGroupIdRef.current);
+    },
+    [closePane]
+  );
 
-  if (!splitTree) return null;
+  const dragValue = useMemo(
+    () => ({ drag, beginDrag, cancelActiveDrag }),
+    [drag, beginDrag, cancelActiveDrag]
+  );
 
-  const canClose = splitTree.type !== 'leaf';
-  const leaves = collectLeafNodes(splitTree);
-  // Ignore a stale/closed focus target (e.g. its group was closed) rather
-  // than rendering a blank pane — falls back to the normal split view, same
-  // as having fewer than two groups.
-  const focusedLeaf =
-    groupViewMode === 'focus' && leaves.length > 1
-      ? leaves.find((l) => l.id === focusedPaneId) || null
-      : null;
+  if (!activeGroup?.tree) return null;
 
   return (
-    <DragContext.Provider value={{ drag, beginDrag, cancelActiveDrag }}>
+    <DragContext.Provider value={dragValue}>
       <div className={cn('h-full w-full flex flex-col overflow-hidden', drag?.active && 'cursor-grabbing')}>
-        {/* One pane: the chrome lives in that pane's tab strip. Split: a single
-            slim bar carries it for the whole group. */}
-        {headerSlot && splitTree.type !== 'leaf' && (
-          <div className="h-panel-header shrink-0 flex items-center justify-end gap-0.5 px-1 bg-vsc-panel border-b border-vsc-border select-none">
-            <span className="mr-auto pl-1.5 text-ui-sm font-medium tracking-wide uppercase text-vsc-fg">Terminal</span>
-            {headerSlot}
-          </div>
-        )}
         <GroupSwitcher
-          leaves={leaves}
-          groupViewMode={groupViewMode}
-          focusedPaneId={focusedPaneId}
-          onShowAll={showAllGroups}
-          onFocusGroup={focusGroup}
+          groups={groups}
+          activeGroupId={activeGroup.id}
+          renamingGroupId={renamingGroupId}
+          setRenamingGroupId={setRenamingGroupId}
+          headerSlot={headerSlot}
         />
-        <div className="flex-1 overflow-hidden">
-          {focusedLeaf ? (
-            // Focus mode: render only the selected group, full-size. The rest
-            // of the split tree is left completely untouched — just not
-            // mounted — so switching back to "All" (or splitting/closing this
-            // very group) resumes exactly where the tree left off.
-            <TerminalPane
-              node={focusedLeaf}
-              onSplitH={() => handleSplit(focusedLeaf.id, 'horizontal')}
-              onSplitV={() => handleSplit(focusedLeaf.id, 'vertical')}
-              onClose={() => handleClose(focusedLeaf.id)}
-              canClose={true}
-            />
-          ) : (
-            <SplitNode
-              node={splitTree}
-              onSplit={handleSplit}
-              onClose={handleClose}
-              canClose={canClose}
-              headerSlot={splitTree.type === 'leaf' ? headerSlot : null}
-            />
-          )}
+        {/* Keyed by group: switching groups mounts a completely fresh tree, so
+            react-resizable-panels re-reads `defaultLayout` from the group's
+            own stored sizes instead of carrying the previous group's layout
+            over. The terminals themselves live in terminalRegistry, so
+            remounting costs nothing but a re-attach. */}
+        <div key={activeGroup.id} className="flex-1 overflow-hidden">
+          <SplitNode
+            node={activeGroup.tree}
+            groupId={activeGroup.id}
+            activePaneId={activeGroup.activePaneId}
+            onSplit={handleSplit}
+            onClose={handleClose}
+            canClose={activeGroup.tree.type !== 'leaf'}
+            onRenameGroup={setRenamingGroupId}
+          />
         </div>
         <DragPreview drag={drag} />
       </div>

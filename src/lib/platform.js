@@ -12,7 +12,7 @@ export const modLabel = isMac ? '⌘' : 'Ctrl';
 
 /** True when the event carries the app modifier (⌘ on macOS, Ctrl elsewhere). */
 export function hasMod(e) {
-  return isMac ? e.metaKey : e.ctrlKey;
+  return Boolean(isMac ? e.metaKey : e.ctrlKey);
 }
 
 /** Render a chord like `mod+shift+d` as "⌘⇧D" on macOS or "Ctrl+Shift+D" elsewhere. */

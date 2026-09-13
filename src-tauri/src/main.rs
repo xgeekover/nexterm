@@ -37,12 +37,23 @@ fn main() {
                 .fs_watcher
                 .start_watching(app.handle().clone(), &root.to_string_lossy());
 
-            // Native menu; app-specific items are forwarded to the webview by id.
-            let menu = menu::build(app.handle())?;
-            app.set_menu(menu)?;
-            app.on_menu_event(|handle, event| {
-                menu::forward_to_webview(handle, event.id().as_ref());
-            });
+            // macOS always has a menu bar at the top of the screen, so the
+            // native menu is the right place for it there, and app-specific
+            // items are forwarded to the webview by id.
+            //
+            // Off macOS the window is frameless (see tauri.windows.conf.json)
+            // and the app draws one compact title row containing its own menu,
+            // VS Code style. A native menu there would add a second row and
+            // re-introduce the accelerator collisions `terminal_safe` exists
+            // to avoid, so there isn't one.
+            #[cfg(target_os = "macos")]
+            {
+                let menu = menu::build(app.handle())?;
+                app.set_menu(menu)?;
+                app.on_menu_event(|handle, event| {
+                    menu::forward_to_webview(handle, event.id().as_ref());
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

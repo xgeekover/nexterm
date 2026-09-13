@@ -17,7 +17,7 @@
 //! convention — muda cannot build those items on other platforms, and
 //! Windows/Linux apps don't have an app-named menu at all. There we fold the
 //! items that would otherwise live there (Settings…, Quit) into the File
-//! menu instead, VS-Code-style. Either way the same 14 custom ids exist on
+//! menu instead, VS-Code-style. Either way the same 13 custom ids exist on
 //! every platform (see `every_custom_id_is_unique_and_matches_the_frontend_contract`),
 //! so the frontend's id-based event handling in `useMenuEvents.js` needs no
 //! platform branching.
@@ -69,6 +69,30 @@ fn custom(id: &'static str, label: &'static str, accelerator: &'static str) -> I
     Item::Custom { id, label, accelerator: Some(accelerator) }
 }
 
+/// A menu item whose accelerator would be a bare `Ctrl`+letter off macOS.
+///
+/// Those belong to the terminal, not to us. Windows resolves the window's
+/// accelerator table before the webview gets the key, and GTK runs its accel
+/// group before the focused widget, so registering `CmdOrCtrl+D` here takes
+/// EOF away from every shell in the app — likewise Ctrl+K (kill line), Ctrl+W
+/// (delete word), Ctrl+P (history), Ctrl+B (backward char) and Ctrl+S (XOFF).
+///
+/// On macOS the app modifier is ⌘, which collides with nothing in the pty, so
+/// the accelerator is registered normally. Elsewhere the item is menu-only and
+/// `useKeybindings.js` provides the shortcut — a webview-level listener, which
+/// xterm's own capture handler correctly beats whenever a terminal has focus.
+fn terminal_safe(id: &'static str, label: &'static str, mac_accelerator: &'static str) -> Item {
+    #[cfg(target_os = "macos")]
+    {
+        Item::Custom { id, label, accelerator: Some(mac_accelerator) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mac_accelerator;
+        Item::Custom { id, label, accelerator: None }
+    }
+}
+
 /// The whole menu bar, in order.
 pub fn spec() -> Vec<Submenu> {
     use Item::{Predefined as P, Separator as Sep};
@@ -100,7 +124,7 @@ pub fn spec() -> Vec<Submenu> {
                 custom("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
                 custom("new-terminal", "New Terminal", "Ctrl+Shift+`"),
                 Sep,
-                custom("save", "Save", "CmdOrCtrl+S"),
+                terminal_safe("save", "Save", "CmdOrCtrl+S"),
                 Sep,
                 P(CloseWindow),
             ],
@@ -117,7 +141,7 @@ pub fn spec() -> Vec<Submenu> {
             items: vec![
                 custom("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
                 custom("new-terminal", "New Terminal", "Ctrl+Shift+`"),
-                custom("save", "Save", "CmdOrCtrl+S"),
+                terminal_safe("save", "Save", "CmdOrCtrl+S"),
                 Sep,
                 custom("preferences", "Settings…", "CmdOrCtrl+,"),
                 Sep,
@@ -143,10 +167,10 @@ pub fn spec() -> Vec<Submenu> {
     submenus.push(Submenu {
         title: "View",
         items: vec![
-            custom("command-palette", "Command Palette…", "CmdOrCtrl+K"),
-            custom("quick-open", "Go to File…", "CmdOrCtrl+P"),
+            terminal_safe("command-palette", "Command Palette…", "CmdOrCtrl+K"),
+            terminal_safe("quick-open", "Go to File…", "CmdOrCtrl+P"),
             Sep,
-            custom("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
+            terminal_safe("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
             custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
             custom("toggle-secondary", "Toggle AI Side Bar", "CmdOrCtrl+Alt+B"),
             Sep,
@@ -156,11 +180,11 @@ pub fn spec() -> Vec<Submenu> {
     submenus.push(Submenu {
         title: "Terminal",
         items: vec![
-            custom("split-right", "Split Right", "CmdOrCtrl+D"),
+            terminal_safe("split-right", "Split Right", "CmdOrCtrl+D"),
             custom("split-down", "Split Down", "CmdOrCtrl+Shift+D"),
-            custom("close-pane", "Close Pane", "CmdOrCtrl+W"),
+            terminal_safe("close-pane", "Close Pane", "CmdOrCtrl+W"),
             Sep,
-            custom("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
+            terminal_safe("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
         ],
     });
 
@@ -334,11 +358,53 @@ mod tests {
     }
 
     #[test]
-    fn every_custom_item_has_an_accelerator() {
+    fn every_custom_item_has_an_accelerator_unless_the_shell_needs_it() {
+        // Off macOS these are reachable from the menu only; `useKeybindings.js`
+        // provides the shortcut, where xterm can win it back when a terminal
+        // has focus. See `terminal_safe`.
+        #[cfg(not(target_os = "macos"))]
+        let menu_only: &[&str] = &[
+            "save",
+            "command-palette",
+            "quick-open",
+            "toggle-sidebar",
+            "split-right",
+            "close-pane",
+            "clear-terminal",
+        ];
+        #[cfg(target_os = "macos")]
+        let menu_only: &[&str] = &[];
+
         for sub in spec() {
             for item in sub.items {
                 if let Item::Custom { id, accelerator, .. } = item {
-                    assert!(accelerator.is_some(), "{id} has no accelerator");
+                    if menu_only.contains(&id) {
+                        assert!(accelerator.is_none(), "{id} must stay menu-only here");
+                    } else {
+                        assert!(accelerator.is_some(), "{id} has no accelerator");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The invariant that matters on Windows and Linux: the window resolves
+    /// its accelerator table before the webview sees the key, so a bare
+    /// Ctrl+letter here is taken away from every shell in the app — and every
+    /// one of those letters means something to readline (D is EOF, K kills to
+    /// end of line, W deletes a word, P walks history, S is XOFF).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn no_accelerator_claims_a_bare_ctrl_letter() {
+        for sub in spec() {
+            for item in sub.items {
+                if let Item::Custom { id, accelerator: Some(accel), .. } = item {
+                    let parts: Vec<&str> = accel.split('+').collect();
+                    let bare_ctrl_letter = parts.len() == 2
+                        && matches!(parts[0], "CmdOrCtrl" | "Ctrl")
+                        && parts[1].len() == 1
+                        && parts[1].chars().all(|c| c.is_ascii_alphabetic());
+                    assert!(!bare_ctrl_letter, "{id} claims {accel}, which the shell needs");
                 }
             }
         }

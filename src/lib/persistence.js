@@ -9,9 +9,17 @@
  * (the persisted shape changes), `loadState` treats any payload written by an
  * older version as absent rather than trying to interpret it — a future
  * shape change is discarded safely instead of crashing the app.
+ *
+ * That discard-on-mismatch policy is *destructive* for any caller that has a
+ * real migration to run: by the time `loadState` has returned the fallback the
+ * old payload is still on disk, but the caller has already bootstrapped a
+ * default state and its own write-behind will overwrite it moments later.
+ * `loadVersionedState` exists for exactly that case — it hands back the raw
+ * `{ version, data }` pair at *any* version so the caller can branch on the
+ * version itself and migrate instead of silently losing the user's data.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** Read `key` from localStorage. Returns `fallback` on any miss, parse error, or version mismatch. */
 export function loadState(key, fallback) {
@@ -41,4 +49,31 @@ export function saveState(key, value) {
   }
 }
 
-export default { loadState, saveState, SCHEMA_VERSION };
+/**
+ * Read `key` WITHOUT the version gate, so a caller that knows how to migrate
+ * an older payload can do so instead of losing it.
+ *
+ * Returns `{ version, data }` for any stored payload — including one written
+ * by an older (or newer) schema — or `null` when the key is absent, the
+ * storage is unreachable, or the payload is not a JSON object. `version` is
+ * whatever was stamped (possibly `undefined` for a hand-written payload), so
+ * callers must compare it explicitly and treat anything they don't recognise
+ * as "no usable state" rather than assuming it is current.
+ *
+ * Additive on purpose: `loadState`/`saveState` behave exactly as before.
+ */
+export function loadVersionedState(key) {
+  try {
+    if (typeof localStorage === 'undefined' || localStorage === null) return null;
+    const raw = localStorage.getItem(key);
+    if (raw == null) return null;
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return { version: parsed.version, data: parsed.data };
+  } catch (_) {
+    return null;
+  }
+}
+
+export default { loadState, saveState, loadVersionedState, SCHEMA_VERSION };
