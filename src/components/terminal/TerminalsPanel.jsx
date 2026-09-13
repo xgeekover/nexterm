@@ -1,12 +1,16 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  Archive,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  Columns2,
+  FolderPlus,
+  Plus,
+  Rows2,
+  Save,
   SquareTerminal,
   Terminal as TermIcon,
-  Plus,
-  Save,
-  Archive,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
@@ -15,11 +19,24 @@ import { cn } from '../../lib/utils.js';
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
 const INDENT = 10;
 
-/** Collect the split tree's groups in DOM order. */
-function collectGroups(node, acc = []) {
+/**
+ * Left padding for a row at tree depth `level` (0 = group). Level 1 lands at
+ * 24px — where terminals already sat under a group — so an unsplit group reads
+ * exactly as it did before panes existed.
+ */
+const padFor = (level) => (level === 0 ? 4 : 4 + INDENT * (level + 1));
+
+/**
+ * Collect one group's panes in DOM order, each tagged with the direction of
+ * the split that contains it (null when the group was never split).
+ */
+function collectPanes(node, direction = null, acc = []) {
   if (!node) return acc;
-  if (node.type === 'leaf') acc.push(node);
-  else node.children.forEach((c) => collectGroups(c, acc));
+  if (node.type === 'leaf') {
+    acc.push({ pane: node, direction });
+    return acc;
+  }
+  for (const child of node.children) collectPanes(child, node.direction, acc);
   return acc;
 }
 
@@ -35,50 +52,107 @@ function relativeTime(ts) {
 
 const basename = (p) => (p || '').replace(/\/+$/, '').split('/').pop() || p || '';
 
+/** The indent guides a row at `level` sits behind, matching the Explorer tree. */
+function IndentGuides({ level }) {
+  if (level < 1) return null;
+  return (
+    <>
+      {Array.from({ length: level }, (_, k) => (
+        <span
+          key={k}
+          aria-hidden="true"
+          className="absolute top-0 bottom-0 border-l border-vsc-indent-guide"
+          style={{ left: 4 + INDENT * (k + 1) }}
+        />
+      ))}
+    </>
+  );
+}
+
 /**
- * The "Terminals" view: every terminal group with its terminals nested under
- * it, plus the groups the user has saved by name. Rows mirror the Explorer's
- * density (22px, chevrons, indent guides) so the two trees read the same.
+ * The "Terminals" view: every group, the panes it is split into, and the
+ * terminals inside them — plus the groups the user has saved by name.
+ *
+ * ROW STRUCTURE. The model is three levels deep (group → pane → terminal) but
+ * the tree renders the pane level ONLY for a group that is actually split.
+ * Most groups hold a single pane, and a sole "Pane 1" row under every group
+ * would be pure indentation tax: it costs a row, a level of indent and a click
+ * target while telling the user nothing they cannot see. So a one-pane group
+ * lists its terminals directly (level 1, exactly where they used to sit) and a
+ * split group grows a level of pane rows (level 1) with its terminals under
+ * them (level 2). The panel is the group switcher first and a layout inspector
+ * second; this keeps the common case flat and only pays for the structure when
+ * the structure exists.
+ *
+ * Rows mirror the Explorer's density (22px, chevrons, indent guides) so the
+ * two trees read the same.
  */
 export function TerminalsPanel() {
-  const splitTree = useTerminalStore((s) => s.splitTree);
+  const groups = useTerminalStore((s) => s.groups);
+  const activeGroupId = useTerminalStore((s) => s.activeGroupId);
   const tabs = useTerminalStore((s) => s.tabs);
   const activeTabId = useTerminalStore((s) => s.activeTabId);
-  const activePaneId = useTerminalStore((s) => s.activePaneId);
-  const groupViewMode = useTerminalStore((s) => s.groupViewMode);
-  const focusedPaneId = useTerminalStore((s) => s.focusedPaneId);
   const savedGroups = useTerminalStore((s) => s.savedGroups);
 
-  const bindPaneToTab = useTerminalStore((s) => s.bindPaneToTab);
   const switchTab = useTerminalStore((s) => s.switchTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
+  const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const createTab = useTerminalStore((s) => s.createTab);
+  const createGroup = useTerminalStore((s) => s.createGroup);
   const duplicateTab = useTerminalStore((s) => s.duplicateTab);
   const closeTab = useTerminalStore((s) => s.closeTab);
   const closePane = useTerminalStore((s) => s.closePane);
+  const closeGroup = useTerminalStore((s) => s.closeGroup);
   const splitPane = useTerminalStore((s) => s.splitPane);
   const renameTab = useTerminalStore((s) => s.renameTab);
   const renameGroup = useTerminalStore((s) => s.renameGroup);
-  const focusGroup = useTerminalStore((s) => s.focusGroup);
-  const showAllGroups = useTerminalStore((s) => s.showAllGroups);
   const closeOthersInGroup = useTerminalStore((s) => s.closeOthersInGroup);
   const closeTabsToTheRight = useTerminalStore((s) => s.closeTabsToTheRight);
+  const moveTabToGroup = useTerminalStore((s) => s.moveTabToGroup);
+  const moveTabToNewPane = useTerminalStore((s) => s.moveTabToNewPane);
   const moveTabToNewGroup = useTerminalStore((s) => s.moveTabToNewGroup);
   const saveGroup = useTerminalStore((s) => s.saveGroup);
   const loadSavedGroup = useTerminalStore((s) => s.loadSavedGroup);
   const renameSavedGroup = useTerminalStore((s) => s.renameSavedGroup);
   const deleteSavedGroup = useTerminalStore((s) => s.deleteSavedGroup);
 
+  // Collapsed group ids AND pane ids share one set — pane ids are unique
+  // across every group, so they cannot collide.
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [savedOpen, setSavedOpen] = useState(true);
-  const [menu, setMenu] = useState(null); // { x, y, kind, id }
+  const [menu, setMenu] = useState(null); // { x, y, kind, id, view? }
   const [draft, setDraft] = useState(null); // { kind: 'group'|'tab'|'saved', id, value }
+  // Selecting a saved group is deliberately inert — see the row's comment.
+  const [selectedSavedId, setSelectedSavedId] = useState(null);
   const listRef = useRef(null);
 
-  const groups = useMemo(() => collectGroups(splitTree), [splitTree]);
   const tabById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
 
-  const toggleGroup = (id) =>
+  /** [{ group, panes: [{ pane, direction }], tabCount }] in switcher order. */
+  const layout = useMemo(
+    () =>
+      groups.map((group) => {
+        const panes = collectPanes(group.tree);
+        return {
+          group,
+          panes,
+          tabCount: panes.reduce((n, { pane }) => n + pane.tabIds.length, 0),
+        };
+      }),
+    [groups]
+  );
+
+  /** Which group and pane hold `tabId` right now. */
+  const locate = (tabId) => {
+    for (const { group, panes } of layout) {
+      for (const { pane } of panes) {
+        if (pane.tabIds.includes(tabId)) return { group, pane, paneCount: panes.length };
+      }
+    }
+    return null;
+  };
+
+  const toggle = (id) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -86,14 +160,14 @@ export function TerminalsPanel() {
       return next;
     });
 
-  const activateTab = (groupId, tabId) => {
-    bindPaneToTab(groupId, tabId);
-    switchTab(tabId);
-    setActivePane(groupId);
-    // Following a terminal into a group that focus mode is hiding would
-    // otherwise activate something the user cannot see.
-    if (groupViewMode === 'focus' && focusedPaneId !== groupId) focusGroup(groupId);
-  };
+  /**
+   * Clicking a terminal has to bring its GROUP on screen before focusing
+   * anything, or the user activates something they cannot see. `switchTab`
+   * does all three steps in one update: it finds the owning group, makes it
+   * the active group, focuses the pane holding the tab, and makes the tab that
+   * pane's visible one.
+   */
+  const activateTab = (tabId) => switchTab(tabId);
 
   const commitDraft = () => {
     if (!draft) return;
@@ -130,65 +204,130 @@ export function TerminalsPanel() {
   );
 
   // ---- context menus -------------------------------------------------
-  const groupItems = (group) => {
+  const groupItems = (entry) => {
+    const { group, panes, tabCount } = entry;
+    const isActive = group.id === activeGroupId;
     const onlyGroup = groups.length <= 1;
-    const focused = groupViewMode === 'focus' && focusedPaneId === group.id;
     return [
-      { key: 'new', label: 'New Terminal in Group', onSelect: () => { setActivePane(group.id); createTab(); } },
-      { key: 'split-r', label: 'Split Right', onSelect: () => splitPane(group.id, 'horizontal') },
-      { key: 'split-d', label: 'Split Down', onSelect: () => splitPane(group.id, 'vertical') },
+      {
+        key: 'switch',
+        label: 'Switch to This Group',
+        disabled: isActive,
+        disabledReason: isActive ? 'This group is already on screen' : undefined,
+        onSelect: () => setActiveGroup(group.id),
+      },
+      { key: 'new', label: 'New Terminal in Group', onSelect: () => createTab({ groupId: group.id }) },
       { type: 'separator', key: 's1' },
+      {
+        key: 'split-r',
+        label: panes.length > 1 ? 'Split Active Pane Right' : 'Split Right',
+        onSelect: () => splitPane(group.activePaneId, 'horizontal', group.id),
+      },
+      {
+        key: 'split-d',
+        label: panes.length > 1 ? 'Split Active Pane Down' : 'Split Down',
+        onSelect: () => splitPane(group.activePaneId, 'vertical', group.id),
+      },
+      { type: 'separator', key: 's2' },
       { key: 'rename', label: 'Rename Group…', onSelect: () => startRename('group', group.id, group.name) },
       {
         key: 'save',
         label: 'Save Group…',
-        disabled: group.tabIds.length === 0,
-        disabledReason: group.tabIds.length === 0 ? 'This group has no terminals to save' : undefined,
+        disabled: tabCount === 0,
+        disabledReason: tabCount === 0 ? 'This group has no terminals to save' : undefined,
         onSelect: () => {
-          const entry = saveGroup(group.id, group.name);
-          if (entry) startRename('saved', entry.id, entry.name);
+          const saved = saveGroup(group.id, group.name);
+          if (!saved) return;
+          setSavedOpen(true);
+          setSelectedSavedId(saved.id);
+          startRename('saved', saved.id, saved.name);
         },
       },
-      { type: 'separator', key: 's2' },
-      focused
-        ? { key: 'all', label: 'Show All Groups', onSelect: () => showAllGroups() }
-        : { key: 'focus', label: 'Focus This Group', disabled: onlyGroup, disabledReason: onlyGroup ? 'There is only one group' : undefined, onSelect: () => focusGroup(group.id) },
       { type: 'separator', key: 's3' },
       {
         key: 'close',
         label: 'Close Group',
+        danger: true,
         disabled: onlyGroup,
         disabledReason: onlyGroup ? 'The last group cannot be closed' : undefined,
-        onSelect: () => closePane(group.id),
+        onSelect: () => closeGroup(group.id),
       },
     ];
   };
 
-  const tabItems = (group, tab) => {
-    const idx = group.tabIds.indexOf(tab.id);
-    const others = group.tabIds.length > 1;
-    const toRight = idx >= 0 && idx < group.tabIds.length - 1;
+  const paneItems = (group, pane, index, paneCount) => [
+    { key: 'focus', label: `Focus Pane ${index + 1}`, onSelect: () => setActivePane(pane.id, group.id) },
+    {
+      key: 'new',
+      label: 'New Terminal in Pane',
+      onSelect: () => createTab({ paneId: pane.id, groupId: group.id }),
+    },
+    { type: 'separator', key: 's1' },
+    { key: 'split-r', label: 'Split Right', onSelect: () => splitPane(pane.id, 'horizontal', group.id) },
+    { key: 'split-d', label: 'Split Down', onSelect: () => splitPane(pane.id, 'vertical', group.id) },
+    { type: 'separator', key: 's2' },
+    {
+      key: 'close',
+      label: 'Close Pane',
+      danger: true,
+      disabled: paneCount <= 1,
+      disabledReason: paneCount <= 1 ? 'This group has only one pane' : undefined,
+      onSelect: () => closePane(pane.id, group.id),
+    },
+  ];
+
+  const tabItems = (group, pane, paneCount, tab, at) => {
+    const idx = pane.tabIds.indexOf(tab.id);
+    const others = pane.tabIds.length > 1;
+    const toRight = idx >= 0 && idx < pane.tabIds.length - 1;
+    const otherGroups = groups.filter((g) => g.id !== group.id);
+    // `moveTabToNewGroup` refuses when the tab is a one-pane group's only
+    // terminal: the move would just rename that group.
+    const aloneInGroup = paneCount === 1 && pane.tabIds.length === 1;
     return [
-      { key: 'open', label: 'Open', onSelect: () => activateTab(group.id, tab.id) },
+      { key: 'open', label: 'Open', onSelect: () => activateTab(tab.id) },
       { type: 'separator', key: 's1' },
       { key: 'rename', label: 'Rename…', onSelect: () => startRename('tab', tab.id, tab.title) },
       { key: 'dup', label: 'Duplicate', onSelect: () => duplicateTab(tab.id) },
-      { key: 'copy-path', label: 'Copy Path', disabled: !tab.cwd, disabledReason: !tab.cwd ? 'This terminal has no directory yet' : undefined, onSelect: () => navigator.clipboard?.writeText(tab.cwd || '') },
+      {
+        key: 'copy-path',
+        label: 'Copy Path',
+        disabled: !tab.cwd,
+        disabledReason: !tab.cwd ? 'This terminal has no directory yet' : undefined,
+        onSelect: () => navigator.clipboard?.writeText(tab.cwd || ''),
+      },
       { type: 'separator', key: 's2' },
       {
-        key: 'move-new',
+        key: 'move-group',
+        label: 'Move to Group ▸',
+        disabled: otherGroups.length === 0,
+        disabledReason: otherGroups.length === 0 ? 'There is no other group to move it to' : undefined,
+        // Drill down in place. `ContextMenu` fires onClose BEFORE onSelect, so
+        // this must hand back a whole new menu object (a functional update
+        // would see the null the close just wrote).
+        onSelect: () => setMenu({ ...at, kind: 'tab', id: tab.id, view: 'move' }),
+      },
+      {
+        key: 'move-new-group',
         label: 'Move to New Group',
-        disabled: !others,
-        disabledReason: !others ? 'It is already the only terminal in its group' : undefined,
+        disabled: aloneInGroup,
+        disabledReason: aloneInGroup ? 'It is already the only terminal in its group' : undefined,
         onSelect: () => moveTabToNewGroup(tab.id),
+      },
+      {
+        key: 'move-new-pane',
+        label: 'Move to New Pane',
+        disabled: !others,
+        disabledReason: !others ? 'It is already the only terminal in its pane' : undefined,
+        onSelect: () => moveTabToNewPane(tab.id, 'horizontal'),
       },
       { type: 'separator', key: 's3' },
       { key: 'close', label: 'Close', onSelect: () => closeTab(tab.id) },
       {
         key: 'close-others',
-        label: 'Close Others in Group',
+        label: 'Close Others in Pane',
         disabled: !others,
-        disabledReason: !others ? 'There are no other terminals in this group' : undefined,
+        disabledReason: !others ? 'There are no other terminals in this pane' : undefined,
         onSelect: () => closeOthersInGroup(tab.id),
       },
       {
@@ -201,19 +340,39 @@ export function TerminalsPanel() {
     ];
   };
 
+  /** The "Move to Group ▸" drill-down: every group except the tab's own. */
+  const moveToGroupItems = (group, tab, at) => [
+    {
+      key: 'back',
+      label: 'Back',
+      icon: ChevronLeft,
+      onSelect: () => setMenu({ ...at, kind: 'tab', id: tab.id }),
+    },
+    { type: 'separator', key: 's1' },
+    ...layout
+      .filter((entry) => entry.group.id !== group.id)
+      .map(({ group: target, tabCount }) => ({
+        key: target.id,
+        label: `${target.name} (${tabCount})`,
+        onSelect: () => moveTabToGroup(tab.id, target.id),
+      })),
+  ];
+
   const savedItems = (entry) => [
-    { key: 'load', label: 'Load in New Group', onSelect: () => loadSavedGroup(entry.id) },
-    { key: 'load-here', label: 'Load into Current Group', onSelect: () => loadSavedGroup(entry.id, { mode: 'replace' }) },
+    { key: 'load', label: 'Load in New Group', onSelect: () => loadSavedGroup(entry.id, { mode: 'new-group' }) },
+    {
+      key: 'load-here',
+      label: 'Load into Current Group',
+      onSelect: () => loadSavedGroup(entry.id, { mode: 'replace' }),
+    },
     { type: 'separator', key: 's1' },
     { key: 'rename', label: 'Rename…', onSelect: () => startRename('saved', entry.id, entry.name) },
-    { key: 'delete', label: 'Delete', onSelect: () => deleteSavedGroup(entry.id) },
+    { key: 'delete', label: 'Delete', danger: true, onSelect: () => deleteSavedGroup(entry.id) },
   ];
 
   const emptyItems = () => [
     { key: 'new-term', label: 'New Terminal', onSelect: () => createTab() },
-    { key: 'new-group', label: 'New Group', onSelect: () => splitPane(activePaneId, 'horizontal') },
-    { type: 'separator', key: 's1' },
-    { key: 'all', label: 'Show All Groups', disabled: groupViewMode !== 'focus', disabledReason: groupViewMode !== 'focus' ? 'Already showing every group' : undefined, onSelect: () => showAllGroups() },
+    { key: 'new-group', label: 'New Group', onSelect: () => createGroup() },
   ];
 
   const openMenu = (e, kind, id) => {
@@ -224,18 +383,28 @@ export function TerminalsPanel() {
 
   const menuItems = () => {
     if (!menu) return [];
+    const at = { x: menu.x, y: menu.y };
     if (menu.kind === 'group') {
-      const g = groups.find((x) => x.id === menu.id);
-      return g ? groupItems(g) : [];
+      const entry = layout.find((l) => l.group.id === menu.id);
+      return entry ? groupItems(entry) : [];
+    }
+    if (menu.kind === 'pane') {
+      const entry = layout.find((l) => l.panes.some((p) => p.pane.id === menu.id));
+      if (!entry) return [];
+      const index = entry.panes.findIndex((p) => p.pane.id === menu.id);
+      return paneItems(entry.group, entry.panes[index].pane, index, entry.panes.length);
     }
     if (menu.kind === 'tab') {
-      const g = groups.find((x) => x.tabIds.includes(menu.id));
-      const t = tabById.get(menu.id);
-      return g && t ? tabItems(g, t) : [];
+      const found = locate(menu.id);
+      const tab = tabById.get(menu.id);
+      if (!found || !tab) return [];
+      return menu.view === 'move'
+        ? moveToGroupItems(found.group, tab, at)
+        : tabItems(found.group, found.pane, found.paneCount, tab, at);
     }
     if (menu.kind === 'saved') {
-      const e = savedGroups.find((x) => x.id === menu.id);
-      return e ? savedItems(e) : [];
+      const entry = savedGroups.find((x) => x.id === menu.id);
+      return entry ? savedItems(entry) : [];
     }
     return emptyItems();
   };
@@ -251,18 +420,78 @@ export function TerminalsPanel() {
     next?.focus();
   };
 
+  /** One terminal row, rendered at `level` (1 in a flat group, 2 in a split one). */
+  const renderTab = (tab, level, isActiveGroup, paneActiveTabId) => {
+    const editing = draft?.kind === 'tab' && draft.id === tab.id;
+    const isActive = isActiveGroup && tab.id === activeTabId;
+    // A tab that is its pane's visible one, in a group that is off screen.
+    const isPaneVisible = !isActive && tab.id === paneActiveTabId;
+    return (
+      <div
+        key={tab.id}
+        data-row
+        role="button"
+        tabIndex={0}
+        onClick={() => activateTab(tab.id)}
+        onDoubleClick={() => startRename('tab', tab.id, tab.title)}
+        onContextMenu={(e) => openMenu(e, 'tab', tab.id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') activateTab(tab.id);
+          else if (e.key === 'F2') {
+            e.preventDefault();
+            startRename('tab', tab.id, tab.title);
+          }
+        }}
+        style={{ paddingLeft: padFor(level) }}
+        title={tab.cwd || tab.title}
+        className={cn(
+          ROW,
+          'relative',
+          isActive
+            ? 'bg-vsc-selection text-vsc-selection-fg'
+            : cn('hover:bg-vsc-hover', isPaneVisible ? 'text-vsc-fg-bright' : 'text-vsc-fg')
+        )}
+      >
+        <IndentGuides level={level} />
+        <TermIcon size={14} className="shrink-0 text-vsc-muted" />
+        {editing ? (
+          renameInput
+        ) : (
+          <>
+            <span className="truncate">{tab.title}</span>
+            {tab.cwd && (
+              <span className="ml-auto text-ui-sm text-vsc-muted shrink-0 truncate max-w-[45%]">
+                {basename(tab.cwd)}
+              </span>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="h-full w-full flex flex-col bg-vsc-sidebar overflow-hidden">
       <div className="h-panel-header shrink-0 flex items-center justify-between px-3 border-b border-vsc-border select-none">
         <span className="text-ui-sm uppercase tracking-wide font-semibold text-vsc-fg">Terminals</span>
-        <button
-          type="button"
-          onClick={() => createTab()}
-          title="New Terminal"
-          className="p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover"
-        >
-          <Plus size={16} />
-        </button>
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => createGroup()}
+            title="New Group"
+            className="p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover"
+          >
+            <FolderPlus size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => createTab()}
+            title="New Terminal"
+            className="p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
       </div>
 
       <div
@@ -271,11 +500,13 @@ export function TerminalsPanel() {
         onContextMenu={(e) => openMenu(e, 'empty', null)}
         className="flex-1 overflow-y-auto py-1"
       >
-        {groups.map((group, gi) => {
-          const isCollapsed = collapsed.has(group.id);
-          const isActiveGroup = group.id === activePaneId;
-          const groupTabs = group.tabIds.map((id) => tabById.get(id)).filter(Boolean);
+        {layout.map(({ group, panes, tabCount }, gi) => {
+          const groupCollapsed = collapsed.has(group.id);
+          const isActiveGroup = group.id === activeGroupId;
+          const isSplit = panes.length > 1;
           const editingGroup = draft?.kind === 'group' && draft.id === group.id;
+          // The pane level only exists on screen when the group is split.
+          const tabLevel = isSplit ? 2 : 1;
 
           return (
             <div key={group.id}>
@@ -283,84 +514,131 @@ export function TerminalsPanel() {
                 data-row
                 role="button"
                 tabIndex={0}
-                onClick={() => setActivePane(group.id)}
+                onClick={() => setActiveGroup(group.id)}
                 onDoubleClick={() => startRename('group', group.id, group.name)}
                 onContextMenu={(e) => openMenu(e, 'group', group.id)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') setActivePane(group.id);
-                  else if (e.key === 'ArrowLeft' && !isCollapsed) toggleGroup(group.id);
-                  else if (e.key === 'ArrowRight' && isCollapsed) toggleGroup(group.id);
+                  if (e.key === 'Enter') setActiveGroup(group.id);
+                  else if (e.key === 'F2') {
+                    e.preventDefault();
+                    startRename('group', group.id, group.name);
+                  } else if (e.key === 'ArrowLeft' && !groupCollapsed) toggle(group.id);
+                  else if (e.key === 'ArrowRight' && groupCollapsed) toggle(group.id);
                 }}
-                style={{ paddingLeft: 4 }}
+                style={{ paddingLeft: padFor(0) }}
+                title={
+                  isActiveGroup
+                    ? `${group.name} — on screen`
+                    : `${group.name} — click to switch to this group`
+                }
+                aria-current={isActiveGroup ? 'true' : undefined}
                 className={cn(
                   ROW,
-                  isActiveGroup ? 'bg-vsc-selection text-vsc-selection-fg' : 'hover:bg-vsc-hover text-vsc-fg'
+                  'relative',
+                  isActiveGroup
+                    ? 'bg-vsc-selection text-vsc-selection-fg font-semibold'
+                    : 'hover:bg-vsc-hover text-vsc-fg'
                 )}
               >
+                {/* The group that fills the terminal area gets an accent bar as
+                    well as the selection fill — "which group am I in" is the
+                    one thing this tree must never leave ambiguous. */}
+                {isActiveGroup && (
+                  <span aria-hidden="true" className="absolute left-0 top-0 bottom-0 w-[2px] bg-vsc-accent" />
+                )}
                 <span
                   onClick={(e) => {
                     e.stopPropagation();
-                    toggleGroup(group.id);
+                    toggle(group.id);
                   }}
-                  className="shrink-0 text-vsc-muted"
+                  className={cn('shrink-0', isActiveGroup ? '' : 'text-vsc-muted')}
                 >
-                  {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                  {groupCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
                 </span>
-                <SquareTerminal size={14} className="shrink-0 text-vsc-muted" />
+                <SquareTerminal size={14} className={cn('shrink-0', isActiveGroup ? '' : 'text-vsc-muted')} />
                 {editingGroup ? (
                   renameInput
                 ) : (
                   <>
                     <span className="truncate">{group.name || `Group ${gi + 1}`}</span>
-                    <span className="ml-auto text-ui-sm text-vsc-muted shrink-0">{groupTabs.length}</span>
+                    <span
+                      className={cn(
+                        'ml-auto flex items-center gap-1 text-ui-sm shrink-0',
+                        isActiveGroup ? '' : 'text-vsc-muted'
+                      )}
+                    >
+                      {isSplit && (
+                        <Columns2 size={12} className="shrink-0" aria-label={`${panes.length} panes`} />
+                      )}
+                      {tabCount}
+                    </span>
                   </>
                 )}
               </div>
 
-              {!isCollapsed &&
-                groupTabs.map((tab) => {
-                  const editingTab = draft?.kind === 'tab' && draft.id === tab.id;
-                  const isActive = tab.id === activeTabId;
+              {!groupCollapsed && tabCount === 0 && (
+                <p className="text-ui-sm text-vsc-muted py-0.5" style={{ paddingLeft: padFor(1) }}>
+                  No terminals
+                </p>
+              )}
+
+              {!groupCollapsed &&
+                panes.map(({ pane, direction }, pi) => {
+                  const paneTabs = pane.tabIds.map((id) => tabById.get(id)).filter(Boolean);
+
+                  // A group with a single pane folds that level away entirely.
+                  if (!isSplit) {
+                    return (
+                      <React.Fragment key={pane.id}>
+                        {paneTabs.map((tab) => renderTab(tab, tabLevel, isActiveGroup, pane.activeTabId))}
+                      </React.Fragment>
+                    );
+                  }
+
+                  const paneCollapsed = collapsed.has(pane.id);
+                  const isActivePane = isActiveGroup && group.activePaneId === pane.id;
+                  const PaneIcon = direction === 'vertical' ? Rows2 : Columns2;
                   return (
-                    <div
-                      key={tab.id}
-                      data-row
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => activateTab(group.id, tab.id)}
-                      onDoubleClick={() => startRename('tab', tab.id, tab.title)}
-                      onContextMenu={(e) => openMenu(e, 'tab', tab.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') activateTab(group.id, tab.id);
-                      }}
-                      style={{ paddingLeft: 4 + INDENT * 2 }}
-                      title={tab.cwd || tab.title}
-                      className={cn(
-                        ROW,
-                        'relative',
-                        isActive ? 'bg-vsc-selection text-vsc-selection-fg' : 'hover:bg-vsc-hover text-vsc-fg'
-                      )}
-                    >
-                      {/* indent guide, matching the Explorer tree */}
-                      <span
-                        aria-hidden="true"
-                        className="absolute top-0 bottom-0 border-l border-vsc-indent-guide"
-                        style={{ left: 4 + INDENT }}
-                      />
-                      <TermIcon size={14} className="shrink-0 text-vsc-muted" />
-                      {editingTab ? (
-                        renameInput
-                      ) : (
-                        <>
-                          <span className="truncate">{tab.title}</span>
-                          {tab.cwd && (
-                            <span className="ml-auto text-ui-sm text-vsc-muted shrink-0 truncate max-w-[45%]">
-                              {basename(tab.cwd)}
-                            </span>
-                          )}
-                        </>
-                      )}
-                    </div>
+                    <React.Fragment key={pane.id}>
+                      <div
+                        data-row
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setActivePane(pane.id, group.id)}
+                        onContextMenu={(e) => openMenu(e, 'pane', pane.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') setActivePane(pane.id, group.id);
+                          else if (e.key === 'ArrowLeft' && !paneCollapsed) toggle(pane.id);
+                          else if (e.key === 'ArrowRight' && paneCollapsed) toggle(pane.id);
+                        }}
+                        style={{ paddingLeft: padFor(1) }}
+                        title={`Pane ${pi + 1} · ${paneTabs.length} terminal${paneTabs.length === 1 ? '' : 's'}`}
+                        className={cn(
+                          ROW,
+                          'relative',
+                          isActivePane
+                            ? 'bg-vsc-inactive-selection text-vsc-fg-bright'
+                            : 'hover:bg-vsc-hover text-vsc-muted'
+                        )}
+                      >
+                        <IndentGuides level={1} />
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggle(pane.id);
+                          }}
+                          className="shrink-0"
+                        >
+                          {paneCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                        </span>
+                        <PaneIcon size={13} className="shrink-0" />
+                        <span className="truncate">Pane {pi + 1}</span>
+                        <span className="ml-auto text-ui-sm shrink-0">{paneTabs.length}</span>
+                      </div>
+
+                      {!paneCollapsed &&
+                        paneTabs.map((tab) => renderTab(tab, tabLevel, isActiveGroup, pane.activeTabId))}
+                    </React.Fragment>
                   );
                 })}
             </div>
@@ -377,7 +655,7 @@ export function TerminalsPanel() {
             onKeyDown={(e) => {
               if (e.key === 'Enter') setSavedOpen((v) => !v);
             }}
-            style={{ paddingLeft: 4 }}
+            style={{ paddingLeft: padFor(0) }}
             className={cn(ROW, 'hover:bg-vsc-hover text-vsc-muted')}
           >
             <span className="shrink-0">{savedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
@@ -395,22 +673,45 @@ export function TerminalsPanel() {
           {savedOpen &&
             savedGroups.map((entry) => {
               const editing = draft?.kind === 'saved' && draft.id === entry.id;
+              const selected = selectedSavedId === entry.id;
               return (
                 <div
                   key={entry.id}
                   data-row
                   role="button"
                   tabIndex={0}
-                  onClick={() => loadSavedGroup(entry.id)}
-                  onDoubleClick={() => startRename('saved', entry.id, entry.name)}
+                  // Loading a saved group spawns real PTYs, so it must never be
+                  // one stray click away — and it CANNOT be the click action at
+                  // all while double-click renames, because a double-click
+                  // delivers two clicks first and would load the group twice.
+                  // Single click only selects; double-click loads; rename moved
+                  // to F2 / the context menu.
+                  onClick={() => setSelectedSavedId(entry.id)}
+                  onDoubleClick={() => {
+                    setSelectedSavedId(entry.id);
+                    loadSavedGroup(entry.id, { mode: 'new-group' });
+                  }}
                   onContextMenu={(e) => openMenu(e, 'saved', entry.id)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') loadSavedGroup(entry.id);
+                    if (e.key === 'Enter') {
+                      setSelectedSavedId(entry.id);
+                      loadSavedGroup(entry.id, { mode: 'new-group' });
+                    } else if (e.key === 'F2') {
+                      e.preventDefault();
+                      startRename('saved', entry.id, entry.name);
+                    }
                   }}
-                  style={{ paddingLeft: 4 + INDENT * 2 }}
-                  title={`${entry.tabs.length} terminals · saved ${relativeTime(entry.savedAt)}`}
-                  className={cn(ROW, 'hover:bg-vsc-hover text-vsc-fg')}
+                  style={{ paddingLeft: padFor(1) }}
+                  title={`${entry.tabs.length} terminals · saved ${relativeTime(
+                    entry.savedAt
+                  )}\nDouble-click to load in a new group · right-click for more`}
+                  className={cn(
+                    ROW,
+                    'relative',
+                    selected ? 'bg-vsc-inactive-selection text-vsc-fg-bright' : 'hover:bg-vsc-hover text-vsc-fg'
+                  )}
                 >
+                  <IndentGuides level={1} />
                   <Save size={14} className="shrink-0 text-vsc-muted" />
                   {editing ? (
                     renameInput
@@ -429,6 +730,9 @@ export function TerminalsPanel() {
       </div>
 
       <ContextMenu
+        // Remounting on a drill-down re-runs ContextMenu's placement pass, so a
+        // taller "Move to Group" list still flips off the window edge.
+        key={`${menu?.kind ?? 'none'}:${menu?.view ?? 'root'}`}
         open={Boolean(menu)}
         x={menu?.x ?? 0}
         y={menu?.y ?? 0}

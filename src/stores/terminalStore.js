@@ -1,18 +1,102 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
-import { loadState, saveState } from '../lib/persistence.js';
+// `loadState` is deliberately NOT used for reads any more: it treats any older
+// schema as absent, which for this store's keys would mean silently bootstrapping
+// over the user's workspace. Reads go through `loadVersionedState` + an explicit
+// version branch; writes still use `saveState` (always the current version).
+import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
+
+// ---------------------------------------------------------------------------
+// The two-level layout model
+// ---------------------------------------------------------------------------
+// The workspace holds several GROUPS. Each group owns ITS OWN split tree of
+// PANES, and exactly one group (`activeGroupId`) fills the whole terminal area
+// at a time. Switching groups swaps the entire arrangement; every group is
+// remembered exactly as it was last left, across switches and restarts.
+// Terminals in inactive groups keep running — only their view is unmounted.
+//
+//   Pane  = { type: 'leaf',  id, tabIds: [], activeTabId }
+//   Split = { type: 'split', id, direction, children: [], sizes: [] }
+//   Group = { id, name, createdAt, tree: Pane|Split, activePaneId }
+//
+// This replaces the previous model, where `splitTree` was ONE tree whose
+// LEAVES were the groups (all on screen at once) and a `groupViewMode` /
+// `focusedPaneId` pair faked "show only one of them". Both are gone: the model
+// is permanently "one group fills the area", so a leaf is now a pane *inside*
+// a group rather than a group itself.
 
 let paneCounter = 1;
 const makePaneId = () => `pane-${paneCounter++}`;
 
-/** Walks a split-tree node and returns the id of its first leaf (DOM order). */
+let groupCounter = 1;
+const makeGroupId = () => `group-${groupCounter++}`;
+
+// Split ids are counter-based, not `Date.now()`-based: two splits created in
+// the same millisecond used to share an id, and `setPaneSizes` addresses a
+// split by id.
+let splitCounter = 1;
+const makeSplitId = () => `split-${splitCounter++}`;
+
+// Same reason, and the same bug: tab ids used to be
+// `tab-term-${Date.now()}-${tabs.length + 1}`. `tabs.length` REWINDS when a
+// terminal is closed, so a terminal spawned in the same millisecond as an
+// earlier one could inherit its id — and everything that keys on a tab id
+// (the xterm registry, `settle`'s placement sweep, `closeTab`, PTY reaping)
+// then acts on the wrong terminal. Counters do not rewind.
+let tabCounter = 1;
+const makeTabId = () => `tab-term-${tabCounter++}`;
+
+function bumpTabCounter(tabId) {
+  const match = /^tab-term-(\d+)$/.exec(typeof tabId === 'string' ? tabId : '');
+  if (!match) return;
+  const next = Number(match[1]) + 1;
+  if (next > tabCounter) tabCounter = next;
+}
+
+/**
+ * Push the id counters past anything that came back from disk (or out of a
+ * saved group), so a freshly created pane/split can never collide with a
+ * restored one.
+ */
+function bumpNodeCounters(node) {
+  walkNodes(node, (n) => {
+    const match = /^(pane|split)-(\d+)$/.exec(typeof n.id === 'string' ? n.id : '');
+    if (!match) return;
+    const next = Number(match[2]) + 1;
+    if (match[1] === 'pane') {
+      if (next > paneCounter) paneCounter = next;
+    } else if (next > splitCounter) {
+      splitCounter = next;
+    }
+  });
+}
+
+function bumpGroupCounter(groupId) {
+  const match = /^group-(\d+)$/.exec(typeof groupId === 'string' ? groupId : '');
+  if (!match) return;
+  const next = Number(match[1]) + 1;
+  if (next > groupCounter) groupCounter = next;
+}
+
+// --- Tree helpers (all operate on ONE group's tree) ----------------------
+
+/** Visit every node (splits included) of a tree. */
+function walkNodes(node, fn) {
+  if (!node || typeof node !== 'object') return;
+  fn(node);
+  if (node.type === 'split' && Array.isArray(node.children)) {
+    for (const child of node.children) walkNodes(child, fn);
+  }
+}
+
+/** Walks a tree and returns the id of its first pane (DOM order). */
 function firstLeafId(node) {
   if (!node) return null;
   if (node.type === 'leaf') return node.id;
   return firstLeafId(node.children[0]);
 }
 
-/** Collects every leaf node of a split-tree, in DOM order. */
+/** Collects every pane of a tree, in DOM order. */
 function collectLeaves(node, acc = []) {
   if (!node) return acc;
   if (node.type === 'leaf') {
@@ -20,6 +104,14 @@ function collectLeaves(node, acc = []) {
     return acc;
   }
   for (const child of node.children) collectLeaves(child, acc);
+  return acc;
+}
+
+/** Collects every split node of a tree, in DOM order. */
+function collectSplits(node, acc = []) {
+  if (!node || node.type !== 'split') return acc;
+  acc.push(node);
+  for (const child of node.children) collectSplits(child, acc);
   return acc;
 }
 
@@ -36,12 +128,84 @@ function mapTree(node, fn) {
   return { ...node, children: node.children.map((child) => mapTree(child, fn)) };
 }
 
-/** The leaf that currently hosts `tabId`, or null. */
+/**
+ * Replace exactly the node carrying `id`. Unlike `mapTree` this keeps
+ * recursing past non-matching splits, so it is safe for nested layouts.
+ */
+function replaceNode(node, id, fn) {
+  if (!node) return null;
+  if (node.id === id) return fn(node);
+  if (node.type !== 'split') return node;
+  return { ...node, children: node.children.map((child) => replaceNode(child, id, fn)) };
+}
+
+const round2 = (value) => Math.round(value * 100) / 100;
+
+/** An even percentage split across `count` children, summing to exactly 100. */
+function evenSizes(count) {
+  if (count <= 0) return [];
+  const each = round2(100 / count);
+  const sizes = new Array(count).fill(each);
+  sizes[count - 1] = round2(100 - each * (count - 1));
+  return sizes;
+}
+
+/**
+ * Coerce `values` into `count` positive percentages summing to 100. Anything
+ * missing, non-finite or non-positive makes the whole row fall back to an even
+ * split — a zero-width pane is never a layout the user asked for.
+ */
+function normalizeSizes(values, count = values?.length ?? 0) {
+  if (!Array.isArray(values) || values.length !== count || count === 0) return evenSizes(count);
+  if (!values.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) return evenSizes(count);
+  const total = values.reduce((a, b) => a + b, 0);
+  const scaled = values.map((v) => round2((v / total) * 100));
+  scaled[count - 1] = round2(100 - scaled.slice(0, -1).reduce((a, b) => a + b, 0));
+  return scaled;
+}
+
+/** The sizes of `node` restricted to the children at `keptIndexes`, renormalized. */
+function keepSizes(node, keptIndexes) {
+  const has = Array.isArray(node.sizes) && node.sizes.length === node.children.length;
+  return normalizeSizes(has ? keptIndexes.map((i) => node.sizes[i]) : null, keptIndexes.length);
+}
+
+/**
+ * Enforce the structural invariants of a tree: a split has ≥2 children (one
+ * child collapses into it, none removes it), `sizes` has exactly one entry per
+ * child, and a pane's `activeTabId` is one of its own `tabIds` (null iff empty).
+ */
+function normalizeTree(node) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.type === 'leaf') {
+    const tabIds = Array.isArray(node.tabIds) ? node.tabIds : [];
+    const activeTabId = tabIds.includes(node.activeTabId) ? node.activeTabId : tabIds[0] ?? null;
+    if (tabIds === node.tabIds && activeTabId === node.activeTabId) return node;
+    return { ...node, tabIds, activeTabId };
+  }
+  if (node.type !== 'split' || !Array.isArray(node.children)) return null;
+  const kept = [];
+  node.children.forEach((child, i) => {
+    const next = normalizeTree(child);
+    if (next) kept.push({ node: next, i });
+  });
+  if (kept.length === 0) return null;
+  if (kept.length === 1) return kept[0].node;
+  return {
+    ...node,
+    id: typeof node.id === 'string' && node.id ? node.id : makeSplitId(),
+    direction: node.direction === 'vertical' ? 'vertical' : 'horizontal',
+    children: kept.map((k) => k.node),
+    sizes: keepSizes(node, kept.map((k) => k.i)),
+  };
+}
+
+/** The pane that currently hosts `tabId` inside one tree, or null. */
 function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
 }
 
-/** Remove a tab from whichever leaf holds it, keeping that leaf's active tab valid. */
+/** Remove a tab from whichever pane holds it, keeping that pane's active tab valid. */
 function removeTabFromTree(node, tabId) {
   return mapTree(node, (n) => {
     if (n.type !== 'leaf' || !n.tabIds.includes(tabId)) return n;
@@ -55,67 +219,237 @@ function removeTabFromTree(node, tabId) {
 }
 
 /**
- * Drop leaves that hold no tabs and collapse splits left with a single child.
- * Returns null when the whole tree is empty.
+ * Drop panes that hold no tabs and collapse splits left with a single child,
+ * carrying the surviving children's `sizes` through. Returns null when the
+ * whole tree is empty.
  */
 function pruneTree(node) {
   if (!node) return null;
   if (node.type === 'leaf') return node.tabIds.length > 0 ? node : null;
-  const children = node.children.map(pruneTree).filter(Boolean);
-  if (children.length === 0) return null;
-  if (children.length === 1) return children[0];
-  return { ...node, children };
+  const kept = [];
+  node.children.forEach((child, i) => {
+    const pruned = pruneTree(child);
+    if (pruned) kept.push({ node: pruned, i });
+  });
+  if (kept.length === 0) return null;
+  if (kept.length === 1) return kept[0].node;
+  return {
+    ...node,
+    children: kept.map((k) => k.node),
+    sizes: keepSizes(node, kept.map((k) => k.i)),
+  };
 }
 
-/** Append a tab to a pane (falling back to the first leaf) and make it active there. */
+/** Remove one pane by id, collapsing the split it leaves behind. */
+function removePane(node, paneId) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node.id === paneId ? null : node;
+  const kept = [];
+  node.children.forEach((child, i) => {
+    const next = removePane(child, paneId);
+    if (next) kept.push({ node: next, i });
+  });
+  if (kept.length === 0) return null;
+  if (kept.length === 1) return kept[0].node;
+  return {
+    ...node,
+    children: kept.map((k) => k.node),
+    sizes: keepSizes(node, kept.map((k) => k.i)),
+  };
+}
+
+/** Append a tab to a pane (falling back to the first pane) and make it active there. */
 function addTabToPane(node, paneId, tabId) {
   let placed = false;
-  const next = mapTree(node, (n) => {
-    if (n.type !== 'leaf' || n.id !== paneId) return n;
+  const next = replaceNode(node, paneId, (n) => {
+    if (n.type !== 'leaf') return n;
     placed = true;
     return { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId };
   });
   if (placed) return next;
   const first = collectLeaves(node)[0];
   if (!first) return { type: 'leaf', id: paneId || makePaneId(), tabIds: [tabId], activeTabId: tabId };
-  return mapTree(node, (n) =>
-    n.type === 'leaf' && n.id === first.id
-      ? { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId }
-      : n
-  );
+  return replaceNode(node, first.id, (n) => ({
+    ...n,
+    tabIds: [...n.tabIds, tabId],
+    activeTabId: tabId,
+  }));
 }
 
-/** An empty root, used when the last terminal goes away. */
-const emptyTree = () => ({ type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null });
+/** Turn the pane `paneId` into a split of itself and `newLeaf`. */
+function splitAt(node, paneId, newLeaf, direction, insertFirst) {
+  return replaceNode(node, paneId, (n) => ({
+    type: 'split',
+    id: makeSplitId(),
+    direction,
+    children: insertFirst ? [newLeaf, n] : [n, newLeaf],
+    sizes: evenSizes(2),
+  }));
+}
 
-// --- Persistence (Task: remember the layout across relaunches) -----------
+/** An empty pane, used when the last group loses its last terminal. */
+const emptyPane = () => ({ type: 'leaf', id: makePaneId(), tabIds: [], activeTabId: null });
+
+/** A brand-new single-pane group holding `tabIds`. */
+function makeGroup({ name, tabIds = [], createdAt = Date.now() } = {}) {
+  const paneId = makePaneId();
+  return {
+    id: makeGroupId(),
+    name: name || 'Group',
+    createdAt,
+    tree: { type: 'leaf', id: paneId, tabIds: [...tabIds], activeTabId: tabIds[0] ?? null },
+    activePaneId: paneId,
+  };
+}
+
+// --- Group-level helpers -------------------------------------------------
+
+/**
+ * Replace one group, ALWAYS returning a brand-new `groups` array.
+ *
+ * The persist subscription at the bottom of this file compares `groups` by
+ * reference; an action that rebuilt a group's tree but handed back the same
+ * array would silently stop being saved. Every group write goes through here
+ * (or through `settle`, which also rebuilds the array) so that cannot happen.
+ * Accepts either the store state or a bare groups array, so two group edits in
+ * one action can be chained.
+ */
+function updateGroup(stateOrGroups, groupId, fn) {
+  const groups = Array.isArray(stateOrGroups) ? stateOrGroups : stateOrGroups.groups;
+  return groups.map((group) => (group.id === groupId ? fn(group) || group : group));
+}
+
+/** The group that owns `paneId` (pane ids are unique across all groups), or null. */
+function groupOfPane(state, paneId) {
+  if (!paneId) return null;
+  return state.groups.find((g) => collectLeaves(g.tree).some((l) => l.id === paneId)) || null;
+}
+
+/** The group whose tree currently holds `tabId`, or null. */
+function groupOfTab(state, tabId) {
+  if (!tabId) return null;
+  return state.groups.find((g) => leafHoldingTab(g.tree, tabId)) || null;
+}
+
+/**
+ * Which group an action should act on: an explicit `groupId` wins, else the
+ * group that owns `paneId`, else the active group. Every pane-addressed action
+ * takes an optional trailing `groupId` for callers that already know it.
+ */
+function resolveGroup(state, groupId, paneId) {
+  if (groupId) return state.groups.find((g) => g.id === groupId) || null;
+  const byPane = groupOfPane(state, paneId);
+  if (byPane) return byPane;
+  return state.groups.find((g) => g.id === state.activeGroupId) || state.groups[0] || null;
+}
+
+/**
+ * Repair the whole layout slice so every invariant holds, whatever the caller
+ * did. EVERY structural action funnels through here.
+ *
+ *  - a tab id lives in exactly one pane of exactly one group (duplicates and
+ *    ids with no matching tab are dropped — so removing a tab from `tabs` is
+ *    enough to sweep it out of all groups)
+ *  - empty panes are pruned; a group that prunes to nothing is removed, except
+ *    the last group, which is emptied instead
+ *  - a split has ≥2 children and one `sizes` entry per child
+ *  - `pane.activeTabId ∈ pane.tabIds` (null iff empty)
+ *  - `group.activePaneId` names a pane in THAT group's tree
+ *  - `activeGroupId` names an existing group
+ *  - `activeTabId` is real and lives in the ACTIVE group
+ *
+ * Returns a partial state ready to hand to `set()`. `groups` is always a fresh
+ * array, so the persist subscription always sees the change.
+ */
+function settle(state, patch = {}) {
+  const tabs = patch.tabs ?? state.tabs;
+  const inputGroups = patch.groups ?? state.groups;
+  const validTabIds = new Set(tabs.map((t) => t.id));
+  const claimed = new Set();
+
+  let groups = inputGroups.map((group) => {
+    let tree = mapTree(group.tree, (n) => {
+      if (n.type !== 'leaf') return n;
+      const tabIds = (Array.isArray(n.tabIds) ? n.tabIds : []).filter((id) => {
+        if (!validTabIds.has(id) || claimed.has(id)) return false;
+        claimed.add(id);
+        return true;
+      });
+      if (tabIds.length === n.tabIds?.length) return n;
+      return { ...n, tabIds, activeTabId: tabIds.includes(n.activeTabId) ? n.activeTabId : tabIds[0] ?? null };
+    });
+    tree = normalizeTree(pruneTree(tree));
+    return tree === group.tree ? group : { ...group, tree };
+  });
+
+  const wantedActiveGroupId = patch.activeGroupId ?? state.activeGroupId;
+
+  // A group with nothing left in it disappears — unless it is the only one,
+  // which is emptied so there is always somewhere to put a terminal.
+  const surviving = groups.filter((g) => g.tree);
+  if (surviving.length === 0) {
+    const foundIdx = groups.findIndex((g) => g.id === wantedActiveGroupId);
+    const idx = foundIdx === -1 ? 0 : foundIdx;
+    const base = groups[idx];
+    // Reuse the pane that is already sitting there (it pruned away precisely
+    // because it is empty) rather than minting a fresh pane id on every settle.
+    const existing = inputGroups[idx] ? collectLeaves(inputGroups[idx].tree)[0] : null;
+    const pane = existing && existing.tabIds.length === 0 ? { ...existing, activeTabId: null } : emptyPane();
+    groups = [base ? { ...base, tree: pane, activePaneId: pane.id } : makeGroup({ name: 'Group 1' })];
+  } else {
+    groups = surviving;
+  }
+
+  groups = groups.map((group) => {
+    const leaves = collectLeaves(group.tree);
+    const activePaneId = leaves.some((l) => l.id === group.activePaneId)
+      ? group.activePaneId
+      : firstLeafId(group.tree);
+    const name = typeof group.name === 'string' && group.name ? group.name : 'Group';
+    if (activePaneId === group.activePaneId && name === group.name) return group;
+    return { ...group, name, activePaneId };
+  });
+
+  const activeGroupId = groups.some((g) => g.id === wantedActiveGroupId) ? wantedActiveGroupId : groups[0].id;
+  const activeGroup = groups.find((g) => g.id === activeGroupId);
+
+  // The active tab must be one the active group actually shows — switching
+  // group therefore moves it.
+  const activeLeaves = collectLeaves(activeGroup.tree);
+  const inActiveGroup = new Set(activeLeaves.flatMap((l) => l.tabIds));
+  let activeTabId = patch.activeTabId !== undefined ? patch.activeTabId : state.activeTabId;
+  if (!activeTabId || !inActiveGroup.has(activeTabId)) {
+    const activePane = activeLeaves.find((l) => l.id === activeGroup.activePaneId);
+    activeTabId = activePane?.activeTabId ?? activeLeaves.find((l) => l.tabIds.length > 0)?.tabIds[0] ?? null;
+  }
+
+  const next = { tabs, groups, activeGroupId, activeTabId };
+  if (patch.cwd !== undefined) next.cwd = patch.cwd;
+  return next;
+}
+
+// --- Persistence ---------------------------------------------------------
 //
-// We persist only what can be meaningfully restored: the split tree's shape
-// (pane ids, optional names, tab order, each pane's active tab) and each
-// tab's `title`/`cwd`. PTY sessions and scrollback are process state and
-// cannot survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
+// We persist only what can be meaningfully restored: every group (id, name,
+// creation time, its split tree's shape — pane ids, tab order, each pane's
+// active tab, each split's direction and `sizes`) plus each tab's
+// `title`/`cwd`. PTY sessions and scrollback are process state and cannot
+// survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
 export const PERSIST_KEY = 'nexterm.terminal.workspace';
 /** Named group snapshots the user saves explicitly (separate from the live layout). */
 export const SAVED_GROUPS_KEY = 'nexterm.terminal.savedGroups';
-
-/** Read the saved-group list, tolerating a corrupt or stale payload. */
-function loadSavedGroups() {
-  const list = loadState(SAVED_GROUPS_KEY, []);
-  return Array.isArray(list) ? list.filter((g) => g && typeof g.id === 'string' && Array.isArray(g.tabs)) : [];
-}
 
 const PERSIST_DEBOUNCE_MS = 300;
 
 let persistTimer = null;
 
-/** Strip a split-tree node down to the fields worth persisting. */
+/** Strip a tree node down to the fields worth persisting. */
 function serializeTreeForPersist(node) {
   if (!node) return null;
   if (node.type === 'leaf') {
     return {
       type: 'leaf',
       id: node.id,
-      ...(node.name ? { name: node.name } : {}),
       tabIds: [...node.tabIds],
       activeTabId: node.activeTabId,
     };
@@ -125,16 +459,25 @@ function serializeTreeForPersist(node) {
     id: node.id,
     direction: node.direction,
     children: node.children.map(serializeTreeForPersist),
+    ...(Array.isArray(node.sizes) ? { sizes: [...node.sizes] } : {}),
+  };
+}
+
+function serializeGroupForPersist(group) {
+  return {
+    id: group.id,
+    name: group.name,
+    createdAt: group.createdAt,
+    activePaneId: group.activePaneId,
+    tree: serializeTreeForPersist(group.tree),
   };
 }
 
 function buildPersistedPayload(state) {
   return {
-    splitTree: serializeTreeForPersist(state.splitTree),
+    groups: state.groups.map(serializeGroupForPersist),
+    activeGroupId: state.activeGroupId,
     tabs: state.tabs.map((t) => ({ id: t.id, title: t.title, cwd: t.cwd })),
-    activePaneId: state.activePaneId,
-    groupViewMode: state.groupViewMode,
-    focusedPaneId: state.focusedPaneId,
   };
 }
 
@@ -146,44 +489,222 @@ function schedulePersist(state) {
   }, PERSIST_DEBOUNCE_MS);
 }
 
+/** Tolerantly collect the leaves of an untrusted (possibly hand-edited) tree. */
+function collectRawLeaves(node, acc = []) {
+  if (!node || typeof node !== 'object') return acc;
+  if (node.type === 'split' && Array.isArray(node.children)) {
+    for (const child of node.children) collectRawLeaves(child, acc);
+    return acc;
+  }
+  if (node.type === 'leaf') acc.push(node);
+  return acc;
+}
+
 /**
- * Rebuild a saved split-tree, dropping any reference to a tab that failed to
- * restore and defaulting malformed/missing ids. `pruneTree` (below) then
- * removes any leaf that ends up empty and collapses single-child splits.
+ * v1 → v2 workspace migration.
+ *
+ * v1 persisted ONE split tree whose leaves WERE the groups, all rendered side
+ * by side, plus a `groupViewMode`/`focusedPaneId` pair that faked showing only
+ * one of them. Because a v1 leaf already was a group, the migration is total:
+ * every leaf becomes a v2 group with a single pane — the leaf's `name` becomes
+ * the group's name, the leaf's id stays the pane id (so ids keep matching what
+ * was saved), and sibling order is preserved so the group switcher lists the
+ * groups exactly as they were laid out left-to-right.
+ *
+ * The split nodes BETWEEN v1 leaves are dropped: with groups never rendered
+ * side by side they have no referent any more.
+ *
+ * The active group is the old focus target (only meaningful when v1 was in
+ * 'focus' mode), else the group holding `activePaneId`, else the first.
+ *
+ * Returns a v2 workspace payload (`{ groups, activeGroupId, tabs }`) — i.e.
+ * exactly what `restoreSavedLayout` consumes — or null when there is nothing
+ * worth restoring.
  */
-function sanitizeRestoredTree(node, validTabIds) {
+export function migrateV1Workspace(v1) {
+  if (!v1 || typeof v1 !== 'object') return null;
+
+  const tabs = (Array.isArray(v1.tabs) ? v1.tabs : [])
+    .filter((t) => t && typeof t.id === 'string' && t.id)
+    .map((t) => ({ id: t.id, title: t.title, cwd: t.cwd }));
+  const leaves = collectRawLeaves(v1.splitTree);
+  if (tabs.length === 0 || leaves.length === 0) return null;
+
+  const createdAt = Date.now();
+  const groups = leaves.map((leaf, i) => {
+    const paneId = typeof leaf.id === 'string' && leaf.id ? leaf.id : `pane-migrated-${i + 1}`;
+    const tabIds = (Array.isArray(leaf.tabIds) ? leaf.tabIds : []).filter((id) => typeof id === 'string');
+    return {
+      // A distinct prefix keeps migrated ids clear of every `group-N` the
+      // counter will ever mint.
+      id: `group-migrated-${i + 1}`,
+      name: (typeof leaf.name === 'string' && leaf.name.trim()) || `Group ${i + 1}`,
+      createdAt,
+      activePaneId: paneId,
+      tree: {
+        type: 'leaf',
+        id: paneId,
+        tabIds,
+        activeTabId: tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : tabIds[0] ?? null,
+      },
+    };
+  });
+
+  const byPaneId = (paneId) => (paneId ? groups.find((g) => g.tree.id === paneId) : null);
+  const active =
+    (v1.groupViewMode === 'focus' ? byPaneId(v1.focusedPaneId) : null) ||
+    byPaneId(v1.activePaneId) ||
+    groups[0];
+
+  return { groups, activeGroupId: active.id, tabs };
+}
+
+/**
+ * Read the live workspace payload, migrating an older schema instead of
+ * throwing it away.
+ *
+ * `loadState` deliberately returns the fallback for ANY version mismatch,
+ * which for this key would mean: bootstrap a single terminal, then let the
+ * 300ms write-behind overwrite the user's real workspace. So this goes through
+ * `loadVersionedState` and branches on the version explicitly; anything
+ * unrecognised (including a *newer* schema written by a future build) returns
+ * null, which bootstraps but — because nothing is understood — is the only
+ * safe reading.
+ */
+function loadWorkspacePayload() {
+  const stored = loadVersionedState(PERSIST_KEY);
+  if (!stored) return null;
+  if (stored.version === SCHEMA_VERSION) {
+    return stored.data && typeof stored.data === 'object' ? stored.data : null;
+  }
+  if (stored.version === 1) return migrateV1Workspace(stored.data);
+  return null;
+}
+
+/** Give a v1 saved group (a flat tab list, no layout) the single-pane tree v2 expects. */
+function migrateV1SavedGroup(entry, index) {
+  const tabs = (Array.isArray(entry.tabs) ? entry.tabs : [])
+    .filter(Boolean)
+    .map((t, i) => ({ slotId: `slot-${i}`, title: t.title, cwd: t.cwd }));
+  if (tabs.length === 0) return null;
+  const paneId = `saved-pane-${index + 1}`;
+  return {
+    id: entry.id,
+    name: typeof entry.name === 'string' && entry.name ? entry.name : 'Saved group',
+    savedAt: typeof entry.savedAt === 'number' ? entry.savedAt : Date.now(),
+    tabs,
+    activePaneId: paneId,
+    tree: {
+      type: 'leaf',
+      id: paneId,
+      tabIds: tabs.map((t) => t.slotId),
+      activeTabId: tabs[0].slotId,
+    },
+  };
+}
+
+/**
+ * A saved group carries a layout but cannot carry live tab ids, so its tree
+ * references stable SLOT ids (`slot-0`, `slot-1`, …) that `loadSavedGroup`
+ * maps onto freshly spawned tabs. `tabs` stays a flat array — the Terminals
+ * panel renders `entry.tabs.length`.
+ */
+function normalizeSavedEntry(entry, index) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (typeof entry.id !== 'string' || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
+  const hasSlots = entry.tabs.every((t) => t && typeof t.slotId === 'string' && t.slotId);
+  if (!hasSlots || !entry.tree) return migrateV1SavedGroup(entry, index);
+  const slotIds = new Set(entry.tabs.map((t) => t.slotId));
+  const tree = normalizeTree(pruneTree(sanitizeRestoredTree(entry.tree, slotIds, new Set())));
+  if (!tree) return migrateV1SavedGroup(entry, index);
+  return { ...entry, tree };
+}
+
+/**
+ * Read the saved-group list, tolerating a corrupt or stale payload.
+ *
+ * v1 entries are migrated on READ and deliberately not written back: the
+ * on-disk payload is only rewritten when the user next saves, renames or
+ * deletes a group, so a bad migration can never eat the list on its own.
+ */
+function loadSavedGroups() {
+  const stored = loadVersionedState(SAVED_GROUPS_KEY);
+  if (!stored) return [];
+  if (stored.version !== SCHEMA_VERSION && stored.version !== 1) return [];
+  const list = Array.isArray(stored.data) ? stored.data : [];
+  return list.map(normalizeSavedEntry).filter(Boolean);
+}
+
+/**
+ * Rebuild a saved tree, dropping any reference to a tab that failed to restore
+ * and to any tab already claimed by an earlier group (a tab lives in exactly
+ * one pane of exactly one group). `pruneTree` then removes any pane that ends
+ * up empty and collapses single-child splits.
+ */
+function sanitizeRestoredTree(node, validTabIds, claimed) {
   if (!node || typeof node !== 'object') return null;
   if (node.type === 'leaf') {
-    const tabIds = Array.isArray(node.tabIds) ? node.tabIds.filter((id) => validTabIds.has(id)) : [];
+    const tabIds = (Array.isArray(node.tabIds) ? node.tabIds : []).filter((id) => {
+      if (!validTabIds.has(id) || claimed.has(id)) return false;
+      claimed.add(id);
+      return true;
+    });
     const activeTabId = tabIds.includes(node.activeTabId) ? node.activeTabId : tabIds[0] ?? null;
     return {
       type: 'leaf',
       id: typeof node.id === 'string' && node.id ? node.id : makePaneId(),
-      ...(typeof node.name === 'string' && node.name ? { name: node.name } : {}),
       tabIds,
       activeTabId,
     };
   }
   if (node.type === 'split' && Array.isArray(node.children)) {
+    const children = node.children
+      .map((c) => sanitizeRestoredTree(c, validTabIds, claimed))
+      .filter(Boolean);
     return {
       type: 'split',
-      id: typeof node.id === 'string' && node.id ? node.id : `split-${Date.now()}`,
+      id: typeof node.id === 'string' && node.id ? node.id : makeSplitId(),
       direction: node.direction === 'vertical' ? 'vertical' : 'horizontal',
-      children: node.children.map((c) => sanitizeRestoredTree(c, validTabIds)).filter(Boolean),
+      children,
+      // Sizes only survive intact when nothing was dropped; `normalizeTree`
+      // and `pruneTree` renormalize whenever a child disappears.
+      ...(Array.isArray(node.sizes) && node.sizes.length === children.length
+        ? { sizes: [...node.sizes] }
+        : {}),
     };
   }
   return null;
 }
 
-/** Bump the pane id counter past anything found in a restored tree so freshly split panes never collide with restored ones. */
-function bumpPaneCounterPastRestoredIds(node) {
-  for (const leaf of collectLeaves(node)) {
-    const match = /^pane-(\d+)$/.exec(leaf.id);
-    if (match) {
-      const n = Number(match[1]);
-      if (n >= paneCounter) paneCounter = n + 1;
-    }
+/** Rewrite every tabId in a tree through `map`, dropping unmapped ones. */
+function remapTreeTabIds(node, map) {
+  if (!node) return null;
+  if (node.type === 'leaf') {
+    const tabIds = node.tabIds.map((id) => map.get(id)).filter(Boolean);
+    return {
+      ...node,
+      tabIds,
+      activeTabId: map.get(node.activeTabId) && tabIds.includes(map.get(node.activeTabId))
+        ? map.get(node.activeTabId)
+        : tabIds[0] ?? null,
+    };
   }
+  return { ...node, children: node.children.map((c) => remapTreeTabIds(c, map)) };
+}
+
+/** Give every pane in a tree a brand-new id, so the same layout can be loaded twice. */
+function regeneratePaneIds(node, idMap = new Map()) {
+  if (!node) return null;
+  if (node.type === 'leaf') {
+    const id = makePaneId();
+    idMap.set(node.id, id);
+    return { ...node, id };
+  }
+  return {
+    ...node,
+    id: makeSplitId(),
+    children: node.children.map((c) => regeneratePaneIds(c, idMap)),
+  };
 }
 
 let unlisteners = [];
@@ -209,10 +730,11 @@ async function disposeTerminalView(tabId) {
 export const useTerminalStore = create((set, get) => {
   /**
    * Spawn a PTY-backed tab and register it in `tabs`, WITHOUT placing it
-   * anywhere in the split tree — callers decide where it goes. Keeping tree
-   * placement out of tab creation is what lets `splitPane` put the new tab
-   * only in the freshly-created pane, instead of it also lingering in
-   * whichever pane happened to be active when the PTY finished spawning.
+   * anywhere in any group — callers decide where it goes. Keeping placement
+   * out of tab creation is what makes two-level placement easy: `splitPane`
+   * can put the new tab only in the freshly-created pane of one group,
+   * instead of it also lingering wherever focus happened to be when the PTY
+   * finished spawning.
    */
   const spawnTab = async (title = null, cwd = null) => {
     try {
@@ -222,10 +744,9 @@ export const useTerminalStore = create((set, get) => {
         cwd: cwd || get().cwd || '/workspace',
       });
 
-      const nextIndex = get().tabs.length + 1;
-      const defaultTitle = `Terminal ${nextIndex}`;
+      const defaultTitle = `Terminal ${get().tabs.length + 1}`;
       const newTab = {
-        id: `tab-term-${Date.now()}-${nextIndex}`,
+        id: makeTabId(),
         title: title || defaultTitle,
         defaultTitle,
         sessionId: ptySession.session_id,
@@ -242,20 +763,50 @@ export const useTerminalStore = create((set, get) => {
     }
   };
 
+  /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
+  const killTabIfOrphaned = async (tabId) => {
+    if (groupOfTab(get(), tabId)) return;
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    try {
+      await invoke('pty_kill', { session_id: tab.sessionId });
+    } catch (e) {
+      console.warn('[TerminalStore] pty_kill failed:', e);
+    }
+    await disposeTerminalView(tabId);
+    set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
+  };
+
   /**
    * Spawn one fresh PTY per saved tab (processes cannot be restored) and
-   * rebuild the saved split tree around the new tab ids. Throws if nothing
+   * rebuild every saved group around the new tab ids. Throws if nothing
    * usable could be restored — the caller falls back to the single-terminal
-   * default in that case.
+   * default in that case. Takes a v2 payload; a v1 one is migrated into that
+   * shape first (see `migrateV1Workspace`).
    */
   const restoreSavedLayout = async (saved, rootPath) => {
-    if (!saved || !Array.isArray(saved.tabs) || saved.tabs.length === 0 || !saved.splitTree) {
+    if (
+      !saved ||
+      !Array.isArray(saved.tabs) ||
+      saved.tabs.length === 0 ||
+      !Array.isArray(saved.groups) ||
+      saved.groups.length === 0
+    ) {
       throw new Error('No saved terminal layout to restore');
+    }
+
+    // Only spawn PTYs for tabs some group actually shows — an orphaned tab id
+    // in the payload must not cost a shell process.
+    const referenced = new Set();
+    for (const group of saved.groups) {
+      for (const leaf of collectRawLeaves(group?.tree)) {
+        for (const id of Array.isArray(leaf.tabIds) ? leaf.tabIds : []) referenced.add(id);
+      }
     }
 
     const newTabs = [];
     for (const savedTab of saved.tabs) {
-      if (!savedTab || !savedTab.id) continue;
+      if (!savedTab || !savedTab.id || !referenced.has(savedTab.id)) continue;
       const wantedCwd = savedTab.cwd || rootPath;
 
       let ptySession;
@@ -281,36 +832,58 @@ export const useTerminalStore = create((set, get) => {
     if (newTabs.length === 0) throw new Error('No terminal tabs could be restored');
 
     const validIds = new Set(newTabs.map((t) => t.id));
-    const tree = pruneTree(sanitizeRestoredTree(saved.splitTree, validIds));
-    if (!tree) throw new Error('Saved layout had no valid panes once sanitized');
+    const claimed = new Set();
+    const seenGroupIds = new Set();
+    const groups = [];
+    saved.groups.forEach((group, i) => {
+      if (!group || typeof group !== 'object') return;
+      const tree = normalizeTree(pruneTree(sanitizeRestoredTree(group.tree, validIds, claimed)));
+      if (!tree) return;
+      let id = typeof group.id === 'string' && group.id ? group.id : makeGroupId();
+      while (seenGroupIds.has(id)) id = makeGroupId();
+      seenGroupIds.add(id);
+      const leaves = collectLeaves(tree);
+      groups.push({
+        id,
+        name: (typeof group.name === 'string' && group.name.trim()) || `Group ${i + 1}`,
+        createdAt: typeof group.createdAt === 'number' ? group.createdAt : Date.now(),
+        tree,
+        activePaneId: leaves.some((l) => l.id === group.activePaneId)
+          ? group.activePaneId
+          : firstLeafId(tree),
+      });
+    });
 
-    bumpPaneCounterPastRestoredIds(tree);
+    if (groups.length === 0) throw new Error('Saved layout had no valid panes once sanitized');
 
-    const leaves = collectLeaves(tree);
-    const activePaneId = leaves.some((l) => l.id === saved.activePaneId)
-      ? saved.activePaneId
-      : firstLeafId(tree) || leaves[0]?.id;
-    const activeLeaf = leaves.find((l) => l.id === activePaneId);
-    const activeTabId = activeLeaf?.activeTabId || activeLeaf?.tabIds?.[0] || newTabs[0].id;
+    for (const group of groups) {
+      bumpNodeCounters(group.tree);
+      bumpGroupCounter(group.id);
+      walkNodes(group.tree, (n) => {
+        if (n.type === 'leaf') (n.tabIds || []).forEach(bumpTabCounter);
+      });
+    }
+
+    const activeGroupId = groups.some((g) => g.id === saved.activeGroupId)
+      ? saved.activeGroupId
+      : groups[0].id;
+    const activeGroup = groups.find((g) => g.id === activeGroupId);
+    const activePane =
+      collectLeaves(activeGroup.tree).find((l) => l.id === activeGroup.activePaneId) ||
+      collectLeaves(activeGroup.tree)[0];
+    const activeTabId = activePane?.activeTabId || activePane?.tabIds?.[0] || newTabs[0].id;
     const activeTab = newTabs.find((t) => t.id === activeTabId) || newTabs[0];
-
-    // A saved focus target only means anything if that group still exists
-    // and there is more than one group to switch between — otherwise fall
-    // back to the normal split view rather than restoring into a focus mode
-    // with nothing valid to focus.
-    const wantsFocus = saved.groupViewMode === 'focus' && leaves.length > 1 &&
-      leaves.some((l) => l.id === saved.focusedPaneId);
 
     return {
       tabs: newTabs,
-      splitTree: tree,
-      activePaneId: activePaneId || 'pane-root',
+      groups,
+      activeGroupId,
       activeTabId,
       cwd: activeTab.cwd || rootPath,
-      groupViewMode: wantsFocus ? 'focus' : 'split',
-      focusedPaneId: wantsFocus ? saved.focusedPaneId : null,
     };
   };
+
+  const initialGroup = makeGroup({ name: 'Group 1' });
 
   return {
     tabs: [],
@@ -320,89 +893,319 @@ export const useTerminalStore = create((set, get) => {
     cwd: '/workspace',
     isInitialized: false,
 
-    // Split tree: { type: 'leaf', id, name?, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
-    // Each leaf is a terminal group holding its own tabs, so a tab can be dragged
-    // between groups or dropped on a group's edge to split it. `name` is an
-    // optional user-assigned label for the group (see `renameGroup`).
-    splitTree: { type: 'leaf', id: 'pane-root', tabIds: [], activeTabId: null },
+    // The workspace's groups, in switcher order. Each owns its own split tree
+    // of panes: { id, name, createdAt, tree, activePaneId }.
+    groups: [initialGroup],
 
-    // The pane currently focused for keyboard shortcuts / block-selection / split-origin.
-    activePaneId: 'pane-root',
-
-    // Warp-style group view: 'split' shows every group side by side (the
-    // split tree as-is); 'focus' shows only `focusedPaneId`'s group,
-    // full-size, while the rest of the tree stays intact but unrendered.
-    groupViewMode: 'split',
-    focusedPaneId: null,
+    // Exactly one group is on screen at a time and fills the terminal area.
+    // (This replaces the old `focusedPaneId` *and* the whole `groupViewMode`
+    // hack — there is no "show every group side by side" mode any more.)
+    activeGroupId: initialGroup.id,
 
     // Named group snapshots the user saved explicitly. Unlike the live layout
     // (auto-persisted), these are kept until deleted and can be loaded any time.
-    savedGroups: loadSavedGroups(),
+    // Deliberately empty here and filled by `init()`. Reading localStorage
+    // during module evaluation captured the list once, at import time, which
+    // made the result depend on which module imported the store first.
+    savedGroups: [],
+
+    // ---- Reading the layout -------------------------------------------
+    getActiveGroup: () => {
+      const { groups, activeGroupId } = get();
+      return groups.find((g) => g.id === activeGroupId) || groups[0] || null;
+    },
+
+    /** The active pane of the active group — what keyboard shortcuts act on. */
+    getActivePaneId: () => get().getActiveGroup()?.activePaneId ?? null,
+
+    // ---- Focus ---------------------------------------------------------
+    /**
+     * Mark a pane as the active one (called on click/focus of a pane). The
+     * pane's own visible tab becomes the active tab, and if the pane belongs
+     * to another group that group is brought on screen.
+     */
+    setActivePane: (paneId, groupId = null) =>
+      set((state) => {
+        const group = resolveGroup(state, groupId, paneId);
+        if (!group) return {};
+        const pane = collectLeaves(group.tree).find((l) => l.id === paneId);
+        if (!pane) return {};
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: paneId })),
+          activeGroupId: group.id,
+          activeTabId: pane.activeTabId ?? state.activeTabId,
+        });
+      }),
 
     /**
-     * Mark a pane as the active one (called on click/focus of a pane).
+     * Bring a group on screen. Its arrangement is exactly as it was last left;
+     * the active tab moves with it (an inactive group's terminals keep
+     * running, so this is purely a view/focus change).
      */
-    setActivePane: (paneId) => set({ activePaneId: paneId }),
+    setActiveGroup: (groupId) =>
+      set((state) => {
+        const group = state.groups.find((g) => g.id === groupId);
+        if (!group) return {};
+        const leaves = collectLeaves(group.tree);
+        const pane = leaves.find((l) => l.id === group.activePaneId) || leaves[0];
+        const nextTabId = pane?.activeTabId ?? pane?.tabIds?.[0] ?? null;
+        const tab = state.tabs.find((t) => t.id === nextTabId);
+        return settle(state, {
+          activeGroupId: groupId,
+          activeTabId: nextTabId,
+          cwd: tab?.cwd ?? state.cwd,
+        });
+      }),
 
     /**
-     * Switch to focus view on a single group — everything else in the split
-     * tree stays exactly as it is, just unmounted. Also focuses that pane so
-     * keyboard shortcuts and split-origin follow the visible group.
+     * Move pane focus by `delta` (±1) through the ACTIVE group's panes in DOM
+     * order, wrapping around at the ends. Other groups are off screen, so they
+     * are never part of the cycle.
      */
-    focusGroup: (paneId) => set({ groupViewMode: 'focus', focusedPaneId: paneId, activePaneId: paneId }),
+    focusNextPane: (delta = 1) =>
+      set((state) => {
+        const group = state.groups.find((g) => g.id === state.activeGroupId);
+        if (!group) return {};
+        const leaves = collectLeaves(group.tree);
+        if (leaves.length === 0) return {};
+        const currentIdx = leaves.findIndex((l) => l.id === group.activePaneId);
+        const fromIdx = currentIdx === -1 ? 0 : currentIdx;
+        const next = leaves[(fromIdx + delta + leaves.length) % leaves.length];
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: next.id })),
+          activeTabId: next.activeTabId ?? state.activeTabId,
+        });
+      }),
+
+    // ---- Groups --------------------------------------------------------
+    /**
+     * Create a new group with one terminal in it and switch to it.
+     * Returns the new group (or null if the PTY could not be spawned).
+     */
+    createGroup: async ({ name = null, cwd = null } = {}) => {
+      const tab = await spawnTab(null, cwd || get().cwd);
+      if (!tab) return null;
+      const group = makeGroup({
+        name: (typeof name === 'string' && name.trim()) || `Group ${get().groups.length + 1}`,
+        tabIds: [tab.id],
+      });
+      set((state) =>
+        settle(state, {
+          groups: [...state.groups, group],
+          activeGroupId: group.id,
+          activeTabId: tab.id,
+        })
+      );
+      return group;
+    },
 
     /**
-     * Return to the normal side-by-side split view.
+     * Close a whole group: every terminal it owns (and no other group shows)
+     * is killed. The last group is emptied rather than removed.
      */
-    showAllGroups: () => set({ groupViewMode: 'split' }),
+    closeGroup: async (groupId) => {
+      const group = get().groups.find((g) => g.id === groupId);
+      if (!group) return;
+      const owned = collectLeaves(group.tree).flatMap((l) => l.tabIds);
+
+      set((state) => {
+        const idx = state.groups.findIndex((g) => g.id === groupId);
+        if (idx === -1) return {};
+        if (state.groups.length === 1) {
+          return settle(state, {
+            groups: updateGroup(state, groupId, (g) => ({ ...g, tree: emptyPane() })),
+          });
+        }
+        const groups = state.groups.filter((g) => g.id !== groupId);
+        const activeGroupId =
+          state.activeGroupId === groupId
+            ? groups[Math.min(idx, groups.length - 1)].id
+            : state.activeGroupId;
+        return settle(state, { groups, activeGroupId });
+      });
+
+      for (const tabId of owned) await killTabIfOrphaned(tabId);
+    },
+
+    /**
+     * Name (or rename) a group — reachable from a right-click on the group
+     * switcher. A blank name resets it to the positional default.
+     */
+    renameGroup: (groupId, name) =>
+      set((state) => {
+        const idx = state.groups.findIndex((g) => g.id === groupId);
+        if (idx === -1) return {};
+        const trimmed = typeof name === 'string' ? name.trim() : '';
+        return {
+          groups: updateGroup(state, groupId, (g) => ({ ...g, name: trimmed || `Group ${idx + 1}` })),
+        };
+      }),
+
+    /**
+     * Persist the pane sizes of one split (percentages, one per child) so a
+     * group's proportions survive being switched away from and relaunched.
+     *
+     * NOTE for the renderer: this is only the store half. `react-resizable-
+     * panels` keeps layout in component state, and under the two-level model
+     * EVERY group switch unmounts a tree, so the panel group must read these
+     * back on mount (an `id` per Panel plus `defaultSize` from `sizes`, or an
+     * `autoSaveId`) and call `setPaneSizes` on layout change. Without that
+     * half, sizes are stored faithfully and still reset on screen.
+     */
+    setPaneSizes: (groupId, splitId, sizes) => {
+      if (!Array.isArray(sizes) || sizes.length < 2) return;
+      set((state) => {
+        const group = resolveGroup(state, groupId, null);
+        if (!group) return {};
+        const target = collectSplits(group.tree).find((s) => s.id === splitId);
+        if (!target || target.children.length !== sizes.length) return {};
+        const next = normalizeSizes(sizes, sizes.length);
+        if (
+          Array.isArray(target.sizes) &&
+          target.sizes.length === next.length &&
+          target.sizes.every((v, i) => v === next[i])
+        ) {
+          return {};
+        }
+        return {
+          groups: updateGroup(state, group.id, (g) => ({
+            ...g,
+            tree: replaceNode(g.tree, splitId, (n) => ({ ...n, sizes: next })),
+          })),
+        };
+      });
+    },
 
     // ---- Tab management used by the Terminals panel's context menus ----
-    /** Close every other terminal in the group that holds `tabId`. */
+    /** Close every other terminal in the pane that holds `tabId`. */
     closeOthersInGroup: async (tabId) => {
-      const leaf = leafHoldingTab(get().splitTree, tabId);
-      if (!leaf) return;
-      for (const id of leaf.tabIds.filter((x) => x !== tabId)) {
+      const group = groupOfTab(get(), tabId);
+      const pane = group && leafHoldingTab(group.tree, tabId);
+      if (!pane) return;
+      for (const id of pane.tabIds.filter((x) => x !== tabId)) {
         await get().closeTab(id);
       }
     },
 
-    /** Close the terminals that sit after `tabId` in its group. */
+    /** Close the terminals that sit after `tabId` in its pane. */
     closeTabsToTheRight: async (tabId) => {
-      const leaf = leafHoldingTab(get().splitTree, tabId);
-      if (!leaf) return;
-      const idx = leaf.tabIds.indexOf(tabId);
+      const group = groupOfTab(get(), tabId);
+      const pane = group && leafHoldingTab(group.tree, tabId);
+      if (!pane) return;
+      const idx = pane.tabIds.indexOf(tabId);
       if (idx === -1) return;
-      for (const id of leaf.tabIds.slice(idx + 1)) {
+      for (const id of pane.tabIds.slice(idx + 1)) {
         await get().closeTab(id);
       }
     },
 
-    /** Split a terminal out of its group into a new one beside it. */
-    moveTabToNewGroup: (tabId, direction = 'horizontal') => {
-      const source = leafHoldingTab(get().splitTree, tabId);
-      // A group's only tab is already "its own group".
+    /**
+     * Split a terminal out of its pane into a new pane beside it, inside the
+     * same group. (This is what `moveTabToNewGroup` used to do, despite its
+     * name.) Returns the new pane's id, or null when the tab is already alone.
+     */
+    moveTabToNewPane: (tabId, direction = 'horizontal') => {
+      const state = get();
+      const group = groupOfTab(state, tabId);
+      const source = group && leafHoldingTab(group.tree, tabId);
+      // A pane's only tab already "is" its own pane.
       if (!source || source.tabIds.length <= 1) return null;
-      get().dropTabOnPane(tabId, source.id, direction === 'vertical' ? 'bottom' : 'right');
-      return get().activePaneId;
+      get().dropTabOnPane(tabId, source.id, direction === 'vertical' ? 'bottom' : 'right', group.id);
+      return get().groups.find((g) => g.id === group.id)?.activePaneId ?? null;
     },
+
+    /**
+     * Move a terminal into a brand-new group of its own and switch to it.
+     * Returns the new group's id, or null when the tab already is a group's
+     * only terminal (moving it would just rename that group).
+     */
+    moveTabToNewGroup: (tabId, { name = null } = {}) => {
+      const state = get();
+      if (!state.tabs.some((t) => t.id === tabId)) return null;
+      const source = groupOfTab(state, tabId);
+      if (source) {
+        const leaves = collectLeaves(source.tree);
+        if (leaves.length === 1 && leaves[0].tabIds.length === 1) return null;
+      }
+      const group = makeGroup({
+        name: (typeof name === 'string' && name.trim()) || `Group ${state.groups.length + 1}`,
+        tabIds: [tabId],
+      });
+      set((s) => {
+        const groups = source
+          ? [...updateGroup(s, source.id, (g) => ({ ...g, tree: removeTabFromTree(g.tree, tabId) })), group]
+          : [...s.groups, group];
+        return settle(s, { groups, activeGroupId: group.id, activeTabId: tabId });
+      });
+      return group.id;
+    },
+
+    /**
+     * Move a terminal into another group — onto `targetPaneId` when given,
+     * otherwise that group's active pane — and switch to it. The tab is
+     * removed from its old group in the same update, so it is never listed in
+     * two panes at once.
+     */
+    moveTabToGroup: (tabId, targetGroupId, targetPaneId = null) =>
+      set((state) => {
+        if (!state.tabs.some((t) => t.id === tabId)) return {};
+        const target = state.groups.find((g) => g.id === targetGroupId);
+        if (!target) return {};
+        const source = groupOfTab(state, tabId);
+
+        const paneId =
+          targetPaneId && collectLeaves(target.tree).some((l) => l.id === targetPaneId)
+            ? targetPaneId
+            : target.activePaneId;
+
+        let groups = state.groups;
+        if (source) {
+          groups = updateGroup(groups, source.id, (g) => ({
+            ...g,
+            tree: removeTabFromTree(g.tree, tabId),
+          }));
+        }
+        groups = updateGroup(groups, target.id, (g) => ({
+          ...g,
+          tree: addTabToPane(g.tree, paneId, tabId),
+          activePaneId: paneId,
+        }));
+
+        return settle(state, { groups, activeGroupId: target.id, activeTabId: tabId });
+      }),
 
     // ---- Saved groups -------------------------------------------------
-    /** Snapshot a group's terminals (titles + their live cwd) under a name. */
-    saveGroup: (paneId, name) => {
+    /**
+     * Snapshot a whole group — its terminals (titles + their live cwd) AND its
+     * pane layout — under a name. A snapshot cannot hold live tab ids, so each
+     * terminal gets a stable slot id and the saved tree references those.
+     */
+    saveGroup: (groupId, name) => {
       const state = get();
-      const leaf = collectLeaves(state.splitTree).find((l) => l.id === paneId);
-      if (!leaf) return null;
+      const group = state.groups.find((g) => g.id === groupId) || state.getActiveGroup();
+      if (!group) return null;
+
+      const slotByTabId = new Map();
+      const tabs = [];
+      for (const leaf of collectLeaves(group.tree)) {
+        for (const tabId of leaf.tabIds) {
+          const tab = state.tabs.find((t) => t.id === tabId);
+          if (!tab) continue;
+          const slotId = `slot-${tabs.length}`;
+          slotByTabId.set(tabId, slotId);
+          tabs.push({ slotId, title: tab.title, cwd: tab.cwd });
+        }
+      }
+      if (tabs.length === 0) return null;
 
       const entry = {
         id: `saved-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        name: (name || '').trim() || leaf.name || 'Saved group',
+        name: (name || '').trim() || group.name || 'Saved group',
         savedAt: Date.now(),
-        tabs: leaf.tabIds
-          .map((id) => state.tabs.find((t) => t.id === id))
-          .filter(Boolean)
-          .map((t) => ({ title: t.title, cwd: t.cwd })),
+        tabs,
+        activePaneId: group.activePaneId,
+        tree: remapTreeTabIds(group.tree, slotByTabId),
       };
-      if (entry.tabs.length === 0) return null;
 
       const savedGroups = [...state.savedGroups, entry];
       set({ savedGroups });
@@ -425,270 +1228,269 @@ export const useTerminalStore = create((set, get) => {
     },
 
     /**
-     * Re-open a saved group. `mode: 'new-group'` (default) puts its terminals
-     * in a brand-new group beside the active one; `'replace'` adds them to the
-     * active group. Each terminal respawns at its saved cwd, falling back to
-     * the workspace root when that directory is gone.
+     * Re-open a saved group. `mode: 'new-group'` (default) rebuilds it as a
+     * brand-new group, layout and all; `'replace'` drops its terminals into
+     * the active group's active pane. Each terminal respawns at its saved cwd,
+     * falling back to the workspace root when that directory is gone.
+     *
+     * Returns the id of the group the terminals landed in.
      */
     loadSavedGroup: async (savedId, { mode = 'new-group' } = {}) => {
       const entry = get().savedGroups.find((g) => g.id === savedId);
-      if (!entry || entry.tabs.length === 0) return null;
+      if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
 
+      // One PTY per saved slot, then slotId → live tab id.
+      const bySlot = new Map();
       const spawned = [];
       for (const saved of entry.tabs) {
         const tab = await spawnTab(saved.title, saved.cwd);
-        if (tab) spawned.push(tab);
+        if (!tab) continue;
+        spawned.push(tab);
+        if (saved.slotId) bySlot.set(saved.slotId, tab.id);
       }
       if (spawned.length === 0) return null;
 
       if (mode === 'replace') {
-        const target = get().activePaneId;
+        const groupId = get().activeGroupId;
         set((state) => {
-          let tree = state.splitTree;
-          for (const t of spawned) tree = addTabToPane(tree, target, t.id);
-          return { splitTree: tree, activeTabId: spawned[0].id };
+          const group = state.groups.find((g) => g.id === groupId);
+          if (!group) return {};
+          const paneId = group.activePaneId;
+          let tree = group.tree;
+          for (const t of spawned) tree = addTabToPane(tree, paneId, t.id);
+          return settle(state, {
+            groups: updateGroup(state, groupId, (g) => ({ ...g, tree, activePaneId: paneId })),
+            activeGroupId: groupId,
+            activeTabId: spawned[0].id,
+          });
         });
-        return target;
+        return groupId;
       }
 
-      const newPaneId = makePaneId();
-      const newLeaf = {
-        type: 'leaf',
-        id: newPaneId,
-        name: entry.name,
-        tabIds: spawned.map((t) => t.id),
-        activeTabId: spawned[0].id,
-      };
-
-      set((state) => {
-        const target = state.activePaneId;
-        const split = mapTree(state.splitTree, (n) =>
-          n.type === 'leaf' && n.id === target
-            ? {
-                type: 'split',
-                id: `split-${Date.now()}`,
-                direction: 'horizontal',
-                children: [n, newLeaf],
-              }
-            : n
-        );
-        return {
-          splitTree: pruneTree(split) || newLeaf,
-          activePaneId: newPaneId,
+      // Rebuild the saved layout: map slot ids onto the new tabs, then mint
+      // fresh pane/split ids so loading the same snapshot twice cannot collide.
+      let tree = entry.tree ? remapTreeTabIds(entry.tree, bySlot) : null;
+      const paneIdMap = new Map();
+      tree = tree ? regeneratePaneIds(tree, paneIdMap) : null;
+      tree = normalizeTree(pruneTree(tree));
+      if (!tree) {
+        tree = {
+          type: 'leaf',
+          id: makePaneId(),
+          tabIds: spawned.map((t) => t.id),
           activeTabId: spawned[0].id,
         };
-      });
-      return newPaneId;
+      }
+
+      // A slot the saved tree never referenced (or one whose pane pruned away)
+      // would leave a live PTY with nowhere to show — park those in the group's
+      // first pane rather than leaking them.
+      const placed = new Set(collectLeaves(tree).flatMap((l) => l.tabIds));
+      for (const t of spawned) {
+        if (!placed.has(t.id)) tree = addTabToPane(tree, firstLeafId(tree), t.id);
+      }
+
+      const activePaneId = paneIdMap.get(entry.activePaneId);
+      const leaves = collectLeaves(tree);
+      const group = {
+        id: makeGroupId(),
+        name: entry.name || 'Saved group',
+        createdAt: Date.now(),
+        tree,
+        activePaneId: leaves.some((l) => l.id === activePaneId) ? activePaneId : firstLeafId(tree),
+      };
+
+      set((state) =>
+        settle(state, {
+          groups: [...state.groups, group],
+          activeGroupId: group.id,
+          activeTabId: spawned[0].id,
+        })
+      );
+      return group.id;
     },
 
-
+    // ---- Panes ---------------------------------------------------------
     /**
-     * Split a leaf pane into two children (horizontal or vertical). The new
+     * Split a pane into two (horizontal or vertical) inside its group. The new
      * tab is spawned directly into the new pane, never into the pane being
      * split, so the same tab can never end up listed in two panes at once.
      * Returns the new pane's id (or null if the split could not be created).
      */
-    splitPane: async (paneId, direction = 'horizontal') => {
+    splitPane: async (paneId, direction = 'horizontal', groupId = null) => {
+      const group = resolveGroup(get(), groupId, paneId);
+      if (!group) return null;
+      const targetPaneId = collectLeaves(group.tree).some((l) => l.id === paneId)
+        ? paneId
+        : group.activePaneId;
+
       const newTab = await spawnTab();
       if (!newTab) return null;
 
       const newPaneId = makePaneId();
-
-      const splitNode = (node) => {
-        if (node.type === 'leaf' && node.id === paneId) {
-          return {
-            type: 'split',
-            id: `split-${Date.now()}`,
-            direction,
-            children: [
-              { ...node },
-              { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id },
-            ],
-          };
-        }
-        if (node.type === 'split') {
-          return { ...node, children: node.children.map(splitNode) };
-        }
-        return node;
-      };
-
-      set((state) => ({ splitTree: splitNode(state.splitTree) }));
+      set((state) => {
+        // The group can have gone away while the PTY was spawning.
+        if (!state.groups.some((g) => g.id === group.id)) return {};
+        const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id };
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({
+            ...g,
+            tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
+          })),
+        });
+      });
       return newPaneId;
     },
 
     /**
-     * Split the currently active pane and focus the newly created one.
+     * Split the active group's active pane and focus the newly created one.
      */
     splitActivePane: async (direction = 'horizontal') => {
-      const { activePaneId, splitPane, setActivePane } = get();
-      const newPaneId = await splitPane(activePaneId, direction);
-      if (newPaneId) setActivePane(newPaneId);
+      const group = get().getActiveGroup();
+      if (!group) return null;
+      const newPaneId = await get().splitPane(group.activePaneId, direction, group.id);
+      if (newPaneId) get().setActivePane(newPaneId, group.id);
       return newPaneId;
     },
 
     /**
-     * Close a pane. The sibling takes over the parent split.
-     * Kills the pane's PTY and drops its tab UNLESS another remaining leaf
-     * still references that same tabId.
+     * Close a pane inside its group. The sibling takes over the parent split.
+     * Kills the pane's PTYs and drops those tabs UNLESS another pane — in ANY
+     * group — still references the same tab id.
      */
-    closePane: async (paneId) => {
-      const { splitTree } = get();
+    closePane: async (paneId, groupId = null) => {
+      const group = resolveGroup(get(), groupId, paneId);
+      if (!group) return;
+      const closing = collectLeaves(group.tree).find((l) => l.id === paneId);
+      if (!closing) return;
+      const closingTabIds = [...closing.tabIds];
 
-      const closingLeaf = collectLeaves(splitTree).find((leaf) => leaf.id === paneId);
-      const closingTabIds = closingLeaf ? [...closingLeaf.tabIds] : [];
-
-      let replacementLeafId = null;
-
-      const removeNode = (node) => {
-        if (node.type !== 'split') return node;
-
-        const idx = node.children.findIndex(
-          (child) => child.type === 'leaf' && child.id === paneId
-        );
-
-        if (idx !== -1) {
-          const remaining = node.children.filter((_, i) => i !== idx);
-          if (remaining.length === 1) {
-            replacementLeafId = firstLeafId(remaining[0]);
-            return remaining[0];
-          }
-          const neighbourIdx = Math.min(idx, remaining.length - 1);
-          replacementLeafId = firstLeafId(remaining[neighbourIdx]);
-          return { ...node, children: remaining };
+      set((state) => {
+        const idx = state.groups.findIndex((g) => g.id === group.id);
+        if (idx === -1) return {};
+        const tree = removePane(state.groups[idx].tree, paneId);
+        if (tree) {
+          return settle(state, { groups: updateGroup(state, group.id, (g) => ({ ...g, tree })) });
         }
-
-        return { ...node, children: node.children.map(removeNode) };
-      };
-
-      // Closing the only pane empties it rather than removing the root.
-      const nextTree =
-        splitTree.type === 'leaf' && splitTree.id === paneId ? emptyTree() : removeNode(splitTree);
-      set({ splitTree: nextTree });
-
-      if (get().activePaneId === paneId && replacementLeafId) {
-        set({ activePaneId: replacementLeafId });
-      }
-
-      // Kill each tab this pane owned that no other pane still shows.
-      for (const tabId of closingTabIds) {
-        if (leafHoldingTab(get().splitTree, tabId)) continue;
-
-        const tab = get().tabs.find((t) => t.id === tabId);
-        if (!tab) continue;
-
-        try {
-          await invoke('pty_kill', { session_id: tab.sessionId });
-        } catch (e) {
-          console.warn('[TerminalStore] pty_kill failed:', e);
+        // That was the group's last pane: the group goes with it, unless it is
+        // the only group — then it is emptied instead.
+        if (state.groups.length === 1) {
+          return settle(state, {
+            groups: updateGroup(state, group.id, (g) => ({ ...g, tree: emptyPane() })),
+          });
         }
-        await disposeTerminalView(tabId);
+        const groups = state.groups.filter((g) => g.id !== group.id);
+        const activeGroupId =
+          state.activeGroupId === group.id
+            ? groups[Math.min(idx, groups.length - 1)].id
+            : state.activeGroupId;
+        return settle(state, { groups, activeGroupId });
+      });
 
-        set((state) => {
-          const nextTabs = state.tabs.filter((t) => t.id !== tabId);
-          return {
-            tabs: nextTabs,
-            activeTabId: state.activeTabId === tabId ? nextTabs[0]?.id || null : state.activeTabId,
-          };
-        });
-      }
+      for (const tabId of closingTabIds) await killTabIfOrphaned(tabId);
     },
 
     /**
-     * Close whichever pane is currently active.
+     * Close whichever pane is active in the active group.
      */
     closeActivePane: () => {
-      const { activePaneId, closePane } = get();
-      return closePane(activePaneId);
-    },
-
-    /**
-     * Move pane focus by `delta` (±1) through the split-tree's leaves in DOM
-     * order, wrapping around at the ends.
-     */
-    focusNextPane: (delta = 1) => {
-      const { splitTree, activePaneId } = get();
-      const leaves = collectLeaves(splitTree);
-      if (leaves.length === 0) return;
-
-      const ids = leaves.map((l) => l.id);
-      const currentIdx = ids.indexOf(activePaneId);
-      const fromIdx = currentIdx === -1 ? 0 : currentIdx;
-      const nextIdx = (fromIdx + delta + ids.length) % ids.length;
-
-      set({ activePaneId: ids[nextIdx] });
+      const group = get().getActiveGroup();
+      if (!group) return Promise.resolve();
+      return get().closePane(group.activePaneId, group.id);
     },
 
     /**
      * Make `tabId` the visible tab of `paneId`. If the tab lives in another
-     * group, move it here first (clicking a tab chip never splits).
+     * pane — or another group — move it here first (clicking a tab chip never
+     * splits).
      */
-    bindPaneToTab: (paneId, tabId) => {
+    bindPaneToTab: (paneId, tabId, groupId = null) =>
       set((state) => {
-        const holder = leafHoldingTab(state.splitTree, tabId);
-        let tree = state.splitTree;
+        const group = resolveGroup(state, groupId, paneId);
+        if (!group || !collectLeaves(group.tree).some((l) => l.id === paneId)) return {};
+        const source = groupOfTab(state, tabId);
+        const holder = source ? leafHoldingTab(source.tree, tabId) : null;
+
+        let groups = state.groups;
         if (!holder || holder.id !== paneId) {
-          tree = pruneTree(addTabToPane(removeTabFromTree(tree, tabId), paneId, tabId)) || emptyTree();
+          if (source) {
+            groups = updateGroup(groups, source.id, (g) => ({
+              ...g,
+              tree: removeTabFromTree(g.tree, tabId),
+            }));
+          }
+          groups = updateGroup(groups, group.id, (g) => ({
+            ...g,
+            tree: addTabToPane(g.tree, paneId, tabId),
+            activePaneId: paneId,
+          }));
         } else {
-          tree = mapTree(tree, (n) =>
-            n.type === 'leaf' && n.id === paneId ? { ...n, activeTabId: tabId } : n
-          );
+          groups = updateGroup(groups, group.id, (g) => ({
+            ...g,
+            tree: replaceNode(g.tree, paneId, (n) => ({ ...n, activeTabId: tabId })),
+            activePaneId: paneId,
+          }));
         }
-        return { splitTree: tree, activePaneId: paneId, activeTabId: tabId };
-      });
-    },
+
+        return settle(state, { groups, activeGroupId: group.id, activeTabId: tabId });
+      }),
 
     /**
-     * Drag & drop a terminal tab onto a pane.
+     * Drag & drop a terminal tab onto a pane — possibly one in another group.
      *
      * `zone` is where inside the target pane it was dropped:
-     *   'center'                  → move the tab into that group
-     *   'left' | 'right'          → split the group horizontally, tab on that side
-     *   'top'  | 'bottom'         → split the group vertically, tab on that side
+     *   'center'                  → move the tab into that pane
+     *   'left' | 'right'          → split the pane horizontally, tab on that side
+     *   'top'  | 'bottom'         → split the pane vertically, tab on that side
      */
-    dropTabOnPane: (tabId, targetPaneId, zone = 'center') => {
-      const state = get();
-      const target = collectLeaves(state.splitTree).find((l) => l.id === targetPaneId);
-      if (!target || !state.tabs.some((t) => t.id === tabId)) return;
+    dropTabOnPane: (tabId, targetPaneId, zone = 'center', targetGroupId = null) => {
+      const state0 = get();
+      if (!state0.tabs.some((t) => t.id === tabId)) return;
+      const targetGroup = resolveGroup(state0, targetGroupId, targetPaneId);
+      if (!targetGroup) return;
+      if (!collectLeaves(targetGroup.tree).some((l) => l.id === targetPaneId)) return;
 
-      const source = leafHoldingTab(state.splitTree, tabId);
+      const sourceGroup = groupOfTab(state0, tabId);
+      const sourcePane = sourceGroup ? leafHoldingTab(sourceGroup.tree, tabId) : null;
 
-      // Dropping a tab back on its own group: just focus it. Splitting a group
+      // Dropping a tab back on its own pane: just focus it. Splitting a pane
       // off its only tab would leave the source empty and is a no-op too.
-      if (source && source.id === targetPaneId) {
-        if (zone === 'center' || source.tabIds.length === 1) {
-          get().bindPaneToTab(targetPaneId, tabId);
+      if (sourcePane && sourcePane.id === targetPaneId) {
+        if (zone === 'center' || sourcePane.tabIds.length === 1) {
+          get().bindPaneToTab(targetPaneId, tabId, targetGroup.id);
           return;
         }
       }
 
-      const withoutTab = removeTabFromTree(state.splitTree, tabId);
+      set((state) => {
+        let groups = state.groups;
+        if (sourceGroup) {
+          groups = updateGroup(groups, sourceGroup.id, (g) => ({
+            ...g,
+            tree: removeTabFromTree(g.tree, tabId),
+          }));
+        }
 
-      if (zone === 'center') {
-        const tree = pruneTree(addTabToPane(withoutTab, targetPaneId, tabId)) || emptyTree();
-        set({ splitTree: tree, activePaneId: targetPaneId, activeTabId: tabId });
-        return;
-      }
+        if (zone === 'center') {
+          groups = updateGroup(groups, targetGroup.id, (g) => ({
+            ...g,
+            tree: addTabToPane(g.tree, targetPaneId, tabId),
+            activePaneId: targetPaneId,
+          }));
+          return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
+        }
 
-      const newPaneId = makePaneId();
-      const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
-      const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
-      const insertFirst = zone === 'left' || zone === 'top';
+        const newPaneId = makePaneId();
+        const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
+        const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
+        const insertFirst = zone === 'left' || zone === 'top';
 
-      const split = mapTree(withoutTab, (n) =>
-        n.type === 'leaf' && n.id === targetPaneId
-          ? {
-              type: 'split',
-              id: `split-${Date.now()}`,
-              direction,
-              children: insertFirst ? [newLeaf, n] : [n, newLeaf],
-            }
-          : n
-      );
-
-      set({
-        splitTree: pruneTree(split) || emptyTree(),
-        activePaneId: newPaneId,
-        activeTabId: tabId,
+        groups = updateGroup(groups, targetGroup.id, (g) => ({
+          ...g,
+          tree: splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst),
+          activePaneId: newPaneId,
+        }));
+        return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
       });
     },
 
@@ -703,24 +1505,6 @@ export const useTerminalStore = create((set, get) => {
           if (t.id !== tabId) return t;
           const trimmed = typeof title === 'string' ? title.trim() : '';
           return { ...t, title: trimmed || t.defaultTitle || t.title };
-        }),
-      }));
-    },
-
-    /**
-     * Name (or rename) a group/pane — reachable from a right-click on the
-     * pane strip's empty area. An empty name clears it back to unnamed.
-     */
-    renameGroup: (paneId, name) => {
-      set((state) => ({
-        splitTree: mapTree(state.splitTree, (n) => {
-          if (n.type !== 'leaf' || n.id !== paneId) return n;
-          const trimmed = typeof name === 'string' ? name.trim() : '';
-          if (!trimmed) {
-            const { name: _drop, ...rest } = n;
-            return rest;
-          }
-          return { ...n, name: trimmed };
         }),
       }));
     },
@@ -845,11 +1629,14 @@ export const useTerminalStore = create((set, get) => {
         }
         set({ cwd: rootPath });
 
-        // Try to bring back last session's groups/tabs/names. Any failure
-        // here (corrupt payload, every pty_spawn rejecting, ...) must fall
-        // back to the plain single-terminal bootstrap below rather than
-        // leaving the app with a half-built tree.
-        const saved = loadState(PERSIST_KEY, null);
+        // Try to bring back last session's groups/panes/tabs. Any failure here
+        // (corrupt payload, every pty_spawn rejecting, ...) must fall back to
+        // the plain single-terminal bootstrap below rather than leaving the
+        // app with a half-built workspace. A v1 payload is migrated rather
+        // than discarded — see `migrateV1Workspace`.
+        set({ savedGroups: loadSavedGroups() });
+
+        const saved = loadWorkspacePayload();
         let restored = null;
         if (saved) {
           try {
@@ -869,10 +1656,8 @@ export const useTerminalStore = create((set, get) => {
             activeTabId: restored.activeTabId,
             cwd: restored.cwd,
             isInitialized: true,
-            splitTree: restored.splitTree,
-            activePaneId: restored.activePaneId,
-            groupViewMode: restored.groupViewMode,
-            focusedPaneId: restored.focusedPaneId,
+            groups: restored.groups,
+            activeGroupId: restored.activeGroupId,
           });
           await get().attachListeners();
           return;
@@ -886,7 +1671,7 @@ export const useTerminalStore = create((set, get) => {
 
         const defaultTitle = 'Terminal 1';
         const initialTab = {
-          id: 'tab-term-1',
+          id: makeTabId(),
           title: defaultTitle,
           defaultTitle,
           sessionId: ptySession.session_id,
@@ -894,16 +1679,15 @@ export const useTerminalStore = create((set, get) => {
           blocks: [],
           activePrompt: '',
         };
+        const group = makeGroup({ name: 'Group 1', tabIds: [initialTab.id] });
 
         set({
           tabs: [initialTab],
           activeTabId: initialTab.id,
           cwd: initialTab.cwd,
           isInitialized: true,
-          splitTree: { type: 'leaf', id: 'pane-root', tabIds: [initialTab.id], activeTabId: initialTab.id },
-          activePaneId: 'pane-root',
-          groupViewMode: 'split',
-          focusedPaneId: null,
+          groups: [group],
+          activeGroupId: group.id,
         });
 
         await get().attachListeners();
@@ -914,36 +1698,49 @@ export const useTerminalStore = create((set, get) => {
 
     createTab: async (titleOrOptions = null, options = {}) => {
       // Backward/forward-compatible signature: createTab(), createTab('Title'),
-      // createTab({ title, paneId }), or createTab('Title', { paneId }). A
-      // caller-supplied paneId targets that pane's group directly instead of
-      // whichever pane happens to be active (see TerminalSplitContainer's
-      // per-pane "+" button).
+      // createTab({ title, paneId, groupId }), or createTab('Title', { paneId,
+      // groupId }). A caller-supplied paneId/groupId targets that pane (and
+      // brings its group on screen) instead of whatever is active — see
+      // TerminalSplitContainer's per-pane "+" button.
       let title = null;
       let paneId = null;
+      let groupId = null;
       if (titleOrOptions && typeof titleOrOptions === 'object') {
         title = titleOrOptions.title ?? null;
         paneId = titleOrOptions.paneId ?? null;
+        groupId = titleOrOptions.groupId ?? null;
       } else {
         title = titleOrOptions;
         paneId = options?.paneId ?? null;
+        groupId = options?.groupId ?? null;
       }
 
       const newTab = await spawnTab(title);
       if (!newTab) return null;
 
-      const targetPaneId = paneId || get().activePaneId;
-      set((state) => ({
-        activeTabId: newTab.id,
-        activePaneId: targetPaneId,
-        splitTree: addTabToPane(state.splitTree, targetPaneId, newTab.id),
-      }));
+      set((state) => {
+        const group = resolveGroup(state, groupId, paneId);
+        if (!group) return {};
+        const targetPaneId = collectLeaves(group.tree).some((l) => l.id === paneId)
+          ? paneId
+          : group.activePaneId;
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({
+            ...g,
+            tree: addTabToPane(g.tree, targetPaneId, newTab.id),
+            activePaneId: targetPaneId,
+          })),
+          activeGroupId: group.id,
+          activeTabId: newTab.id,
+        });
+      });
 
       return newTab;
     },
 
     /**
      * "Copy Tab": open a new terminal in the SAME (live) working directory as
-     * `tabId`, placed in that same tab's group, and make it the active tab
+     * `tabId`, placed in that same tab's pane, and make it the active tab
      * there. `tab.cwd` is kept current by the `pty-cwd` listener below (OSC
      * 7), so this lands wherever the user actually `cd`'d to — not just
      * where the original tab was first spawned.
@@ -952,25 +1749,61 @@ export const useTerminalStore = create((set, get) => {
       const source = get().tabs.find((t) => t.id === tabId);
       if (!source) return null;
 
-      const holder = leafHoldingTab(get().splitTree, tabId);
-      const targetPaneId = holder?.id || get().activePaneId;
+      const sourceGroup = groupOfTab(get(), tabId);
+      const holder = sourceGroup ? leafHoldingTab(sourceGroup.tree, tabId) : null;
 
       const newTab = await spawnTab(null, source.cwd);
       if (!newTab) return null;
 
-      set((state) => ({
-        activeTabId: newTab.id,
-        activePaneId: targetPaneId,
-        splitTree: addTabToPane(state.splitTree, targetPaneId, newTab.id),
-      }));
+      set((state) => {
+        const group =
+          (sourceGroup && state.groups.find((g) => g.id === sourceGroup.id)) || state.getActiveGroup();
+        if (!group) return {};
+        const targetPaneId = collectLeaves(group.tree).some((l) => l.id === holder?.id)
+          ? holder.id
+          : group.activePaneId;
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({
+            ...g,
+            tree: addTabToPane(g.tree, targetPaneId, newTab.id),
+            activePaneId: targetPaneId,
+          })),
+          activeGroupId: group.id,
+          activeTabId: newTab.id,
+        });
+      });
 
       return newTab;
     },
 
+    /**
+     * Show a terminal. Because only one group is on screen at a time, this
+     * also switches to the group that owns the tab and focuses the pane
+     * holding it.
+     */
     switchTab: (tabId) => {
-      const tab = get().tabs.find((t) => t.id === tabId);
+      const state0 = get();
+      const tab = state0.tabs.find((t) => t.id === tabId);
       if (!tab) return;
-      set({ activeTabId: tabId, cwd: tab.cwd });
+      const owner = groupOfTab(state0, tabId);
+      if (!owner) {
+        // A spawned-but-unplaced tab (see `spawnTab`) belongs to no group yet.
+        set({ activeTabId: tabId, cwd: tab.cwd });
+        return;
+      }
+      const pane = leafHoldingTab(owner.tree, tabId);
+      set((state) =>
+        settle(state, {
+          groups: updateGroup(state, owner.id, (g) => ({
+            ...g,
+            tree: replaceNode(g.tree, pane.id, (n) => ({ ...n, activeTabId: tabId })),
+            activePaneId: pane.id,
+          })),
+          activeGroupId: owner.id,
+          activeTabId: tabId,
+          cwd: tab.cwd,
+        })
+      );
     },
 
     closeTab: async (tabId) => {
@@ -984,22 +1817,15 @@ export const useTerminalStore = create((set, get) => {
       }
       await disposeTerminalView(tabId);
 
-      set((state) => {
-        const nextTabs = state.tabs.filter((t) => t.id !== tabId);
-        let nextActiveId = state.activeTabId;
-        if (state.activeTabId === tabId) {
-          nextActiveId = nextTabs[0]?.id || null;
-        }
-        // Drop it from its group too, collapsing the group if it was the last tab.
-        const splitTree = pruneTree(removeTabFromTree(state.splitTree, tabId)) || emptyTree();
-        const paneStillThere = collectLeaves(splitTree).some((l) => l.id === state.activePaneId);
-        return {
-          tabs: nextTabs,
-          activeTabId: nextActiveId,
-          splitTree,
-          activePaneId: paneStillThere ? state.activePaneId : firstLeafId(splitTree) || 'pane-root',
-        };
-      });
+      // `settle` sweeps a dropped tab id out of EVERY group (not just one
+      // tree), prunes whichever pane it emptied, and drops a group that ends
+      // up with nothing — keeping the last group as an empty one.
+      set((state) =>
+        settle(state, {
+          tabs: state.tabs.filter((t) => t.id !== tabId),
+          activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
+        })
+      );
     },
 
     executeCommand: async (commandText, tabId = null) => {
@@ -1144,19 +1970,21 @@ export const useTerminalStore = create((set, get) => {
   };
 });
 
-// Debounced write-behind: any change to the tree shape, tab identity, or
-// focused pane schedules a save. Guarded on `isInitialized` so the store's
-// own bootstrap (or a restore) never immediately overwrites what it just
-// loaded, and gated to changes that actually matter to the persisted shape
-// so typing into a running command doesn't thrash localStorage.
+// Debounced write-behind: any change to the groups, the tab list, or which
+// group is on screen schedules a save. Guarded on `isInitialized` so the
+// store's own bootstrap (or a restore) never immediately overwrites what it
+// just loaded, and gated to changes that actually matter to the persisted
+// shape so typing into a running command doesn't thrash localStorage.
+//
+// `groups` is compared BY REFERENCE, and every group write rebuilds that array
+// (see `updateGroup` / `settle`) — a mutation deep inside a group, including
+// one in a group that is NOT on screen, therefore still schedules a save.
 useTerminalStore.subscribe((state, prevState) => {
   if (!state.isInitialized) return;
   if (
-    state.splitTree === prevState.splitTree &&
+    state.groups === prevState.groups &&
     state.tabs === prevState.tabs &&
-    state.activePaneId === prevState.activePaneId &&
-    state.groupViewMode === prevState.groupViewMode &&
-    state.focusedPaneId === prevState.focusedPaneId
+    state.activeGroupId === prevState.activeGroupId
   ) {
     return;
   }
