@@ -2,7 +2,7 @@ import React, { useEffect, useReducer, useRef } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { getOrCreateTerminal, isFittable } from './terminalRegistry.js';
-import { suggest, recordCommand, completionFor } from '../../lib/commandIndex.js';
+import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 
@@ -93,6 +93,8 @@ export function TerminalView({ tabId, active = false }) {
   // when the effect (re)ran the handlers, not the latest one. `forceRender`
   // is the only thing that actually asks React to re-paint the overlay.
   const suggestStateRef = useRef(EMPTY_SUGGEST_STATE);
+  /** The last line submitted, kept until its exit code arrives. */
+  const lastSubmittedRef = useRef('');
   const [, forceRender] = useReducer((c) => c + 1, 0);
   const setSuggestState = (next) => {
     const resolved = typeof next === 'function' ? next(suggestStateRef.current) : next;
@@ -211,7 +213,14 @@ export function TerminalView({ tabId, active = false }) {
         case '\r':
         case '\n': {
           const cmd = bufferRef.current.trim();
-          if (cmd) recordCommand(cmd);
+          if (cmd) {
+            // Recorded on submit, because that is the only moment that works
+            // for a shell without OSC 133 integration. If the shell does report
+            // an exit code and it is non-zero, the command is taken back out
+            // below — a typo should not be suggested for the rest of the day.
+            recordCommand(cmd);
+            lastSubmittedRef.current = cmd;
+          }
           bufferRef.current = '';
           setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
           return;
@@ -294,10 +303,13 @@ export function TerminalView({ tabId, active = false }) {
         }));
         return false;
       }
+      // Enter RUNS what is on the line — it never accepts a suggestion. Taking
+      // the highlighted item instead meant typing `opencode`, seeing a stale
+      // `opencoded` offered from history, and having it typed for you. Tab and
+      // → accept; Enter submits, as it does in every shell.
       if (popupOpen && event.key === 'Enter') {
-        if (!acceptSuggestion(state.selectedIndex)) return true;
-        event.preventDefault();
-        return false;
+        setSuggestState(EMPTY_SUGGEST_STATE);
+        return true;
       }
       if (state.visible && event.key === 'Escape') {
         event.preventDefault();
@@ -315,6 +327,10 @@ export function TerminalView({ tabId, active = false }) {
     let promptCancelled = false;
     listen('pty-command-done', (payload) => {
       if (payload?.session_id !== sessionId) return;
+      if (payload.exit_code !== 0 && lastSubmittedRef.current) {
+        forgetCommand(lastSubmittedRef.current);
+      }
+      lastSubmittedRef.current = '';
       bufferRef.current = '';
       setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
     }).then((off) => {

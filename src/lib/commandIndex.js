@@ -96,6 +96,30 @@ export function recordCommand(cmd) {
   historyFreq.set(trimmed, (historyFreq.get(trimmed) || 0) + 1);
 }
 
+/**
+ * Take a command back out of the history.
+ *
+ * A command is recorded when it is submitted, because that is the only moment
+ * that works for shells without OSC 133 integration. When the shell does tell
+ * us the exit code and it is non-zero, the typo comes straight back out again —
+ * otherwise `opencoded` was suggested, and offered ahead of `opencode`, for the
+ * rest of the session.
+ */
+export function forgetCommand(cmd) {
+  const key = typeof cmd === 'string' ? cmd.trim() : '';
+  if (!key) return;
+  const seen = historyFreq.get(key);
+  if (seen === undefined) return;
+  if (seen > 1) {
+    // It has worked before; one failure should not erase a command the user
+    // actually uses.
+    historyFreq.set(key, seen - 1);
+    return;
+  }
+  historyFreq.delete(key);
+  historyLog = historyLog.filter((c) => c !== key);
+}
+
 /** Test-only: drop everything recordCommand has accumulated so far. */
 export function __resetCommandHistory() {
   historyLog = [];
@@ -184,7 +208,7 @@ export function suggest(input, { history = [] } = {}) {
     .map(([candidate]) => candidate);
 }
 
-export default { suggest, recordCommand };
+export default { suggest, recordCommand, forgetCommand, completionFor };
 
 /**
  * The text still to be typed for `candidate` to complete `buffer`, or null when
