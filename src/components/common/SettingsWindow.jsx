@@ -3,6 +3,7 @@ import { X, Search, RotateCcw } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
+import { isWindows } from '../../lib/platform.js';
 
 /**
  * VS Code's Settings editor reads the live `--font-mono` token so the text
@@ -148,6 +149,29 @@ function buildItems(monoPlaceholder) {
       options: TERMINAL_THEME_IDS.map((id) => ({ value: id, label: TERMINAL_THEMES[id].label })),
     },
     {
+      id: 'terminalDefaultShell',
+      section: 'terminal',
+      key: 'terminalDefaultShell',
+      settingKey: 'terminal.integrated.defaultShell',
+      title: 'Default Shell',
+      description:
+        'Which shell new terminals open. "Default" is the system one — the command prompt on Windows, $SHELL elsewhere. A path may be typed in place of a name.',
+      control: 'select',
+      options: isWindows
+        ? [
+            { value: 'default', label: 'Default (Command Prompt)' },
+            { value: 'powershell', label: 'Windows PowerShell' },
+            { value: 'pwsh', label: 'PowerShell 7' },
+            { value: 'cmd', label: 'Command Prompt' },
+          ]
+        : [
+            { value: 'default', label: 'Default ($SHELL)' },
+            { value: 'zsh', label: 'zsh' },
+            { value: 'bash', label: 'bash' },
+            { value: 'sh', label: 'sh' },
+          ],
+    },
+    {
       id: 'terminalSuggestions',
       section: 'terminal',
       key: 'terminalSuggestions',
@@ -288,6 +312,7 @@ export function SettingsWindow() {
   const terminalScrollback = useSettingsStore((s) => s.terminalScrollback);
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
+  const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
@@ -303,6 +328,7 @@ export function SettingsWindow() {
     terminalScrollback,
     terminalTheme,
     terminalSuggestions,
+    terminalDefaultShell,
     editorFontSize,
     editorTabSize,
     editorWordWrap,

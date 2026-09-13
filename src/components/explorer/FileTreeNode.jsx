@@ -158,6 +158,7 @@ export function FileTreeNode({ node, depth = 0, allNodes = [], onContextMenuRequ
   const expandedFolders = useEditorStore((s) => s.expandedFolders);
   const toggleFolder = useEditorStore((s) => s.toggleFolder);
   const openFile = useEditorStore((s) => s.openFile);
+  const readDir = useEditorStore((s) => s.readDir);
   const deletePath = useEditorStore((s) => s.deletePath);
   const activeTabId = useEditorStore((s) => s.activeTabId);
   const tabs = useEditorStore((s) => s.tabs);
@@ -177,15 +178,30 @@ export function FileTreeNode({ node, depth = 0, allNodes = [], onContextMenuRequ
   const isSelected = selectedPath === node.path || activeTab?.filePath === node.path;
   const isRenaming = renamingPath === node.path;
 
-  // Find children if node is folder
-  const children = isFolder
-    ? allNodes.filter((n) => {
-        if (n.path === node.path) return false;
-        if (!n.path.startsWith(node.path + '/')) return false;
-        const relative = n.path.slice(node.path.length + 1);
-        return !relative.includes('/');
+  // `fs_read_dir` returns a NESTED tree: a directory carries its own entries in
+  // `children`, and the array the explorer holds is only the root's. Looking
+  // for descendants by path prefix in that top-level array therefore found
+  // nothing, so every folder opened empty — which is what made the explorer
+  // look like it had no subfolders or files at all.
+  const children = isFolder && Array.isArray(node.children) ? node.children : [];
+
+  // A directory at the depth limit comes back with `children: []`, which is
+  // indistinguishable from a genuinely empty one — so fetch on first expand
+  // rather than telling the user it is empty when it is not.
+  const [lazyChildren, setLazyChildren] = useState(null);
+  const shownChildren = children.length > 0 ? children : lazyChildren || [];
+  useEffect(() => {
+    if (!isFolder || !isExpanded || children.length > 0 || lazyChildren) return;
+    let cancelled = false;
+    readDir(node.path)
+      .then((nodes) => {
+        if (!cancelled) setLazyChildren(nodes);
       })
-    : [];
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isFolder, isExpanded, children.length, lazyChildren, node.path, readDir]);
 
   const openOrToggle = () => {
     if (isFolder) {
@@ -334,8 +350,8 @@ export function FileTreeNode({ node, depth = 0, allNodes = [], onContextMenuRequ
               onDone={() => setCreatingEntry(null)}
             />
           )}
-          {children.length > 0 ? (
-            children.map((child) => (
+          {shownChildren.length > 0 ? (
+            shownChildren.map((child) => (
               <FileTreeNode
                 key={child.path}
                 node={child}

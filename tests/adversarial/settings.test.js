@@ -21,6 +21,7 @@ const SETTINGS_KEYS = [
   'terminalScrollback',
   'terminalTheme',
   'terminalSuggestions',
+  'terminalDefaultShell',
   'editorFontSize',
   'editorTabSize',
   'editorWordWrap',

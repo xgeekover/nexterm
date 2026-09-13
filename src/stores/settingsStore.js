@@ -20,6 +20,7 @@ export const SETTINGS_DEFAULTS = {
   terminalScrollback: 5000,
   terminalTheme: 'dark-modern',
   terminalSuggestions: true,
+  terminalDefaultShell: 'default',
   editorFontSize: 12,
   editorTabSize: 2,
   editorWordWrap: false,

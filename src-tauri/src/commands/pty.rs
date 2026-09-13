@@ -17,6 +17,9 @@ pub fn pty_spawn(
     cols: u16,
     rows: u16,
     cwd: Option<String>,
+    // `shell` is a well-known name ("cmd", "powershell", "pwsh", "zsh", …) or a
+    // path; empty or absent means the platform default.
+    shell: Option<String>,
 ) -> Result<PtySessionInfo, String> {
     let root = state.workspace.root();
     let cwd = cwd
@@ -26,7 +29,7 @@ pub fn pty_spawn(
         .unwrap_or(root)
         .to_string_lossy()
         .to_string();
-    state.pty_manager.spawn(app, cols, rows, Some(cwd), None)
+    state.pty_manager.spawn(app, cols, rows, Some(cwd), shell)
 }
 
 /// Stays synchronous on purpose: the manager hands the bytes to the session's

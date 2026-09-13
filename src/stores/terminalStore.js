@@ -5,6 +5,7 @@ import { invoke, listen } from '../lib/ipc.js';
 // over the user's workspace. Reads go through `loadVersionedState` + an explicit
 // version branch; writes still use `saveState` (always the current version).
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
+import { useSettingsStore } from './settingsStore.js';
 
 // ---------------------------------------------------------------------------
 // The two-level layout model
@@ -483,6 +484,7 @@ function serializeGroupForPersist(group) {
 
 function buildPersistedPayload(state) {
   return {
+    workspaceName: state.workspaceName,
     groups: state.groups.map(serializeGroupForPersist),
     activeGroupId: state.activeGroupId,
     tabs: state.tabs.map((t) => ({ id: t.id, title: t.title, cwd: t.cwd })),
@@ -804,6 +806,7 @@ export const useTerminalStore = create((set, get) => {
         cols: 80,
         rows: 24,
         cwd: cwd || get().cwd || '/workspace',
+        shell: useSettingsStore.getState().terminalDefaultShell,
       });
 
       const defaultTitle = `Terminal ${get().tabs.length + 1}`;
@@ -935,6 +938,8 @@ export const useTerminalStore = create((set, get) => {
       throw new Error('No saved terminal layout to restore');
     }
 
+    const shell = useSettingsStore.getState().terminalDefaultShell;
+
     // Only spawn PTYs for tabs some group actually shows — an orphaned tab id
     // in the payload must not cost a shell process.
     const referenced = new Set();
@@ -951,11 +956,11 @@ export const useTerminalStore = create((set, get) => {
 
       let ptySession;
       try {
-        ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: wantedCwd });
+        ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: wantedCwd, shell });
       } catch (_) {
         // The saved directory may no longer exist — retry at the workspace root.
         try {
-          ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: rootPath });
+          ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: rootPath, shell });
         } catch (err) {
           // And if even that fails, skip this one terminal. Letting it throw
           // abandoned the ENTIRE restore and the write-behind then replaced the
@@ -1032,6 +1037,10 @@ export const useTerminalStore = create((set, get) => {
       activeGroupId,
       activeTabId,
       cwd: activeTab.cwd || rootPath,
+      workspaceName:
+        typeof saved.workspaceName === 'string' && saved.workspaceName.trim()
+          ? saved.workspaceName.trim()
+          : 'Default',
     };
   };
 
@@ -1061,6 +1070,10 @@ export const useTerminalStore = create((set, get) => {
     // made the result depend on which module imported the store first.
     savedGroups: [],
     savedWorkspaces: [],
+    // The session on screen is itself a workspace — groups live inside it.
+    // It used to be nameless, with "workspaces" existing only as save slots
+    // beside it, which left no answer to "which one am I in?".
+    workspaceName: 'Default',
 
     // ---- Reading the layout -------------------------------------------
     getActiveGroup: () => {
@@ -1095,6 +1108,12 @@ export const useTerminalStore = create((set, get) => {
      * the active tab moves with it (an inactive group's terminals keep
      * running, so this is purely a view/focus change).
      */
+    /** Rename the session you are working in. */
+    renameWorkspace: (name) => {
+      const trimmed = (name || '').trim();
+      if (trimmed) set({ workspaceName: trimmed });
+    },
+
     setActiveGroup: (groupId) =>
       set((state) => {
         const group = state.groups.find((g) => g.id === groupId);
@@ -1396,7 +1415,7 @@ export const useTerminalStore = create((set, get) => {
       );
       const entry = {
         id: `ws-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        name: (name || '').trim() || `Workspace ${state.savedWorkspaces.length + 1}`,
+        name: (name || '').trim() || state.workspaceName || `Workspace ${state.savedWorkspaces.length + 1}`,
         savedAt: Date.now(),
         groups,
         activeIndex: Math.min(activeIndex, groups.length - 1),
@@ -1457,6 +1476,8 @@ export const useTerminalStore = create((set, get) => {
           groups: mode === 'replace' ? newGroups : [...state.groups, ...newGroups],
           activeGroupId: active.id,
           activeTabId: collectLeaves(active.tree)[0]?.activeTabId ?? null,
+          // Replacing the session means you are now IN that workspace.
+          ...(mode === 'replace' && entry.name ? { workspaceName: entry.name } : {}),
         })
       );
 
@@ -1871,6 +1892,7 @@ export const useTerminalStore = create((set, get) => {
           cols: 80,
           rows: 24,
           cwd: rootPath,
+          shell: useSettingsStore.getState().terminalDefaultShell,
         });
 
         const defaultTitle = 'Terminal 1';
@@ -2190,7 +2212,7 @@ export const useTerminalStore = create((set, get) => {
  * kept the debounce permanently reset.
  */
 function persistKeyOf(state) {
-  return `${state.activeGroupId}|${state.groups
+  return `${state.workspaceName}|${state.activeGroupId}|${state.groups
     .map((g) => `${g.id}:${g.name}:${JSON.stringify(serializeTreeForPersist(g.tree))}:${g.activePaneId}`)
     .join(';')}|${state.tabs.map((t) => `${t.id}:${t.title}:${t.cwd}`).join(';')}`;
 }
@@ -2202,7 +2224,8 @@ useTerminalStore.subscribe((state, prevState) => {
   if (
     state.groups === prevState.groups &&
     state.tabs === prevState.tabs &&
-    state.activeGroupId === prevState.activeGroupId
+    state.activeGroupId === prevState.activeGroupId &&
+    state.workspaceName === prevState.workspaceName
   ) {
     return;
   }

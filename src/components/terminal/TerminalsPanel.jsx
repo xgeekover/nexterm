@@ -95,6 +95,7 @@ export function TerminalsPanel() {
   const activeTabId = useTerminalStore((s) => s.activeTabId);
   const savedGroups = useTerminalStore((s) => s.savedGroups);
   const savedWorkspaces = useTerminalStore((s) => s.savedWorkspaces);
+  const workspaceName = useTerminalStore((s) => s.workspaceName);
 
   const switchTab = useTerminalStore((s) => s.switchTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
@@ -121,13 +122,12 @@ export function TerminalsPanel() {
   const loadWorkspace = useTerminalStore((s) => s.loadWorkspace);
   const renameSavedWorkspace = useTerminalStore((s) => s.renameSavedWorkspace);
   const deleteSavedWorkspace = useTerminalStore((s) => s.deleteSavedWorkspace);
+  const renameWorkspace = useTerminalStore((s) => s.renameWorkspace);
 
   // Collapsed group ids AND pane ids share one set — pane ids are unique
   // across every group, so they cannot collide.
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [savedOpen, setSavedOpen] = useState(true);
-  const [workspacesOpen, setWorkspacesOpen] = useState(true);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(null);
   const [menu, setMenu] = useState(null); // { x, y, kind, id, view? }
   const [draft, setDraft] = useState(null); // { kind: 'group'|'tab'|'saved'|'workspace', id, value }
   // Selecting a saved group is deliberately inert — see the row's comment.
@@ -184,6 +184,7 @@ export function TerminalsPanel() {
     else if (draft.kind === 'tab') renameTab(draft.id, value);
     else if (draft.kind === 'saved') renameSavedGroup(draft.id, value);
     else if (draft.kind === 'workspace') renameSavedWorkspace(draft.id, value);
+    else if (draft.kind === 'workspace-name') renameWorkspace(value);
     setDraft(null);
   };
 
@@ -395,13 +396,49 @@ export function TerminalsPanel() {
     { key: 'delete', label: 'Delete', danger: true, onSelect: () => deleteSavedWorkspace(entry.id) },
   ];
 
+  /**
+   * The menu behind the workspace bar.
+   *
+   * Saved workspaces used to be their own section in the tree, which left the
+   * session you were actually IN nameless and unlisted. The live session is
+   * the workspace now; saved ones are alternatives you switch to from here.
+   */
+  const workspaceBarItems = (at) => [
+    { key: 'rename', label: 'Rename Workspace…', onSelect: () => startRename('workspace-name', 'current', workspaceName) },
+    {
+      key: 'save',
+      label: 'Save Workspace',
+      disabled: tabs.length === 0,
+      disabledReason: tabs.length === 0 ? 'There are no terminals to save' : undefined,
+      onSelect: saveAllGroups,
+    },
+    { type: 'separator', key: 's1' },
+    {
+      key: 'switch',
+      label: `Open Saved Workspace${savedWorkspaces.length ? ` (${savedWorkspaces.length})` : ''}…`,
+      disabled: savedWorkspaces.length === 0,
+      disabledReason: savedWorkspaces.length === 0 ? 'Nothing saved yet' : undefined,
+      onSelect: () => setMenu({ ...at, kind: 'workspace-list', id: null }),
+    },
+  ];
+
+  const savedWorkspaceListItems = (at) => [
+    { key: 'back', label: '‹ Back', icon: ChevronLeft, onSelect: () => setMenu({ ...at, kind: 'workspace-bar', id: null }) },
+    { type: 'separator', key: 's0' },
+    ...savedWorkspaces.map((entry) => ({
+      key: entry.id,
+      label: `${entry.name} (${entry.groups.length}g · ${entry.groups.reduce((n, g) => n + (g.tabs?.length || 0), 0)}t)`,
+      onSelect: () => loadWorkspace(entry.id, { mode: 'replace' }),
+    })),
+  ];
+
   /** Snapshot every group at once, then open its name for editing. */
   const saveAllGroups = () => {
     const entry = saveWorkspace();
     if (!entry) return;
-    setWorkspacesOpen(true);
-    setSelectedWorkspaceId(entry.id);
-    startRename('workspace', entry.id, entry.name);
+    // Saving under the name you are already working in is the common case;
+    // renaming is one menu item away.
+    startRename('workspace-name', 'current', entry.name);
   };
 
   const emptyItems = () => [
@@ -448,6 +485,8 @@ export function TerminalsPanel() {
       const entry = savedGroups.find((x) => x.id === menu.id);
       return entry ? savedItems(entry) : [];
     }
+    if (menu.kind === 'workspace-bar') return workspaceBarItems(at);
+    if (menu.kind === 'workspace-list') return savedWorkspaceListItems(at);
     if (menu.kind === 'workspace') {
       const entry = savedWorkspaces.find((x) => x.id === menu.id);
       return entry ? workspaceItems(entry) : [];
@@ -538,6 +577,39 @@ export function TerminalsPanel() {
             <Plus size={16} />
           </button>
         </div>
+      </div>
+
+      {/* The session you are in. Groups below belong to it. */}
+      <div
+        data-row
+        role="button"
+        tabIndex={0}
+        title={`Workspace "${workspaceName}" — ${layout.length} groups, ${tabs.length} terminals\nClick for save / rename / open another`}
+        onClick={(e) => setMenu({ x: e.currentTarget.getBoundingClientRect().left, y: e.currentTarget.getBoundingClientRect().bottom, kind: 'workspace-bar', id: null })}
+        onContextMenu={(e) => openMenu(e, 'workspace-bar', null)}
+        onKeyDown={(e) => {
+          if (e.key === 'F2') {
+            e.preventDefault();
+            startRename('workspace-name', 'current', workspaceName);
+          }
+        }}
+        className={cn(
+          'shrink-0 flex items-center gap-2 h-[26px] px-3 border-b border-vsc-border',
+          'text-ui-sm text-vsc-fg hover:bg-vsc-hover cursor-default select-none'
+        )}
+      >
+        <Layers size={14} className="shrink-0 text-vsc-muted" />
+        {draft?.kind === 'workspace-name' ? (
+          renameInput
+        ) : (
+          <>
+            <span className="truncate font-medium">{workspaceName}</span>
+            <span className="ml-auto shrink-0 text-vsc-muted">
+              {layout.length}g · {tabs.length}t
+            </span>
+            <ChevronDown size={14} className="shrink-0 text-vsc-muted" />
+          </>
+        )}
       </div>
 
       <div
@@ -690,105 +762,6 @@ export function TerminalsPanel() {
             </div>
           );
         })}
-
-        {/* ---- saved workspaces: every group at once ---- */}
-        <div className="mt-2 border-t border-vsc-border pt-1">
-          <div
-            data-row
-            role="button"
-            tabIndex={0}
-            onClick={() => setWorkspacesOpen((v) => !v)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') setWorkspacesOpen((v) => !v);
-            }}
-            onContextMenu={(e) => openMenu(e, 'empty', null)}
-            style={{ paddingLeft: padFor(0) }}
-            className={cn(ROW, 'hover:bg-vsc-hover text-vsc-muted')}
-          >
-            <span className="shrink-0">
-              {workspacesOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            </span>
-            <Layers size={14} className="shrink-0" />
-            <span className="text-ui-sm uppercase tracking-wide font-semibold">Workspaces</span>
-            <button
-              type="button"
-              title="Save All Groups…"
-              onClick={(e) => {
-                e.stopPropagation();
-                saveAllGroups();
-              }}
-              disabled={tabs.length === 0}
-              className="ml-auto shrink-0 p-0.5 rounded-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover disabled:opacity-40"
-            >
-              <Save size={14} />
-            </button>
-            <span className="text-ui-sm shrink-0">{savedWorkspaces.length}</span>
-          </div>
-
-          {workspacesOpen && savedWorkspaces.length === 0 && (
-            <p className="px-3 py-1 text-ui-sm text-vsc-muted">
-              Save every group at once — their layouts and directories — and bring the whole
-              session back later.
-            </p>
-          )}
-
-          {workspacesOpen &&
-            savedWorkspaces.map((entry) => {
-              const editing = draft?.kind === 'workspace' && draft.id === entry.id;
-              const selected = selectedWorkspaceId === entry.id;
-              const terminals = entry.groups.reduce((n, g) => n + (g.tabs?.length || 0), 0);
-              return (
-                <div
-                  key={entry.id}
-                  data-row
-                  role="button"
-                  tabIndex={0}
-                  // Restoring replaces the whole session and spawns real
-                  // shells, so — as with saved groups — a single click only
-                  // selects. Double-click restores.
-                  onClick={() => setSelectedWorkspaceId(entry.id)}
-                  onDoubleClick={() => {
-                    setSelectedWorkspaceId(entry.id);
-                    loadWorkspace(entry.id, { mode: 'replace' });
-                  }}
-                  onContextMenu={(e) => openMenu(e, 'workspace', entry.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setSelectedWorkspaceId(entry.id);
-                      loadWorkspace(entry.id, { mode: 'replace' });
-                    } else if (e.key === 'F2') {
-                      e.preventDefault();
-                      startRename('workspace', entry.id, entry.name);
-                    }
-                  }}
-                  style={{ paddingLeft: padFor(1) }}
-                  title={`${entry.groups.length} groups · ${terminals} terminals · saved ${relativeTime(
-                    entry.savedAt
-                  )}\nDouble-click to restore this whole session · right-click for more`}
-                  className={cn(
-                    ROW,
-                    'relative',
-                    selected
-                      ? 'bg-vsc-inactive-selection text-vsc-fg-bright'
-                      : 'hover:bg-vsc-hover text-vsc-fg'
-                  )}
-                >
-                  <IndentGuides level={1} />
-                  <Layers size={14} className="shrink-0 text-vsc-muted" />
-                  {editing ? (
-                    renameInput
-                  ) : (
-                    <>
-                      <span className="truncate">{entry.name}</span>
-                      <span className="ml-auto text-ui-sm text-vsc-muted shrink-0">
-                        {entry.groups.length}g · {terminals}t · {relativeTime(entry.savedAt)}
-                      </span>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-        </div>
 
         {/* ---- saved groups ---- */}
         <div className="mt-2 border-t border-vsc-border pt-1">
