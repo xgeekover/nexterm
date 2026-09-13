@@ -623,6 +623,12 @@ mod tests {
             assert!(parent.contains(&uid), "the directory is not per-user: {parent}");
         }
 
-        let _ = fs::remove_dir_all(a.parent().unwrap());
+        // Clean up only the two directories this case made. `a.parent()` is
+        // the per-PROCESS directory every test in this run shares, and
+        // removing it deleted rc files a parallel test had just written and
+        // was about to read — a ~5%-of-runs flake in
+        // `generates_all_four_rc_files`.
+        let _ = fs::remove_dir_all(&a);
+        let _ = fs::remove_dir_all(&b);
     }
 }

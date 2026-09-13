@@ -79,13 +79,18 @@ describe('Tier 1: Terminal Blocks & Multi-Tab Feature Coverage', () => {
     const tab2 = await app.createTerminalTab('Tab 2');
     assert.equal(app.terminalTabs.length, 2);
 
-    await app.closeTerminalTab(tab2.id);
+    // Read these before closing: tabs are live views onto the store, so once
+    // the app has dropped tab 2 there is nothing left to read them off.
+    const tab2Id = tab2.id;
+    const tab2SessionId = tab2.sessionId;
+
+    await app.closeTerminalTab(tab2Id);
     assert.equal(app.terminalTabs.length, 1, 'Should now have 1 tab left');
     assert.equal(app.activeTerminalTabId, tab1.id, 'Active tab should fallback to remaining tab 1');
 
     // Verify pty_kill call was dispatched to IPC
     const killCalls = app.ipc.getCalls('pty_kill');
     assert.ok(killCalls.length > 0, 'pty_kill must be invoked when tab is closed');
-    assert.equal(killCalls[killCalls.length - 1].args.session_id, tab2.sessionId);
+    assert.equal(killCalls[killCalls.length - 1].args.session_id, tab2SessionId);
   });
 });

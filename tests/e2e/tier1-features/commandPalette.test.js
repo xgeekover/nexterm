@@ -30,20 +30,46 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
 
   test('TC-PAL-03: Searching commands filters built-in IDE actions', () => {
     app.openCommandPalette();
-    const results = app.searchPalette('terminal');
+    const results = app.searchPalette('new terminal');
 
-    assert.ok(results.commands.length > 0, 'Should find matching command for "terminal"');
-    assert.equal(results.commands[0].title, 'Toggle Terminal');
-    assert.equal(results.commands[0].action, 'toggle_terminal');
+    assert.ok(results.commands.length > 0, 'Should find matching command for "new terminal"');
+    assert.equal(results.commands[0].title, 'New Terminal Tab');
+    assert.equal(results.commands[0].command, 'new_terminal');
+
+    const titles = app.searchPalette('').commands.map((c) => c.title);
+    assert.deepEqual(
+      titles,
+      ['New Terminal Tab', 'Clear Terminal Output', 'Save All Files'],
+      'The palette offers exactly the three commands the app implements'
+    );
   });
 
-  test('TC-PAL-04: Searching AI actions filters quick prompt actions', () => {
+  test('TC-PAL-04: Files nested in subfolders are findable, not just top-level ones', () => {
     app.openCommandPalette();
-    const results = app.searchPalette('explain');
+    const results = app.searchPalette('calculator');
 
-    assert.ok(results.aiActions.length > 0, 'Should find matching AI action');
-    assert.equal(results.aiActions[0].title, 'Explain Error with AI');
-    assert.equal(results.aiActions[0].prompt, 'Explain this error');
+    // `fs_read_dir` returns a nested tree; a palette that reads only its top
+    // level can never offer anything under `src/`, which is what ⌘P did.
+    assert.ok(results.files.length > 0, 'A file two levels down must be offered');
+    assert.equal(results.files[0].path, '/workspace/src/calculator.js');
+    assert.ok(
+      app.searchPalette('').files.some((f) => f.path === '/workspace/tests/calculator.test.js'),
+      'Every file in the tree is offered when the query is empty'
+    );
+  });
+
+  test('TC-PAL-07: Quick-open mode (⌘P) offers files only, never commands', () => {
+    app.openCommandPalette('files');
+    const results = app.searchPalette('terminal');
+
+    assert.equal(results.commands.length, 0, 'Quick open must not offer commands');
+    app.closeCommandPalette();
+
+    app.openCommandPalette('all');
+    assert.ok(
+      app.searchPalette('terminal').commands.length > 0,
+      'The full palette still offers commands for the same query'
+    );
   });
 
   test('TC-PAL-05: Selecting a file result from palette opens file in Monaco editor', async () => {
@@ -60,10 +86,20 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
   test('TC-PAL-06: Selecting an IDE command from palette executes corresponding action', async () => {
     app.openCommandPalette();
     const results = app.searchPalette('save all');
-    const saveAllCmd = results.commands.find((c) => c.action === 'save_all');
+    const saveAllCmd = results.commands.find((c) => c.command === 'save_all');
     assert.ok(saveAllCmd, 'Save All command must exist');
+
+    const tab = await app.openFile('/workspace/README.md');
+    app.editBuffer(tab.id, '# edited by the palette test\n');
+    assert.equal(tab.isDirty, true);
 
     await app.executePaletteItem(saveAllCmd);
     assert.equal(app.paletteOpen, false, 'Palette should close');
+    assert.equal(tab.isDirty, false, 'Save All must write every dirty buffer');
+    assert.equal(
+      await app.ipc.invoke('fs_read_file', { path: '/workspace/README.md' }),
+      '# edited by the palette test\n',
+      'Disk must hold what Save All wrote'
+    );
   });
 });

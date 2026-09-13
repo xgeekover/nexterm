@@ -157,8 +157,12 @@ npm run tauri build
 ```
 
 CI (`.github/workflows/build.yml`) runs the test suite on every push and builds
-macOS, Windows and Linux bundles. Pushing a `v*` tag publishes a release with
-the installers plus the Windows portable zip attached.
+macOS, Windows and Linux bundles. Publishing is a separate, tag-only job:
+pushing a `v*` tag creates the release as a **draft**, checks that all eight
+expected assets are present and non-empty, uploads them, reads them back from
+the API to confirm the sizes match, and only then makes the release visible.
+A build that loses a platform leaves a draft behind instead of a half-finished
+public release.
 
 ## Test
 

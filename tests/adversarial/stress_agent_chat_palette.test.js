@@ -80,8 +80,10 @@ describe('Adversarial Stress: R5 Command Palette & Theming', () => {
         const res = app.searchPalette(term);
         assert.ok(Array.isArray(res.files));
         assert.ok(Array.isArray(res.commands));
-        assert.ok(Array.isArray(res.aiActions));
       }, `Search with "${term}" must not throw error`);
+      const res = app.searchPalette(term);
+      assert.equal(res.files.length, 0, `"${term}" must match no file`);
+      assert.equal(res.commands.length, 0, `"${term}" must match no command`);
     }
   });
 

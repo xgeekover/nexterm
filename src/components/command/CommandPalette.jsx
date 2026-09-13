@@ -3,17 +3,13 @@ import {
   Search,
   FileCode,
   Terminal,
-  Sparkles,
-  Sun,
-  Plus,
   Save,
-  Cpu,
 } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { fuzzyMatch, cn } from '../../lib/utils.js';
-import { chord } from '../../lib/platform.js';
+import { cn } from '../../lib/utils.js';
+import { buildPaletteGroups } from '../../lib/paletteItems.js';
 
 export function CommandPalette() {
   const isOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
@@ -43,79 +39,45 @@ export function CommandPalette() {
 
   if (!isOpen) return null;
 
-  // Build items list
-  const q = query.toLowerCase().trim();
+  // The result rows and the order the arrow keys walk them both come from
+  // `buildPaletteGroups` (src/lib/paletteItems.js), so the selection can never
+  // run past the last visible row onto an item the user cannot see.
+  const groups = buildPaletteGroups({ fileTree, query, mode: paletteMode });
+  const allFiltered = groups.flatMap((g) => g.items);
 
-  // 1. Files
-  const fileItems = fileTree
-    .filter((node) => !node.is_dir)
-    .filter((node) => fuzzyMatch(q, node.path) || fuzzyMatch(q, node.name))
-    .map((node) => ({
-      type: 'file',
-      hint: 'File',
-      id: `file-${node.path}`,
-      title: node.name,
-      subtitle: node.path,
-      icon: <FileCode size={16} />,
-      action: async () => {
-        await openFile(node.path);
-        setActiveView('editor');
-      },
-    }));
+  const iconFor = (item) => {
+    if (item.type === 'file') return <FileCode size={16} />;
+    if (item.command === 'save_all') return <Save size={16} />;
+    return <Terminal size={16} />;
+  };
 
-  // 2. Built-in Commands
-  const commandItems = [
-    {
-      type: 'command',
-      hint: chord('ctrl', 'shift', '`'),
-      id: 'cmd-new-terminal',
-      title: 'New Terminal Tab',
-      subtitle: 'Spawns a new independent PTY terminal session',
-      icon: <Terminal size={16} />,
-      action: async () => {
+  const runItem = async (item) => {
+    if (item.type === 'file') {
+      await openFile(item.path);
+      setActiveView('editor');
+      return;
+    }
+    switch (item.command) {
+      case 'new_terminal':
         await createTerminalTab();
         setActiveView('terminal');
-      },
-    },
-    {
-      type: 'command',
-      hint: chord('mod', 'l'),
-      id: 'cmd-clear-terminal',
-      title: 'Clear Terminal Output',
-      subtitle: 'Purges unpinned blocks in current terminal tab',
-      icon: <Terminal size={16} />,
-      action: () => clearTerminalBlocks(),
-    },
-    {
-      type: 'command',
-      hint: chord('mod', 's'),
-      id: 'cmd-save-all',
-      title: 'Save All Files',
-      subtitle: 'Writes all dirty editor buffers to disk',
-      icon: <Save size={16} />,
-      action: async () => await saveAll(),
-    },
-  ].filter((cmd) => fuzzyMatch(q, cmd.title) || fuzzyMatch(q, cmd.subtitle));
-
-  const groups = [
-    { label: 'files', items: fileItems },
-    { label: 'commands', items: commandItems },
-  ]
-    .filter((g) => g.items.length > 0)
-    .filter((g) => paletteMode === 'all' || g.label === 'files');
-
-  // What the arrow keys and Enter act on must be exactly what is on screen.
-  // Building this from every item regardless of `paletteMode` let the
-  // selection run past the last visible row onto a command the user could not
-  // see — and Enter then ran it, so ⌘P plus two ArrowDowns spawned a terminal
-  // instead of opening a file.
-  const allFiltered = groups.flatMap((g) => g.items);
+        return;
+      case 'clear_terminal':
+        clearTerminalBlocks();
+        return;
+      case 'save_all':
+        await saveAll();
+        return;
+      default:
+        return;
+    }
+  };
 
   const handleSelect = async (item) => {
     if (!item) return;
     setOpen(false);
     try {
-      await item.action();
+      await runItem(item);
     } catch (err) {
       console.error('Error executing palette item:', err);
     }
@@ -191,7 +153,7 @@ export function CommandPalette() {
                         isSelected ? 'bg-vsc-selection text-vsc-selection-fg' : 'text-vsc-fg'
                       )}
                     >
-                      <span className="flex-shrink-0">{item.icon}</span>
+                      <span className="flex-shrink-0">{iconFor(item)}</span>
                       <span className="truncate">{item.title}</span>
                       {item.subtitle && (
                         <span

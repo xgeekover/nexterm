@@ -62,6 +62,61 @@ fn spawn_writer_thread(
     Ok(tx)
 }
 
+/// The kernel's buffer for one canonical-mode input line, in bytes.
+///
+/// In canonical ("cooked") mode the line discipline buffers a line until a
+/// newline arrives. A newline-free run that fills this buffer loses data —
+/// differently on each platform, both measured against a real pty:
+///
+///   macOS  buffer 1024: the line is discarded WHOLE. 1023 bytes plus the
+///          newline arrive intact; 1024 bytes deliver nothing at all.
+///   Linux  buffer 4096: the line is TRUNCATED. 4095 bytes plus the newline
+///          arrive intact; past that only the first 4096 bytes ever arrive.
+///
+/// Splitting the write up does not help on either, because the buffer
+/// accumulates across writes.
+///
+/// `fpathconf(_PC_MAX_CANON)` is NOT usable for this. It reports 1024 on
+/// macOS, which is right, but 255 on Linux — the POSIX minimum, sixteen times
+/// smaller than the real buffer. Trusting it made the guard below refuse
+/// pastes that Linux handles perfectly well, which is worse than the silent
+/// loss it was meant to prevent. The constants are measured, and
+/// `canonical_limit_tests` re-measures the boundary on whatever platform it
+/// runs, so a wrong value fails CI rather than reaching a user.
+#[cfg(all(unix, target_os = "macos"))]
+pub(crate) const CANON_LINE_LIMIT: usize = 1024;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) const CANON_LINE_LIMIT: usize = 4096;
+
+/// Whether the foreground program has this tty in canonical mode.
+///
+/// `tcgetattr` on the MASTER side reports the line discipline the slave is
+/// running under, so this tracks the program that currently owns the terminal
+/// — a shell's line editor turns ICANON off, `cat` and `read` leave it on.
+/// `None` when the mode cannot be determined, so callers stay out of the way.
+#[cfg(unix)]
+fn is_canonical(master: &(dyn MasterPty + Send)) -> Option<bool> {
+    let fd = master.as_raw_fd()?;
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `tcgetattr` fills a zeroed termios for an fd we own.
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return None;
+    }
+    Some((termios.c_lflag & libc::ICANON) != 0)
+}
+
+/// The longest run of bytes at the START of `data` with no newline in it.
+///
+/// Only a leading run matters: once a newline goes through, the line
+/// discipline hands that line to the program and starts the buffer over.
+///
+/// unix-only, like its one caller: Windows ConPTY has no line discipline, and
+/// `#![deny(warnings)]` turns an unused function there into a build failure.
+#[cfg(unix)]
+fn leading_line_len(data: &[u8]) -> usize {
+    data.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(data.len())
+}
+
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<String, Arc<PtySession>>>>,
     counter: AtomicU64,
@@ -328,6 +383,32 @@ impl PtyManager {
                 .cloned()
                 .ok_or_else(|| format!("PTY session not found: {session_id}"))?
         };
+
+        // A newline-free run this long is dropped in full by the line
+        // discipline when the foreground program reads in canonical mode, and
+        // nothing we do on this side changes that — chunking it does not help,
+        // because the kernel's buffer accumulates across writes. Say so
+        // instead of handing over bytes that silently evaporate.
+        #[cfg(unix)]
+        {
+            let run = leading_line_len(data.as_bytes());
+            {
+                if run >= CANON_LINE_LIMIT {
+                    let canonical = {
+                        let master = session.master.lock();
+                        is_canonical(master.as_ref())
+                    };
+                    if canonical == Some(true) {
+                        return Err(format!(
+                            "{run} bytes were not sent: the program reading this terminal takes \
+                             at most {} bytes on one line. Send it in pieces separated by \
+                             newlines, or write it to a file instead.",
+                            CANON_LINE_LIMIT - 1
+                        ));
+                    }
+                }
+            }
+        }
 
         let queue = session.input.lock();
         let sender = queue
@@ -615,5 +696,220 @@ mod shell_choice_tests {
         assert!(PtyManager::resolve_shell(Some("cmd")).to_lowercase().ends_with("cmd.exe"));
         // and the default is the command prompt, not PowerShell
         assert!(PtyManager::default_shell().to_lowercase().ends_with("cmd.exe"));
+    }
+}
+
+
+/// `CANON_LINE_LIMIT`, checked against the kernel rather than assumed.
+///
+/// The boundary is re-measured here on whatever platform the suite runs, so a
+/// constant that is wrong for a platform fails CI instead of reaching a user —
+/// which is exactly what happened when this trusted `fpathconf`, whose 255 on
+/// Linux would have made the guard refuse pastes that work fine.
+#[cfg(all(test, unix))]
+mod canonical_limit_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::time::{Duration, Instant};
+
+    struct Probe {
+        child: Box<dyn Child + Send + Sync>,
+        master: Box<dyn MasterPty + Send>,
+        out: std::path::PathBuf,
+        tx: std::sync::mpsc::Sender<Vec<u8>>,
+    }
+
+    /// A `cat` on a pty, capturing what actually reaches it. `raw` selects the
+    /// line discipline: a shell's line editor looks like `raw`, `cat`/`read`
+    /// like the default.
+    fn probe(raw: bool, tag: &str) -> Probe {
+        // Shell-safe: this path goes straight into a `sh -c` command line.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let out = std::env::temp_dir().join(format!(
+            "nexterm-canon-{tag}-{}-{}.txt",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&out);
+
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg(format!(
+            "stty {} -echo; cat > {}",
+            if raw { "raw" } else { "sane" },
+            out.display()
+        ));
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        drop(pair.slave);
+
+        // The master must be drained continuously or both sides wedge.
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+
+        let writer = pair.master.take_writer().expect("writer");
+        let tx = spawn_writer_thread(writer, tag).unwrap();
+        std::thread::sleep(Duration::from_millis(300)); // let `stty` take effect
+        Probe { child, master: pair.master, out, tx }
+    }
+
+    impl Probe {
+        /// Bytes that actually reached `cat` after sending `n` newline-free
+        /// bytes followed by a newline. `n + 1` means nothing was lost.
+        fn deliver(&self, n: usize) -> usize {
+            self.tx.send(vec![b'a'; n]).unwrap();
+            self.tx.send(b"\n".to_vec()).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            self.tx.send(vec![4u8]).unwrap(); // Ctrl-D: cat flushes and exits
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut size = 0;
+            while Instant::now() < deadline {
+                if let Ok(meta) = std::fs::metadata(&self.out) {
+                    size = meta.len() as usize;
+                    if size > n {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            size
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_file(&self.out);
+        }
+    }
+
+    #[test]
+    fn the_mode_the_guard_reads_is_the_mode_the_program_is_in() {
+        let cooked = probe(false, "mode-cooked");
+        assert_eq!(
+            is_canonical(cooked.master.as_ref()),
+            Some(true),
+            "a program reading lines must be seen as canonical"
+        );
+        let raw = probe(true, "mode-raw");
+        assert_eq!(
+            is_canonical(raw.master.as_ref()),
+            Some(false),
+            "a program in raw mode must not be seen as canonical"
+        );
+    }
+
+    /// Pins `CANON_LINE_LIMIT` to the kernel from both sides. A limit set too
+    /// SMALL fails the first assertion (the guard would refuse working
+    /// pastes); too LARGE fails the second (data would still be lost
+    /// silently).
+    #[test]
+    fn the_constant_is_exactly_where_the_kernel_starts_losing_data() {
+        let under = probe(false, "limit-under");
+        assert_eq!(
+            under.deliver(CANON_LINE_LIMIT - 1),
+            CANON_LINE_LIMIT,
+            "a line one byte under CANON_LINE_LIMIT ({CANON_LINE_LIMIT}) must arrive whole — \
+             the constant is too small for this platform and the guard would refuse input \
+             the kernel handles fine"
+        );
+
+        let at = probe(false, "limit-at");
+        let delivered = at.deliver(CANON_LINE_LIMIT);
+        assert!(
+            delivered < CANON_LINE_LIMIT + 1,
+            "a line at CANON_LINE_LIMIT ({CANON_LINE_LIMIT}) must lose data, but all \
+             {} bytes arrived — the constant is too large for this platform",
+            CANON_LINE_LIMIT + 1
+        );
+    }
+
+    /// How the loss shows up differs by platform, and both are data loss: the
+    /// point of the guard is that neither reaches the user unannounced.
+    #[test]
+    fn the_loss_is_total_on_macos_and_a_truncation_elsewhere() {
+        let at = probe(false, "limit-shape");
+        let delivered = at.deliver(CANON_LINE_LIMIT * 2);
+        if cfg!(target_os = "macos") {
+            assert_eq!(delivered, 0, "macOS discards an over-long canonical line whole");
+        } else {
+            assert_eq!(
+                delivered, CANON_LINE_LIMIT,
+                "Linux truncates an over-long canonical line to the buffer size"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_mode_takes_far_more_than_the_canonical_limit() {
+        // A shell's line editor puts the tty here, which is why pasting at a
+        // prompt works and pasting into `cat` does not.
+        let p = probe(true, "raw-big");
+        let n = CANON_LINE_LIMIT * 4;
+        assert_eq!(p.deliver(n), n + 1, "raw mode must deliver a large paste intact");
+    }
+
+    #[test]
+    fn the_guard_rejects_only_what_the_kernel_would_drop() {
+        let cooked = probe(false, "guard-cooked");
+        let mgr = PtyManager::new();
+        let session = Arc::new(PtySession {
+            id: "guard".into(),
+            shell: "/bin/sh".into(),
+            created_at: Utc::now(),
+            master: Mutex::new(
+                native_pty_system()
+                    .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+                    .expect("openpty")
+                    .master,
+            ),
+            input: Mutex::new(Some(cooked.tx.clone())),
+            child: Mutex::new(spare_child()),
+        });
+        mgr.sessions.lock().insert("guard".into(), session);
+
+        // A bare pty with no program on it is canonical by default, which is
+        // exactly the state the guard has to judge.
+        let err = mgr
+            .write("guard", &"a".repeat(CANON_LINE_LIMIT))
+            .expect_err("an over-limit line must be refused");
+        assert!(err.contains("were not sent"), "the refusal must say so plainly: {err}");
+        assert!(
+            err.contains(&(CANON_LINE_LIMIT - 1).to_string()),
+            "and name the limit: {err}"
+        );
+
+        // Everything else still goes through untouched.
+        mgr.write("guard", &"a".repeat(CANON_LINE_LIMIT - 1))
+            .expect("a line under the limit is fine");
+        let long_but_split = format!("{}\n{}", "a".repeat(10), "b".repeat(CANON_LINE_LIMIT * 4));
+        mgr.write("guard", &long_but_split[..11])
+            .expect("a run ending in a newline is fine however long the payload");
+        mgr.write("guard", "echo hi\n").expect("ordinary input is fine");
+        mgr.write("guard", "").expect("an empty write is fine");
+    }
+
+    /// A child handle for a session built by hand in the test above.
+    fn spare_child() -> Box<dyn Child + Send + Sync> {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 30");
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        drop(pair.slave);
+        child
     }
 }

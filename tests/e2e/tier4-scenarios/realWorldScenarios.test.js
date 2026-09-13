@@ -23,6 +23,7 @@ describe('Tier 4: Real-World Scenarios (End-to-End User Journeys)', () => {
     assert.equal(activeTab.language, 'json');
 
     // Step 3: Create a dedicated build terminal tab
+    const firstTerminalId = app.activeTerminalTabId;
     const buildTab = await app.createTerminalTab('Build & Lint');
     assert.equal(app.activeTerminalTabId, buildTab.id);
 
@@ -38,7 +39,7 @@ describe('Tier 4: Real-World Scenarios (End-to-End User Journeys)', () => {
     assert.equal(buildTab.blocks[0].id, b1.id);
 
     // Step 6: Switch back to default terminal tab
-    app.switchTerminalTab('tab-term-1');
-    assert.equal(app.activeTerminalTabId, 'tab-term-1');
+    app.switchTerminalTab(firstTerminalId);
+    assert.equal(app.activeTerminalTabId, firstTerminalId);
   });
 });
