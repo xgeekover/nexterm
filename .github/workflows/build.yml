@@ -7,18 +7,29 @@ on:
   pull_request:
     branches: [main]
 
+# Every job gets read-only access; the one job that needs to write to the
+# repository (release) asks for it itself. A PR from a fork must never be able
+# to reach a token that can publish.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Bundling Monaco's language workers exceeds node's default heap on the
   # macOS runner.
   NODE_OPTIONS: --max-old-space-size=4096
 
+# Actions are pinned to commit SHAs, not tags: a tag can be moved onto new code
+# by whoever owns the action, and these run with access to the build. The
+# trailing comment records which version each SHA was, so bumping one stays a
+# readable diff.
+
 jobs:
   test:
     name: test (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Otherwise the job token is written into .git/config, where an npm
           # lifecycle script or a build.rs can read it back out.
@@ -34,14 +45,14 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
 
@@ -61,17 +72,13 @@ jobs:
   build:
     name: build (${{ matrix.platform }})
     needs: test
-    # Creating the release and uploading the portable zip both write to the
-    # repository; the default GITHUB_TOKEN is read-only.
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
         platform: [macos-latest, windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Otherwise the job token is written into .git/config, where an npm
           # lifecycle script or a build.rs can read it back out.
@@ -88,36 +95,26 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
 
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build (release, upload artifacts)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        # No GITHUB_TOKEN: this invocation only builds. Artifacts are uploaded
-        # by actions/upload-artifact, which uses the Actions runtime token.
-        uses: tauri-apps/tauri-action@v0
-
-      - name: Build and publish release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "NexTerm ${{ github.ref_name }}"
-          releaseDraft: false
-          prerelease: false
+      # Builds only. This job never receives GITHUB_TOKEN and never publishes
+      # anything — a tag build produces exactly the same bundles as a branch
+      # build, and the release job below is the only thing that can put them
+      # in front of users.
+      - name: Build bundles
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
 
       # A Tauri app is a single self-contained exe; zipping it gives Windows
       # users a no-install build. It still needs the WebView2 runtime, which
@@ -138,19 +135,168 @@ jobs:
           Copy-Item "README.md" "$name/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "$name/*" -DestinationPath "$name.zip" -Force
 
-      - name: Attach Windows portable build to the release
-        if: matrix.platform == 'windows-latest' && startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} "NexTerm-windows-x64-portable.zip" --clobber
+      # Collect the installers into one flat directory so the release job does
+      # not have to know Tauri's per-platform bundle layout.
+      - name: Collect installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find src-tauri/target/release/bundle \
+            -type f \
+            \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.msi' \
+               -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \
+               -o -name '*.rpm' \) \
+            -exec cp {} dist/ \;
+          if [ -f NexTerm-windows-x64-portable.zip ]; then
+            cp NexTerm-windows-x64-portable.zip dist/
+          fi
+          echo "collected:"
+          ls -la dist/
+          # An empty dist means the bundler silently produced nothing — that
+          # used to surface only as a release with assets missing.
+          [ -n "$(ls -A dist)" ] || { echo "::error::no installers were produced"; exit 1; }
 
       - name: Upload bundles
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nexterm-${{ matrix.platform }}
-          path: |
-            src-tauri/target/release/bundle/**
-            NexTerm-windows-x64-portable.zip
-          if-no-files-found: ignore
+          path: dist/**
+          if-no-files-found: error
+
+  release:
+    name: release
+    # Tags only. A push to main or a pull request can never reach this job, so
+    # there is no path from ordinary CI to a published release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+
+      - name: Gather assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist/
+
+      # The release is only worth publishing if every platform actually landed.
+      # v0.1.0 shipped three times with pieces missing because nothing checked.
+      - name: Verify every expected asset is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          check() {
+            local label="$1" pattern="$2"
+            # shellcheck disable=SC2086
+            if compgen -G "dist/$pattern" > /dev/null; then
+              echo "  ok       $label -> $(cd dist && ls $pattern | tr '\n' ' ')"
+            else
+              echo "::error::missing release asset: $label (no dist/$pattern)"
+              missing=1
+            fi
+          }
+          echo "expected assets:"
+          check "macOS disk image"      "*.dmg"
+          check "macOS app archive"     "*.app.tar.gz"
+          check "Windows installer"     "*-setup.exe"
+          check "Windows MSI"           "*.msi"
+          check "Windows portable zip"  "NexTerm-windows-x64-portable.zip"
+          check "Linux AppImage"        "*.AppImage"
+          check "Linux deb"             "*.deb"
+          check "Linux rpm"             "*.rpm"
+          [ "$missing" -eq 0 ] || { echo "::error::refusing to publish an incomplete release"; exit 1; }
+
+          # A bundler can also emit a zero-byte file rather than failing.
+          while IFS= read -r f; do
+            [ -s "$f" ] || { echo "::error::empty asset: $f"; exit 1; }
+          done < <(find dist -type f)
+
+      # Draft first: the release exists but nobody sees it until the assets
+      # have been uploaded AND read back, so a half-uploaded release is never
+      # visible to users.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Name the repository outright rather than letting gh infer it from
+          # a git remote — the checkout deliberately keeps no credentials.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — reusing it as a draft"
+            gh release edit "$TAG" --draft
+          else
+            gh release create "$TAG" \
+              --draft \
+              --title "NexTerm $TAG" \
+              --generate-notes
+          fi
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Name the repository outright rather than letting gh infer it from
+          # a git remote — the checkout deliberately keeps no credentials.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber
+
+      # Read the release back rather than trusting the upload's exit code.
+      - name: Verify the uploaded release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Name the repository outright rather than letting gh infer it from
+          # a git remote — the checkout deliberately keeps no credentials.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.name)\t\(.size)\t\(.state)"' > uploaded.tsv
+          echo "uploaded:"; cat uploaded.tsv
+
+          # Compare on exact field equality rather than a pattern: asset names
+          # carry dots and plus signs that a regex would read as metacharacters.
+          fail=0
+          while IFS= read -r local; do
+            name="$(basename "$local")"
+            size="$(wc -c < "$local" | tr -d ' ')"
+            read -r remote_size remote_state <<<"$(
+              awk -F'\t' -v n="$name" '$1 == n { print $2, $3; found=1 } END { if (!found) print "", "" }' uploaded.tsv
+            )"
+            if [ -z "$remote_size" ]; then
+              echo "::error::asset never arrived: $name"; fail=1; continue
+            fi
+            if [ "$remote_size" != "$size" ]; then
+              echo "::error::$name uploaded at $remote_size bytes, expected $size"; fail=1
+            fi
+            if [ "$remote_state" != "uploaded" ]; then
+              echo "::error::$name is in state '$remote_state', not 'uploaded'"; fail=1
+            fi
+          done < <(find dist -type f)
+          [ "$fail" -eq 0 ] || { echo "::error::leaving the release as a draft"; exit 1; }
+
+      # Only now does it become visible.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Name the repository outright rather than letting gh infer it from
+          # a git remote — the checkout deliberately keeps no credentials.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --draft=false --latest
