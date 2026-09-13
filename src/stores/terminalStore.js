@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
+import { notifyTerminal } from '../lib/terminalNotice.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
 // schema as absent, which for this store's keys would mean silently bootstrapping
 // over the user's workspace. Reads go through `loadVersionedState` + an explicit
@@ -2162,12 +2163,20 @@ export const useTerminalStore = create((set, get) => {
 
     // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
     writeRaw: async (tabId, data) => {
-      const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
+      const targetId = tabId || get().activeTabId;
+      const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
       try {
         await invoke('pty_write', { session_id: tab.sessionId, data });
       } catch (err) {
-        console.error('[TerminalStore] Raw write failed:', err);
+        // The backend refuses input the tty would silently discard — a paste
+        // longer than one canonical-mode line, which the kernel drops whole.
+        // Swallowing that to the console is how a pasted block could vanish
+        // with nothing on screen to say it had.
+        const message = typeof err === 'string' ? err : err?.message;
+        if (!notifyTerminal(targetId, message)) {
+          console.error('[TerminalStore] Raw write failed:', err);
+        }
       }
     },
 

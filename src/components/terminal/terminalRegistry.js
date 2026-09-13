@@ -19,6 +19,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
+import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
 
 const instances = new Map();
@@ -298,6 +299,22 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
 }
 
 /** Tear down a tab's xterm instance for good. Call only when its tab closes. */
+/**
+ * Print a NexTerm message into a terminal, styled so it cannot be mistaken for
+ * program output. Used for things the user has to be told about but the shell
+ * knows nothing of — a paste the kernel refused, for instance.
+ */
+export function writeNotice(tabId, message) {
+  const entry = instances.get(tabId);
+  if (!entry || !message) return false;
+  entry.term.write(`\r\n\x1b[33m[NexTerm] ${message}\x1b[0m\r\n`);
+  return true;
+}
+
+// Let the store reach the screen without importing this module (it runs in
+// Node under the test suites, and xterm brings a stylesheet with it).
+setTerminalNoticeSink(writeNotice);
+
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;

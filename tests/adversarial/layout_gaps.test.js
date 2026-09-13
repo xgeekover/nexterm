@@ -12,6 +12,7 @@
  * test can never see.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
+import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
 import {
   sizesOf,
   layoutOf,
@@ -344,5 +345,98 @@ describe('Layout gaps: behaviours no test was holding down', () => {
       null,
       'a zero-width pane is ignored rather than persisted'
     );
+  });
+});
+
+/**
+ * A paste the kernel will discard must be SEEN.
+ *
+ * The line discipline drops a canonical-mode line at MAX_CANON whole — not
+ * truncated — so the backend refuses it up front (src-tauri/src/pty/manager.rs
+ * proves the kernel behaviour). That refusal is only worth anything if it
+ * reaches the screen; it used to go to `console.error`, which is how a pasted
+ * block could vanish with nothing to show for it.
+ */
+describe('A refused write is shown to the user, not swallowed', () => {
+  let release;
+  let notices;
+  let unsink;
+  let consoleErrors;
+  let realConsoleError;
+
+  beforeEach(async () => {
+    release = borrowStorage();
+    await relaunch();
+    notices = [];
+    consoleErrors = [];
+    realConsoleError = console.error;
+    console.error = (...args) => consoleErrors.push(args.join(' '));
+    unsink = setTerminalNoticeSink((tabId, message) => {
+      notices.push({ tabId, message });
+      return true;
+    });
+  });
+
+  test('PASTE-01: the backend’s refusal is printed into the terminal it was meant for', async () => {
+    const tabId = st().activeTabId;
+    const tab = st().tabs.find((t) => t.id === tabId);
+
+    // Stand in for the backend refusing an over-limit paste.
+    const refusal =
+      '4096 bytes were not sent: the program reading this terminal takes at most 1023 bytes on one line.';
+    const bridge = await import('../../src/lib/ipc.js');
+    const original = bridge.mockBridge.invoke.bind(bridge.mockBridge);
+    bridge.mockBridge.invoke = async (command, args) => {
+      if (command === 'pty_write' && args?.session_id === tab.sessionId) throw new Error(refusal);
+      return original(command, args);
+    };
+
+    try {
+      await S.getState().writeRaw(tabId, 'a'.repeat(4096));
+    } finally {
+      bridge.mockBridge.invoke = original;
+    }
+
+    assert.equal(notices.length, 1, 'exactly one notice must be shown');
+    assert.equal(notices[0].tabId, tabId, 'it goes to the terminal the paste was aimed at');
+    assert.ok(
+      notices[0].message.includes('were not sent'),
+      `the user is told the paste did not go: ${notices[0].message}`
+    );
+    assert.equal(
+      consoleErrors.length,
+      0,
+      'nothing is swallowed to the console once the user has been told'
+    );
+  });
+
+  test('PASTE-02: with no terminal on screen to tell, the failure still reaches the console', async () => {
+    unsink();
+    unsink = setTerminalNoticeSink(null);
+
+    const tabId = st().activeTabId;
+    const tab = st().tabs.find((t) => t.id === tabId);
+    const bridge = await import('../../src/lib/ipc.js');
+    const original = bridge.mockBridge.invoke.bind(bridge.mockBridge);
+    bridge.mockBridge.invoke = async (command, args) => {
+      if (command === 'pty_write' && args?.session_id === tab.sessionId) throw new Error('nope');
+      return original(command, args);
+    };
+
+    try {
+      await S.getState().writeRaw(tabId, 'x');
+    } finally {
+      bridge.mockBridge.invoke = original;
+    }
+
+    assert.equal(notices.length, 0, 'no notice could be drawn');
+    assert.equal(consoleErrors.length, 1, 'so the failure is not lost entirely');
+  });
+
+  test('PASTE-03: teardown', () => {
+    unsink();
+    console.error = realConsoleError;
+    release();
+    assert.ok(true);
   });
 });
