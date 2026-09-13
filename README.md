@@ -101,6 +101,14 @@ scrollback, colour theme, and command suggestions.
 
 On Windows and Linux use `Ctrl` wherever `⌘` is listed.
 
+**Shortcuts yield to the shell.** A chord the terminal needs goes to the
+terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K` kills to end of line,
+`Ctrl+C` interrupts, and the app does nothing. The same chord elsewhere in the
+window does what the table says. On Windows and Linux the items that would
+otherwise collide are reachable from the menu bar as well, because a native
+menu accelerator is resolved before the webview and would take the key away
+from every shell in the app.
+
 ## Develop
 
 ```sh
