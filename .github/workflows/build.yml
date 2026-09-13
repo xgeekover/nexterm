@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Otherwise the job token is written into .git/config, where an npm
+          # lifecycle script or a build.rs can read it back out.
+          persist-credentials: false
 
       - name: Install Tauri Linux dependencies
         run: |
@@ -68,6 +72,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Otherwise the job token is written into .git/config, where an npm
+          # lifecycle script or a build.rs can read it back out.
+          persist-credentials: false
 
       - name: Install Tauri Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -96,9 +104,9 @@ jobs:
 
       - name: Build (release, upload artifacts)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        # No GITHUB_TOKEN: this invocation only builds. Artifacts are uploaded
+        # by actions/upload-artifact, which uses the Actions runtime token.
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish release
         if: startsWith(github.ref, 'refs/tags/v')

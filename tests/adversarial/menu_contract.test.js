@@ -24,8 +24,8 @@ const rustIds = new Set(
 /** Ids `runMenuAction` actually answers. */
 const handledIds = new Set([...ACTIONS_JS.matchAll(/case '([a-z-]+)':/g)].map((m) => m[1]));
 
-/** Drawn only by the in-app menu; macOS uses the predefined Quit item. */
-const IN_APP_ONLY = new Set(['quit']);
+/** Ids drawn only by the in-app menu. None today: both menus share every id. */
+const IN_APP_ONLY = new Set();
 
 const barIds = MENU_BAR.flatMap((menu) => menu.items.filter((i) => i.id).map((i) => i.id));
 

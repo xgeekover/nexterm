@@ -2,7 +2,7 @@ import React, { useEffect, useReducer, useRef } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { getOrCreateTerminal, isFittable } from './terminalRegistry.js';
-import { suggest, recordCommand } from '../../lib/commandIndex.js';
+import { suggest, recordCommand, completionFor } from '../../lib/commandIndex.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 
@@ -239,19 +239,32 @@ export function TerminalView({ tabId, active = false }) {
     };
     const suggestDataDisposable = entry.term.onData(bufferHandler);
 
+    /**
+     * Accept a suggestion by typing the part the user has not typed yet.
+     *
+     * That only works when the candidate actually CONTINUES what is on the
+     * line. `suggest()` also returns subsequence matches — `gs` matches
+     * `git push` — and slicing those by the buffer's length wrote the tail of
+     * a different string onto the line: `gs` + Enter became `gst push`, and
+     * the Enter was swallowed, so the user got a mangled line instead of a
+     * command. Anything that is not a continuation is left alone.
+     *
+     * @returns true when something was written.
+     */
     const acceptSuggestion = (index) => {
       const state = suggestStateRef.current;
       const chosen = state.items[index ?? 0];
-      if (!chosen) {
+      const rest = completionFor(bufferRef.current, chosen);
+      if (rest === null) {
         setSuggestState(EMPTY_SUGGEST_STATE);
-        return;
+        return false;
       }
-      const rest = chosen.slice(bufferRef.current.length);
       if (rest) {
         writeRaw(tabId, rest);
         bufferRef.current = chosen;
       }
       setSuggestState(EMPTY_SUGGEST_STATE);
+      return true;
     };
 
     // Intercepts specific keys ourselves (Tab/→ to accept, ↑/↓ to move the
@@ -264,8 +277,8 @@ export function TerminalView({ tabId, active = false }) {
       const popupOpen = state.visible && state.items.length > 1;
 
       if (state.visible && state.ghost && (event.key === 'Tab' || event.key === 'ArrowRight')) {
+        if (!acceptSuggestion(popupOpen ? state.selectedIndex : 0)) return true;
         event.preventDefault();
-        acceptSuggestion(popupOpen ? state.selectedIndex : 0);
         return false;
       }
       if (popupOpen && event.key === 'ArrowDown') {
@@ -282,8 +295,8 @@ export function TerminalView({ tabId, active = false }) {
         return false;
       }
       if (popupOpen && event.key === 'Enter') {
+        if (!acceptSuggestion(state.selectedIndex)) return true;
         event.preventDefault();
-        acceptSuggestion(state.selectedIndex);
         return false;
       }
       if (state.visible && event.key === 'Escape') {

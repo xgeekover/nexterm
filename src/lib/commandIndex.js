@@ -185,3 +185,19 @@ export function suggest(input, { history = [] } = {}) {
 }
 
 export default { suggest, recordCommand };
+
+/**
+ * The text still to be typed for `candidate` to complete `buffer`, or null when
+ * it does not complete it at all.
+ *
+ * `suggest()` ranks subsequence matches too — `gs` matches `git push` — which
+ * are useful to SHOW but must never be accepted by slicing off `buffer.length`
+ * characters: that wrote the tail of a different string onto the command line
+ * (`gs` + Enter became `gst push`). Completion is only defined when the
+ * candidate literally continues what is there.
+ */
+export function completionFor(buffer, candidate) {
+  if (typeof buffer !== 'string' || typeof candidate !== 'string') return null;
+  if (!candidate.toLowerCase().startsWith(buffer.toLowerCase())) return null;
+  return candidate.slice(buffer.length);
+}

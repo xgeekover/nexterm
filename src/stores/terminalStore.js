@@ -1765,6 +1765,10 @@ export const useTerminalStore = create((set, get) => {
         set((state) => ({
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
+            // Remember that this shell is gone. Without it the tab looked
+            // alive — blinking cursor, full scrollback — while every
+            // keystroke went nowhere.
+            tab = { ...tab, exited: { code: typeof exit_code === 'number' ? exit_code : null } };
             const blocks = [...tab.blocks];
             const runningIdx = blocks.findIndex((b) => b.status === 'running');
             if (runningIdx !== -1) {

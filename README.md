@@ -126,6 +126,7 @@ scrollback, colour theme, and command suggestions.
 | `⌃⇧\`` | New terminal tab in the current group |
 | `⌘D` / `⌘⇧D` | Split the active pane right / down |
 | `⌘W` | Close the active terminal pane |
+| `⌘⇧W` | Close the window |
 | `⌥⌘←` / `⌥⌘→` | Focus the previous / next pane |
 | `⌘B` | Toggle the primary sidebar |
 | `⌘L` | Clear the active terminal |
@@ -184,3 +185,7 @@ src
 The terminal layout is a tree: every leaf is a *group* holding an ordered list of
 tab ids, and every branch is a horizontal or vertical split. Dragging a tab
 rewrites that tree, and `src/lib/persistence.js` versions it into local storage.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
