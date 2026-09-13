@@ -5,7 +5,7 @@
  * run as plain Node assertions — no terminal instance involved.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { suggest, recordCommand, __resetCommandHistory } from '../../src/lib/commandIndex.js';
+import { suggest, recordCommand, __resetCommandHistory, completionFor} from '../../src/lib/commandIndex.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS, DEFAULT_TERMINAL_THEME_ID } from '../../src/lib/terminalThemes.js';
 
 describe('commandIndex: ranked command suggestions', () => {
@@ -125,5 +125,45 @@ describe('terminalThemes: theme registry shape', () => {
     for (const id of required) {
       assert.ok(TERMINAL_THEME_IDS.includes(id), `missing required theme "${id}"`);
     }
+  });
+});
+
+describe('Accepting a suggestion never rewrites what is already typed', () => {
+  // `suggest()` ranks subsequence matches as well as prefixes, which is useful
+  // to show but dangerous to accept: slicing a candidate by the buffer's LENGTH
+  // pasted the tail of a different string onto the command line. `gs` + Enter
+  // used to produce `gst push` — and the Enter was swallowed, so the user was
+  // left with a mangled line instead of a command that ran.
+  const cases = ['gs', 'gc', 'dc', 'kg', 'ls -'];
+
+  test('IS-20: a subsequence match is never treated as a completion', () => {
+    for (const typed of cases) {
+      for (const candidate of suggest(typed)) {
+        const completion = completionFor(typed, candidate);
+        if (completion === null) continue;
+        assert.equal(
+          (typed + completion).toLowerCase(),
+          candidate.toLowerCase(),
+          `accepting "${candidate}" after "${typed}" would not leave the candidate on the line`
+        );
+      }
+    }
+  });
+
+  test('IS-21: the top suggestion for a common abbreviation is refused, not spliced', () => {
+    const top = suggest('gs')[0];
+    assert.ok(top, 'no suggestion for "gs" at all — the fixture has drifted');
+    // It is still offered (subsequence matching is the point of the feature)…
+    assert.equal(top.toLowerCase().startsWith('gs'), false, `"${top}" is a prefix match, pick another fixture`);
+    // …but it cannot be accepted onto the line.
+    assert.equal(completionFor('gs', top), null);
+  });
+
+  test('IS-22: a real prefix still completes, and an exact match completes to nothing', () => {
+    assert.equal(completionFor('git pu', 'git push'), 'sh');
+    assert.equal(completionFor('GIT PU', 'git push'), 'sh', 'case-insensitive, like the popup');
+    assert.equal(completionFor('git push', 'git push'), '');
+    assert.equal(completionFor('', 'git push'), 'git push');
+    assert.equal(completionFor('git push', null), null);
   });
 });

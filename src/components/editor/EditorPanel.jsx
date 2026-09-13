@@ -1,9 +1,10 @@
-import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Panel, Group, Separator } from 'react-resizable-panels';
 import Editor from '@monaco-editor/react';
 import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
+import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs, EditorDragContext, markEditorDragEnded } from './EditorTabs.jsx';
 import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
@@ -14,11 +15,12 @@ import { chord } from '../../lib/platform.js';
 // Monaco theme is a fixed constant instead of a live settingsStore read.
 const MONACO_THEME = 'nexterm-dark';
 
+// Everything here is fixed; the four the Settings window offers are merged in
+// per render by `useMonacoOptions`. They used to be hardcoded HERE, so Font
+// Size, Tab Size, Word Wrap and Minimap changed the settings window and
+// nothing else.
 const MONACO_OPTIONS = {
   fontFamily: '"SF Mono", Menlo, Monaco, "Cascadia Code", Consolas, monospace',
-  fontSize: 12,
-  lineHeight: 18,
-  minimap: { enabled: true },
   renderLineHighlight: 'line',
   scrollBeyondLastLine: false,
   smoothScrolling: true,
@@ -27,6 +29,25 @@ const MONACO_OPTIONS = {
   padding: { top: 8 },
   automaticLayout: true,
 };
+
+/** MONACO_OPTIONS plus the four settings the user can actually change. */
+function useMonacoOptions() {
+  const fontSize = useSettingsStore((s) => s.editorFontSize);
+  const tabSize = useSettingsStore((s) => s.editorTabSize);
+  const wordWrap = useSettingsStore((s) => s.editorWordWrap);
+  const minimap = useSettingsStore((s) => s.editorMinimap);
+  return useMemo(
+    () => ({
+      ...MONACO_OPTIONS,
+      fontSize,
+      lineHeight: Math.round(fontSize * 1.5),
+      tabSize,
+      wordWrap: wordWrap ? 'on' : 'off',
+      minimap: { enabled: minimap },
+    }),
+    [fontSize, tabSize, wordWrap, minimap]
+  );
+}
 
 /** Pointer travel before a press turns into a drag. */
 const DRAG_THRESHOLD_PX = 4;
@@ -122,6 +143,7 @@ function relativeSegments(filePath, rootPath) {
  * between groups, or onto a group's edge to split it.
  */
 function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
+  const monacoOptions = useMonacoOptions();
   const paneId = node.id;
   const tabs = useEditorStore((s) => s.tabs);
   const activeEditorPaneId = useEditorStore((s) => s.activeEditorPaneId);
@@ -194,7 +216,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               theme={MONACO_THEME}
               value={activeTab.content}
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
-              options={MONACO_OPTIONS}
+              options={monacoOptions}
             />
             {/* While dragging, swallow pointer events so Monaco cannot eat them. */}
             {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}

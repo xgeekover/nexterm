@@ -550,6 +550,26 @@ describe('Terminal layout: persistence, restore contents, and live cwd', () => {
     assert.equal(tabById(a).cwd, '/workspace/a-moved', "a is untouched by b's event");
   });
 
+  test('TL-26: a terminal whose shell has exited is marked, not left looking alive', async () => {
+    const a = panes()[0].tabIds[0];
+    const sessionA = tabById(a).sessionId;
+    assert.equal(tabById(a).exited, undefined, 'sanity: it starts alive');
+
+    await mockBridge.emit('pty-exit', { session_id: sessionA, exit_code: 0 });
+    assert.deepEqual(
+      tabById(a).exited,
+      { code: 0 },
+      'the tab kept a blinking cursor and swallowed every keystroke with nothing to show for it'
+    );
+
+    // a non-zero code is kept as-is, and an unknown session is ignored
+    const b = (await S.getState().createTab()).id;
+    await mockBridge.emit('pty-exit', { session_id: tabById(b).sessionId, exit_code: 130 });
+    assert.deepEqual(tabById(b).exited, { code: 130 });
+    await mockBridge.emit('pty-exit', { session_id: 'no-such-session', exit_code: 1 });
+    assert.deepEqual(tabById(a).exited, { code: 0 }, 'an unknown session must not touch anyone');
+  });
+
   test('TL-20: an unknown session id in a pty-cwd event is ignored', async () => {
     const before = JSON.stringify(S.getState().tabs);
     await mockBridge.emit('pty-cwd', { session_id: 'pty-does-not-exist', cwd: '/nowhere' });

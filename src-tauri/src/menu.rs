@@ -17,7 +17,8 @@
 //! convention — muda cannot build those items on other platforms, and
 //! Windows/Linux apps don't have an app-named menu at all. There we fold the
 //! items that would otherwise live there (Settings…, Quit) into the File
-//! menu instead, VS-Code-style. Either way the same 13 custom ids exist on
+//! menu instead, VS-Code-style. The custom ids are the same on every
+//! platform apart from `close-window`, which only macOS needs, and
 //! every platform (see `every_custom_id_is_unique_and_matches_the_frontend_contract`),
 //! so the frontend's id-based event handling in `useMenuEvents.js` needs no
 //! platform branching.
@@ -126,7 +127,13 @@ pub fn spec() -> Vec<Submenu> {
                 Sep,
                 terminal_safe("save", "Save", "CmdOrCtrl+S"),
                 Sep,
-                P(CloseWindow),
+                // Deliberately NOT `P(CloseWindow)`: muda gives that ⌘W on
+                // macOS, and two items claiming one key equivalent means AppKit
+                // drops the accelerator from the later one — Terminal ▸ Close
+                // Pane ended up with no shortcut at all, and ⌘W closed the whole
+                // window with every terminal in it. Terminal.app and iTerm put
+                // ⌘W on the tab and ⌘⇧W on the window; so do we.
+                custom("close-window", "Close Window", "CmdOrCtrl+Shift+W"),
             ],
         });
     }
@@ -172,7 +179,7 @@ pub fn spec() -> Vec<Submenu> {
             Sep,
             terminal_safe("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
             custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
-            custom("toggle-secondary", "Toggle AI Side Bar", "CmdOrCtrl+Alt+B"),
+            custom("toggle-secondary", "Toggle Terminals Side Bar", "CmdOrCtrl+Alt+B"),
             Sep,
             P(Fullscreen),
         ],
@@ -197,7 +204,7 @@ pub fn spec() -> Vec<Submenu> {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            vec![P(Minimize), P(Maximize), P(CloseWindow)]
+            vec![P(Minimize), P(Maximize)]
         }
     };
     submenus.push(Submenu { title: "Window", items: window_items });
@@ -324,7 +331,17 @@ mod tests {
         let ids = custom_ids();
         let unique: HashSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "duplicate menu ids: {ids:?}");
-        // Mirrors the `case` labels in src/hooks/useMenuEvents.js.
+        // Mirrors `runMenuAction` in src/lib/menuActions.js, which both this
+        // menu and the one the app draws off macOS dispatch through.
+        #[cfg(target_os = "macos")]
+        let expected = [
+            "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
+            "toggle-sidebar", "toggle-panel", "toggle-secondary",
+            "split-right", "split-down", "close-pane", "clear-terminal", "close-window",
+        ];
+        // Off macOS the window is closed from the app's own title bar, and
+        // Quit lives in the File menu as a predefined item.
+        #[cfg(not(target_os = "macos"))]
         let expected = [
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",

@@ -6,7 +6,7 @@
  * range-clamping (font size 8-32, line height 1-2, tab size 1-8, scrollback
  * 100-100000), so it is not re-asserted here.
  */
-import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
+import { describe, test, beforeEach, assert, afterEach} from '../e2e/harness/testFramework.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 
 const S = useSettingsStore;
@@ -116,5 +116,76 @@ describe('Settings store: setSetting / resetSettings contract', () => {
     assert.equal(S.getState().terminalScrollback, S.getState().settingsDefaults.terminalScrollback);
 
     S.getState().setSettingsModalOpen(false);
+  });
+});
+
+describe('Settings survive a restart', () => {
+  // Every setting used to live only in memory: the store never touched
+  // persistence.js, so picking a terminal theme or a font size and relaunching
+  // put it straight back to the default — while the terminal TABS came back
+  // correctly, which made it look like a bug rather than a design choice.
+  const KEY = 'nexterm.settings';
+  const backing = new Map();
+  let borrowed = null;
+
+  const useOwnStorage = () => {
+    borrowed = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+      setItem: (k, v) => backing.set(k, String(v)),
+      removeItem: (k) => backing.delete(k),
+      clear: () => backing.clear(),
+    };
+    backing.clear();
+  };
+  const returnStorage = () => {
+    globalThis.localStorage = borrowed;
+    borrowed = null;
+  };
+
+  /** Re-import the store as if the app had just started. */
+  const relaunch = () =>
+    import(`../../src/stores/settingsStore.js?relaunch=${Math.random()}`);
+
+  beforeEach(useOwnStorage);
+  afterEach(returnStorage);
+
+  test('ST-20: a changed setting is written and read back on the next launch', async () => {
+    const first = await relaunch();
+    first.useSettingsStore.getState().setSetting('terminalTheme', 'dracula');
+    first.useSettingsStore.getState().setSetting('terminalFontSize', 16);
+    assert.ok(backing.get(KEY), 'nothing reached storage');
+
+    const next = await relaunch();
+    assert.equal(next.useSettingsStore.getState().terminalTheme, 'dracula');
+    assert.equal(next.useSettingsStore.getState().terminalFontSize, 16);
+  });
+
+  test('ST-21: resetting is remembered too', async () => {
+    const first = await relaunch();
+    first.useSettingsStore.getState().setSetting('terminalTheme', 'nord');
+    first.useSettingsStore.getState().resetSettings();
+
+    const next = await relaunch();
+    assert.equal(
+      next.useSettingsStore.getState().terminalTheme,
+      next.useSettingsStore.getState().settingsDefaults.terminalTheme
+    );
+  });
+
+  test('ST-22: a corrupt or foreign payload falls back to the defaults', async () => {
+    backing.set(KEY, '{{{ not json');
+    let store = (await relaunch()).useSettingsStore.getState();
+    assert.equal(store.terminalFontSize, 12);
+
+    // wrong types and unknown keys are ignored rather than trusted
+    backing.set(
+      KEY,
+      JSON.stringify({ version: 2, data: { terminalFontSize: 'huge', nonsense: 1, terminalTheme: 'nord' } })
+    );
+    store = (await relaunch()).useSettingsStore.getState();
+    assert.equal(store.terminalFontSize, 12, 'a string font size must not be trusted');
+    assert.equal(store.terminalTheme, 'nord', 'but a well-typed value still loads');
+    assert.equal('nonsense' in store, false);
   });
 });

@@ -1,4 +1,50 @@
 import { create } from 'zustand';
+import { loadState, saveState } from '../lib/persistence.js';
+
+/** Where the Settings window's values live between sessions. */
+export const SETTINGS_KEY = 'nexterm.settings';
+
+/**
+ * Every setting the Settings window edits, and its default.
+ *
+ * This is the single list: the store spreads it for its initial state, reads
+ * the saved values over it, and `resetSettings` puts it back. Adding a setting
+ * here is all that is needed for it to be persisted.
+ */
+export const SETTINGS_DEFAULTS = {
+  terminalFontFamily: '',
+  terminalFontSize: 12,
+  terminalLineHeight: 1.5,
+  terminalCursorStyle: 'bar',
+  terminalCursorBlink: true,
+  terminalScrollback: 5000,
+  terminalTheme: 'dark-modern',
+  terminalSuggestions: true,
+  editorFontSize: 12,
+  editorTabSize: 2,
+  editorWordWrap: false,
+  editorMinimap: true,
+  reducedMotion: false,
+};
+
+/** Saved values, ignoring anything that is not a setting we know about. */
+function loadSettings() {
+  const saved = loadState(SETTINGS_KEY, null);
+  if (!saved || typeof saved !== 'object') return {};
+  const out = {};
+  for (const key of Object.keys(SETTINGS_DEFAULTS)) {
+    if (key in saved && typeof saved[key] === typeof SETTINGS_DEFAULTS[key]) {
+      out[key] = saved[key];
+    }
+  }
+  return out;
+}
+
+function persistSettings(state) {
+  const payload = {};
+  for (const key of Object.keys(SETTINGS_DEFAULTS)) payload[key] = state[key];
+  saveState(SETTINGS_KEY, payload);
+}
 
 export const useSettingsStore = create((set, get) => ({
   activeView: 'terminal', // 'terminal' | 'editor' | 'agents' | 'chat' | 'all' — legacy, mapped onto shell flags below
@@ -8,22 +54,11 @@ export const useSettingsStore = create((set, get) => ({
   isSettingsModalOpen: false,
 
   // ---- Workspace settings (the Settings window edits these) ----
-  // Terminal
-  terminalFontFamily: '',        // '' = follow the app's --font-mono token
-  terminalFontSize: 12,
-  terminalLineHeight: 1.5,
-  terminalCursorStyle: 'bar',    // 'bar' | 'block' | 'underline'
-  terminalCursorBlink: true,
-  terminalScrollback: 5000,
-  terminalTheme: 'dark-modern',   // src/lib/terminalThemes.js
-  terminalSuggestions: true,      // inline command intellisense
-  // Editor
-  editorFontSize: 12,
-  editorTabSize: 2,
-  editorWordWrap: false,
-  editorMinimap: true,
-  // Workbench
-  reducedMotion: false,
+  // Shapes and defaults live in SETTINGS_DEFAULTS above; whatever the user
+  // last chose is read over them here. These used to live only in memory, so
+  // every setting silently reverted on the next launch.
+  ...SETTINGS_DEFAULTS,
+  ...loadSettings(),
 
   // VS Code Dark Modern shell regions
   sidebarVisible: true, // primary sidebar (Explorer)
@@ -101,27 +136,19 @@ export const useSettingsStore = create((set, get) => ({
   setSettingsModalOpen: (open) => set({ isSettingsModalOpen: open }),
 
   /** Defaults for every key the Settings window exposes. */
-  settingsDefaults: {
-    terminalFontFamily: '',
-    terminalFontSize: 12,
-    terminalLineHeight: 1.5,
-    terminalCursorStyle: 'bar',
-    terminalCursorBlink: true,
-    terminalScrollback: 5000,
-    terminalTheme: 'dark-modern',
-    terminalSuggestions: true,
-    editorFontSize: 12,
-    editorTabSize: 2,
-    editorWordWrap: false,
-    editorMinimap: true,
-    reducedMotion: false,
+  settingsDefaults: SETTINGS_DEFAULTS,
+
+  /** Update one setting by key, and remember it. */
+  setSetting: (key, value) => {
+    set({ [key]: value });
+    persistSettings(get());
   },
 
-  /** Update one setting by key. */
-  setSetting: (key, value) => set({ [key]: value }),
-
-  /** Restore every setting to its default. */
-  resetSettings: () => set((state) => ({ ...state.settingsDefaults })),
+  /** Restore every setting to its default, and remember that too. */
+  resetSettings: () => {
+    set({ ...SETTINGS_DEFAULTS });
+    persistSettings(get());
+  },
 }));
 
 export default useSettingsStore;

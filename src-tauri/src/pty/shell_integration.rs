@@ -27,6 +27,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// What it takes to make a shell emit our markers: extra environment
 /// variables, plus extra `CommandBuilder` arguments (some shells only load a
@@ -132,6 +133,53 @@ if [[ -f "$NEXTERM_USER_ZDOTDIR/.zlogin" ]]; then
 fi
 "#;
 
+
+/// Where this process keeps the rc files it generates for the shell.
+///
+/// Two things made a single fixed `$TMPDIR/nexterm-shell-integration` wrong:
+///
+///   * On Linux `temp_dir()` is `/tmp`, which is world-writable. Another local
+///     user could pre-create the directory (or a symlink in its place) and
+///     every terminal NexTerm opened would source their code as the victim.
+///     macOS and Windows hand each user a private temp directory, so only
+///     Linux was exposed — but the fix costs nothing anywhere.
+///   * One path shared by every process meant the test suite raced itself:
+///     two tests generating the same rc file at once, under cargo's parallel
+///     harness, read a file another was halfway through writing.
+///
+/// Both go away with a directory that belongs to this user AND this process.
+fn integration_dir(shell: &str) -> Result<PathBuf, String> {
+    // Unique per user, per process, and per call: the uid keeps another local
+    // account out, the pid keeps two running copies apart, and the counter
+    // keeps two threads of one process (cargo's test harness) from writing the
+    // same file at once.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let mut dir = std::env::temp_dir();
+    #[cfg(unix)]
+    {
+        // SAFETY: `getuid` only reads this process's own uid and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        dir.push(format!("nexterm-{uid}-{}", std::process::id()));
+    }
+    #[cfg(not(unix))]
+    {
+        dir.push(format!("nexterm-{}", std::process::id()));
+    }
+    dir.push(format!("{shell}-{}", SEQ.fetch_add(1, Ordering::Relaxed)));
+
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create the shell-integration directory {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Owner-only, so nothing else can drop a file in even when the parent
+        // is a shared /tmp. Best effort — a failure here must not stop a
+        // terminal from opening.
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
+    Ok(dir)
+}
+
 fn zsh_integration() -> ShellIntegration {
     match prepare_zsh_dir() {
         Ok(dir) => {
@@ -157,7 +205,7 @@ fn zsh_integration() -> ShellIntegration {
 
 /// Write (or refresh) the generated zsh rc directory and return its path.
 pub fn prepare_zsh_dir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("nexterm-shell-integration").join("zsh");
+    let dir = integration_dir("zsh")?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, body) in [
         (".zshenv", ZSHENV),
@@ -247,7 +295,7 @@ fn bash_integration() -> ShellIntegration {
 
 /// Write (or refresh) the generated bash rc file and return its path.
 pub fn prepare_bash_rcfile() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("nexterm-shell-integration").join("bash");
+    let dir = integration_dir("bash")?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = dir.join("bashrc");
     if fs::read_to_string(&path).map(|cur| cur == BASHRC).unwrap_or(false) {
@@ -343,7 +391,7 @@ fn pwsh_integration() -> ShellIntegration {
 /// Write (or refresh) the generated PowerShell integration script and
 /// return its path.
 pub fn prepare_pwsh_integration() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("nexterm-shell-integration").join("pwsh");
+    let dir = integration_dir("pwsh")?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = dir.join("integration.ps1");
     if fs::read_to_string(&path).map(|cur| cur == PWSH_INTEGRATION).unwrap_or(false) {
@@ -540,5 +588,41 @@ mod tests {
         // cfg-portable while still covering path-with-directory matching.
         let b = for_shell("C:/Program Files/PowerShell/7/PWSH.EXE");
         assert!(!b.args.is_empty());
+    }
+
+    /// The generated rc files used to live in one fixed
+    /// `$TMPDIR/nexterm-shell-integration/<shell>`. On Linux that is inside a
+    /// world-writable /tmp, so another local account could plant the directory
+    /// and have every NexTerm terminal source their code; and one path shared
+    /// by every caller is what made this very suite race itself under cargo's
+    /// parallel harness.
+    #[test]
+    fn integration_dirs_are_private_and_never_shared_between_calls() {
+        let a = integration_dir("zsh").unwrap();
+        let b = integration_dir("zsh").unwrap();
+        assert_ne!(a, b, "two calls handed out the same directory");
+        assert!(a.exists() && b.exists());
+
+        let pid = std::process::id().to_string();
+        for dir in [&a, &b] {
+            let parent = dir.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
+            assert!(parent.starts_with("nexterm-"), "unexpected parent: {parent}");
+            assert!(parent.ends_with(&pid), "the directory is not per-process: {parent}");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Owner-only: nothing else may read the rc files or drop one in.
+            let mode = fs::metadata(&a).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "shell-integration directory is {mode:o}, not 700");
+
+            // and it really is per-user
+            let uid = unsafe { libc::getuid() }.to_string();
+            let parent = a.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
+            assert!(parent.contains(&uid), "the directory is not per-user: {parent}");
+        }
+
+        let _ = fs::remove_dir_all(a.parent().unwrap());
     }
 }

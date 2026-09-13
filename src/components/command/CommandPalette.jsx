@@ -104,7 +104,12 @@ export function CommandPalette() {
     .filter((g) => g.items.length > 0)
     .filter((g) => paletteMode === 'all' || g.label === 'files');
 
-  const allFiltered = [...fileItems, ...commandItems];
+  // What the arrow keys and Enter act on must be exactly what is on screen.
+  // Building this from every item regardless of `paletteMode` let the
+  // selection run past the last visible row onto a command the user could not
+  // see — and Enter then ran it, so ⌘P plus two ArrowDowns spawned a terminal
+  // instead of opening a file.
+  const allFiltered = groups.flatMap((g) => g.items);
 
   const handleSelect = async (item) => {
     if (!item) return;

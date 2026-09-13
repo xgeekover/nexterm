@@ -202,6 +202,13 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     cursorStyle: settingsState.terminalCursorStyle,
     cursorBlink: settingsState.terminalCursorBlink,
     scrollback: settingsState.terminalScrollback,
+    // xterm's default is 1, i.e. no correction, and several canonical palettes
+    // define an ANSI colour equal to their own background — Monokai, One Dark,
+    // Gruvbox, Tomorrow Night and Solarized all render "black" invisibly, as
+    // does the default theme (#000000 on #181818). VS Code lifts the same
+    // palettes to 4.5 rather than editing them, and so do we: the theme stays
+    // the canonical one, the text stays readable.
+    minimumContrastRatio: 4.5,
     allowProposedApi: true,
     theme: resolveTerminalTheme(settingsState.terminalTheme),
   });
@@ -216,6 +223,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // mounted, and independent of the store's own (bookkeeping) pty-output
   // listener.
   let ptyUnlisten = null;
+  let exitUnlisten = null;
   let ptyCancelled = false;
   if (sessionId) {
     listen('pty-output', (payload) => {
@@ -225,6 +233,22 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     }).then((off) => {
       if (ptyCancelled) off();
       else ptyUnlisten = off;
+    });
+
+    // When the shell exits, say so. The pane used to keep a blinking cursor
+    // and simply swallow every keystroke, with no way to tell a dead terminal
+    // from a hung one — the failure only showed up in the devtools console.
+    listen('pty-exit', (payload) => {
+      const { session_id, exit_code } = payload || {};
+      if (session_id !== sessionId || entry.exited) return;
+      entry.exited = true;
+      const code = typeof exit_code === 'number' ? exit_code : null;
+      term.write(
+        `\r\n\x1b[90m[process exited${code === null ? '' : ` with code ${code}`}]\x1b[0m\r\n`
+      );
+    }).then((off) => {
+      if (ptyCancelled) off();
+      else exitUnlisten = off;
     });
   }
 
@@ -236,9 +260,11 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     fitAddon,
     container,
     dataDisposable,
+    exited: false,
     stopPtyListener: () => {
       ptyCancelled = true;
       ptyUnlisten?.();
+      exitUnlisten?.();
     },
   };
   instances.set(tabId, entry);

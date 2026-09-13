@@ -72,7 +72,7 @@ export function runMenuAction(id) {
     case 'clear-terminal':
       terminal.clearBlocks?.();
       break;
-    case 'quit':
+    case 'close-window':
       windowControls.close();
       break;
     default:
@@ -96,7 +96,7 @@ export const MENU_BAR = [
       { type: 'separator' },
       { id: 'preferences', label: 'Settings…', shortcut: chord('mod', ',') },
       { type: 'separator' },
-      { id: 'quit', label: 'Exit' },
+      { id: 'close-window', label: 'Exit', shortcut: chord('mod', 'shift', 'w') },
     ],
   },
   {

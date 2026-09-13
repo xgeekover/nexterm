@@ -302,7 +302,13 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                 aria-selected={isActive}
                 aria-grabbed={isBeingDragged}
                 data-tab-chip={tab.id}
-                title={`${tab.title} — drag onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`}
+                title={
+                  tab.exited
+                    ? `${tab.title} — this shell has exited${
+                        tab.exited.code === null ? '' : ` (code ${tab.exited.code})`
+                      }`
+                    : `${tab.title} — drag onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
+                }
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   beginDrag(tab, e);
@@ -342,7 +348,16 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   isBeingDragged && 'opacity-40'
                 )}
               >
-                <span className="truncate max-w-[120px]">{tab.title}</span>
+                <span
+                  className={cn(
+                    'truncate max-w-[120px]',
+                    // A shell that has exited still has its scrollback worth
+                    // reading, so the tab stays — but it should not look live.
+                    tab.exited && 'line-through opacity-60'
+                  )}
+                >
+                  {tab.title}
+                </span>
               </div>
             );
           })}
