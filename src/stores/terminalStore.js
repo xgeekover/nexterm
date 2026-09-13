@@ -436,12 +436,18 @@ function settle(state, patch = {}) {
 // `title`/`cwd`. PTY sessions and scrollback are process state and cannot
 // survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
 export const PERSIST_KEY = 'nexterm.terminal.workspace';
+/** The pre-upgrade payload, kept once so a failed migration is recoverable. */
+export const PERSIST_BACKUP_KEY = 'nexterm.terminal.workspace.v1.bak';
 /** Named group snapshots the user saves explicitly (separate from the live layout). */
 export const SAVED_GROUPS_KEY = 'nexterm.terminal.savedGroups';
 
 const PERSIST_DEBOUNCE_MS = 300;
+/** However busy the terminals are, the layout is never more than this stale. */
+const PERSIST_MAX_WAIT_MS = 2000;
 
 let persistTimer = null;
+let persistDeadline = null;
+let pendingPersistState = null;
 
 /** Strip a tree node down to the fields worth persisting. */
 function serializeTreeForPersist(node) {
@@ -481,12 +487,35 @@ function buildPersistedPayload(state) {
   };
 }
 
-/** Debounced write-behind so a burst of state changes only saves once. */
+/**
+ * Debounced write-behind, with a ceiling.
+ *
+ * A plain restart-on-every-change debounce is starvable, and a terminal is
+ * exactly the thing that starves it: `pty-output` rebuilds `state.tabs` on
+ * every chunk, so a shell printing more often than the debounce (a dev server,
+ * `tail -f`, a test watcher) pushed the save out forever. Renaming a group or
+ * rearranging panes then never reached disk until the output stopped — and if
+ * the app was quit while it was still streaming, all of it was lost.
+ *
+ * So: coalesce bursts as before, but never go longer than PERSIST_MAX_WAIT_MS
+ * without writing.
+ */
 function schedulePersist(state) {
+  pendingPersistState = state;
   clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
-    saveState(PERSIST_KEY, buildPersistedPayload(state));
-  }, PERSIST_DEBOUNCE_MS);
+  if (persistDeadline === null) persistDeadline = Date.now() + PERSIST_MAX_WAIT_MS;
+  const wait = Math.max(0, Math.min(PERSIST_DEBOUNCE_MS, persistDeadline - Date.now()));
+  persistTimer = setTimeout(flushPersist, wait);
+}
+
+/** Write whatever is pending right now. Safe to call when nothing is. */
+function flushPersist() {
+  clearTimeout(persistTimer);
+  persistTimer = null;
+  persistDeadline = null;
+  const state = pendingPersistState;
+  pendingPersistState = null;
+  if (state) saveState(PERSIST_KEY, buildPersistedPayload(state));
 }
 
 /** Tolerantly collect the leaves of an untrusted (possibly hand-edited) tree. */
@@ -571,13 +600,35 @@ export function migrateV1Workspace(v1) {
  * null, which bootstraps but — because nothing is understood — is the only
  * safe reading.
  */
+/**
+ * Copy the pre-upgrade payload aside before this version can write over it.
+ *
+ * The upgrade launch is the one launch where the saved workspace is
+ * irreplaceable: if the restore fails for any reason the write-behind replaces
+ * it with a fresh single-terminal v2 payload, and rolling back does not help
+ * because the older build rejects v2. Cheap insurance, written once.
+ */
+function backUpPreUpgradePayload() {
+  try {
+    if (typeof localStorage === 'undefined' || localStorage === null) return;
+    if (localStorage.getItem(PERSIST_BACKUP_KEY) != null) return;
+    const raw = localStorage.getItem(PERSIST_KEY);
+    if (raw != null) localStorage.setItem(PERSIST_BACKUP_KEY, raw);
+  } catch (_) {
+    // storage unavailable or full — the restore still goes ahead
+  }
+}
+
 function loadWorkspacePayload() {
   const stored = loadVersionedState(PERSIST_KEY);
   if (!stored) return null;
   if (stored.version === SCHEMA_VERSION) {
     return stored.data && typeof stored.data === 'object' ? stored.data : null;
   }
-  if (stored.version === 1) return migrateV1Workspace(stored.data);
+  if (stored.version === 1) {
+    backUpPreUpgradePayload();
+    return migrateV1Workspace(stored.data);
+  }
   return null;
 }
 
@@ -814,7 +865,19 @@ export const useTerminalStore = create((set, get) => {
         ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: wantedCwd });
       } catch (_) {
         // The saved directory may no longer exist — retry at the workspace root.
-        ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: rootPath });
+        try {
+          ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: rootPath });
+        } catch (err) {
+          // And if even that fails, skip this one terminal. Letting it throw
+          // abandoned the ENTIRE restore and the write-behind then replaced the
+          // saved workspace with a single fresh terminal — one flaky ConPTY
+          // call costing the user every group they had.
+          console.error(
+            `[TerminalStore] Could not restore terminal "${savedTab.title || savedTab.id}" — skipping it:`,
+            err
+          );
+          continue;
+        }
       }
 
       const defaultTitle = `Terminal ${newTabs.length + 1}`;
@@ -1611,7 +1674,8 @@ export const useTerminalStore = create((set, get) => {
       }
       unlisteners = [];
       listening = false;
-      clearTimeout(persistTimer);
+      // Write the pending layout out rather than dropping it on the floor.
+      flushPersist();
     },
 
     init: async () => {
@@ -1979,6 +2043,20 @@ export const useTerminalStore = create((set, get) => {
 // `groups` is compared BY REFERENCE, and every group write rebuilds that array
 // (see `updateGroup` / `settle`) — a mutation deep inside a group, including
 // one in a group that is NOT on screen, therefore still schedules a save.
+/**
+ * What the persisted payload is actually made of. Comparing `state.tabs` by
+ * reference used to schedule a save on every `pty-output` chunk — the array is
+ * rebuilt per chunk, but none of the persisted FIELDS change — which is what
+ * kept the debounce permanently reset.
+ */
+function persistKeyOf(state) {
+  return `${state.activeGroupId}|${state.groups
+    .map((g) => `${g.id}:${g.name}:${JSON.stringify(serializeTreeForPersist(g.tree))}:${g.activePaneId}`)
+    .join(';')}|${state.tabs.map((t) => `${t.id}:${t.title}:${t.cwd}`).join(';')}`;
+}
+
+let lastPersistKey = null;
+
 useTerminalStore.subscribe((state, prevState) => {
   if (!state.isInitialized) return;
   if (
@@ -1988,7 +2066,17 @@ useTerminalStore.subscribe((state, prevState) => {
   ) {
     return;
   }
+  const key = persistKeyOf(state);
+  if (key === lastPersistKey) return;
+  lastPersistKey = key;
   schedulePersist(state);
 });
+
+// The webview can go away without warning (quit, reload, a Windows update
+// reboot). Write out whatever is pending rather than losing it.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', flushPersist);
+  window.addEventListener('beforeunload', flushPersist);
+}
 
 export default useTerminalStore;
