@@ -6,7 +6,10 @@
 //! lets menu items be created there, so the muda layer cannot run in tests.
 //!
 //! macOS routes ⌘C/⌘V/⌘A through the Edit menu, so a custom menu must keep
-//! the predefined edit items or text fields stop working. App-specific items
+//! the predefined edit items there or text fields stop working. The same
+//! items are deliberately absent everywhere else: their Ctrl accelerators
+//! would be claimed by the window before the webview sees them, and Ctrl+C
+//! has to reach the pty as SIGINT. App-specific items
 //! are forwarded to the webview as a `menu` event carrying the item id; the
 //! frontend maps ids to store actions (see `src/hooks/useMenuEvents.js`).
 //!
@@ -123,6 +126,16 @@ pub fn spec() -> Vec<Submenu> {
         });
     }
 
+    // macOS routes ⌘C/⌘V/⌘A through the Edit menu — without these items the
+    // shortcuts do nothing in the webview at all.
+    //
+    // Everywhere else the menu is actively harmful: muda gives these the
+    // CmdOrCtrl accelerators, so Windows' TranslateAccelerator and GTK's
+    // accel group both claim Ctrl+C before the webview sees it — and Ctrl+C
+    // in a terminal has to reach the pty as SIGINT, or a runaway process
+    // cannot be stopped from the keyboard. Ctrl+Z (Undo) is the same story.
+    // WebView2 and WebKitGTK already handle the editing shortcuts natively.
+    #[cfg(target_os = "macos")]
     submenus.push(Submenu {
         title: "Edit",
         items: vec![P(Undo), P(Redo), Sep, P(Cut), P(Copy), P(Paste), P(SelectAll)],
@@ -238,8 +251,9 @@ mod tests {
         let titles: Vec<&str> = spec().iter().map(|s| s.title).collect();
         #[cfg(target_os = "macos")]
         assert_eq!(titles, ["NexTerm", "File", "Edit", "View", "Terminal", "Window"]);
+        // No Edit menu off macOS — see the module doc and `edit_menu_*` below.
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(titles, ["File", "Edit", "View", "Terminal", "Window"]);
+        assert_eq!(titles, ["File", "View", "Terminal", "Window"]);
     }
 
     #[cfg(target_os = "macos")]
@@ -298,12 +312,25 @@ mod tests {
         assert_eq!(ids.len(), expected.len(), "unexpected extra ids: {ids:?}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn edit_menu_keeps_the_clipboard_items_macos_needs() {
         let edit = spec().into_iter().find(|s| s.title == "Edit").expect("Edit submenu");
         for needed in [Predefined::Cut, Predefined::Copy, Predefined::Paste, Predefined::SelectAll] {
             assert!(edit.items.contains(&Item::Predefined(needed)), "Edit menu lacks {needed:?}");
         }
+    }
+
+    /// On Windows and Linux these carry Ctrl accelerators that the window's
+    /// accelerator table claims before the webview — which would take Ctrl+C
+    /// away from the terminal, leaving no way to interrupt a running command.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn no_edit_menu_off_macos_so_ctrl_c_reaches_the_terminal() {
+        assert!(
+            spec().into_iter().all(|s| s.title != "Edit"),
+            "an Edit menu here would claim Ctrl+C before the pty sees it"
+        );
     }
 
     #[test]

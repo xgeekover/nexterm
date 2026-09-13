@@ -287,10 +287,11 @@ if (-not (Test-Path Variable:Global:__NextermOriginalPrompt)) {
 }
 
 function Global:prompt {
-    $__nextermCode = 0
-    if (-not $?) {
-        $__nextermCode = if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
-    }
+    # $? is set by EVERY statement, an assignment included, so it has to be
+    # read inside the first one. Capturing it on a later line only ever
+    # reported that the preceding assignment succeeded, which made every
+    # command look like it exited 0.
+    $__nextermCode = if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
     $__nextermPath = $PWD.Path -replace '\\', '/'
     if ($__nextermPath -notmatch '^/') { $__nextermPath = "/$__nextermPath" }
     $__nextermMarker = "$([char]27)]133;D;$__nextermCode$([char]7)$([char]27)]7;file://$__nextermPath$([char]7)$([char]27)]133;A$([char]7)"
