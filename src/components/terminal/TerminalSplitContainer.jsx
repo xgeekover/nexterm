@@ -11,6 +11,13 @@ import React, {
 import { createPortal } from 'react-dom';
 import { Panel, Group, Separator, useGroupRef } from 'react-resizable-panels';
 import {
+  sizesOf,
+  layoutOf,
+  panelMinSize,
+  shouldReconcile,
+  sizesFromLayout,
+} from './splitLayout.js';
+import {
   SplitSquareHorizontal,
   SplitSquareVertical,
   X,
@@ -54,8 +61,6 @@ let lastDragEndAt = 0;
 const DRAG_THRESHOLD_PX = 4;
 /** How deep into a pane counts as an edge (split) rather than the centre (move). */
 const EDGE_FRACTION = 0.25;
-/** Percentage-point slack before a stored layout counts as "different". */
-const SIZE_EPSILON = 0.25;
 
 /**
  * Dragging is done with pointer events rather than HTML5 drag & drop.
@@ -131,20 +136,6 @@ function countTerminals(tree) {
   return collectPanes(tree).reduce((sum, pane) => sum + pane.tabIds.length, 0);
 }
 
-/**
- * A split's child sizes as percentages summing to 100, falling back to an even
- * split for anything missing or malformed (the store normalizes on write, so
- * this only matters for hand-edited/older persisted state).
- */
-function sizesOf(node) {
-  const count = node.children.length;
-  const raw = Array.isArray(node.sizes) && node.sizes.length === count ? node.sizes : null;
-  const usable =
-    raw && raw.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0) ? raw : null;
-  if (!usable) return new Array(count).fill(100 / count);
-  const total = usable.reduce((a, b) => a + b, 0);
-  return usable.map((v) => (v / total) * 100);
-}
 
 /**
  * Copy text to the clipboard. Prefers the async Clipboard API (works inside
@@ -556,14 +547,8 @@ function ResizableSplit({ node, groupId, renderChild }) {
   // Cheap structural identity for the memo/effect below: ids + sizes.
   const layoutKey = childIds.map((id, i) => `${id}:${sizes[i].toFixed(2)}`).join(',');
 
-  const layout = useMemo(() => {
-    const next = {};
-    childIds.forEach((id, i) => {
-      next[id] = sizes[i];
-    });
-    return next;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const layout = useMemo(() => layoutOf(node), [layoutKey]);
 
   useLayoutEffect(() => {
     const handle = groupRef.current;
@@ -574,11 +559,8 @@ function ResizableSplit({ node, groupId, renderChild }) {
     } catch (_) {
       return;
     }
-    const ids = Object.keys(layout);
     // `setLayout` throws unless the layout names exactly the Group's panels.
-    if (Object.keys(current).length !== ids.length) return;
-    if (!ids.every((id) => typeof current[id] === 'number')) return;
-    if (ids.every((id) => Math.abs(current[id] - layout[id]) <= SIZE_EPSILON)) return;
+    if (!shouldReconcile(current, layout)) return;
     try {
       handle.setLayout(layout);
     } catch (_) {
@@ -589,11 +571,8 @@ function ResizableSplit({ node, groupId, renderChild }) {
 
   const handleLayoutChanged = useCallback(
     (nextLayout, meta) => {
-      // Only a real separator drag / resize keypress writes back; every other
-      // trigger is the library echoing what we just told it.
-      if (meta && meta.isUserInteraction === false) return;
-      const next = childIds.map((id) => nextLayout?.[id]);
-      if (!next.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) return;
+      const next = sizesFromLayout(childIds, nextLayout, meta);
+      if (!next) return;
       setPaneSizes(groupId, node.id, next);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -601,9 +580,7 @@ function ResizableSplit({ node, groupId, renderChild }) {
   );
 
   const direction = node.direction === 'vertical' ? 'vertical' : 'horizontal';
-  // A pane may never be squeezed to nothing, but "15%" stops being satisfiable
-  // past six children, which the library rejects — scale it down instead.
-  const minSize = String(Math.max(4, Math.min(15, Math.floor(90 / node.children.length))));
+  const minSize = panelMinSize(node.children.length);
 
   return (
     <Group

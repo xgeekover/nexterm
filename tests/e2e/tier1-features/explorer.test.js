@@ -1,5 +1,20 @@
 import { describe, test, beforeEach, assert, AppEnvironment } from '../harness/index.js';
 
+/**
+ * `fs_read_dir` returns a NESTED tree — a directory carries its own
+ * `children` — which is what the Rust backend does. Reading only the top level
+ * is exactly the mistake that hid missing subfolders in the explorer and made
+ * ⌘P unable to find anything under `src/`, so these cases walk it.
+ */
+function flatten(nodes, acc = []) {
+  for (const node of nodes || []) {
+    acc.push(node);
+    if (node.is_dir) flatten(node.children, acc);
+  }
+  return acc;
+}
+const pathsIn = (tree) => flatten(tree).map((n) => n.path);
+
 describe('Tier 1: File Explorer Tree & Click-to-Open Feature Coverage', () => {
   let app;
 
@@ -13,9 +28,21 @@ describe('Tier 1: File Explorer Tree & Click-to-Open Feature Coverage', () => {
     assert.ok(Array.isArray(tree), 'Explorer tree must be an array of nodes');
     assert.ok(tree.length > 0, 'Explorer tree must not be empty');
 
-    const filePaths = tree.map((n) => n.path);
-    assert.ok(filePaths.includes('/workspace/package.json'), 'package.json must be present in tree');
-    assert.ok(filePaths.includes('/workspace/src/App.jsx'), 'src/App.jsx must be present in tree');
+    const topLevel = tree.map((n) => n.path);
+    assert.ok(topLevel.includes('/workspace/package.json'), 'package.json must be present at the top level');
+    assert.equal(
+      topLevel.includes('/workspace/src/App.jsx'),
+      false,
+      'a nested file must NOT be flattened onto the top level'
+    );
+
+    const src = tree.find((n) => n.path === '/workspace/src');
+    assert.ok(src && src.is_dir, 'src must be present as a directory node');
+    assert.ok(
+      src.children.some((c) => c.path === '/workspace/src/App.jsx'),
+      'src/App.jsx must hang off its own parent directory'
+    );
+    assert.ok(pathsIn(tree).includes('/workspace/src/App.jsx'), 'src/App.jsx must be reachable in the tree');
   });
 
   test('TC-EXPL-02: Folder node click toggles expanded and collapsed state', () => {
@@ -43,8 +70,7 @@ describe('Tier 1: File Explorer Tree & Click-to-Open Feature Coverage', () => {
     await app.ipc.invoke('fs_create_file', { path: newFilePath });
 
     await app.refreshExplorer();
-    const treePaths = app.explorerTree.map((n) => n.path);
-    assert.ok(treePaths.includes(newFilePath), 'Newly created file must appear in explorer tree');
+    assert.ok(pathsIn(app.explorerTree).includes(newFilePath), 'Newly created file must appear in explorer tree');
   });
 
   test('TC-EXPL-05: Creating a new folder via fs_create_dir updates filesystem and explorer tree', async () => {
@@ -52,7 +78,7 @@ describe('Tier 1: File Explorer Tree & Click-to-Open Feature Coverage', () => {
     await app.ipc.invoke('fs_create_dir', { path: newDirPath });
 
     await app.refreshExplorer();
-    const dirNodes = app.explorerTree.filter((n) => n.is_dir).map((n) => n.path);
+    const dirNodes = flatten(app.explorerTree).filter((n) => n.is_dir).map((n) => n.path);
     assert.ok(dirNodes.includes(newDirPath), 'Newly created directory must appear in explorer tree');
   });
 
@@ -61,7 +87,7 @@ describe('Tier 1: File Explorer Tree & Click-to-Open Feature Coverage', () => {
     await app.ipc.invoke('fs_delete_path', { path: targetFile, recursive: false });
 
     await app.refreshExplorer();
-    const treePaths = app.explorerTree.map((n) => n.path);
+    const treePaths = pathsIn(app.explorerTree);
     assert.equal(treePaths.includes(targetFile), false, 'Deleted file must not be present in explorer tree');
   });
 
