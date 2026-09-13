@@ -1,11 +1,14 @@
 /**
  * Store-level coverage for the Explorer's VS Code-style context menu logic
  * added to src/stores/editorStore.js: the cut/copy/paste clipboard and the
- * rename flow. Both are implemented as read+write+delete (or a recursive
- * directory duplication for folders) against the real fs_* IPC surface —
- * there is no native rename/move/copy command — so these tests exercise the
- * actual store + the real browser mock bridge from src/lib/ipc.js rather
- * than a stand-alone reimplementation.
+ * rename flow. Moves and renames go through the single `fs_rename_path`
+ * command; only a copy still walks the tree. These tests exercise the actual
+ * store + the real browser mock bridge from src/lib/ipc.js rather than a
+ * stand-alone reimplementation.
+ *
+ * The last four cases are regressions for the copy-then-delete era, when a
+ * folder rename dropped everything below the first level and a rename that
+ * only changed capitalisation deleted the file outright.
  */
 
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
@@ -173,7 +176,7 @@ describe('Explorer context menu — Rename', () => {
     await useEditorStore.getState().refreshExplorer();
   });
 
-  test('renamePath renames a file via read+write+delete and updates its open tab', async () => {
+  test('renamePath renames a file and updates its open tab', async () => {
     const oldPath = `${scratchDir}/old.txt`;
     await invoke('fs_write_file', { path: oldPath, content: 'rename me' });
     await useEditorStore.getState().refreshExplorer();
@@ -283,5 +286,97 @@ describe('Explorer context menu — selection, inline create and rename UI state
 describe('Explorer context menu — Reveal in Finder/Explorer (documented no-op)', () => {
   test('revealPath resolves without throwing since no reveal IPC command exists', async () => {
     await assert.doesNotReject(() => useEditorStore.getState().revealPath('/workspace/README.md'));
+  });
+
+  test('copying a folder duplicates every level of it', async () => {
+    const src = `${scratchDir}/lib`;
+    const dest = `${scratchDir}/dest`;
+    await invoke('fs_create_dir', { path: src });
+    await invoke('fs_create_dir', { path: `${src}/deep` });
+    await invoke('fs_create_dir', { path: `${src}/deep/deeper` });
+    await invoke('fs_write_file', { path: `${src}/top.js`, content: 't' });
+    await invoke('fs_write_file', { path: `${src}/deep/mid.js`, content: 'm' });
+    await invoke('fs_write_file', { path: `${src}/deep/deeper/leaf.js`, content: 'l' });
+    await invoke('fs_create_dir', { path: dest });
+    await useEditorStore.getState().refreshExplorer();
+
+    useEditorStore.getState().copyToClipboard(src, true);
+    await useEditorStore.getState().pasteClipboard(dest);
+
+    // fs_read_dir nests its results; a copy that walks only the top level
+    // silently produces empty directories below the first level.
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/lib/top.js` }), 't');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/lib/deep/mid.js` }), 'm');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/lib/deep/deeper/leaf.js` }), 'l');
+    // the original must be untouched by a copy
+    assert.equal(await invoke('fs_read_file', { path: `${src}/deep/deeper/leaf.js` }), 'l');
+  });
+
+  test('renamePath keeps every descendant of a folder, not just the first level', async () => {
+    const src = `${scratchDir}/proj`;
+    await invoke('fs_create_dir', { path: src });
+    await invoke('fs_create_dir', { path: `${src}/src` });
+    await invoke('fs_create_dir', { path: `${src}/src/nested` });
+    await invoke('fs_write_file', { path: `${src}/top.txt`, content: 'top' });
+    await invoke('fs_write_file', { path: `${src}/src/a.js`, content: 'a' });
+    await invoke('fs_write_file', { path: `${src}/src/nested/b.js`, content: 'b' });
+    await useEditorStore.getState().refreshExplorer();
+
+    await useEditorStore.getState().renamePath(src, 'proj2');
+
+    const dest = `${scratchDir}/proj2`;
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/top.txt` }), 'top');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/src/a.js` }), 'a');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/src/nested/b.js` }), 'b');
+    await assert.rejects(() => invoke('fs_read_file', { path: `${src}/src/nested/b.js` }));
+  });
+
+  test('renamePath refuses to overwrite an existing sibling', async () => {
+    const keep = `${scratchDir}/keep.txt`;
+    const other = `${scratchDir}/other.txt`;
+    await invoke('fs_write_file', { path: keep, content: 'KEEP ME' });
+    await invoke('fs_write_file', { path: other, content: 'other' });
+    await useEditorStore.getState().refreshExplorer();
+
+    await assert.rejects(
+      () => useEditorStore.getState().renamePath(other, 'keep.txt'),
+      /already exists/
+    );
+    assert.equal(await invoke('fs_read_file', { path: keep }), 'KEEP ME');
+    assert.equal(await invoke('fs_read_file', { path: other }), 'other');
+  });
+
+  test('cutting a folder into another folder moves the whole subtree', async () => {
+    const src = `${scratchDir}/pkg`;
+    const dest = `${scratchDir}/dest`;
+    await invoke('fs_create_dir', { path: src });
+    await invoke('fs_create_dir', { path: `${src}/lib` });
+    await invoke('fs_create_dir', { path: dest });
+    await invoke('fs_write_file', { path: `${src}/index.js`, content: 'i' });
+    await invoke('fs_write_file', { path: `${src}/lib/util.js`, content: 'u' });
+    await useEditorStore.getState().refreshExplorer();
+
+    useEditorStore.getState().cutToClipboard(src, true);
+    await useEditorStore.getState().pasteClipboard(dest);
+
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/pkg/index.js` }), 'i');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/pkg/lib/util.js` }), 'u');
+    await assert.rejects(() => invoke('fs_read_file', { path: `${src}/lib/util.js` }));
+  });
+
+  test('pasting into a nested folder suffixes a name collision instead of clobbering it', async () => {
+    const sub = `${scratchDir}/sub`;
+    await invoke('fs_create_dir', { path: sub });
+    await invoke('fs_write_file', { path: `${scratchDir}/keep.txt`, content: 'ROOT COPY' });
+    await invoke('fs_write_file', { path: `${sub}/keep.txt`, content: 'SUB PRECIOUS' });
+    await useEditorStore.getState().refreshExplorer();
+
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/keep.txt`, false);
+    await useEditorStore.getState().pasteClipboard(sub);
+
+    // The sibling set must be read from the nested tree, not just the root's
+    // own children, or the suffix never triggers and the destination is lost.
+    assert.equal(await invoke('fs_read_file', { path: `${sub}/keep.txt` }), 'SUB PRECIOUS');
+    assert.equal(await invoke('fs_read_file', { path: `${sub}/keep copy.txt` }), 'ROOT COPY');
   });
 });

@@ -56,11 +56,21 @@ pub struct Filtered {
 #[derive(Default)]
 pub struct OscFilter {
     pending: Vec<u8>,
+    /// Trailing bytes of a multi-byte UTF-8 character that the last chunk cut
+    /// in half. A PTY read boundary lands mid-character often — every 4 KB of
+    /// output — and decoding each chunk on its own would turn both halves into
+    /// U+FFFD before the frontend ever sees them.
+    utf8_tail: Vec<u8>,
 }
 
 impl OscFilter {
     pub fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self { pending: Vec::new(), utf8_tail: Vec::new() }
+    }
+
+    /// Anything still held back, for the caller to flush at EOF.
+    pub fn take_utf8_tail(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.utf8_tail)
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> Filtered {
@@ -142,6 +152,28 @@ impl OscFilter {
                 }
             }
             i = resume;
+        }
+
+        // Re-attach whatever the previous chunk could not finish, then hold
+        // back a truncated character for the next one. Continuation bytes are
+        // all >= 0x80, so they can never be mistaken for ESC, ']' or BEL and
+        // this is safe alongside the escape scanner above.
+        if !self.utf8_tail.is_empty() {
+            let mut joined = std::mem::take(&mut self.utf8_tail);
+            joined.extend_from_slice(&out);
+            out = joined;
+        }
+        if let Err(e) = std::str::from_utf8(&out) {
+            // `error_len() == None` means "ran out of bytes", i.e. truncated
+            // rather than genuinely malformed. Only that is worth waiting for;
+            // real garbage still goes through the lossy conversion.
+            if e.error_len().is_none() {
+                let valid = e.valid_up_to();
+                if out.len() - valid <= 3 {
+                    self.utf8_tail = out[valid..].to_vec();
+                    out.truncate(valid);
+                }
+            }
         }
 
         Filtered {
@@ -386,5 +418,62 @@ mod tests {
         let r = feed_str(&mut f, "\x1b]7;not-a-uri\x07ok");
         assert_eq!(r.output, "\x1b]7;not-a-uri\x07ok");
         assert!(r.markers.is_empty());
+    }
+
+    /// A PTY read boundary lands mid-character roughly every 4 KB of output.
+    /// Decoding each chunk on its own destroyed both halves; these walk every
+    /// split point of a mixed-script string and demand a byte-exact result.
+    #[test]
+    fn multibyte_characters_survive_every_chunk_boundary() {
+        let text = "안녕하세요 ✅ café 🚀 ─────";
+        let bytes = text.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut filter = OscFilter::new();
+            let mut got = String::new();
+            got.push_str(&filter.feed(&bytes[..split]).output);
+            got.push_str(&filter.feed(&bytes[split..]).output);
+            got.push_str(&String::from_utf8_lossy(&filter.take_utf8_tail()));
+            assert_eq!(got, text, "corrupted when split at byte {split}");
+            assert!(!got.contains('\u{FFFD}'), "replacement char at split {split}");
+        }
+    }
+
+    #[test]
+    fn a_character_split_across_three_chunks_survives() {
+        // 🚀 is four bytes; feed it one byte at a time.
+        let bytes = "🚀".as_bytes();
+        let mut filter = OscFilter::new();
+        let mut got = String::new();
+        for b in bytes {
+            got.push_str(&filter.feed(&[*b]).output);
+        }
+        assert_eq!(got, "🚀");
+        assert!(filter.take_utf8_tail().is_empty());
+    }
+
+    #[test]
+    fn markers_still_parse_when_a_chunk_ends_mid_character() {
+        let mut filter = OscFilter::new();
+        let mut payload = "한".as_bytes().to_vec();
+        let tail = payload.split_off(1); // cut the first character in half
+        let first = filter.feed(&payload);
+        assert!(first.markers.is_empty());
+
+        let mut rest = tail;
+        rest.extend_from_slice(b"\x1b]133;D;0\x07done");
+        let second = filter.feed(&rest);
+        assert_eq!(second.output, "한done");
+        assert_eq!(second.markers.len(), 1);
+        assert!(matches!(second.markers[0], Marker::CommandFinished(Some(0))));
+    }
+
+    #[test]
+    fn genuinely_invalid_bytes_are_not_held_back_forever() {
+        let mut filter = OscFilter::new();
+        // 0xFF can never start a UTF-8 sequence; it must go through lossily
+        // instead of stalling the stream.
+        let out = filter.feed(&[0xFF, b'o', b'k']);
+        assert!(out.output.ends_with("ok"));
+        assert!(filter.take_utf8_tail().is_empty());
     }
 }

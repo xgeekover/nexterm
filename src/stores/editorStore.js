@@ -135,9 +135,30 @@ function remapAfterMove(state, fromPath, toPath) {
 // duplicated by re-creating its structure and re-writing every file
 // underneath it one at a time via the existing fs_read_dir/fs_read_file/
 // fs_write_file/fs_create_dir surface.
+/** Depth-first flatten of the nested FileNode[] that `fs_read_dir` returns. */
+function flattenNodes(nodes, acc = []) {
+  for (const node of nodes || []) {
+    acc.push(node);
+    if (node.children && node.children.length) flattenNodes(node.children, acc);
+  }
+  return acc;
+}
+
+/** Names of everything that already lives directly inside `dirPath`. */
+function siblingNamesIn(nodes, dirPath) {
+  return new Set(
+    flattenNodes(nodes)
+      .filter((n) => parentDirOf(n.path) === dirPath)
+      .map((n) => n.name)
+  );
+}
+
 async function copyDirRecursive(srcPath, destPath) {
   await invoke('fs_create_dir', { path: destPath });
-  const nodes = (await invoke('fs_read_dir', { path: srcPath, max_depth: 1000 })) || [];
+  const tree = (await invoke('fs_read_dir', { path: srcPath, max_depth: 1000 })) || [];
+  // `fs_read_dir` nests its results; walking only the top level would copy
+  // one layer and — where the caller then deletes the source — lose the rest.
+  const nodes = flattenNodes(tree);
 
   const dirs = [];
   const files = [];
@@ -615,9 +636,10 @@ export const useEditorStore = create((set, get) => ({
   cutToClipboard: (path, isDir) => set({ clipboard: { mode: 'cut', path, isDir: Boolean(isDir) } }),
   clearClipboard: () => set({ clipboard: null }),
 
-  // Rename is implemented as read+write+delete for a file, or a recursive
-  // directory duplication followed by a recursive delete for a folder —
-  // there is no native rename/move IPC command to call instead.
+  // One `fs_rename_path` call, never copy-then-delete: the kernel decides
+  // whether the old and new names are the same entry, which is what makes a
+  // case-only or NFC/NFD change safe on a case-insensitive volume, and it
+  // refuses to clobber an existing file instead of merging two into one.
   renamePath: async (oldPath, rawName) => {
     const trimmed = (rawName || '').trim();
     if (!trimmed || trimmed.includes('/')) {
@@ -628,18 +650,8 @@ export const useEditorStore = create((set, get) => ({
     const newPath = parent === '/' ? `/${trimmed}` : `${parent}/${trimmed}`;
     if (newPath === oldPath) return;
 
-    const node = get().fileTree.find((n) => n.path === oldPath);
-    const isDir = node ? Boolean(node.is_dir) : get().expandedFolders.has(oldPath);
-
     try {
-      if (isDir) {
-        await copyDirRecursive(oldPath, newPath);
-        await invoke('fs_delete_path', { path: oldPath, recursive: true });
-      } else {
-        const content = await invoke('fs_read_file', { path: oldPath });
-        await invoke('fs_write_file', { path: newPath, content });
-        await invoke('fs_delete_path', { path: oldPath, recursive: false });
-      }
+      await invoke('fs_rename_path', { from: oldPath, to: newPath });
       set((state) => remapAfterMove(state, oldPath, newPath));
       await get().refreshExplorer();
     } catch (err) {
@@ -669,11 +681,7 @@ export const useEditorStore = create((set, get) => ({
       return;
     }
 
-    const siblingNames = new Set(
-      get()
-        .fileTree.filter((n) => parentDirOf(n.path) === targetBase)
-        .map((n) => n.name)
-    );
+    const siblingNames = siblingNamesIn(get().fileTree, targetBase);
 
     let destName = name;
     if (siblingNames.has(destName) || (mode === 'copy' && sameLocation)) {
@@ -690,17 +698,17 @@ export const useEditorStore = create((set, get) => ({
     const destPath = `${targetBase}/${destName}`;
 
     try {
-      if (isDir) {
+      if (mode === 'cut') {
+        // A move is a rename: atomic, and it cannot drop part of a subtree
+        // the way copy-then-delete does.
+        await invoke('fs_rename_path', { from: srcPath, to: destPath });
+        set((state) => remapAfterMove(state, srcPath, destPath));
+        set({ clipboard: null });
+      } else if (isDir) {
         await copyDirRecursive(srcPath, destPath);
       } else {
         const content = await invoke('fs_read_file', { path: srcPath });
         await invoke('fs_write_file', { path: destPath, content });
-      }
-
-      if (mode === 'cut') {
-        await invoke('fs_delete_path', { path: srcPath, recursive: isDir });
-        set((state) => remapAfterMove(state, srcPath, destPath));
-        set({ clipboard: null });
       }
 
       await get().refreshExplorer();

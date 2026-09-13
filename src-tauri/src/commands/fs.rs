@@ -60,6 +60,19 @@ pub fn fs_create_dir(state: State<AppState>, path: String) -> Result<(), String>
     fs::create_dir(&confined(&state, &path)?)
 }
 
+/// Rename or move a path. Both ends are confined, so this cannot be used to
+/// lift a file out of the workspace or pull one in.
+#[tauri::command(rename_all = "snake_case")]
+pub fn fs_rename_path(state: State<AppState>, from: String, to: String) -> Result<(), String> {
+    let from_abs = confined(&state, &from)?;
+    let to_abs = confined(&state, &to)?;
+    let root = state.workspace.root().to_string_lossy().to_string();
+    if from_abs == root || to_abs == root {
+        return Err("Refusing to rename the workspace root".to_string());
+    }
+    fs::rename_path(&from_abs, &to_abs)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_delete_path(
     state: State<AppState>,
