@@ -208,6 +208,12 @@ export const useEditorStore = create((set, get) => ({
   selectedPath: null,   // row highlighted by click or right-click
   clipboard: null,      // { mode: 'copy' | 'cut', path, isDir } | null
   creatingEntry: null,  // { parentPath, type: 'file' | 'folder' } | null
+  // A close the user asked for that would throw away unsaved edits, held
+  // until they answer. `closeTab`/`closeEditorPane` stay unconditional; the
+  // UI goes through `requestClose*` so nothing is dropped silently.
+  pendingClose: null,   // { kind: 'tab' | 'pane', id, tabIds: [], names: [] } | null
+  // A save refused because the file changed on disk after this tab read it.
+  pendingOverwrite: null, // { tabId, fileName, diskContent } | null
   renamingPath: null,   // path currently rendered as an inline rename input
 
   // Event listeners are attached once and can be torn down (HMR, unmount)
@@ -356,10 +362,31 @@ export const useEditorStore = create((set, get) => ({
     }));
   },
 
-  saveFile: async (tabId = null) => {
+  saveFile: async (tabId = null, { force = false } = {}) => {
     const targetId = tabId || get().activeTabId;
     const tab = get().tabs.find((t) => t.id === targetId);
     if (!tab) return;
+
+    // The bytes on disk may not be the ones this tab read. git, a formatter,
+    // or a command in the app's own terminal can all move them, and writing
+    // `tab.content` over that silently destroys the newer version.
+    if (!force) {
+      let onDisk = null;
+      try {
+        onDisk = await invoke('fs_read_file', { path: tab.filePath });
+      } catch {
+        // Gone or unreadable — writing recreates it, which is the expected
+        // outcome of saving, so fall through.
+      }
+      if (onDisk !== null && onDisk !== tab.savedContent) {
+        set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk } });
+        const err = new Error(
+          `${tab.fileName} has changed on disk since it was opened.`
+        );
+        err.code = 'EXTERNAL_CHANGE';
+        throw err;
+      }
+    }
 
     try {
       await invoke('fs_write_file', {
@@ -385,6 +412,83 @@ export const useEditorStore = create((set, get) => ({
     for (const tab of dirtyTabs) {
       await get().saveFile(tab.id);
     }
+  },
+
+  /** Close a tab, asking first if it has unsaved edits. */
+  requestCloseTab: (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab || !tab.isDirty) {
+      get().closeTab(tabId);
+      return;
+    }
+    set({ pendingClose: { kind: 'tab', id: tabId, tabIds: [tabId], names: [tab.fileName] } });
+  },
+
+  /** Close a whole editor group, asking first about any unsaved tab in it. */
+  requestCloseEditorPane: (paneId) => {
+    const leaf = collectLeaves(get().editorSplitTree).find((l) => l.id === paneId);
+    const dirty = (leaf?.tabIds || [])
+      .map((id) => get().tabs.find((t) => t.id === id))
+      .filter((t) => t && t.isDirty);
+    if (dirty.length === 0) {
+      get().closeEditorPane(paneId);
+      return;
+    }
+    set({
+      pendingClose: {
+        kind: 'pane',
+        id: paneId,
+        tabIds: dirty.map((t) => t.id),
+        names: dirty.map((t) => t.fileName),
+      },
+    });
+  },
+
+  cancelPendingClose: () => set({ pendingClose: null }),
+
+  cancelPendingOverwrite: () => set({ pendingOverwrite: null }),
+
+  /** Write this tab over the newer bytes on disk, because the user said so. */
+  confirmPendingOverwrite: async () => {
+    const pending = get().pendingOverwrite;
+    if (!pending) return;
+    set({ pendingOverwrite: null });
+    await get().saveFile(pending.tabId, { force: true });
+  },
+
+  /** Throw away the buffer and take what is on disk instead. */
+  reloadFromDisk: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const content = await invoke('fs_read_file', { path: tab.filePath });
+    set((state) => ({
+      pendingOverwrite: null,
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, content, savedContent: content, isDirty: false } : t
+      ),
+    }));
+  },
+
+  /** Close without saving. */
+  discardPendingClose: () => {
+    const pending = get().pendingClose;
+    if (!pending) return;
+    set({ pendingClose: null });
+    if (pending.kind === 'tab') get().closeTab(pending.id);
+    else get().closeEditorPane(pending.id);
+  },
+
+  /** Save every unsaved tab involved, then close. A failed save keeps the
+   *  prompt open rather than closing over an edit that never reached disk. */
+  savePendingClose: async () => {
+    const pending = get().pendingClose;
+    if (!pending) return;
+    for (const id of pending.tabIds) {
+      await get().saveFile(id);
+    }
+    set({ pendingClose: null });
+    if (pending.kind === 'tab') get().closeTab(pending.id);
+    else get().closeEditorPane(pending.id);
   },
 
   closeTab: (tabId) => {
@@ -597,11 +701,14 @@ export const useEditorStore = create((set, get) => ({
     try {
       await invoke('fs_delete_path', { path, recursive });
       await get().refreshExplorer();
-      // Close tab if deleted file was open
-      const openTab = get().tabs.find((t) => t.filePath === path);
-      if (openTab) {
-        get().closeTab(openTab.id);
-      }
+      // Close every tab the delete removed. Matching only the exact path
+      // left a deleted folder's files open, and saving one of those
+      // recreated the directory the user had just deleted.
+      const prefix = `${path}/`;
+      const orphaned = get().tabs.filter(
+        (t) => t.filePath === path || t.filePath.startsWith(prefix)
+      );
+      orphaned.forEach((t) => get().closeTab(t.id));
     } catch (err) {
       console.error(`[EditorStore] Failed to delete ${path}:`, err);
       throw err;
