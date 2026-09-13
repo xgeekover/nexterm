@@ -137,31 +137,35 @@ jobs:
 
       # Collect the installers into one flat directory so the release job does
       # not have to know Tauri's per-platform bundle layout.
+      # NOTE: not `dist/` — that is Vite's output directory, already full of
+      # the frontend bundle by the time this runs. Uploading `dist/**` swept
+      # several hundred Monaco chunks into the artifact alongside the
+      # installers.
       - name: Collect installers
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          rm -rf installers && mkdir -p installers
           find src-tauri/target/release/bundle \
             -type f \
             \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.msi' \
                -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \
                -o -name '*.rpm' \) \
-            -exec cp {} dist/ \;
+            -exec cp {} installers/ \;
           if [ -f NexTerm-windows-x64-portable.zip ]; then
-            cp NexTerm-windows-x64-portable.zip dist/
+            cp NexTerm-windows-x64-portable.zip installers/
           fi
           echo "collected:"
-          ls -la dist/
-          # An empty dist means the bundler silently produced nothing — that
-          # used to surface only as a release with assets missing.
-          [ -n "$(ls -A dist)" ] || { echo "::error::no installers were produced"; exit 1; }
+          ls -la installers/
+          # Empty means the bundler silently produced nothing — that used to
+          # surface only as a release with assets missing.
+          [ -n "$(ls -A installers)" ] || { echo "::error::no installers were produced"; exit 1; }
 
       - name: Upload bundles
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nexterm-${{ matrix.platform }}
-          path: dist/**
+          path: installers/**
           if-no-files-found: error
 
   release:
@@ -186,9 +190,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          find artifacts -type f -exec cp {} dist/ \;
-          ls -la dist/
+          rm -rf installers && mkdir -p installers
+          find artifacts -type f -exec cp {} installers/ \;
+          ls -la installers/
 
       # The release is only worth publishing if every platform actually landed.
       # v0.1.0 shipped three times with pieces missing because nothing checked.
@@ -200,10 +204,10 @@ jobs:
           check() {
             local label="$1" pattern="$2"
             # shellcheck disable=SC2086
-            if compgen -G "dist/$pattern" > /dev/null; then
-              echo "  ok       $label -> $(cd dist && ls $pattern | tr '\n' ' ')"
+            if compgen -G "installers/$pattern" > /dev/null; then
+              echo "  ok       $label -> $(cd installers && ls $pattern | tr '\n' ' ')"
             else
-              echo "::error::missing release asset: $label (no dist/$pattern)"
+              echo "::error::missing release asset: $label (no installers/$pattern)"
               missing=1
             fi
           }
@@ -221,7 +225,7 @@ jobs:
           # A bundler can also emit a zero-byte file rather than failing.
           while IFS= read -r f; do
             [ -s "$f" ] || { echo "::error::empty asset: $f"; exit 1; }
-          done < <(find dist -type f)
+          done < <(find installers -type f)
 
       # Draft first: the release exists but nobody sees it until the assets
       # have been uploaded AND read back, so a half-uploaded release is never
@@ -254,7 +258,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" dist/* --clobber
+          gh release upload "$TAG" installers/* --clobber
 
       # Read the release back rather than trusting the upload's exit code.
       - name: Verify the uploaded release
@@ -288,7 +292,7 @@ jobs:
             if [ "$remote_state" != "uploaded" ]; then
               echo "::error::$name is in state '$remote_state', not 'uploaded'"; fail=1
             fi
-          done < <(find dist -type f)
+          done < <(find installers -type f)
           [ "$fail" -eq 0 ] || { echo "::error::leaving the release as a draft"; exit 1; }
 
       # Only now does it become visible.
