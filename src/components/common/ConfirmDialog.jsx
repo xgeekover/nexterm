@@ -12,7 +12,12 @@ export function ConfirmDialog({
   message,
   confirmLabel = 'OK',
   cancelLabel = 'Cancel',
+  // Optional third choice, for the "Save / Don't Save / Cancel" shape where
+  // neither confirming nor cancelling is the safe default.
+  altLabel = null,
+  onAlt = null,
   danger = false,
+  altDanger = false,
   onConfirm,
   onCancel,
 }) {
@@ -64,6 +69,20 @@ export function ConfirmDialog({
         </div>
         <div className="px-3 py-3 text-ui text-vsc-fg">{message}</div>
         <div className="px-3 pb-3 flex items-center justify-end gap-2">
+          {altLabel && (
+            <button
+              type="button"
+              onClick={onAlt}
+              className={cn(
+                'h-[26px] px-3 text-ui rounded-[3px]',
+                altDanger
+                  ? 'bg-vsc-button-secondary text-vsc-error hover:bg-vsc-item-hover'
+                  : 'bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover'
+              )}
+            >
+              {altLabel}
+            </button>
+          )}
           <button
             type="button"
             onClick={onCancel}

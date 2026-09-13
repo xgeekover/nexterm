@@ -10,6 +10,8 @@ import './editor_layout.test.js';
 import './explorer_actions.test.js';
 import './settings.test.js';
 import './terminal_intellisense.test.js';
+import './ipc_contract.test.js';
+import './editor_unsaved.test.js';
 
 async function run() {
   console.log('====================================================');

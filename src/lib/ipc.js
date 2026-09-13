@@ -331,35 +331,45 @@ class BrowserMockBridge {
       case 'fs_read_dir': {
         const { path, max_depth = 10 } = args;
         const normalized = (path || '/workspace').replace(/\/+$/, '');
-        const nodes = [];
-        for (const dir of this.directories) {
-          if (dir.startsWith(normalized) && dir !== normalized) {
-            const rel = dir.slice(normalized.length + 1);
-            if (!rel.includes('/') || max_depth > 1) {
-              nodes.push({
-                name: dir.split('/').pop(),
-                path: dir,
-                is_dir: true,
-                size: 0,
-                children: [],
-              });
-            }
-          }
-        }
-        for (const [filePath, content] of this.files.entries()) {
-          if (filePath.startsWith(normalized)) {
+        // The Rust backend returns a NESTED tree — each directory carries its
+        // own `children` — and hides the same build/VCS folders. The mock used
+        // to return one flat list, which let callers that only walked the top
+        // level look correct here and lose data against the real backend.
+        const SKIPPED = ['.git', 'node_modules', 'target', '.agents', 'dist'];
+
+        const childrenOf = (dirPath, depth) => {
+          const prefix = `${dirPath}/`;
+          const nodes = [];
+          for (const dir of this.directories) {
+            if (!dir.startsWith(prefix)) continue;
+            const rel = dir.slice(prefix.length);
+            if (rel.includes('/')) continue;
+            if (SKIPPED.includes(rel)) continue;
             nodes.push({
-              name: filePath.split('/').pop(),
+              name: rel,
+              path: dir,
+              is_dir: true,
+              size: 0,
+              children: depth > 1 ? childrenOf(dir, depth - 1) : [],
+            });
+          }
+          for (const [filePath, content] of this.files.entries()) {
+            if (!filePath.startsWith(prefix)) continue;
+            const rel = filePath.slice(prefix.length);
+            if (rel.includes('/')) continue;
+            nodes.push({
+              name: rel,
               path: filePath,
               is_dir: false,
               size: typeof content === 'string' ? content.length : 0,
             });
           }
-        }
-        return nodes;
+          return nodes;
+        };
+
+        return childrenOf(normalized, Math.max(1, max_depth));
       }
 
-      // 7. fs_read_file
       case 'fs_read_file': {
         const { path } = args;
         if (!this.files.has(path)) {
@@ -392,6 +402,39 @@ class BrowserMockBridge {
         const { path } = args;
         this.directories.add(path);
         await this.emit('fs-change', { path, kind: 'create_dir' });
+        return null;
+      }
+
+      // 11. fs_rename_path — one atomic move, like the Rust command.
+      case 'fs_rename_path': {
+        const { from, to } = args;
+        const isDir = this.directories.has(from);
+        if (!this.files.has(from) && !isDir) {
+          throw new Error(`Path does not exist: ${from}`);
+        }
+        if ((this.files.has(to) || this.directories.has(to)) && to !== from) {
+          throw new Error(`A file or folder named '${to.split('/').pop()}' already exists`);
+        }
+        if (isDir && to.startsWith(`${from}/`)) {
+          throw new Error(`Cannot move '${from}' inside itself`);
+        }
+        const move = (map, isSet) => {
+          for (const key of Array.from(isSet ? map.keys() : map.keys())) {
+            if (key !== from && !key.startsWith(`${from}/`)) continue;
+            const next = to + key.slice(from.length);
+            if (isSet) {
+              map.delete(key);
+              map.add(next);
+            } else {
+              const value = map.get(key);
+              map.delete(key);
+              map.set(next, value);
+            }
+          }
+        };
+        move(this.files, false);
+        move(this.directories, true);
+        await this.emit('fs-change', { path: to, kind: 'rename' });
         return null;
       }
 
@@ -433,40 +476,80 @@ class BrowserMockBridge {
 export const mockBridge = new BrowserMockBridge();
 
 /**
- * Invoke an IPC command.
- * Transparently forwards to Tauri v2 core invoke if available, otherwise delegates to browser mock bridge.
+ * The Tauri bridge modules, loaded once.
+ *
+ * Only a failure to LOAD these may fall back to the mock. A rejection from a
+ * command is the command's own answer — every Rust command returns
+ * `Result<_, String>`, so a refusal or a real I/O failure arrives as a
+ * rejection — and it has to reach the caller. Answering it with fabricated
+ * mock data is how a failed save came to be reported as a success.
  */
-export async function invoke(command, args = {}) {
-  if (isTauri()) {
-    try {
-      const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
-      return await tauriInvoke(command, args);
-    } catch (err) {
-      console.warn(`[IPC] Tauri invoke error, falling back to mock:`, err);
-      return await mockBridge.invoke(command, args);
+let corePromise = null;
+let eventPromise = null;
+
+function loadBridge(which) {
+  if (which === 'core') {
+    if (!corePromise) {
+      corePromise = import('@tauri-apps/api/core').catch((err) => {
+        corePromise = null; // let a later call retry
+        throw err;
+      });
     }
+    return corePromise;
   }
-  return await mockBridge.invoke(command, args);
+  if (!eventPromise) {
+    eventPromise = import('@tauri-apps/api/event').catch((err) => {
+      eventPromise = null;
+      throw err;
+    });
+  }
+  return eventPromise;
 }
 
 /**
- * Listen to an IPC event.
- * Transparently forwards to Tauri v2 event listener if available, otherwise delegates to browser mock bridge.
- * Returns an unlisten function.
+ * Invoke an IPC command. Inside Tauri this is the real command and its errors
+ * are real; in a browser it is the mock bridge.
+ */
+export async function invoke(command, args = {}) {
+  if (isTauri()) {
+    let core;
+    try {
+      core = await loadBridge('core');
+    } catch (err) {
+      console.error(
+        `[IPC] Tauri core module failed to load; serving '${command}' from the browser mock:`,
+        err
+      );
+      return mockBridge.invoke(command, args);
+    }
+    // Deliberately outside the try: let the command's own rejection through.
+    return core.invoke(command, args);
+  }
+  return mockBridge.invoke(command, args);
+}
+
+const unwrap = (callback) => (evt) => callback(evt?.payload !== undefined ? evt.payload : evt);
+
+/**
+ * Listen to an IPC event. Returns an unlisten function.
  */
 export async function listen(event, callback) {
   if (isTauri()) {
+    let mod;
     try {
-      const { listen: tauriListen } = await import('@tauri-apps/api/event');
-      return await tauriListen(event, (evt) => {
-        callback(evt.payload !== undefined ? evt.payload : evt);
-      });
+      mod = await loadBridge('event');
     } catch (err) {
-      console.warn(`[IPC] Tauri listen error, falling back to mock:`, err);
-      return mockBridge.listen(event, (evt) => callback(evt.payload !== undefined ? evt.payload : evt));
+      console.error(
+        `[IPC] Tauri event module failed to load; subscribing '${event}' on the browser mock:`,
+        err
+      );
+      return mockBridge.listen(event, unwrap(callback));
     }
+    // Same rule as invoke: a failed subscription must surface, not silently
+    // swap a live PTY stream for a simulated one.
+    return mod.listen(event, unwrap(callback));
   }
-  return mockBridge.listen(event, (evt) => callback(evt.payload !== undefined ? evt.payload : evt));
+  return mockBridge.listen(event, unwrap(callback));
 }
 
 export default {

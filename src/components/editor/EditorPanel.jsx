@@ -6,6 +6,7 @@ import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { EditorTabs, EditorDragContext, markEditorDragEnded } from './EditorTabs.jsx';
 import { DiffViewer } from './DiffViewer.jsx';
+import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
 import { chord } from '../../lib/platform.js';
 
@@ -253,7 +254,15 @@ export function EditorPanel() {
   const diffView = useEditorStore((s) => s.diffView);
   const editorSplitTree = useEditorStore((s) => s.editorSplitTree);
   const splitEditorPane = useEditorStore((s) => s.splitEditorPane);
-  const closeEditorPane = useEditorStore((s) => s.closeEditorPane);
+  const requestCloseEditorPane = useEditorStore((s) => s.requestCloseEditorPane);
+  const pendingClose = useEditorStore((s) => s.pendingClose);
+  const cancelPendingClose = useEditorStore((s) => s.cancelPendingClose);
+  const discardPendingClose = useEditorStore((s) => s.discardPendingClose);
+  const savePendingClose = useEditorStore((s) => s.savePendingClose);
+  const pendingOverwrite = useEditorStore((s) => s.pendingOverwrite);
+  const cancelPendingOverwrite = useEditorStore((s) => s.cancelPendingOverwrite);
+  const confirmPendingOverwrite = useEditorStore((s) => s.confirmPendingOverwrite);
+  const reloadFromDisk = useEditorStore((s) => s.reloadFromDisk);
   const dropEditorTabOnPane = useEditorStore((s) => s.dropEditorTabOnPane);
 
   // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
@@ -342,8 +351,54 @@ export function EditorPanel() {
   }, [splitEditorPane]);
 
   const handleClose = useCallback((paneId) => {
-    closeEditorPane(paneId);
-  }, [closeEditorPane]);
+    requestCloseEditorPane(paneId);
+  }, [requestCloseEditorPane]);
+
+  const unsavedPrompt = pendingClose ? (
+    <ConfirmDialog
+      open
+      title={pendingClose.names.length > 1 ? 'Unsaved Changes' : `Save ${pendingClose.names[0]}?`}
+      message={
+        pendingClose.names.length > 1
+          ? `${pendingClose.names.join(', ')} have unsaved changes. Your changes will be lost if you don't save them.`
+          : `Your changes to ${pendingClose.names[0]} will be lost if you don't save them.`
+      }
+      confirmLabel="Save"
+      altLabel="Don't Save"
+      altDanger
+      cancelLabel="Cancel"
+      onConfirm={() => {
+        savePendingClose().catch((err) =>
+          console.error('[EditorPanel] Save before close failed; keeping the tab open:', err)
+        );
+      }}
+      onAlt={discardPendingClose}
+      onCancel={cancelPendingClose}
+    />
+  ) : null;
+
+  const overwritePrompt = pendingOverwrite ? (
+    <ConfirmDialog
+      open
+      title="File Changed on Disk"
+      message={`${pendingOverwrite.fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`}
+      confirmLabel="Overwrite"
+      danger
+      altLabel="Use Disk Version"
+      cancelLabel="Cancel"
+      onConfirm={() => {
+        confirmPendingOverwrite().catch((err) =>
+          console.error('[EditorPanel] Overwrite failed:', err)
+        );
+      }}
+      onAlt={() => {
+        reloadFromDisk(pendingOverwrite.tabId).catch((err) =>
+          console.error('[EditorPanel] Reload from disk failed:', err)
+        );
+      }}
+      onCancel={cancelPendingOverwrite}
+    />
+  ) : null;
 
   if (diffView && diffView.open) {
     return <DiffViewer />;
@@ -361,6 +416,8 @@ export function EditorPanel() {
         </div>
         <DragPreview drag={drag} />
       </div>
+      {unsavedPrompt}
+      {overwritePrompt}
     </EditorDragContext.Provider>
   );
 }

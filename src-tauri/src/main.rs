@@ -58,6 +58,7 @@ fn main() {
             commands::fs::fs_write_file,
             commands::fs::fs_create_file,
             commands::fs::fs_create_dir,
+            commands::fs::fs_rename_path,
             commands::fs::fs_delete_path,
             commands::system::system_get_info,
         ])

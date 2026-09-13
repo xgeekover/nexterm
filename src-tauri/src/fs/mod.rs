@@ -151,6 +151,75 @@ pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
     }
 }
 
+/// True when both paths name the same on-disk entry.
+///
+/// String comparison cannot answer this: on a case-insensitive volume (APFS
+/// and NTFS by default) `Foo.txt` and `foo.txt` are one file, and macOS also
+/// folds NFC and NFD spellings of the same name together. `canonicalize`
+/// returns the filesystem's own spelling, so comparing those answers it.
+fn is_same_entry(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Rename or move a path in one filesystem operation.
+///
+/// This exists because the obvious alternative — read, write to the new name,
+/// delete the old — is wrong in ways that destroy data:
+///
+///   * it walks the tree, so anything the walk misses is deleted and never
+///     copied;
+///   * it decodes file contents, so a binary file aborts it half-way;
+///   * and it decides "is this the same file?" with a string comparison, which
+///     says `Foo.txt` and `foo.txt` differ when the filesystem says they do
+///     not — so the write lands in the original and the delete then removes it.
+///
+/// `fs::rename` has none of those failure modes: it is atomic, it never looks
+/// inside the entry, and the kernel resolves same-entry questions.
+pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
+    let from = resolve_path(from_str);
+    let to = resolve_path(to_str);
+
+    // `exists()` follows symlinks and so reports false for a broken one, which
+    // would make a dangling link unrenameable. Ask about the link itself.
+    if from.symlink_metadata().is_err() {
+        return Err(format!("Path does not exist: {from_str}"));
+    }
+
+    let same = is_same_entry(&from, &to);
+
+    // A pure case or Unicode-normalization change resolves to the same entry;
+    // that is a rename to allow, not a collision to refuse.
+    if to.symlink_metadata().is_ok() && !same {
+        let name = to
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| to_str.to_string());
+        return Err(format!("A file or folder named '{name}' already exists"));
+    }
+
+    // `rename` reports this as a bare EINVAL; say what actually happened.
+    let from_is_dir = from
+        .symlink_metadata()
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    if from_is_dir && !same && to.starts_with(&from) {
+        return Err(format!("Cannot move '{from_str}' inside itself"));
+    }
+
+    if let Some(parent) = to.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directory: {e}"))?;
+        }
+    }
+
+    fs::rename(&from, &to)
+        .map_err(|e| format!("Failed to rename '{from_str}' to '{to_str}': {e}"))
+}
+
 
 // ---------------------------------------------------------------------------
 // Workspace root confinement
@@ -415,5 +484,137 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    /// Each test gets its own directory. Sharing one fixed path between tests
+    /// is what made the shell-integration suite flaky under cargo's parallel
+    /// harness; do not repeat it here.
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("nexterm-rename-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn case_only_rename_keeps_the_file() {
+        let root = temp_root("case");
+        let from = root.join("Foo.txt");
+        let to = root.join("foo.txt");
+        fs::write(&from, "important data").unwrap();
+
+        rename_path(&s(&from), &s(&to)).unwrap();
+
+        // On a case-insensitive volume these are one entry, on a
+        // case-sensitive one they are two; either way the bytes must survive
+        // and the directory must still hold exactly one file.
+        let names: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "rename lost the file: {names:?}");
+        assert_eq!(fs::read_to_string(root.join(&names[0])).unwrap(), "important data");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unicode_normalization_rename_keeps_the_file() {
+        let root = temp_root("nfc");
+        let nfc = root.join("\u{d55c}.txt"); // 한 as one precomposed code point
+        let nfd = root.join("\u{1112}\u{1161}\u{11ab}.txt"); // the same syllable, decomposed
+        fs::write(&nfc, "korean").unwrap();
+
+        rename_path(&s(&nfc), &s(&nfd)).unwrap();
+
+        let names: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "rename lost the file: {names:?}");
+        assert_eq!(fs::read_to_string(root.join(&names[0])).unwrap(), "korean");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn directory_rename_keeps_every_descendant() {
+        let root = temp_root("dir");
+        let proj = root.join("proj");
+        // Depth 3, plus one folder the directory listing deliberately hides.
+        fs::create_dir_all(proj.join("src/nested/deeper")).unwrap();
+        fs::create_dir_all(proj.join(".git")).unwrap();
+        fs::write(proj.join("top.txt"), "top").unwrap();
+        fs::write(proj.join("src/a.js"), "a").unwrap();
+        fs::write(proj.join("src/nested/b.js"), "b").unwrap();
+        fs::write(proj.join("src/nested/deeper/c.js"), "c").unwrap();
+        fs::write(proj.join(".git/config"), "cfg").unwrap();
+        // A byte sequence that is not valid UTF-8: a copy that decodes file
+        // contents aborts here, a rename never looks inside.
+        fs::write(proj.join("logo.png"), [0x89u8, 0x50, 0x4e, 0x47, 0xff, 0xfe]).unwrap();
+
+        let dest = root.join("proj2");
+        rename_path(&s(&proj), &s(&dest)).unwrap();
+
+        assert!(!proj.exists(), "source directory still present");
+        assert_eq!(fs::read_to_string(dest.join("top.txt")).unwrap(), "top");
+        assert_eq!(fs::read_to_string(dest.join("src/a.js")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(dest.join("src/nested/b.js")).unwrap(), "b");
+        assert_eq!(fs::read_to_string(dest.join("src/nested/deeper/c.js")).unwrap(), "c");
+        assert_eq!(fs::read_to_string(dest.join(".git/config")).unwrap(), "cfg");
+        assert_eq!(fs::read(dest.join("logo.png")).unwrap(), vec![0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_entry() {
+        let root = temp_root("collide");
+        fs::write(root.join("keep.txt"), "KEEP ME").unwrap();
+        fs::write(root.join("other.txt"), "other").unwrap();
+
+        let err = rename_path(&s(&root.join("other.txt")), &s(&root.join("keep.txt")))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(root.join("keep.txt")).unwrap(), "KEEP ME");
+        assert_eq!(fs::read_to_string(root.join("other.txt")).unwrap(), "other");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refuses_to_move_a_directory_into_itself() {
+        let root = temp_root("selfmove");
+        let dir = root.join("outer");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inside.txt"), "still here").unwrap();
+
+        let err = rename_path(&s(&dir), &s(&dir.join("child"))).unwrap_err();
+        assert!(err.contains("inside itself"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("inside.txt")).unwrap(), "still here");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_source_is_an_error_and_a_dangling_link_is_not() {
+        let root = temp_root("missing");
+        assert!(rename_path(&s(&root.join("nope.txt")), &s(&root.join("x.txt"))).is_err());
+
+        #[cfg(unix)]
+        {
+            // A broken symlink is a real directory entry; renaming it must
+            // move the link, not report it missing.
+            std::os::unix::fs::symlink(root.join("no-such-target"), root.join("link")).unwrap();
+            rename_path(&s(&root.join("link")), &s(&root.join("link2"))).unwrap();
+            assert!(root.join("link2").symlink_metadata().is_ok());
+            assert!(root.join("link").symlink_metadata().is_err());
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 }

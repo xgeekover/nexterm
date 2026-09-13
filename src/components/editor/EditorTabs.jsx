@@ -2,7 +2,6 @@ import React, { createContext, useContext } from 'react';
 import { X, Circle, FileCode2, FileJson, FileText, File, SplitSquareHorizontal, SplitSquareVertical } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
-import { chord } from '../../lib/platform.js';
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
@@ -57,7 +56,7 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
   const paneId = node.id;
   const tabs = useEditorStore((s) => s.tabs);
   const bindEditorPaneToTab = useEditorStore((s) => s.bindEditorPaneToTab);
-  const closeTab = useEditorStore((s) => s.closeTab);
+  const requestCloseTab = useEditorStore((s) => s.requestCloseTab);
   const { drag, beginDrag } = useContext(EditorDragContext);
 
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
@@ -86,7 +85,7 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
                 // Middle-click closes the tab.
                 if (e.button === 1) {
                   e.preventDefault();
-                  closeTab(tab.id);
+                  requestCloseTab(tab.id);
                 }
               }}
               onClick={() => {
@@ -119,9 +118,9 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    closeTab(tab.id);
+                    requestCloseTab(tab.id);
                   }}
-                  title={`Close (${chord('mod', 'w')})`}
+                  title="Close"
                   className={cn(
                     'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover',
                     tab.isDirty

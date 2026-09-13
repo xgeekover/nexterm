@@ -216,6 +216,17 @@ impl PtyManager {
                     }
                 }
 
+                // The shell died mid-character: emit the bytes verbatim rather
+                // than holding them forever.
+                let tail = filter.take_utf8_tail();
+                if !tail.is_empty() {
+                    let payload = PtyOutputPayload {
+                        session_id: session_id_clone.clone(),
+                        data: String::from_utf8_lossy(&tail).to_string(),
+                    };
+                    let _ = app_handle_clone.emit("pty-output", &payload);
+                }
+
                 let exit_code = if let Some(session_arc) = session_weak.upgrade() {
                     let mut child = session_arc.child.lock();
                     child.wait().ok().map(|status| status.exit_code())
