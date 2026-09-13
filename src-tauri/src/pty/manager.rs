@@ -109,6 +109,10 @@ fn is_canonical(master: &(dyn MasterPty + Send)) -> Option<bool> {
 ///
 /// Only a leading run matters: once a newline goes through, the line
 /// discipline hands that line to the program and starts the buffer over.
+///
+/// unix-only, like its one caller: Windows ConPTY has no line discipline, and
+/// `#![deny(warnings)]` turns an unused function there into a build failure.
+#[cfg(unix)]
 fn leading_line_len(data: &[u8]) -> usize {
     data.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(data.len())
 }
