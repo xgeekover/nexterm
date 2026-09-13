@@ -13,6 +13,7 @@ import './terminal_intellisense.test.js';
 import './ipc_contract.test.js';
 import './editor_unsaved.test.js';
 import './keybindings_platform.test.js';
+import './menu_contract.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -44,6 +44,11 @@ that layout the next time you open it.
 - **Filesystem confinement.** Every file command is resolved against the
   workspace root, with the deepest existing ancestor canonicalised so symlinks
   cannot escape it.
+- **One title row.** On Windows and Linux the window is frameless and NexTerm
+  draws its own compact title bar — menu, command centre, layout toggles and
+  window buttons in a single 35px row, VS Code style, instead of a native
+  title bar with a native menu bar under it. macOS keeps its traffic lights
+  and the system menu bar.
 
 ## Install
 
