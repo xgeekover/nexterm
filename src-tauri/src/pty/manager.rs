@@ -99,22 +99,55 @@ impl PtyManager {
         }
         #[cfg(windows)]
         {
-            // PowerShell 7+ (`pwsh.exe`) is the modern, cross-platform build;
-            // prefer it when the user has it installed. It does not ship
-            // with Windows, so we search PATH ourselves rather than assume
-            // it resolves the way `powershell.exe` (always in System32) does.
-            if let Some(pwsh) = Self::find_on_path("pwsh.exe") {
-                return pwsh;
-            }
-            if Self::find_on_path("powershell.exe").is_some() {
-                return "powershell.exe".to_string();
-            }
+            // The plain command prompt, which is what "a terminal" means to
+            // most people on Windows and what every Windows box has. PowerShell
+            // is a deliberate choice now (`terminal.integrated.defaultShell`),
+            // not something NexTerm decides for you.
             if let Ok(comspec) = std::env::var("COMSPEC") {
                 if !comspec.trim().is_empty() && Path::new(&comspec).exists() {
                     return comspec;
                 }
             }
-            "powershell.exe".to_string()
+            "cmd.exe".to_string()
+        }
+    }
+
+    /// Turn the user's choice into something spawnable.
+    ///
+    /// The frontend sends either one of a few well-known names or an absolute
+    /// path, so a user can point at a shell we have never heard of.
+    pub fn resolve_shell(spec: Option<&str>) -> String {
+        let spec = spec.map(str::trim).unwrap_or("");
+        if spec.is_empty() || spec == "default" {
+            return Self::default_shell();
+        }
+
+        // An explicit path wins over any name matching.
+        if spec.contains('/') || spec.contains('\\') {
+            return spec.to_string();
+        }
+
+        #[cfg(windows)]
+        {
+            match spec {
+                "cmd" => std::env::var("COMSPEC")
+                    .ok()
+                    .filter(|c| !c.trim().is_empty())
+                    .unwrap_or_else(|| "cmd.exe".to_string()),
+                "powershell" => "powershell.exe".to_string(),
+                "pwsh" => Self::find_on_path("pwsh.exe").unwrap_or_else(|| "pwsh.exe".to_string()),
+                other => other.to_string(),
+            }
+        }
+        #[cfg(unix)]
+        {
+            for dir in ["/bin/", "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/"] {
+                let candidate = format!("{dir}{spec}");
+                if Path::new(&candidate).exists() {
+                    return candidate;
+                }
+            }
+            spec.to_string()
         }
     }
 
@@ -142,10 +175,7 @@ impl PtyManager {
         shell: Option<String>,
     ) -> Result<PtySessionInfo, String> {
         let session_id = format!("pty-{}", self.counter.fetch_add(1, Ordering::SeqCst));
-        let shell_path = match shell {
-            Some(s) if !s.trim().is_empty() => s,
-            _ => Self::default_shell(),
-        };
+        let shell_path = Self::resolve_shell(shell.as_deref());
 
         let mut cmd = CommandBuilder::new(&shell_path);
         if let Some(dir) = cwd {
@@ -534,5 +564,56 @@ mod writer_thread_tests {
         tx.send(b"x".to_vec()).unwrap();
         thread::sleep(Duration::from_millis(80));
         assert!(tx.send(b"y".to_vec()).is_err(), "writer thread outlived a broken pipe");
+    }
+}
+
+#[cfg(test)]
+mod shell_choice_tests {
+    use super::*;
+
+    /// The shell is the user's choice, not ours. On Windows the default used
+    /// to be PowerShell, which is a preference the app had no business making
+    /// — "a terminal" there means the command prompt, and PowerShell is now
+    /// something you pick.
+    #[test]
+    fn an_absent_or_default_choice_is_the_platform_default() {
+        assert_eq!(PtyManager::resolve_shell(None), PtyManager::default_shell());
+        assert_eq!(PtyManager::resolve_shell(Some("")), PtyManager::default_shell());
+        assert_eq!(PtyManager::resolve_shell(Some("   ")), PtyManager::default_shell());
+        assert_eq!(PtyManager::resolve_shell(Some("default")), PtyManager::default_shell());
+    }
+
+    #[test]
+    fn a_path_is_taken_as_written_so_an_unknown_shell_still_works() {
+        assert_eq!(
+            PtyManager::resolve_shell(Some("/opt/weird/fish")),
+            "/opt/weird/fish"
+        );
+        assert_eq!(
+            PtyManager::resolve_shell(Some(r"C:\Tools\nu.exe")),
+            r"C:\Tools\nu.exe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_name_resolves_to_a_real_binary_when_one_exists() {
+        let sh = PtyManager::resolve_shell(Some("sh"));
+        assert!(Path::new(&sh).exists(), "resolved {sh}, which does not exist");
+        assert!(sh.ends_with("/sh"), "expected an absolute path, got {sh}");
+
+        // A name we cannot find is handed over unchanged rather than silently
+        // swapped for something else.
+        assert_eq!(PtyManager::resolve_shell(Some("definitely-not-a-shell")), "definitely-not-a-shell");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_map_to_their_executables() {
+        assert!(PtyManager::resolve_shell(Some("powershell")).eq_ignore_ascii_case("powershell.exe"));
+        assert!(PtyManager::resolve_shell(Some("pwsh")).to_lowercase().ends_with("pwsh.exe"));
+        assert!(PtyManager::resolve_shell(Some("cmd")).to_lowercase().ends_with("cmd.exe"));
+        // and the default is the command prompt, not PowerShell
+        assert!(PtyManager::default_shell().to_lowercase().ends_with("cmd.exe"));
     }
 }

@@ -80,11 +80,29 @@ function zoneFromPoint(rect, clientX, clientY) {
 }
 
 /** Resolve the pane body under the pointer, if any. */
-function paneAtPoint(clientX, clientY) {
+/**
+ * What a drop at this point would do.
+ *
+ * The terminal surface splits by quarter; the TAB STRIP means "put it in this
+ * pane as a tab", which is how a split is merged back. The strip used not to
+ * be a target at all, so dragging a tab onto the one place it visibly belongs
+ * did nothing at all.
+ */
+function dropTargetAtPoint(clientX, clientY) {
   const el = document.elementFromPoint(clientX, clientY);
+
+  const strip = el?.closest?.('[data-tab-strip]');
+  if (strip) {
+    return { paneId: strip.getAttribute('data-tab-strip'), zone: 'tabs' };
+  }
+
   const body = el?.closest?.('[data-pane-body]');
   if (!body) return null;
-  return { paneId: body.getAttribute('data-pane-body'), rect: body.getBoundingClientRect() };
+  const rect = body.getBoundingClientRect();
+  return {
+    paneId: body.getAttribute('data-pane-body'),
+    zone: zoneFromPoint(rect, clientX, clientY),
+  };
 }
 
 /** Resolve the group-switcher chip under the pointer, if any. */
@@ -160,8 +178,17 @@ async function copyToClipboard(text) {
 }
 
 /** Translucent overlay showing where the dropped tab will land. */
+/**
+ * What will happen if the tab is dropped here.
+ *
+ * Showing only a tinted rectangle left the user guessing whether an edge drop
+ * would split or move, so each zone names itself: the edges say which way the
+ * pane will divide, the middle and the tab strip say the tab joins this pane.
+ */
 function DropIndicator({ zone }) {
   if (!zone) return null;
+  if (zone === 'tabs') return null; // the strip highlights itself
+
   const box = {
     center: 'inset-0',
     left: 'left-0 top-0 bottom-0 w-1/2',
@@ -169,17 +196,33 @@ function DropIndicator({ zone }) {
     top: 'left-0 right-0 top-0 h-1/2',
     bottom: 'left-0 right-0 bottom-0 h-1/2',
   }[zone];
+
+  const label = {
+    center: 'Add as a tab here',
+    left: 'Split left',
+    right: 'Split right',
+    top: 'Split up',
+    bottom: 'Split down',
+  }[zone];
+
   return (
     <div
       aria-hidden="true"
       className={cn(
-        'absolute z-20 pointer-events-none border border-vsc-focus',
+        'absolute z-20 pointer-events-none flex items-center justify-center',
+        'border-2 border-vsc-accent rounded-sm',
         'bg-[color-mix(in_srgb,var(--vsc-accent)_18%,transparent)]',
+        'transition-[top,left,right,bottom,width,height] duration-100 ease-out',
         box
       )}
-    />
+    >
+      <span className="px-2 py-0.5 rounded-sm bg-vsc-accent text-vsc-accent-fg text-ui-sm font-medium shadow-widget">
+        {label}
+      </span>
+    </div>
   );
 }
+
 
 /**
  * The chip that follows the cursor while dragging. Portaled straight onto
@@ -261,7 +304,13 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
       {/* Tab strip — each chip is a drag handle. Right-clicking empty space
           in the strip (not a chip or a button) opens the pane menu. */}
       <div
-        className="h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none"
+        data-tab-strip={paneId}
+        className={cn(
+          'relative h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none',
+          // Dropping a tab here is how a pane is merged back into tabs, so it
+          // has to look like somewhere you can drop.
+          dropZone === 'tabs' && 'bg-vsc-accent/15 ring-1 ring-inset ring-vsc-accent'
+        )}
         onContextMenu={(e) => {
           e.preventDefault();
           setPaneMenu({ x: e.clientX, y: e.clientY });
@@ -875,7 +924,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
           Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
         if (!movedEnough) return;
 
-        const hit = paneAtPoint(ev.clientX, ev.clientY);
+        const hit = dropTargetAtPoint(ev.clientX, ev.clientY);
         // A group chip is only considered when the pointer isn't over a pane —
         // the switcher sits above the panes, never on top of one.
         const chip = hit ? null : groupChipAtPoint(ev.clientX, ev.clientY);
@@ -885,7 +934,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
           x: ev.clientX,
           y: ev.clientY,
           targetPaneId: hit?.paneId ?? null,
-          zone: hit ? zoneFromPoint(hit.rect, ev.clientX, ev.clientY) : null,
+          zone: hit?.zone ?? null,
           // Dropping on the chip of the group the tab already lives in (the
           // active one — only its tabs are on screen) is a no-op, so it is
           // never highlighted as a target.
@@ -904,7 +953,9 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         if (cur?.active) lastDragEndAt = Date.now();
         if (!cur?.active) return;
         if (cur.targetPaneId) {
-          dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+          // 'tabs' and 'center' both mean "into this pane"; only the
+          // edges split.
+          dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone === 'tabs' ? 'center' : cur.zone || 'center');
         } else if (cur.targetGroupId) {
           moveTabToGroup(cur.tabId, cur.targetGroupId);
         }

@@ -5,7 +5,7 @@
  * run as plain Node assertions — no terminal instance involved.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { suggest, recordCommand, __resetCommandHistory, completionFor} from '../../src/lib/commandIndex.js';
+import { suggest, recordCommand, __resetCommandHistory, completionFor, forgetCommand} from '../../src/lib/commandIndex.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS, DEFAULT_TERMINAL_THEME_ID } from '../../src/lib/terminalThemes.js';
 
 describe('commandIndex: ranked command suggestions', () => {
@@ -165,5 +165,53 @@ describe('Accepting a suggestion never rewrites what is already typed', () => {
     assert.equal(completionFor('git push', 'git push'), '');
     assert.equal(completionFor('', 'git push'), 'git push');
     assert.equal(completionFor('git push', null), null);
+  });
+});
+
+describe('A failed command does not become a suggestion', () => {
+  // Suggestions are recorded when a line is submitted, because that is the only
+  // moment that works for a shell with no OSC 133 integration. But a typo was
+  // then offered ahead of the real command for the rest of the session: typing
+  // `opencode` brought back the `opencoded` that had just failed.
+  test('IS-23: a non-zero exit takes the command back out of history', () => {
+    __resetCommandHistory();
+
+    recordCommand('opencoded');
+    assert.deepEqual(suggest('opencod').slice(0, 1), ['opencoded'], 'sanity: it was recorded');
+
+    forgetCommand('opencoded');
+    assert.equal(
+      suggest('opencod').includes('opencoded'),
+      false,
+      'the failed command is still being suggested'
+    );
+  });
+
+  test('IS-24: forgetting one run of a repeated command keeps the rest', () => {
+    // Deliberately not a command from the curated index, so history is the
+    // only thing that could be suggesting it.
+    const cmd = 'deploy-staging --force';
+    __resetCommandHistory();
+    assert.deepEqual(suggest('deploy-stag'), [], 'fixture must not exist in the static index');
+
+    recordCommand(cmd);
+    recordCommand(cmd);
+
+    forgetCommand(cmd);
+    assert.equal(
+      suggest('deploy-stag').includes(cmd),
+      true,
+      'a command that has worked before should survive one failure'
+    );
+
+    forgetCommand(cmd);
+    assert.equal(suggest('deploy-stag').includes(cmd), false, 'the last run should drop it');
+  });
+
+  test('IS-25: forgetting something that was never recorded is harmless', () => {
+    __resetCommandHistory();
+    assert.doesNotThrow(() => forgetCommand('never-ran'));
+    assert.doesNotThrow(() => forgetCommand(''));
+    assert.doesNotThrow(() => forgetCommand(null));
   });
 });

@@ -550,6 +550,29 @@ describe('Terminal layout: persistence, restore contents, and live cwd', () => {
     assert.equal(tabById(a).cwd, '/workspace/a-moved', "a is untouched by b's event");
   });
 
+  test('TL-27: new terminals open the shell the user chose', async () => {
+    // On Windows the app used to decide this for you — PowerShell, always.
+    // The choice now travels from the setting to pty_spawn; the Rust side
+    // turns the name into an executable (see shell_choice_tests).
+    const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
+    const seen = [];
+    const real = mockBridge.invoke.bind(mockBridge);
+    mockBridge.invoke = async (cmd, args) => {
+      if (cmd === 'pty_spawn') seen.push(args.shell);
+      return real(cmd, args);
+    };
+    try {
+      useSettingsStore.getState().setSetting('terminalDefaultShell', 'pwsh');
+      await S.getState().createTab();
+      useSettingsStore.getState().setSetting('terminalDefaultShell', 'default');
+      await S.getState().createTab();
+    } finally {
+      mockBridge.invoke = real;
+      useSettingsStore.getState().setSetting('terminalDefaultShell', 'default');
+    }
+    assert.deepEqual(seen, ['pwsh', 'default'], 'the chosen shell never reached pty_spawn');
+  });
+
   test('TL-26: a terminal whose shell has exited is marked, not left looking alive', async () => {
     const a = panes()[0].tabIds[0];
     const sessionA = tabById(a).sessionId;

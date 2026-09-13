@@ -185,9 +185,67 @@ function ensureSettingsSubscriptionStarted() {
  * listener and keystroke wiring are set up once, for the lifetime of the
  * instance, so remounting the owning component never double-subscribes.
  */
+/**
+ * Point an instance's PTY listeners at `sessionId`, replacing whatever they
+ * were listening to before.
+ *
+ * A tab keeps its id across a restore while its shell gets a NEW session id,
+ * so an instance left bound to the old one shows no output and sends input
+ * nowhere — a terminal that looks alive and is completely inert. Rebinding on
+ * change is what keeps the instance and its shell together.
+ */
+function bindSession(entry, sessionId) {
+  entry.stopPtyListener?.();
+  entry.sessionId = sessionId;
+  entry.exited = false;
+
+  let ptyUnlisten = null;
+  let exitUnlisten = null;
+  let cancelled = false;
+
+  if (sessionId) {
+    listen('pty-output', (payload) => {
+      const { session_id, data } = payload || {};
+      if (!data || session_id !== sessionId) return;
+      entry.term.write(data);
+    }).then((off) => {
+      if (cancelled) off();
+      else ptyUnlisten = off;
+    });
+
+    // When the shell exits, say so. The pane used to keep a blinking cursor
+    // and simply swallow every keystroke, with no way to tell a dead terminal
+    // from a hung one — the failure only showed up in the devtools console.
+    listen('pty-exit', (payload) => {
+      const { session_id, exit_code } = payload || {};
+      if (session_id !== sessionId || entry.exited) return;
+      entry.exited = true;
+      const code = typeof exit_code === 'number' ? exit_code : null;
+      entry.term.write(
+        `\r\n\x1b[90m[process exited${code === null ? '' : ` with code ${code}`}]\x1b[0m\r\n`
+      );
+    }).then((off) => {
+      if (cancelled) off();
+      else exitUnlisten = off;
+    });
+  }
+
+  entry.stopPtyListener = () => {
+    cancelled = true;
+    ptyUnlisten?.();
+    exitUnlisten?.();
+  };
+}
+
 export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   let entry = instances.get(tabId);
-  if (entry) return entry;
+  if (entry) {
+    // The instance is reused across pane moves and remounts, but its SHELL can
+    // change underneath it (a restore respawns every terminal with the same tab
+    // id and a fresh session).
+    if (sessionId && entry.sessionId !== sessionId) bindSession(entry, sessionId);
+    return entry;
+  }
 
   const container = document.createElement('div');
   container.style.width = '100%';
@@ -222,51 +280,19 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // the instance — independent of whichever component currently has it
   // mounted, and independent of the store's own (bookkeeping) pty-output
   // listener.
-  let ptyUnlisten = null;
-  let exitUnlisten = null;
-  let ptyCancelled = false;
-  if (sessionId) {
-    listen('pty-output', (payload) => {
-      const { session_id, data } = payload || {};
-      if (!data || session_id !== sessionId) return;
-      term.write(data);
-    }).then((off) => {
-      if (ptyCancelled) off();
-      else ptyUnlisten = off;
-    });
-
-    // When the shell exits, say so. The pane used to keep a blinking cursor
-    // and simply swallow every keystroke, with no way to tell a dead terminal
-    // from a hung one — the failure only showed up in the devtools console.
-    listen('pty-exit', (payload) => {
-      const { session_id, exit_code } = payload || {};
-      if (session_id !== sessionId || entry.exited) return;
-      entry.exited = true;
-      const code = typeof exit_code === 'number' ? exit_code : null;
-      term.write(
-        `\r\n\x1b[90m[process exited${code === null ? '' : ` with code ${code}`}]\x1b[0m\r\n`
-      );
-    }).then((off) => {
-      if (ptyCancelled) off();
-      else exitUnlisten = off;
-    });
-  }
-
   ensureThemeObserverStarted();
   ensureSettingsSubscriptionStarted();
 
   entry = {
     term,
     fitAddon,
+    sessionId: null,
     container,
     dataDisposable,
     exited: false,
-    stopPtyListener: () => {
-      ptyCancelled = true;
-      ptyUnlisten?.();
-      exitUnlisten?.();
-    },
+    stopPtyListener: null,
   };
+  bindSession(entry, sessionId);
   instances.set(tabId, entry);
   return entry;
 }

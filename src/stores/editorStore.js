@@ -253,6 +253,23 @@ export const useEditorStore = create((set, get) => ({
     await get().attachListeners();
   },
 
+  /**
+   * Read one directory's entries.
+   *
+   * `refreshExplorer` only walks a few levels deep, and a directory at that
+   * limit comes back with an empty `children` that is indistinguishable from a
+   * genuinely empty one. The tree calls this the first time such a folder is
+   * expanded instead of claiming it is empty.
+   */
+  readDir: async (path) => {
+    try {
+      return (await invoke('fs_read_dir', { path, max_depth: 2 })) || [];
+    } catch (err) {
+      console.error(`[EditorStore] Failed to read ${path}:`, err);
+      return [];
+    }
+  },
+
   refreshExplorer: async () => {
     set({ isLoadingTree: true });
     try {
