@@ -1,6 +1,6 @@
 [package]
 name = "nexterm"
-version = "0.1.3"
+version = "0.1.4"
 description = "Next-generation Multi-AI Terminal IDE"
 edition = "2021"
 license = "MIT"
