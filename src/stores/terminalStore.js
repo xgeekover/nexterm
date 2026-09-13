@@ -440,6 +440,8 @@ export const PERSIST_KEY = 'nexterm.terminal.workspace';
 export const PERSIST_BACKUP_KEY = 'nexterm.terminal.workspace.v1.bak';
 /** Named group snapshots the user saves explicitly (separate from the live layout). */
 export const SAVED_GROUPS_KEY = 'nexterm.terminal.savedGroups';
+/** Snapshots of the WHOLE workspace — every group, its layout and its cwds. */
+export const SAVED_WORKSPACES_KEY = 'nexterm.terminal.savedWorkspaces';
 
 const PERSIST_DEBOUNCE_MS = 300;
 /** However busy the terminals are, the layout is never more than this stale. */
@@ -678,6 +680,15 @@ function normalizeSavedEntry(entry, index) {
  * on-disk payload is only rewritten when the user next saves, renames or
  * deletes a group, so a bad migration can never eat the list on its own.
  */
+function loadSavedWorkspaces() {
+  const stored = loadVersionedState(SAVED_WORKSPACES_KEY);
+  if (!stored || stored.version !== SCHEMA_VERSION) return [];
+  const list = Array.isArray(stored.data) ? stored.data : [];
+  return list.filter(
+    (w) => w && typeof w.id === 'string' && Array.isArray(w.groups) && w.groups.length > 0
+  );
+}
+
 function loadSavedGroups() {
   const stored = loadVersionedState(SAVED_GROUPS_KEY);
   if (!stored) return [];
@@ -815,6 +826,84 @@ export const useTerminalStore = create((set, get) => {
   };
 
   /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
+  /**
+   * Freeze one group into something storable: its layout with the live tab
+   * ids swapped for stable slot ids, and each terminal's title and CURRENT
+   * directory (the live OSC 7 cwd, not the one it was opened at).
+   */
+  const snapshotGroup = (state, group) => {
+    const slotByTabId = new Map();
+    const tabs = [];
+    for (const leaf of collectLeaves(group.tree)) {
+      for (const tabId of leaf.tabIds) {
+        const tab = state.tabs.find((t) => t.id === tabId);
+        if (!tab) continue;
+        const slotId = `slot-${tabs.length}`;
+        slotByTabId.set(tabId, slotId);
+        tabs.push({ slotId, title: tab.title, cwd: tab.cwd });
+      }
+    }
+    if (tabs.length === 0) return null;
+    return {
+      name: group.name,
+      tabs,
+      activePaneId: group.activePaneId,
+      tree: remapTreeTabIds(group.tree, slotByTabId),
+    };
+  };
+
+  /**
+   * Turn a snapshot back into a live group: one shell per slot, the saved
+   * layout rebuilt around them, fresh pane ids so loading the same snapshot
+   * twice cannot collide.
+   */
+  const materializeGroup = async (entry, fallbackName = 'Saved group') => {
+    if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
+
+    const bySlot = new Map();
+    const spawned = [];
+    for (const saved of entry.tabs) {
+      const tab = await spawnTab(saved.title, saved.cwd);
+      if (!tab) continue;
+      spawned.push(tab);
+      if (saved.slotId) bySlot.set(saved.slotId, tab.id);
+    }
+    if (spawned.length === 0) return null;
+
+    let tree = entry.tree ? remapTreeTabIds(entry.tree, bySlot) : null;
+    const paneIdMap = new Map();
+    tree = tree ? regeneratePaneIds(tree, paneIdMap) : null;
+    tree = normalizeTree(pruneTree(tree));
+    if (!tree) {
+      tree = {
+        type: 'leaf',
+        id: makePaneId(),
+        tabIds: spawned.map((t) => t.id),
+        activeTabId: spawned[0].id,
+      };
+    }
+
+    // A slot the tree never referenced would leave a live shell with nowhere
+    // to show — park it rather than leaking it.
+    const placed = new Set(collectLeaves(tree).flatMap((l) => l.tabIds));
+    for (const t of spawned) {
+      if (!placed.has(t.id)) tree = addTabToPane(tree, firstLeafId(tree), t.id);
+    }
+
+    const activePaneId = paneIdMap.get(entry.activePaneId);
+    const leaves = collectLeaves(tree);
+    return {
+      group: {
+        id: makeGroupId(),
+        name: entry.name || fallbackName,
+        createdAt: Date.now(),
+        tree,
+        activePaneId: leaves.some((l) => l.id === activePaneId) ? activePaneId : firstLeafId(tree),
+      },
+      spawned,
+    };
+  };
+
   const killTabIfOrphaned = async (tabId) => {
     if (groupOfTab(get(), tabId)) return;
     const tab = get().tabs.find((t) => t.id === tabId);
@@ -971,6 +1060,7 @@ export const useTerminalStore = create((set, get) => {
     // during module evaluation captured the list once, at import time, which
     // made the result depend on which module imported the store first.
     savedGroups: [],
+    savedWorkspaces: [],
 
     // ---- Reading the layout -------------------------------------------
     getActiveGroup: () => {
@@ -1248,26 +1338,16 @@ export const useTerminalStore = create((set, get) => {
       const group = state.groups.find((g) => g.id === groupId) || state.getActiveGroup();
       if (!group) return null;
 
-      const slotByTabId = new Map();
-      const tabs = [];
-      for (const leaf of collectLeaves(group.tree)) {
-        for (const tabId of leaf.tabIds) {
-          const tab = state.tabs.find((t) => t.id === tabId);
-          if (!tab) continue;
-          const slotId = `slot-${tabs.length}`;
-          slotByTabId.set(tabId, slotId);
-          tabs.push({ slotId, title: tab.title, cwd: tab.cwd });
-        }
-      }
-      if (tabs.length === 0) return null;
+      const snapshot = snapshotGroup(state, group);
+      if (!snapshot) return null;
 
       const entry = {
+        ...snapshot,
         id: `saved-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        // The caller's name wins over the group's own — snapshotGroup carries
+        // `name` too, so the spread has to come first.
         name: (name || '').trim() || group.name || 'Saved group',
         savedAt: Date.now(),
-        tabs,
-        activePaneId: group.activePaneId,
-        tree: remapTreeTabIds(group.tree, slotByTabId),
       };
 
       const savedGroups = [...state.savedGroups, entry];
@@ -1298,22 +1378,108 @@ export const useTerminalStore = create((set, get) => {
      *
      * Returns the id of the group the terminals landed in.
      */
+    /**
+     * Snapshot EVERY group at once — each one's layout and each terminal's
+     * current directory — under a single name. Saving groups one at a time
+     * loses which arrangement they were part of; this keeps the whole desk.
+     */
+    saveWorkspace: (name) => {
+      const state = get();
+      const groups = state.groups
+        .map((g) => snapshotGroup(state, g))
+        .filter(Boolean);
+      if (groups.length === 0) return null;
+
+      const activeIndex = Math.max(
+        0,
+        state.groups.findIndex((g) => g.id === state.activeGroupId)
+      );
+      const entry = {
+        id: `ws-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: (name || '').trim() || `Workspace ${state.savedWorkspaces.length + 1}`,
+        savedAt: Date.now(),
+        groups,
+        activeIndex: Math.min(activeIndex, groups.length - 1),
+      };
+
+      const savedWorkspaces = [...state.savedWorkspaces, entry];
+      set({ savedWorkspaces });
+      saveState(SAVED_WORKSPACES_KEY, savedWorkspaces);
+      return entry;
+    },
+
+    renameSavedWorkspace: (savedId, name) => {
+      const trimmed = (name || '').trim();
+      const next = get().savedWorkspaces.map((w) =>
+        w.id === savedId ? { ...w, name: trimmed || w.name } : w
+      );
+      set({ savedWorkspaces: next });
+      saveState(SAVED_WORKSPACES_KEY, next);
+    },
+
+    deleteSavedWorkspace: (savedId) => {
+      const next = get().savedWorkspaces.filter((w) => w.id !== savedId);
+      set({ savedWorkspaces: next });
+      saveState(SAVED_WORKSPACES_KEY, next);
+    },
+
+    /**
+     * Bring a whole workspace back.
+     *
+     * `replace` puts the session back the way it was — every saved group, and
+     * the ones currently open are closed and their shells reaped. `append`
+     * adds the saved groups alongside what is already there.
+     *
+     * Everything is spawned BEFORE anything is closed, so a failure partway
+     * through leaves the user with what they already had rather than nothing.
+     */
+    loadWorkspace: async (savedId, { mode = 'replace' } = {}) => {
+      const entry = get().savedWorkspaces.find((w) => w.id === savedId);
+      if (!entry || !Array.isArray(entry.groups) || entry.groups.length === 0) return null;
+
+      const made = [];
+      for (const snapshot of entry.groups) {
+        const result = await materializeGroup(snapshot, `Group ${made.length + 1}`);
+        if (result) made.push(result);
+      }
+      if (made.length === 0) return null;
+
+      const doomed =
+        mode === 'replace'
+          ? get().groups.flatMap((g) => collectLeaves(g.tree).flatMap((l) => l.tabIds))
+          : [];
+
+      const newGroups = made.map((m) => m.group);
+      const active = newGroups[Math.min(entry.activeIndex ?? 0, newGroups.length - 1)];
+
+      set((state) =>
+        settle(state, {
+          groups: mode === 'replace' ? newGroups : [...state.groups, ...newGroups],
+          activeGroupId: active.id,
+          activeTabId: collectLeaves(active.tree)[0]?.activeTabId ?? null,
+        })
+      );
+
+      for (const tabId of doomed) await killTabIfOrphaned(tabId);
+      return active.id;
+    },
+
     loadSavedGroup: async (savedId, { mode = 'new-group' } = {}) => {
       const entry = get().savedGroups.find((g) => g.id === savedId);
       if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
 
-      // One PTY per saved slot, then slotId → live tab id.
-      const bySlot = new Map();
-      const spawned = [];
-      for (const saved of entry.tabs) {
-        const tab = await spawnTab(saved.title, saved.cwd);
-        if (!tab) continue;
-        spawned.push(tab);
-        if (saved.slotId) bySlot.set(saved.slotId, tab.id);
-      }
-      if (spawned.length === 0) return null;
-
+      // Merge into the group on screen: one shell per saved slot, dropped into
+      // the active pane. The saved LAYOUT is deliberately ignored here — the
+      // user asked for these terminals inside the arrangement they are looking
+      // at, not for that arrangement to be replaced.
       if (mode === 'replace') {
+        const spawned = [];
+        for (const saved of entry.tabs) {
+          const tab = await spawnTab(saved.title, saved.cwd);
+          if (tab) spawned.push(tab);
+        }
+        if (spawned.length === 0) return null;
+
         const groupId = get().activeGroupId;
         set((state) => {
           const group = state.groups.find((g) => g.id === groupId);
@@ -1330,47 +1496,17 @@ export const useTerminalStore = create((set, get) => {
         return groupId;
       }
 
-      // Rebuild the saved layout: map slot ids onto the new tabs, then mint
-      // fresh pane/split ids so loading the same snapshot twice cannot collide.
-      let tree = entry.tree ? remapTreeTabIds(entry.tree, bySlot) : null;
-      const paneIdMap = new Map();
-      tree = tree ? regeneratePaneIds(tree, paneIdMap) : null;
-      tree = normalizeTree(pruneTree(tree));
-      if (!tree) {
-        tree = {
-          type: 'leaf',
-          id: makePaneId(),
-          tabIds: spawned.map((t) => t.id),
-          activeTabId: spawned[0].id,
-        };
-      }
-
-      // A slot the saved tree never referenced (or one whose pane pruned away)
-      // would leave a live PTY with nowhere to show — park those in the group's
-      // first pane rather than leaking them.
-      const placed = new Set(collectLeaves(tree).flatMap((l) => l.tabIds));
-      for (const t of spawned) {
-        if (!placed.has(t.id)) tree = addTabToPane(tree, firstLeafId(tree), t.id);
-      }
-
-      const activePaneId = paneIdMap.get(entry.activePaneId);
-      const leaves = collectLeaves(tree);
-      const group = {
-        id: makeGroupId(),
-        name: entry.name || 'Saved group',
-        createdAt: Date.now(),
-        tree,
-        activePaneId: leaves.some((l) => l.id === activePaneId) ? activePaneId : firstLeafId(tree),
-      };
+      const made = await materializeGroup(entry);
+      if (!made) return null;
 
       set((state) =>
         settle(state, {
-          groups: [...state.groups, group],
-          activeGroupId: group.id,
-          activeTabId: spawned[0].id,
+          groups: [...state.groups, made.group],
+          activeGroupId: made.group.id,
+          activeTabId: made.spawned[0].id,
         })
       );
-      return group.id;
+      return made.group.id;
     },
 
     // ---- Panes ---------------------------------------------------------
@@ -1698,7 +1834,7 @@ export const useTerminalStore = create((set, get) => {
         // the plain single-terminal bootstrap below rather than leaving the
         // app with a half-built workspace. A v1 payload is migrated rather
         // than discarded — see `migrateV1Workspace`.
-        set({ savedGroups: loadSavedGroups() });
+        set({ savedGroups: loadSavedGroups(), savedWorkspaces: loadSavedWorkspaces() });
 
         const saved = loadWorkspacePayload();
         let restored = null;

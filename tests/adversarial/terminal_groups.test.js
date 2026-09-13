@@ -859,3 +859,107 @@ describe('Terminal ids never repeat', () => {
     }
   });
 });
+
+describe('Saving the whole workspace, not one group at a time', () => {
+  /** A compact drawing of a group's arrangement, e.g. `h([1]v([1][1]))`. */
+  const shape = (n) =>
+    n.type === 'leaf' ? `[${n.tabIds.length}]` : `${n.direction[0]}(${n.children.map(shape).join('')})`;
+  const layout = () => groups().map((g) => `${g.name}${shape(g.tree)}`).join('  ');
+  const cwds = () => S.getState().tabs.map((t) => t.cwd).sort().join(',');
+
+  /** Two groups with different arrangements and distinct directories. */
+  async function buildSession() {
+    await relaunch();
+    S.getState().renameGroup(S.getState().activeGroupId, 'Backend');
+    const pane = await S.getState().splitPane(S.getState().getActivePaneId(), 'horizontal');
+    await S.getState().splitPane(pane, 'vertical');
+    await S.getState().createGroup({ name: 'Frontend' });
+    await S.getState().splitPane(S.getState().getActivePaneId(), 'vertical');
+    // stand in for the live OSC 7 cwd each shell reports
+    S.setState((st) => ({ tabs: st.tabs.map((t, i) => ({ ...t, cwd: `/srv/dir${i}` })) }));
+  }
+
+  test('TG-60: saveWorkspace snapshots every group, its layout and its directories', async () => {
+    await buildSession();
+    const entry = S.getState().saveWorkspace('Morning setup');
+
+    assert.ok(entry, 'nothing was saved');
+    assert.equal(entry.name, 'Morning setup');
+    assert.equal(entry.groups.length, 2, 'both groups are in the snapshot');
+    assert.deepEqual(entry.groups.map((g) => g.name), ['Backend', 'Frontend']);
+    assert.equal(
+      entry.groups.reduce((n, g) => n + g.tabs.length, 0),
+      5,
+      'every terminal is in the snapshot'
+    );
+    // the layout is stored by slot id, never by live tab id
+    const slots = entry.groups.flatMap((g) => leavesOf(g.tree).flatMap((l) => l.tabIds));
+    assert.equal(slots.every((id) => id.startsWith('slot-')), true, `tree references live ids: ${slots}`);
+    assert.deepEqual(
+      entry.groups.flatMap((g) => g.tabs.map((t) => t.cwd)).sort(),
+      ['/srv/dir0', '/srv/dir1', '/srv/dir2', '/srv/dir3', '/srv/dir4'],
+      'each terminal keeps the directory it was actually in'
+    );
+    assertInvariants('TG-60');
+  });
+
+  test('TG-61: restoring brings the whole session back, layout and directories alike', async () => {
+    await buildSession();
+    const before = layout();
+    const beforeCwds = cwds();
+    const entry = S.getState().saveWorkspace('Morning setup');
+
+    // wreck it: close every group but one, then rearrange what is left
+    for (const g of groups().slice(1)) await S.getState().closeGroup(g.id);
+    await S.getState().splitPane(S.getState().getActivePaneId(), 'vertical');
+    assert.notEqual(layout(), before, 'the session was not actually disturbed');
+
+    await S.getState().loadWorkspace(entry.id, { mode: 'replace' });
+
+    assert.equal(layout(), before, 'the arrangement did not come back');
+    assert.equal(cwds(), beforeCwds, 'the directories did not come back');
+    assert.equal(S.getState().tabs.length, 5, 'restoring leaked or lost terminals');
+    assertInvariants('TG-61');
+  });
+
+  test('TG-62: restoring replaces the session; adding keeps what is already open', async () => {
+    await buildSession();
+    const entry = S.getState().saveWorkspace('Snapshot');
+
+    await S.getState().loadWorkspace(entry.id, { mode: 'append' });
+    assert.equal(groups().length, 4, 'append should sit alongside the current groups');
+    assert.equal(S.getState().tabs.length, 10, 'append should spawn its own terminals');
+
+    await S.getState().loadWorkspace(entry.id, { mode: 'replace' });
+    assert.equal(groups().length, 2, 'replace should leave only the saved groups');
+    assert.equal(S.getState().tabs.length, 5, 'replace should reap the terminals it displaced');
+    assertInvariants('TG-62');
+  });
+
+  test('TG-63: workspaces round-trip through storage and survive a relaunch', async () => {
+    await buildSession();
+    const entry = S.getState().saveWorkspace('Persisted');
+    await flushPersist();
+
+    await relaunch({ keepStorage: true });
+    const restored = S.getState().savedWorkspaces;
+    assert.equal(restored.length, 1, 'the workspace list did not survive a relaunch');
+    assert.equal(restored[0].name, 'Persisted');
+    assert.equal(restored[0].groups.length, 2);
+
+    S.getState().renameSavedWorkspace(entry.id, 'Renamed');
+    await relaunch({ keepStorage: true });
+    assert.equal(S.getState().savedWorkspaces[0].name, 'Renamed', 'rename did not reach storage');
+
+    S.getState().deleteSavedWorkspace(entry.id);
+    await relaunch({ keepStorage: true });
+    assert.equal(S.getState().savedWorkspaces.length, 0, 'delete did not reach storage');
+  });
+
+  test('TG-64: saving an empty session saves nothing', async () => {
+    await relaunch();
+    for (const tab of [...S.getState().tabs]) await S.getState().closeTab(tab.id);
+    assert.equal(S.getState().saveWorkspace('Empty'), null);
+    assert.equal(S.getState().savedWorkspaces.length, 0);
+  });
+});
