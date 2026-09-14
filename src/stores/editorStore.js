@@ -11,6 +11,10 @@ import {
   samePath,
   stripTrailingSep,
 } from '../lib/paths.js';
+import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
+
+/** Folders whose read is in flight, so an impatient double-click reads once. */
+const loadingDirs = new Set();
 
 let unlisteners = [];
 let listening = false;
@@ -305,16 +309,45 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
+  /**
+   * Open or close a folder.
+   *
+   * `refreshExplorer` only walks a few levels, so a directory at that limit
+   * comes back with `children: []` — indistinguishable from a genuinely empty
+   * one. Opening such a folder reads it and writes the result into `fileTree`,
+   * so the tree stays the single source of truth. It used to be cached in the
+   * row component instead, where a refresh could not reach it: a file created
+   * inside a deep folder never appeared until the app restarted.
+   */
   toggleFolder: (folderPath) => {
+    const wasExpanded = get().expandedFolders.has(folderPath);
     set((state) => {
       const next = new Set(state.expandedFolders);
-      if (next.has(folderPath)) {
-        next.delete(folderPath);
-      } else {
-        next.add(folderPath);
-      }
+      if (wasExpanded) next.delete(folderPath);
+      else next.add(folderPath);
       return { expandedFolders: next };
     });
+    if (!wasExpanded) get().ensureChildrenLoaded(folderPath);
+  },
+
+  setFolderExpanded: (folderPath, expanded) => {
+    if (get().expandedFolders.has(folderPath) === expanded) return;
+    get().toggleFolder(folderPath);
+  },
+
+  /** Read a folder's entries into the tree if they are not there yet. */
+  ensureChildrenLoaded: async (folderPath) => {
+    const node = findNode(get().fileTree, folderPath);
+    if (!node || !node.is_dir) return;
+    if (Array.isArray(node.children) && node.children.length > 0) return;
+    if (loadingDirs.has(folderPath)) return;
+    loadingDirs.add(folderPath);
+    try {
+      const children = await get().readDir(folderPath);
+      set((state) => ({ fileTree: setChildrenAt(state.fileTree, folderPath, children) }));
+    } finally {
+      loadingDirs.delete(folderPath);
+    }
   },
 
   openFile: async (filePath) => {

@@ -364,6 +364,13 @@ class BrowserMockBridge {
               size: typeof content === 'string' ? content.length : 0,
             });
           }
+          // The Rust backend sorts directories first, then by name, and the
+          // explorer renders whatever order it is handed — so a mock that
+          // skipped this showed a different tree from the real app.
+          nodes.sort((a, b) => {
+            if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+            return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+          });
           return nodes;
         };
 

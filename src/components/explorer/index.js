@@ -1,2 +1,2 @@
 export { FileExplorer } from './FileExplorer.jsx';
-export { FileTreeNode } from './FileTreeNode.jsx';
+export { TreeRow } from './TreeRow.jsx';
