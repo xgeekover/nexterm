@@ -14,18 +14,7 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { FileTreeNode } from './FileTreeNode.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
-
-function parentPathOf(path) {
-  const idx = path.lastIndexOf('/');
-  return idx <= 0 ? '/' : path.slice(0, idx);
-}
-
-function relativeTo(rootPath, path) {
-  const base = rootPath.replace(/\/+$/, '');
-  if (path === base) return '.';
-  if (path.startsWith(`${base}/`)) return path.slice(base.length + 1);
-  return path;
-}
+import { basename, dirname, join, relativeTo } from '../../lib/paths.js';
 
 async function writeToSystemClipboard(text) {
   try {
@@ -76,8 +65,7 @@ export function FileExplorer() {
       return;
     }
 
-    const base = rootPath.replace(/\/+$/, '');
-    const fullPath = `${base}/${trimmed.replace(/^\/+/, '')}`;
+    const fullPath = join(rootPath, trimmed);
     try {
       if (creatingEntry.type === 'file') {
         await createFile(fullPath);
@@ -118,7 +106,7 @@ export function FileExplorer() {
     const isEmpty = target.type === 'empty';
     const isFile = target.type === 'file';
     const isFolderish = !isFile; // folder row or the empty area (== workspace root)
-    const newParent = isFile ? parentPathOf(target.path) : target.path;
+    const newParent = isFile ? dirname(target.path) : target.path;
 
     const items = [];
     const pushSeparator = () => {
@@ -236,15 +224,14 @@ export function FileExplorer() {
     );
   }
 
-  // Find root nodes (direct children of the workspace root)
-  const rootPrefix = rootPath.replace(/\/+$/, '') + '/';
-  const rootNodes = fileTree.filter((n) => {
-    if (n.path === rootPath) return false;
-    if (!n.path.startsWith(rootPrefix)) return false;
-    return !n.path.slice(rootPrefix.length).includes('/');
-  });
+  // `fs_read_dir` already returns exactly the root's direct children, each
+  // carrying its own `children` — so the tree IS the root listing. The old
+  // code re-derived it by matching a "<root>/" prefix against every path,
+  // which on Windows compared `C:\\proj\\src` against `C:\\proj/` and
+  // discarded every entry, leaving the explorer permanently empty.
+  const rootNodes = fileTree;
 
-  const rootName = rootPath.replace(/\/+$/, '').split('/').filter(Boolean).pop() || rootPath;
+  const rootName = basename(rootPath) || rootPath;
 
   return (
     <div className="group flex flex-col h-full w-full bg-vsc-sidebar select-none overflow-hidden">

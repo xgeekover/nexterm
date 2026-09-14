@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
+import { extname, join } from '../../lib/paths.js';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 
 const INDENT_SIZE = 8; // px per depth level
@@ -106,8 +107,7 @@ function CreateEntryRow({ depth, parentPath, type, createFile, createFolder, onD
       onDone();
       return;
     }
-    const base = parentPath.replace(/\/+$/, '');
-    const fullPath = `${base}/${trimmed.replace(/^\/+/, '')}`;
+    const fullPath = join(parentPath, trimmed);
     try {
       if (type === 'file') {
         await createFile(fullPath);

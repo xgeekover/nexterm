@@ -1,6 +1,16 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
+import {
+  basename,
+  depthOf,
+  dirname,
+  isInside,
+  join,
+  reparent,
+  samePath,
+  stripTrailingSep,
+} from '../lib/paths.js';
 
 let unlisteners = [];
 let listening = false;
@@ -102,17 +112,8 @@ const emptyEditorTree = () => ({ type: 'leaf', id: 'editor-pane-root', tabIds: [
 
 // --- Path helpers shared by the move/rename/duplicate flows below ---------
 
-function parentDirOf(path) {
-  const idx = path.lastIndexOf('/');
-  if (idx <= 0) return '/';
-  return path.slice(0, idx);
-}
-
-function remapPathPrefix(path, fromPath, toPath) {
-  if (path === fromPath) return toPath;
-  if (path.startsWith(`${fromPath}/`)) return toPath + path.slice(fromPath.length);
-  return path;
-}
+const parentDirOf = dirname;
+const remapPathPrefix = reparent;
 
 // After a move/rename from `fromPath` to `toPath`, re-point tabs, expanded
 // folders and the current selection instead of silently orphaning them.
@@ -123,7 +124,7 @@ function remapAfterMove(state, fromPath, toPath) {
   const nextTabs = state.tabs.map((t) => {
     const newPath = remapPathPrefix(t.filePath, fromPath, toPath);
     if (newPath === t.filePath) return t;
-    return { ...t, filePath: newPath, fileName: newPath.split('/').pop() };
+    return { ...t, filePath: newPath, fileName: basename(newPath) };
   });
   const nextSelected = state.selectedPath
     ? remapPathPrefix(state.selectedPath, fromPath, toPath)
@@ -148,7 +149,7 @@ function flattenNodes(nodes, acc = []) {
 function siblingNamesIn(nodes, dirPath) {
   return new Set(
     flattenNodes(nodes)
-      .filter((n) => parentDirOf(n.path) === dirPath)
+      .filter((n) => samePath(parentDirOf(n.path), dirPath))
       .map((n) => n.name)
   );
 }
@@ -163,16 +164,15 @@ async function copyDirRecursive(srcPath, destPath) {
   const dirs = [];
   const files = [];
   for (const node of nodes) {
-    if (node.path === srcPath || !node.path.startsWith(`${srcPath}/`)) continue;
-    const rel = node.path.slice(srcPath.length);
-    const newPath = destPath + rel;
+    if (!isInside(srcPath, node.path)) continue;
+    const newPath = reparent(node.path, srcPath, destPath);
     if (node.is_dir) dirs.push(newPath);
     else files.push({ from: node.path, to: newPath });
   }
 
   // Parents before children so a nested fs_create_dir never races ahead of
   // the directory it is supposed to live inside.
-  dirs.sort((a, b) => a.split('/').length - b.split('/').length);
+  dirs.sort((a, b) => depthOf(a) - depthOf(b));
   for (const dirPath of dirs) {
     await invoke('fs_create_dir', { path: dirPath });
   }
@@ -338,7 +338,7 @@ export const useEditorStore = create((set, get) => ({
 
     try {
       const content = await invoke('fs_read_file', { path: filePath });
-      const fileName = filePath.split('/').pop();
+      const fileName = basename(filePath);
       const language = getLanguageFromPath(filePath);
 
       const tabId = `tab-edit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -791,11 +791,11 @@ export const useEditorStore = create((set, get) => ({
     const clip = get().clipboard;
     if (!clip) return;
     const { mode, path: srcPath, isDir } = clip;
-    const targetBase = targetFolderPathRaw.replace(/\/+$/, '');
-    const name = srcPath.split('/').pop();
-    const sameLocation = parentDirOf(srcPath) === targetBase;
+    const targetBase = stripTrailingSep(targetFolderPathRaw);
+    const name = basename(srcPath);
+    const sameLocation = samePath(parentDirOf(srcPath), targetBase);
 
-    if (isDir && (targetBase === srcPath || targetBase.startsWith(`${srcPath}/`))) {
+    if (isDir && (samePath(targetBase, srcPath) || isInside(srcPath, targetBase))) {
       throw new Error('Cannot paste a folder into itself or one of its own subfolders.');
     }
 
@@ -819,7 +819,7 @@ export const useEditorStore = create((set, get) => ({
       destName = candidate;
     }
 
-    const destPath = `${targetBase}/${destName}`;
+    const destPath = join(targetBase, destName);
 
     try {
       if (mode === 'cut') {
