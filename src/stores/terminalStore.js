@@ -1762,6 +1762,12 @@ export const useTerminalStore = create((set, get) => {
         set((state) => ({
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
+            // Remember the code whether or not a block was tracking this
+            // command: typing straight into the terminal never creates one,
+            // which is the normal case, so anything reading it off `blocks`
+            // only ever saw commands run from the palette.
+            const code = exit_code ?? 0;
+            tab = { ...tab, lastExitCode: code };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
@@ -2081,6 +2087,7 @@ export const useTerminalStore = create((set, get) => {
           if (t.id !== targetTabId) return t;
           return {
             ...t,
+            lastExitCode: null,
             blocks: [...t.blocks, block],
           };
         });

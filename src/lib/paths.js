@@ -123,6 +123,11 @@ export function displayPath(path, { home = null, keep = 3 } = {}) {
   }
   const sep = sepOf(shown) === '\\' ? '\\' : '/';
   const parts = shown.split(/[\\/]/).filter(Boolean);
-  if (parts.length <= keep) return shown;
-  return `…${sep}${parts.slice(-keep).join(sep)}`;
+  const rooted = parts[0] === '~';
+  // `~` says which home this is under; dropping it to save two characters
+  // turns a recognisable path into an anonymous one.
+  const budget = rooted ? keep + 1 : keep;
+  if (parts.length <= budget) return shown;
+  const tail = parts.slice(-keep).join(sep);
+  return rooted ? `~${sep}…${sep}${tail}` : `…${sep}${tail}`;
 }
