@@ -10,6 +10,24 @@ use crate::models::FileNode;
 
 pub const SKIPPED_FOLDERS: &[&str] = &[".git", "node_modules", "target", ".agents", "dist"];
 
+/// `Path::canonicalize`, without the `\\?\` prefix Windows puts on the result.
+///
+/// That verbatim spelling went everywhere a path goes: the title bar showed
+/// `\\?\D:\…`, and cmd.exe, handed it as a working directory, rejected it as a
+/// UNC path and started in C:\Windows instead. `dunce` drops the prefix
+/// whenever the plain path means the same thing, and is `canonicalize` itself
+/// off Windows. Everything in this module canonicalizes through here — root
+/// and candidate alike — so `starts_with(root)` compares like with like.
+trait Canonical {
+    fn canonical(&self) -> std::io::Result<PathBuf>;
+}
+
+impl Canonical for Path {
+    fn canonical(&self) -> std::io::Result<PathBuf> {
+        dunce::canonicalize(self)
+    }
+}
+
 pub fn resolve_path(path_str: &str) -> PathBuf {
     let trimmed = path_str.trim();
     if trimmed.is_empty() || trimmed == "." {
@@ -158,7 +176,7 @@ pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
 /// folds NFC and NFD spellings of the same name together. `canonicalize`
 /// returns the filesystem's own spelling, so comparing those answers it.
 fn is_same_entry(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
+    match (a.canonical(), b.canonical()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
@@ -253,7 +271,7 @@ impl Workspace {
 
     pub fn set_root(&self, candidate: &Path) -> Result<PathBuf, String> {
         let canonical = candidate
-            .canonicalize()
+            .canonical()
             .map_err(|e| format!("Cannot open '{}': {e}", candidate.display()))?;
         if !canonical.is_dir() {
             return Err(format!("Not a directory: {}", canonical.display()));
@@ -278,13 +296,13 @@ fn default_root() -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         // A bundled .app launches with cwd "/", which is never a useful root.
         if cwd.parent().is_some() {
-            if let Ok(canonical) = cwd.canonicalize() {
+            if let Ok(canonical) = cwd.canonical() {
                 return canonical;
             }
         }
     }
     let home = home_dir();
-    home.canonicalize().unwrap_or(home)
+    home.canonical().unwrap_or(home)
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -323,7 +341,7 @@ pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
     let mut cursor = normalized.as_path();
     let mut pending: Vec<OsString> = Vec::new();
     let resolved = loop {
-        match cursor.canonicalize() {
+        match cursor.canonical() {
             Ok(canonical) => break canonical,
             Err(_) => {
                 let name = cursor
@@ -361,7 +379,7 @@ mod confine_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("inner")).unwrap();
         fs::write(dir.join("inner/file.txt"), "ok").unwrap();
-        dir.canonicalize().unwrap()
+        dir.canonical().unwrap()
     }
 
     #[test]
@@ -395,6 +413,25 @@ mod confine_tests {
         let root = temp_root("abs");
         assert!(confine_to(&root, "/etc/passwd").is_err());
         assert!(confine_to(&root, "~/.ssh/id_rsa").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Windows' own canonicalize answers `\\?\D:\…`, which cmd.exe refuses as a
+    /// working directory and the title bar printed as-is.
+    #[test]
+    fn paths_handed_out_carry_no_verbatim_prefix() {
+        let root = temp_root("verbatim");
+        let workspace = Workspace::new();
+        let set = workspace.set_root(&root).unwrap();
+        let confined = workspace.confine("inner/file.txt").unwrap();
+        for path in [&root, &set, &confined] {
+            assert!(
+                !path.to_string_lossy().starts_with(r"\\?\"),
+                "verbatim path handed out: {}",
+                path.display()
+            );
+        }
+        assert!(confined.starts_with(&set), "{} is not under {}", confined.display(), set.display());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -499,7 +536,7 @@ mod rename_tests {
             .join(format!("nexterm-rename-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        dir.canonical().unwrap()
     }
 
     fn s(p: &Path) -> String {
