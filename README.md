@@ -13,7 +13,7 @@ macOS, Windows and Linux from one codebase.
 >
 > The recording is driven through the app's UI in a browser preview, so the shell
 > output in it is simulated. In the packaged desktop app the same panes run real
-> `zsh` / `bash` / `pwsh` processes.
+> `zsh` / `bash` / `pwsh` / `cmd` processes.
 
 ## Why
 
@@ -43,7 +43,14 @@ that layout the next time you open it.
   written to local storage and restored on next launch, without being asked.
 - **A real terminal.** xterm.js over a native PTY, with OSC 133 shell
   integration (command start/end + exit status) and OSC 7 so the status bar and
-  new splits follow the shell's actual working directory.
+  new splits follow the shell's actual working directory. Terminals draw with
+  xterm's WebGL renderer, so block and box-drawing characters — TUI logos,
+  borders — fill their cells at any line height, and fall back to the DOM
+  renderer where WebGL is unavailable.
+- **Built for Windows' ConPTY.** The backend answers ConPTY's start-up cursor
+  query (without it `cmd.exe` shows no prompt), and tells xterm.js the Windows
+  build so a pane that is resized — a split, a maximised window — is not
+  re-wrapped twice and does not lose lines.
 - **Command suggestions.** An inline, oh-my-zsh-style ghost-text suggestion as
   you type, ranked from the commands this session has run plus a curated index
   of common ones. It is an app-side layer, not real shell completion — it never
@@ -52,16 +59,20 @@ that layout the next time you open it.
   Solarized Dark/Light, Nord, One Dark, Gruvbox Dark, Tomorrow Night.
 - **An editor when you need one.** Open a file from the Explorer and it appears
   as a Monaco tab above the terminals; close it and you are back to a pure
-  terminal window. Monaco and its workers are bundled locally — nothing is
-  fetched from a CDN at runtime.
-- **Filesystem confinement.** Every file command is resolved against the
-  workspace root, with the deepest existing ancestor canonicalised so symlinks
-  cannot escape it.
+  terminal window. Monaco is loaded the first time the editor is shown, not at
+  launch, and it and its workers are bundled locally — nothing is fetched from a
+  CDN at runtime.
+- **Opens with no folder, like VS Code.** NexTerm starts with nothing open;
+  the Explorer offers *Open Folder*. Until a folder is open, terminals start in
+  your home directory.
+- **Filesystem confinement.** Every file command is resolved against the open
+  folder, with the deepest existing ancestor canonicalised so symlinks cannot
+  escape it. With no folder open, file commands are refused outright.
 - **One title row.** On Windows and Linux the window is frameless and NexTerm
-  draws its own compact title bar — menu, command centre, layout toggles and
-  window buttons in a single 35px row, VS Code style, instead of a native
-  title bar with a native menu bar under it. macOS keeps its traffic lights
-  and the system menu bar.
+  draws its own compact title bar — a ☰ application menu, the folder name,
+  command centre, layout toggles and window buttons in a single 35px row, VS
+  Code style, instead of a native title bar with a native menu bar under it.
+  macOS keeps its traffic lights and the system menu bar.
 
 ## Install
 
@@ -80,6 +91,10 @@ Silicon. Build one locally with `npm run tauri build -- --target x86_64-apple-da
 ## Using it
 
 The recording above walks through most of this.
+
+**Open a folder.** NexTerm starts with no folder. Click *Open Folder* in the
+Explorer, or ☰ → File → *Open Folder…*. The Explorer, the title bar and new
+terminals then follow that folder.
 
 **Open a terminal.** The window starts as one group holding one terminal.
 `⌃⇧\`` adds a tab to the current group; the `+` in the tab bar does the same.
@@ -112,6 +127,11 @@ in alongside what you already have.
 **Open a file.** Click a file in the Explorer. The Monaco editor opens above the
 terminal panel as a normal tab; the terminals keep running underneath.
 
+**Use the menu.** On Windows and Linux, ☰ at the left of the title bar opens
+File, View and Terminal. Hover or use the arrow keys to step into a menu,
+`Enter` to run an item, `Esc` to back out; keys typed while it is open never
+reach the terminal behind it.
+
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
 scrollback, colour theme, and command suggestions.
@@ -138,9 +158,9 @@ On Windows and Linux use `Ctrl` wherever `⌘` is listed.
 terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K` kills to end of line,
 `Ctrl+C` interrupts, and the app does nothing. The same chord elsewhere in the
 window does what the table says. On Windows and Linux the items that would
-otherwise collide are reachable from the menu bar as well, because a native
-menu accelerator is resolved before the webview and would take the key away
-from every shell in the app.
+otherwise collide are reachable from the ☰ menu as well, because a native menu
+accelerator is resolved before the webview and would take the key away from
+every shell in the app.
 
 ## Develop
 
@@ -164,10 +184,15 @@ the API to confirm the sizes match, and only then makes the release visible.
 A build that loses a platform leaves a draft behind instead of a half-finished
 public release.
 
+CI runs the tests on Ubuntu only. Windows-specific behaviour — ConPTY, `\\?\`
+paths, the Windows build number — is covered by tests that only compile or
+matter on Windows, so run the suites on a Windows machine before tagging a
+release that touches it.
+
 ## Test
 
 ```sh
-cd src-tauri && cargo test    # PTY, OSC parsing, fs confinement, native menu
+cd src-tauri && cargo test    # PTY, ConPTY start-up, OSC parsing, fs confinement, native menu
 node tests/e2e/runner.js      # store + UI flows against a mock IPC bridge
 node tests/adversarial/runner.js
 ```
@@ -176,14 +201,14 @@ node tests/adversarial/runner.js
 
 ```
 src-tauri/src
-  pty/            PTY manager, OSC 133/7 filter, per-shell integration scripts
-  fs/             workspace-confined file commands + watcher
+  pty/            PTY manager, ConPTY start-up query, OSC 133/7 filter, shell integration
+  fs/             folder-confined file commands + watcher
   menu.rs         native menu described as data, so it is testable off-thread
   commands/       the #[tauri::command] surface
 src
-  stores/         zustand stores (terminal tree, editor, settings)
+  stores/         zustand stores (terminal tree, editor, settings, system info)
   components/     layout, terminal, editor, explorer, command palette
-  lib/            persistence, ANSI parsing, terminal themes, IPC wrapper
+  lib/            persistence, paths, terminal compatibility rules, themes, IPC wrapper
 ```
 
 The terminal layout is a tree: every leaf is a *group* holding an ordered list of
