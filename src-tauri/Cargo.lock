@@ -1999,6 +1999,7 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
+ "winreg 0.55.0",
 ]
 
 [[package]]

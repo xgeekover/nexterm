@@ -67,6 +67,11 @@ pub struct SystemInfo {
     pub tauri_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rust_version: Option<String>,
+    /// The Windows build number (e.g. 19045). xterm.js needs it to tell a
+    /// ConPTY that ends wrapped lines with a real line break (before 21376)
+    /// from one that wraps natively.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_build: Option<u32>,
 }
 
 #[cfg(test)]
@@ -115,6 +120,7 @@ mod tests {
             app_version: Some("0.1.0".to_string()),
             tauri_version: Some("2.11.5".to_string()),
             rust_version: Some("1.97.1".to_string()),
+            os_build: None,
         };
         let json = serde_json::to_string(&sys).unwrap();
         assert!(json.contains("\"os\":\"macos\""));

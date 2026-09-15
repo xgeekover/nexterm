@@ -21,6 +21,7 @@ import './editor_unsaved.test.js';
 import './keybindings_platform.test.js';
 import './menu_contract.test.js';
 import './init_once.test.js';
+import './terminal_compat.test.js';
 
 async function run() {
   console.log('====================================================');

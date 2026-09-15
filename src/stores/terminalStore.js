@@ -7,6 +7,7 @@ import { notifyTerminal } from '../lib/terminalNotice.js';
 // version branch; writes still use `saveState` (always the current version).
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
 import { useSettingsStore } from './settingsStore.js';
+import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 
 // ---------------------------------------------------------------------------
 // The two-level layout model
@@ -955,7 +956,8 @@ export const useTerminalStore = create((set, get) => {
     const newTabs = [];
     for (const savedTab of saved.tabs) {
       if (!savedTab || !savedTab.id || !referenced.has(savedTab.id)) continue;
-      const wantedCwd = savedTab.cwd || rootPath;
+      // Layouts saved by older builds carry `\\?\D:\…` paths; show and use the plain form.
+      const wantedCwd = withoutVerbatimPrefix(savedTab.cwd) || rootPath;
 
       let ptySession;
       try {

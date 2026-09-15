@@ -39,6 +39,8 @@ export const useSystemStore = create((set, get) => ({
           homeDir: info.home_dir ?? null,
           defaultShell: info.default_shell ?? null,
           appVersion: info.app_version ?? null,
+          // Windows build number; terminals need it to know how ConPTY wraps.
+          osBuild: info.os_build ?? null,
           isLoaded: true,
         });
         return;

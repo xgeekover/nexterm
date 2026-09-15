@@ -27,3 +27,7 @@ tauri-plugin-window-state = "2"
 # getuid(), so the shell-integration files go somewhere only this user can reach.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The Windows build number, which the terminal needs to know how ConPTY wraps lines.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

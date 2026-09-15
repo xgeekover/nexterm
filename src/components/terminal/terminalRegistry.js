@@ -16,13 +16,45 @@
  */
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
+import { usablePtySize, windowsPtyFor } from '../../lib/terminalCompat.js';
+import { useSystemStore } from '../../stores/systemStore.js';
 
 const instances = new Map();
+
+/**
+ * Draw a terminal with xterm's WebGL renderer, once its element is in the
+ * document.
+ *
+ * The DOM renderer draws block and box-drawing characters with the font, and a
+ * glyph only covers the font's height — so at the default line height of 1.5
+ * every row of a TUI's logo and every vertical border came out striped with the
+ * background (reproduced with the block and box characters opencode draws:
+ * gaps at 1.5, solid at 1.0). The WebGL renderer draws those characters itself,
+ * filling the whole cell at any line height. It measures the font from the live
+ * DOM, hence "once attached". Without WebGL, or when the context is lost, the
+ * addon is dropped and xterm carries on with its DOM renderer.
+ */
+export function ensureGpuRenderer(entry) {
+  if (entry.gpu !== undefined || !entry.container.isConnected) return;
+  try {
+    const addon = new WebglAddon();
+    addon.onContextLoss(() => {
+      addon.dispose();
+      entry.gpu = null;
+    });
+    entry.term.loadAddon(addon);
+    entry.gpu = addon;
+  } catch (err) {
+    console.warn('[Terminal] WebGL renderer unavailable, using the DOM renderer:', err);
+    entry.gpu = null;
+  }
+}
 
 /** Keys the Settings window exposes that should update every live terminal
  * instance in place, without recreating it. */
@@ -158,7 +190,7 @@ function applyLiveTerminalSettings(state) {
     entry.term.options.cursorBlink = state.terminalCursorBlink;
     entry.term.options.scrollback = state.terminalScrollback;
     entry.term.options.theme = theme;
-    if (isFittable(entry.container)) {
+    if (isFittable(entry.container) && usablePtySize(entry.fitAddon.proposeDimensions())) {
       try {
         entry.fitAddon.fit();
       } catch (_) {
@@ -179,6 +211,19 @@ function ensureSettingsSubscriptionStarted() {
     if (changed) applyLiveTerminalSettings(state);
   });
 }
+
+/**
+ * Keep every terminal's `windowsPty` in step with what the backend reports.
+ *
+ * The first terminals are created at startup, before `system_get_info` has
+ * answered, so they were made without the build number; they get it as soon as
+ * it arrives. `{}` is xterm's own "not set" value.
+ */
+useSystemStore.subscribe((state, prev) => {
+  if (state.os === prev.os && state.osBuild === prev.osBuild) return;
+  const windowsPty = windowsPtyFor(state) ?? {};
+  for (const entry of instances.values()) entry.term.options.windowsPty = windowsPty;
+});
 
 /**
  * Get the persistent xterm instance for a tab, creating it on first use.
@@ -270,6 +315,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     minimumContrastRatio: 4.5,
     allowProposedApi: true,
     theme: resolveTerminalTheme(settingsState.terminalTheme),
+    // `{}` off Windows: xterm's own "not set". See terminalCompat.js.
+    windowsPty: windowsPtyFor(useSystemStore.getState()) ?? {},
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
