@@ -13,6 +13,7 @@ import './status_bar.test.js';
 import './persist_robustness.test.js';
 import './editor_layout.test.js';
 import './explorer_actions.test.js';
+import './app_menu.test.js';
 import './settings.test.js';
 import './terminal_intellisense.test.js';
 import './ipc_contract.test.js';
