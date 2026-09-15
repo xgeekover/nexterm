@@ -1985,6 +1985,7 @@ name = "nexterm"
 version = "0.1.5"
 dependencies = [
  "chrono",
+ "dunce",
  "libc",
  "notify",
  "parking_lot",
@@ -1998,6 +1999,7 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
+ "winreg 0.55.0",
 ]
 
 [[package]]

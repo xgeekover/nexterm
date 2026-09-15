@@ -8,15 +8,21 @@ import './shell_integration.test.js';
 import './terminal_groups.test.js';
 import './terminal_layout.test.js';
 import './layout_gaps.test.js';
+import './windows_paths.test.js';
+import './status_bar.test.js';
 import './persist_robustness.test.js';
 import './editor_layout.test.js';
 import './explorer_actions.test.js';
+import './app_menu.test.js';
 import './settings.test.js';
 import './terminal_intellisense.test.js';
 import './ipc_contract.test.js';
 import './editor_unsaved.test.js';
 import './keybindings_platform.test.js';
 import './menu_contract.test.js';
+import './init_once.test.js';
+import './terminal_compat.test.js';
+import './no_folder.test.js';
 
 async function run() {
   console.log('====================================================');

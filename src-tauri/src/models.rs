@@ -35,6 +35,10 @@ pub struct PtySessionInfo {
     pub session_id: String,
     pub shell: String,
     pub created_at: DateTime<Utc>,
+    /// The directory the shell started in, as the backend chose it — the UI
+    /// shows this rather than guessing from what it asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +71,11 @@ pub struct SystemInfo {
     pub tauri_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rust_version: Option<String>,
+    /// The Windows build number (e.g. 19045). xterm.js needs it to tell a
+    /// ConPTY that ends wrapped lines with a real line break (before 21376)
+    /// from one that wraps natively.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_build: Option<u32>,
 }
 
 #[cfg(test)]
@@ -98,11 +107,13 @@ mod tests {
             session_id: "pty-1".to_string(),
             shell: "/bin/zsh".to_string(),
             created_at: Utc::now(),
+            cwd: Some("/Users/test".to_string()),
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"id\":\"pty-1\""));
         assert!(json.contains("\"session_id\":\"pty-1\""));
         assert!(json.contains("\"shell\":\"/bin/zsh\""));
+        assert!(json.contains("\"cwd\":\"/Users/test\""));
     }
 
     #[test]
@@ -115,6 +126,7 @@ mod tests {
             app_version: Some("0.1.0".to_string()),
             tauri_version: Some("2.11.5".to_string()),
             rust_version: Some("1.97.1".to_string()),
+            os_build: None,
         };
         let json = serde_json::to_string(&sys).unwrap();
         assert!(json.contains("\"os\":\"macos\""));

@@ -57,7 +57,11 @@ class BrowserMockBridge {
     this.systemInfo = {
       os: 'macos',
       arch: 'aarch64',
-      app_version: '0.1.0',
+      // Same field names the Rust command serialises, so a caller written
+      // against the mock works against the real backend.
+      default_shell: '/bin/zsh',
+      home_dir: '/Users/developer',
+      app_version: '0.1.5',
       tauri_version: '2.0.0',
       rust_version: '1.80.0',
     };
@@ -92,7 +96,7 @@ class BrowserMockBridge {
 
     if (testFiles.length === 0) {
       await this.emit('pty-output', { session_id, data: 'No test files found.\r\n' });
-      await this.emit('pty-exit', { session_id, exit_code: 0 });
+      await this.emit('pty-command-done', { session_id, exit_code: 0 });
       return;
     }
 
@@ -118,11 +122,11 @@ class BrowserMockBridge {
     if (allPassed) {
       outputBuffer += `Test Suites: 1 passed, 1 total\nTests:       ${totalPassed} passed, ${totalPassed} total\r\n`;
       await this.emit('pty-output', { session_id, data: outputBuffer });
-      await this.emit('pty-exit', { session_id, exit_code: 0 });
+      await this.emit('pty-command-done', { session_id, exit_code: 0 });
     } else {
       outputBuffer += `Test Suites: 1 failed, 1 total\nTests:       ${totalFailed} failed, ${totalPassed} passed, ${totalPassed + totalFailed} total\r\n`;
       await this.emit('pty-output', { session_id, data: outputBuffer });
-      await this.emit('pty-exit', { session_id, exit_code: 1 });
+      await this.emit('pty-command-done', { session_id, exit_code: 1 });
     }
   }
 
@@ -223,69 +227,75 @@ class BrowserMockBridge {
             }
             if (entries.size === 0 && !this.directories.has(normalized)) {
               await this.emit('pty-output', { session_id, data: `ls: ${cmdArgs[0] || targetDir}: No such file or directory\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 1 });
+              await this.emit('pty-command-done', { session_id, exit_code: 1 });
             } else {
               const fileList = Array.from(entries).sort().join('  \n');
               await this.emit('pty-output', { session_id, data: `${fileList}\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 0 });
+              await this.emit('pty-command-done', { session_id, exit_code: 0 });
             }
           } else if (cmd === 'pwd') {
             await this.emit('pty-output', { session_id, data: `${session.cwd}\r\n` });
-            await this.emit('pty-exit', { session_id, exit_code: 0 });
+            await this.emit('pty-command-done', { session_id, exit_code: 0 });
           } else if (cmd === 'cd') {
             const target = cmdArgs[0] || '/workspace';
             const resolved = resolvePath(session.cwd, target);
             if (this.directories.has(resolved) || Array.from(this.files.keys()).some((f) => f.startsWith(resolved + '/'))) {
               session.cwd = resolved;
-              await this.emit('pty-exit', { session_id, exit_code: 0 });
+              await this.emit('pty-command-done', { session_id, exit_code: 0 });
             } else {
               await this.emit('pty-output', { session_id, data: `cd: no such file or directory: ${target}\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 1 });
+              await this.emit('pty-command-done', { session_id, exit_code: 1 });
             }
           } else if (cmd === 'echo') {
             const echoContent = cmdArgs.join(' ');
             await this.emit('pty-output', { session_id, data: `${echoContent}\r\n` });
-            await this.emit('pty-exit', { session_id, exit_code: 0 });
+            await this.emit('pty-command-done', { session_id, exit_code: 0 });
           } else if (cmd === 'cat') {
             const targetFile = cmdArgs[0] ? resolvePath(session.cwd, cmdArgs[0]) : null;
             if (targetFile && this.files.has(targetFile)) {
               await this.emit('pty-output', { session_id, data: `${this.files.get(targetFile)}\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 0 });
+              await this.emit('pty-command-done', { session_id, exit_code: 0 });
             } else {
               await this.emit('pty-output', { session_id, data: `cat: ${cmdArgs[0] || ''}: No such file or directory\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 1 });
+              await this.emit('pty-command-done', { session_id, exit_code: 1 });
             }
           } else if (cmd === 'clear') {
             await this.emit('pty-output', { session_id, data: '\x1b[2J\x1b[H' });
-            await this.emit('pty-exit', { session_id, exit_code: 0 });
+            await this.emit('pty-command-done', { session_id, exit_code: 0 });
           } else if (cmd === 'git') {
             const sub = cmdArgs[0];
             if (sub === 'status') {
               const gitStatus = `On branch main\nYour branch is up to date with 'origin/main'.\n\nnothing to commit, working tree clean\r\n`;
               await this.emit('pty-output', { session_id, data: gitStatus });
-              await this.emit('pty-exit', { session_id, exit_code: 0 });
+              await this.emit('pty-command-done', { session_id, exit_code: 0 });
             } else if (sub === 'branch') {
               await this.emit('pty-output', { session_id, data: `* main\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 0 });
+              await this.emit('pty-command-done', { session_id, exit_code: 0 });
             } else if (sub === '--version' || sub === 'version') {
               await this.emit('pty-output', { session_id, data: `git version 2.45.0\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 0 });
+              await this.emit('pty-command-done', { session_id, exit_code: 0 });
             } else {
               await this.emit('pty-output', { session_id, data: `git: '${sub}' is not a git command. See 'git --help'.\r\n` });
-              await this.emit('pty-exit', { session_id, exit_code: 1 });
+              await this.emit('pty-command-done', { session_id, exit_code: 1 });
             }
           } else if (cmd === 'whoami') {
             await this.emit('pty-output', { session_id, data: `developer\r\n` });
-            await this.emit('pty-exit', { session_id, exit_code: 0 });
+            await this.emit('pty-command-done', { session_id, exit_code: 0 });
           } else if (cmd === 'date') {
             await this.emit('pty-output', { session_id, data: `${new Date().toUTCString()}\r\n` });
-            await this.emit('pty-exit', { session_id, exit_code: 0 });
+            await this.emit('pty-command-done', { session_id, exit_code: 0 });
           } else if (cmd === 'npm' && (cmdArgs[0] === 'test' || cmdArgs[0] === 't')) {
             await this.runDynamicVirtualTests(session);
+          } else if (cmd === 'exit' || cmd === 'logout') {
+            // The one command that really does end the session.
+            const code = Number(cmdArgs[0]) || 0;
+            session.active = false;
+            await this.emit('pty-exit', { session_id, exit_code: code });
+            this.ptySessions.delete(session_id);
           } else {
             const shellName = (session.shell || '').includes('zsh') ? 'zsh' : 'bash';
             await this.emit('pty-output', { session_id, data: `${shellName}: command not found: ${cmd}\r\n` });
-            await this.emit('pty-exit', { session_id, exit_code: 127 });
+            await this.emit('pty-command-done', { session_id, exit_code: 127 });
           }
         });
         await session._queue;
@@ -364,6 +374,13 @@ class BrowserMockBridge {
               size: typeof content === 'string' ? content.length : 0,
             });
           }
+          // The Rust backend sorts directories first, then by name, and the
+          // explorer renders whatever order it is handed — so a mock that
+          // skipped this showed a different tree from the real app.
+          nodes.sort((a, b) => {
+            if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+            return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+          });
           return nodes;
         };
 

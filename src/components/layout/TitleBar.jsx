@@ -5,6 +5,7 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
 import { chord, isMac } from '../../lib/platform.js';
+import { basename } from '../../lib/paths.js';
 import { MenuBar } from './MenuBar.jsx';
 import { WindowControls } from './WindowControls.jsx';
 
@@ -19,9 +20,11 @@ export function TitleBar() {
   const togglePanel = useSettingsStore((s) => s.togglePanel);
   const secondarySidebarVisible = useSettingsStore((s) => s.secondarySidebarVisible);
   const toggleSecondarySidebar = useSettingsStore((s) => s.toggleSecondarySidebar);
-  const rootPath = useEditorStore((s) => s.rootPath);
+  // Null until the backend has been asked, and while no folder is open.
+  const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
 
-  const workspaceName = (rootPath || '').split('/').filter(Boolean).pop() || rootPath || '';
+  // basename reads either separator; splitting on '/' kept the whole Windows path.
+  const workspaceName = rootPath ? basename(rootPath) || rootPath : '';
 
   return (
     <header
@@ -42,7 +45,7 @@ export function TitleBar() {
         {workspaceName && (
           <>
             <span className="text-vsc-muted">—</span>
-            <span className="text-vsc-muted truncate">{workspaceName}</span>
+            <span className="text-vsc-muted truncate" title={rootPath}>{workspaceName}</span>
           </>
         )}
       </div>

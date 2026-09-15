@@ -31,11 +31,14 @@ fn main() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(state)
         .setup(|app| {
+            // No folder is open at launch; `fs_pick_root` starts watching the
+            // one the user opens.
             let app_state = app.state::<AppState>();
-            let root = app_state.workspace.root();
-            let _ = app_state
-                .fs_watcher
-                .start_watching(app.handle().clone(), &root.to_string_lossy());
+            if let Some(root) = app_state.workspace.root() {
+                let _ = app_state
+                    .fs_watcher
+                    .start_watching(app.handle().clone(), &root.to_string_lossy());
+            }
 
             // macOS always has a menu bar at the top of the screen, so the
             // native menu is the right place for it there, and app-specific

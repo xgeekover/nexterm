@@ -1,10 +1,26 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
+import {
+  basename,
+  depthOf,
+  dirname,
+  isInside,
+  join,
+  reparent,
+  samePath,
+  stripTrailingSep,
+} from '../lib/paths.js';
+import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
+
+/** Folders whose read is in flight, so an impatient double-click reads once. */
+const loadingDirs = new Set();
 
 let unlisteners = [];
 let listening = false;
 let refreshTimer = null;
+// The init() still running, shared by every caller until it settles — see init.
+let initInFlight = null;
 
 // --- Editor split tree ------------------------------------------------------
 // Mirrors src/stores/terminalStore.js's split-tree model so the editor
@@ -102,17 +118,8 @@ const emptyEditorTree = () => ({ type: 'leaf', id: 'editor-pane-root', tabIds: [
 
 // --- Path helpers shared by the move/rename/duplicate flows below ---------
 
-function parentDirOf(path) {
-  const idx = path.lastIndexOf('/');
-  if (idx <= 0) return '/';
-  return path.slice(0, idx);
-}
-
-function remapPathPrefix(path, fromPath, toPath) {
-  if (path === fromPath) return toPath;
-  if (path.startsWith(`${fromPath}/`)) return toPath + path.slice(fromPath.length);
-  return path;
-}
+const parentDirOf = dirname;
+const remapPathPrefix = reparent;
 
 // After a move/rename from `fromPath` to `toPath`, re-point tabs, expanded
 // folders and the current selection instead of silently orphaning them.
@@ -123,7 +130,7 @@ function remapAfterMove(state, fromPath, toPath) {
   const nextTabs = state.tabs.map((t) => {
     const newPath = remapPathPrefix(t.filePath, fromPath, toPath);
     if (newPath === t.filePath) return t;
-    return { ...t, filePath: newPath, fileName: newPath.split('/').pop() };
+    return { ...t, filePath: newPath, fileName: basename(newPath) };
   });
   const nextSelected = state.selectedPath
     ? remapPathPrefix(state.selectedPath, fromPath, toPath)
@@ -148,7 +155,7 @@ function flattenNodes(nodes, acc = []) {
 function siblingNamesIn(nodes, dirPath) {
   return new Set(
     flattenNodes(nodes)
-      .filter((n) => parentDirOf(n.path) === dirPath)
+      .filter((n) => samePath(parentDirOf(n.path), dirPath))
       .map((n) => n.name)
   );
 }
@@ -163,16 +170,15 @@ async function copyDirRecursive(srcPath, destPath) {
   const dirs = [];
   const files = [];
   for (const node of nodes) {
-    if (node.path === srcPath || !node.path.startsWith(`${srcPath}/`)) continue;
-    const rel = node.path.slice(srcPath.length);
-    const newPath = destPath + rel;
+    if (!isInside(srcPath, node.path)) continue;
+    const newPath = reparent(node.path, srcPath, destPath);
     if (node.is_dir) dirs.push(newPath);
     else files.push({ from: node.path, to: newPath });
   }
 
   // Parents before children so a nested fs_create_dir never races ahead of
   // the directory it is supposed to live inside.
-  dirs.sort((a, b) => a.split('/').length - b.split('/').length);
+  dirs.sort((a, b) => depthOf(a) - depthOf(b));
   for (const dirPath of dirs) {
     await invoke('fs_create_dir', { path: dirPath });
   }
@@ -195,6 +201,9 @@ export const useEditorStore = create((set, get) => ({
   rootPath: '/workspace',
   expandedFolders: new Set(['/workspace', '/workspace/src', '/workspace/tests']),
   isLoadingTree: false,
+  // False until init() has asked the backend for the real root; until then
+  // `rootPath` is only the browser mock's placeholder. See FileExplorer.
+  rootResolved: false,
   diffView: null,
 
   // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
@@ -239,18 +248,35 @@ export const useEditorStore = create((set, get) => ({
     unlisteners = [];
     listening = false;
   },
-  init: async () => {
-    // The backend owns the workspace root; the browser mock reports '/workspace'.
-    try {
-      const rootPath = await invoke('fs_get_root');
-      if (rootPath) set({ rootPath, expandedFolders: new Set([rootPath]) });
-    } catch (err) {
-      console.error('[EditorStore] Failed to resolve workspace root:', err);
-    }
-    await get().refreshExplorer();
+  init: () => {
+    // App's effect runs twice under React StrictMode in development, and the
+    // second run arrives while the first is still waiting on the backend.
+    // Share the run in flight rather than resolving the root and reading the
+    // tree twice. Cleared once it settles, so a later init() runs afresh.
+    if (initInFlight) return initInFlight;
+    initInFlight = (async () => {
+      // The backend owns the workspace root and starts with none, as VS Code
+      // does (the browser mock reports '/workspace').
+      try {
+        const rootPath = await invoke('fs_get_root');
+        set(
+          rootPath
+            ? { rootPath, expandedFolders: new Set([rootPath]) }
+            : { rootPath: null, expandedFolders: new Set(), fileTree: [] }
+        );
+      } catch (err) {
+        console.error('[EditorStore] Failed to resolve workspace root:', err);
+      }
+      // As known as it will get: the placeholder stays if the backend could not say.
+      set({ rootResolved: true });
+      await get().refreshExplorer();
 
-    // Listen to filesystem changes
-    await get().attachListeners();
+      // Listen to filesystem changes
+      await get().attachListeners();
+    })().finally(() => {
+      initInFlight = null;
+    });
+    return initInFlight;
   },
 
   /**
@@ -271,6 +297,11 @@ export const useEditorStore = create((set, get) => ({
   },
 
   refreshExplorer: async () => {
+    // No folder open: there is no tree to read, and the backend would refuse.
+    if (!get().rootPath) {
+      set({ fileTree: [], isLoadingTree: false });
+      return;
+    }
     set({ isLoadingTree: true });
     try {
       const tree = await invoke('fs_read_dir', {
@@ -305,16 +336,45 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
+  /**
+   * Open or close a folder.
+   *
+   * `refreshExplorer` only walks a few levels, so a directory at that limit
+   * comes back with `children: []` — indistinguishable from a genuinely empty
+   * one. Opening such a folder reads it and writes the result into `fileTree`,
+   * so the tree stays the single source of truth. It used to be cached in the
+   * row component instead, where a refresh could not reach it: a file created
+   * inside a deep folder never appeared until the app restarted.
+   */
   toggleFolder: (folderPath) => {
+    const wasExpanded = get().expandedFolders.has(folderPath);
     set((state) => {
       const next = new Set(state.expandedFolders);
-      if (next.has(folderPath)) {
-        next.delete(folderPath);
-      } else {
-        next.add(folderPath);
-      }
+      if (wasExpanded) next.delete(folderPath);
+      else next.add(folderPath);
       return { expandedFolders: next };
     });
+    if (!wasExpanded) get().ensureChildrenLoaded(folderPath);
+  },
+
+  setFolderExpanded: (folderPath, expanded) => {
+    if (get().expandedFolders.has(folderPath) === expanded) return;
+    get().toggleFolder(folderPath);
+  },
+
+  /** Read a folder's entries into the tree if they are not there yet. */
+  ensureChildrenLoaded: async (folderPath) => {
+    const node = findNode(get().fileTree, folderPath);
+    if (!node || !node.is_dir) return;
+    if (Array.isArray(node.children) && node.children.length > 0) return;
+    if (loadingDirs.has(folderPath)) return;
+    loadingDirs.add(folderPath);
+    try {
+      const children = await get().readDir(folderPath);
+      set((state) => ({ fileTree: setChildrenAt(state.fileTree, folderPath, children) }));
+    } finally {
+      loadingDirs.delete(folderPath);
+    }
   },
 
   openFile: async (filePath) => {
@@ -338,7 +398,7 @@ export const useEditorStore = create((set, get) => ({
 
     try {
       const content = await invoke('fs_read_file', { path: filePath });
-      const fileName = filePath.split('/').pop();
+      const fileName = basename(filePath);
       const language = getLanguageFromPath(filePath);
 
       const tabId = `tab-edit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -791,11 +851,11 @@ export const useEditorStore = create((set, get) => ({
     const clip = get().clipboard;
     if (!clip) return;
     const { mode, path: srcPath, isDir } = clip;
-    const targetBase = targetFolderPathRaw.replace(/\/+$/, '');
-    const name = srcPath.split('/').pop();
-    const sameLocation = parentDirOf(srcPath) === targetBase;
+    const targetBase = stripTrailingSep(targetFolderPathRaw);
+    const name = basename(srcPath);
+    const sameLocation = samePath(parentDirOf(srcPath), targetBase);
 
-    if (isDir && (targetBase === srcPath || targetBase.startsWith(`${srcPath}/`))) {
+    if (isDir && (samePath(targetBase, srcPath) || isInside(srcPath, targetBase))) {
       throw new Error('Cannot paste a folder into itself or one of its own subfolders.');
     }
 
@@ -819,7 +879,7 @@ export const useEditorStore = create((set, get) => ({
       destName = candidate;
     }
 
-    const destPath = `${targetBase}/${destName}`;
+    const destPath = join(targetBase, destName);
 
     try {
       if (mode === 'cut') {

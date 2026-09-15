@@ -1,7 +1,8 @@
 import React, { useEffect, useReducer, useRef } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { getOrCreateTerminal, isFittable } from './terminalRegistry.js';
+import { ensureGpuRenderer, getOrCreateTerminal, isFittable } from './terminalRegistry.js';
+import { usablePtySize } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
@@ -122,11 +123,19 @@ export function TerminalView({ tabId, active = false }) {
     setSuggestState(EMPTY_SUGGEST_STATE);
 
     wrapper.replaceChildren(entry.container);
+    ensureGpuRenderer(entry);
 
     const doFit = () => {
       if (!isFittable(wrapper)) return;
       try {
+        // A pane too small for the backend (mid-layout) keeps its current size:
+        // otherwise xterm draws for one size while the shell writes for another.
+        const size = usablePtySize(entry.fitAddon.proposeDimensions());
+        if (!size) return;
         entry.fitAddon.fit();
+        if (entry.term.cols !== size.cols || entry.term.rows !== size.rows) {
+          entry.term.resize(size.cols, size.rows);
+        }
         resizePty(tabId, entry.term.cols, entry.term.rows);
         // A resize invalidates any cached cursor pixel position — clear
         // rather than risk drawing the overlay in a stale spot.

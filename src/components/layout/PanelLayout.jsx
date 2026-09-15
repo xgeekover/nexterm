@@ -4,10 +4,15 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TerminalSplitContainer } from '../terminal/index.js';
 import { TerminalsPanel } from '../terminal/index.js';
-import { EditorPanel } from '../editor/EditorPanel.jsx';
 import { FileExplorer } from '../explorer/FileExplorer.jsx';
 import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
+
+// The editor brings Monaco with it, the largest part of the app's JavaScript.
+// Loaded the first time the editor region is shown instead of at launch.
+const EditorPanel = React.lazy(() =>
+  import('../editor/EditorPanel.jsx').then((module) => ({ default: module.EditorPanel }))
+);
 
 const panelButton =
   'w-6 h-6 flex items-center justify-center rounded text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover active:bg-vsc-item-active transition-colors';
@@ -576,7 +581,9 @@ export function PanelLayout() {
                   minSize="20"
                   className={cn('h-full overflow-hidden bg-vsc-editor', presenceClass(editorPresence))}
                 >
-                  <EditorPanel />
+                  <React.Suspense fallback={null}>
+                    <EditorPanel />
+                  </React.Suspense>
                 </Panel>
               )}
 

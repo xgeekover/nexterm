@@ -15,7 +15,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 
-const PLATFORM_MODULE = fileURLToPath(new URL('../../src/lib/platform.js', import.meta.url));
+// import() takes a URL, not a path: `D:\…` reads as the scheme `d:` on Windows.
+const PLATFORM_MODULE = new URL('../../src/lib/platform.js', import.meta.url).href;
 const KEYBINDINGS = fileURLToPath(new URL('../../src/hooks/useKeybindings.js', import.meta.url));
 
 const setNavigator = (value) =>

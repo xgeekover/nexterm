@@ -14,15 +14,13 @@
     "@monaco-editor/react": "^4.7.0",
     "@tauri-apps/api": "^2.11.1",
     "@xterm/addon-fit": "^0.10.0",
-    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "lucide-react": "^1.41.0",
     "monaco-editor": "^0.56.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.12.3",
-    "remark-gfm": "^4.0.1",
     "zustand": "^5.0.15"
   },
   "devDependencies": {

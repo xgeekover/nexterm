@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FolderPlus,
   FolderOpen,
@@ -7,25 +7,13 @@ import {
   ChevronsDownUp,
   ChevronDown,
   ChevronRight,
-  Check,
-  X,
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
-import { FileTreeNode } from './FileTreeNode.jsx';
+import { TreeRow, NameInput, indentFor, ROW_HEIGHT } from './TreeRow.jsx';
+import { flattenVisible, navigate } from './treeRows.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
-
-function parentPathOf(path) {
-  const idx = path.lastIndexOf('/');
-  return idx <= 0 ? '/' : path.slice(0, idx);
-}
-
-function relativeTo(rootPath, path) {
-  const base = rootPath.replace(/\/+$/, '');
-  if (path === base) return '.';
-  if (path.startsWith(`${base}/`)) return path.slice(base.length + 1);
-  return path;
-}
+import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 
 async function writeToSystemClipboard(text) {
   try {
@@ -39,7 +27,9 @@ export function FileExplorer() {
   const fileTree = useEditorStore((s) => s.fileTree);
   const isLoadingTree = useEditorStore((s) => s.isLoadingTree);
   const refreshExplorer = useEditorStore((s) => s.refreshExplorer);
-  const rootPath = useEditorStore((s) => s.rootPath);
+  // Until the backend has been asked, `rootPath` is only a placeholder; showing
+  // it would flash a folder that is not open.
+  const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
   const pickRoot = useEditorStore((s) => s.pickRoot);
   const createFile = useEditorStore((s) => s.createFile);
   const createFolder = useEditorStore((s) => s.createFolder);
@@ -51,46 +41,33 @@ export function FileExplorer() {
   const creatingEntry = useEditorStore((s) => s.creatingEntry);
   const setCreatingEntry = useEditorStore((s) => s.setCreatingEntry);
   const beginRename = useEditorStore((s) => s.beginRename);
+  const cancelRename = useEditorStore((s) => s.cancelRename);
+  const renamingPath = useEditorStore((s) => s.renamingPath);
+  const renamePath = useEditorStore((s) => s.renamePath);
+  const setFolderExpanded = useEditorStore((s) => s.setFolderExpanded);
+  const selectedPath = useEditorStore((s) => s.selectedPath);
+  const tabs = useEditorStore((s) => s.tabs);
+  const activeTabId = useEditorStore((s) => s.activeTabId);
   const clipboard = useEditorStore((s) => s.clipboard);
   const copyToClipboard = useEditorStore((s) => s.copyToClipboard);
   const cutToClipboard = useEditorStore((s) => s.cutToClipboard);
   const pasteClipboard = useEditorStore((s) => s.pasteClipboard);
 
-  const [newItemName, setNewItemName] = useState('');
   const [explorerError, setExplorerError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
   const [contextMenu, setContextMenu] = useState(null); // { x, y, target }
   const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, name }
 
+  // A remount (the side bar reopened) re-reads the tree. The FIRST mount runs
+  // before App has asked the backend for the workspace root — a child's
+  // effects run before its parent's — so reading then meant reading the
+  // placeholder '/workspace', which the backend refuses. editorStore.init
+  // loads the tree itself as soon as the real root is known.
   useEffect(() => {
-    refreshExplorer();
+    if (useEditorStore.getState().rootResolved) refreshExplorer();
   }, [refreshExplorer]);
 
   const isCreatingAtRoot = creatingEntry?.parentPath === rootPath;
-
-  const handleCreateSubmit = async (e) => {
-    e?.preventDefault();
-    const trimmed = newItemName.trim();
-    if (!trimmed) {
-      setCreatingEntry(null);
-      return;
-    }
-
-    const base = rootPath.replace(/\/+$/, '');
-    const fullPath = `${base}/${trimmed.replace(/^\/+/, '')}`;
-    try {
-      if (creatingEntry.type === 'file') {
-        await createFile(fullPath);
-      } else if (creatingEntry.type === 'folder') {
-        await createFolder(fullPath);
-      }
-      setNewItemName('');
-      setCreatingEntry(null);
-      setExplorerError('');
-    } catch (err) {
-      setExplorerError(`Could not create ${creatingEntry.type}: ${err.message}`);
-    }
-  };
 
   const handleCollapseAll = () => {
     Array.from(expandedFolders).forEach((path) => toggleFolder(path));
@@ -118,7 +95,7 @@ export function FileExplorer() {
     const isEmpty = target.type === 'empty';
     const isFile = target.type === 'file';
     const isFolderish = !isFile; // folder row or the empty area (== workspace root)
-    const newParent = isFile ? parentPathOf(target.path) : target.path;
+    const newParent = isFile ? dirname(target.path) : target.path;
 
     const items = [];
     const pushSeparator = () => {
@@ -214,6 +191,98 @@ export function FileExplorer() {
     return items;
   };
 
+  // --- the visible rows, and the keyboard that walks them ----------------
+  const rows = useMemo(() => flattenVisible(fileTree, expandedFolders), [fileTree, expandedFolders]);
+
+  const [focusIndex, setFocusIndex] = useState(0);
+  const [treeFocused, setTreeFocused] = useState(false);
+  const treeRef = useRef(null);
+
+  const activeFilePath = tabs.find((t) => t.id === activeTabId)?.filePath || null;
+
+  // Where the inline "new file/folder" input goes: the first child of the
+  // folder being added to, or the top of the tree for the workspace root.
+  const createIndex = useMemo(() => {
+    if (!creatingEntry) return -1;
+    if (samePath(creatingEntry.parentPath, rootPath)) return 0;
+    const parent = rows.findIndex((r) => samePath(r.node.path, creatingEntry.parentPath));
+    return parent === -1 ? -1 : parent + 1;
+  }, [creatingEntry, rows, rootPath]);
+
+  const createDepth = useMemo(() => {
+    if (createIndex <= 0) return 0;
+    return (rows[createIndex - 1]?.depth ?? 0) + 1;
+  }, [createIndex, rows]);
+
+  // A row that scrolls out of view under the arrow keys is a row the user
+  // cannot see they have selected.
+  useEffect(() => {
+    if (!treeFocused) return;
+    const path = rows[focusIndex]?.node.path;
+    if (!path) return;
+    treeRef.current
+      ?.querySelector(`[data-path="${CSS.escape(path)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [focusIndex, rows, treeFocused]);
+
+  // Keep the focused row pointing at the selection when it changes by mouse.
+  useEffect(() => {
+    if (!selectedPath) return;
+    const idx = rows.findIndex((r) => samePath(r.node.path, selectedPath));
+    if (idx !== -1) setFocusIndex(idx);
+  }, [selectedPath, rows]);
+
+  const activateRow = useCallback(
+    (row) => {
+      setSelectedPath(row.node.path);
+      if (row.isFolder) toggleFolder(row.node.path);
+      else openFile(row.node.path);
+    },
+    [setSelectedPath, toggleFolder, openFile]
+  );
+
+  const handleTreeKeyDown = (e) => {
+    // While an inline input is open it owns the keyboard.
+    if (creatingEntry || renamingPath) return;
+    if (e.key === 'F2' && selectedPath) {
+      e.preventDefault();
+      beginRename(selectedPath);
+      return;
+    }
+    const action = navigate(rows, focusIndex, e.key);
+    if (!action) return;
+    e.preventDefault();
+    if (action.index !== undefined) {
+      setFocusIndex(action.index);
+      setSelectedPath(rows[action.index].node.path);
+    } else if (action.expand) {
+      setFolderExpanded(action.expand, true);
+    } else if (action.collapse) {
+      setFolderExpanded(action.collapse, false);
+    } else if (action.open) {
+      const row = rows[focusIndex];
+      if (row) activateRow(row);
+    }
+  };
+
+  const renderCreateRow = () => (
+    <div
+      className="flex items-center gap-1 pr-2"
+      style={{ height: ROW_HEIGHT, paddingLeft: indentFor(createDepth) + 16 }}
+    >
+      <NameInput
+        initialValue=""
+        placeholder={creatingEntry?.type === 'folder' ? 'Folder name' : 'File name'}
+        onCommit={async (name) => {
+          const full = join(creatingEntry.parentPath, name);
+          if (creatingEntry.type === 'folder') await createFolder(full);
+          else await createFile(full);
+        }}
+        onCancel={() => setCreatingEntry(null)}
+      />
+    </div>
+  );
+
   if (!rootPath) {
     return (
       <div className="flex flex-col h-full w-full bg-vsc-sidebar select-none overflow-hidden">
@@ -236,15 +305,14 @@ export function FileExplorer() {
     );
   }
 
-  // Find root nodes (direct children of the workspace root)
-  const rootPrefix = rootPath.replace(/\/+$/, '') + '/';
-  const rootNodes = fileTree.filter((n) => {
-    if (n.path === rootPath) return false;
-    if (!n.path.startsWith(rootPrefix)) return false;
-    return !n.path.slice(rootPrefix.length).includes('/');
-  });
+  // `fs_read_dir` already returns exactly the root's direct children, each
+  // carrying its own `children` — so the tree IS the root listing. The old
+  // code re-derived it by matching a "<root>/" prefix against every path,
+  // which on Windows compared `C:\\proj\\src` against `C:\\proj/` and
+  // discarded every entry, leaving the explorer permanently empty.
+  const rootNodes = fileTree;
 
-  const rootName = rootPath.replace(/\/+$/, '').split('/').filter(Boolean).pop() || rootPath;
+  const rootName = basename(rootPath) || rootPath;
 
   return (
     <div className="group flex flex-col h-full w-full bg-vsc-sidebar select-none overflow-hidden">
@@ -282,10 +350,7 @@ export function FileExplorer() {
 
           <button
             type="button"
-            onClick={() => {
-              setNewItemName('');
-              setCreatingEntry({ parentPath: rootPath, type: 'file' });
-            }}
+            onClick={() => setCreatingEntry({ parentPath: rootPath, type: 'file' })}
             className="p-1 rounded-sm hover:bg-vsc-item-hover text-vsc-muted hover:text-vsc-fg transition"
             title="New File"
           >
@@ -294,10 +359,7 @@ export function FileExplorer() {
 
           <button
             type="button"
-            onClick={() => {
-              setNewItemName('');
-              setCreatingEntry({ parentPath: rootPath, type: 'folder' });
-            }}
+            onClick={() => setCreatingEntry({ parentPath: rootPath, type: 'folder' })}
             className="p-1 rounded-sm hover:bg-vsc-item-hover text-vsc-muted hover:text-vsc-fg transition"
             title="New Folder"
           >
@@ -325,39 +387,22 @@ export function FileExplorer() {
         </div>
       </div>
 
-      {/* Inline Creation Input (workspace root only — nested folders get an
-          inline row inside the tree itself, see FileTreeNode) */}
-      {isCreatingAtRoot && (
-        <form onSubmit={handleCreateSubmit} className="px-2 py-1 border-b border-vsc-border shrink-0">
-          <div className="flex items-center gap-1 bg-vsc-input border border-vsc-focus rounded-sm px-2 py-1">
-            <span className="text-ui-sm font-mono text-vsc-muted">/</span>
-            <input
-              type="text"
-              autoFocus
-              value={newItemName}
-              onChange={(e) => setNewItemName(e.target.value)}
-              placeholder={`New ${creatingEntry.type} name…`}
-              className="flex-1 bg-transparent border-none outline-none font-mono text-ui-sm text-vsc-fg placeholder-vsc-placeholder"
-            />
-            <button type="submit" className="text-vsc-ok hover:text-vsc-fg p-0.5">
-              <Check size={14} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setCreatingEntry(null)}
-              className="text-vsc-muted hover:text-vsc-error p-0.5"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </form>
-      )}
-
-      {/* Directory Tree */}
+      {/* Directory tree — a flat list of the rows actually on screen, which
+          is how VS Code models it: "the next row" is the next entry, whatever
+          its depth, so arrow keys, focus and scrolling are all one dimension. */}
       {rootExpanded && (
         <div
-          className="flex-1 overflow-y-auto"
-          onClick={() => setSelectedPath(null)}
+          ref={treeRef}
+          role="tree"
+          aria-label="Files"
+          tabIndex={0}
+          onFocus={() => setTreeFocused(true)}
+          onBlur={() => setTreeFocused(false)}
+          onKeyDown={handleTreeKeyDown}
+          className="flex-1 overflow-auto outline-none"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setSelectedPath(null);
+          }}
           onContextMenu={handleEmptyAreaContextMenu}
         >
           {explorerError && (
@@ -365,19 +410,41 @@ export function FileExplorer() {
               {explorerError}
             </div>
           )}
-          {rootNodes.length > 0 ? (
-            rootNodes.map((node) => (
-              <FileTreeNode
-                key={node.path}
-                node={node}
-                depth={0}
-                allNodes={fileTree}
-                onContextMenuRequest={handleTreeContextMenu}
-              />
-            ))
+
+          {rows.length === 0 && createIndex === -1 ? (
+            <div className="px-4 py-3 text-vsc-muted text-ui-sm">
+              {isLoadingTree ? 'Loading…' : 'This folder is empty'}
+            </div>
           ) : (
-            <div className="px-4 py-3 text-center text-vsc-muted text-ui-sm italic">
-              {isLoadingTree ? 'Loading files…' : 'No files found'}
+            <div className="min-w-max">
+              {rows.map((row, i) => (
+                <React.Fragment key={row.node.path}>
+                  {i === createIndex && renderCreateRow()}
+                  <TreeRow
+                    row={row}
+                    isSelected={
+                      samePath(selectedPath || '', row.node.path) ||
+                      (!selectedPath && samePath(activeFilePath || '', row.node.path))
+                    }
+                    isFocused={treeFocused}
+                    isCut={clipboard?.mode === 'cut' && samePath(clipboard.path, row.node.path)}
+                    onActivate={activateRow}
+                    onToggle={(r) => toggleFolder(r.node.path)}
+                    onContextMenu={(e, r) =>
+                      handleTreeContextMenu(e, {
+                        type: r.isFolder ? 'folder' : 'file',
+                        path: r.node.path,
+                        isDir: r.isFolder,
+                        name: r.node.name,
+                      })
+                    }
+                    renaming={samePath(renamingPath || '', row.node.path)}
+                    onRenameCommit={(name) => renamePath(row.node.path, name)}
+                    onRenameCancel={cancelRename}
+                  />
+                </React.Fragment>
+              ))}
+              {createIndex >= rows.length && renderCreateRow()}
             </div>
           )}
         </div>

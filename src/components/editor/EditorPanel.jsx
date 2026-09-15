@@ -2,6 +2,11 @@ import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } 
 import { createPortal } from 'react-dom';
 import { Panel, Group, Separator } from 'react-resizable-panels';
 import Editor from '@monaco-editor/react';
+// Monaco itself, its workers and its themes arrive with this panel rather than
+// with the app: imported from main.jsx they were part of the JavaScript every
+// launch loaded before anyone had opened a file. PanelLayout loads this module
+// lazily.
+import '../../lib/monaco.js';
 import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';

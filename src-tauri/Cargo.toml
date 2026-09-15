@@ -19,9 +19,15 @@ parking_lot = "0.12.5"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 walkdir = "2.5.0"
+# canonicalize without the \\?\ prefix Windows adds — see `Canonical` in src/fs/mod.rs.
+dunce = "1.0.5"
 tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
 
 # getuid(), so the shell-integration files go somewhere only this user can reach.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The Windows build number, which the terminal needs to know how ConPTY wraps lines.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

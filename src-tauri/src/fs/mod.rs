@@ -10,6 +10,24 @@ use crate::models::FileNode;
 
 pub const SKIPPED_FOLDERS: &[&str] = &[".git", "node_modules", "target", ".agents", "dist"];
 
+/// `Path::canonicalize`, without the `\\?\` prefix Windows puts on the result.
+///
+/// That verbatim spelling went everywhere a path goes: the title bar showed
+/// `\\?\D:\…`, and cmd.exe, handed it as a working directory, rejected it as a
+/// UNC path and started in C:\Windows instead. `dunce` drops the prefix
+/// whenever the plain path means the same thing, and is `canonicalize` itself
+/// off Windows. Everything in this module canonicalizes through here — root
+/// and candidate alike — so `starts_with(root)` compares like with like.
+trait Canonical {
+    fn canonical(&self) -> std::io::Result<PathBuf>;
+}
+
+impl Canonical for Path {
+    fn canonical(&self) -> std::io::Result<PathBuf> {
+        dunce::canonicalize(self)
+    }
+}
+
 pub fn resolve_path(path_str: &str) -> PathBuf {
     let trimmed = path_str.trim();
     if trimmed.is_empty() || trimmed == "." {
@@ -158,7 +176,7 @@ pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
 /// folds NFC and NFD spellings of the same name together. `canonicalize`
 /// returns the filesystem's own spelling, so comparing those answers it.
 fn is_same_entry(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
+    match (a.canonical(), b.canonical()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
@@ -231,7 +249,10 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 pub struct Workspace {
-    root: Mutex<PathBuf>,
+    /// `None` until a folder is opened. NexTerm starts with no folder, as VS
+    /// Code does, instead of adopting whatever directory it was launched from —
+    /// which in development was src-tauri and in an install the program folder.
+    root: Mutex<Option<PathBuf>>,
 }
 
 impl Default for Workspace {
@@ -243,27 +264,41 @@ impl Default for Workspace {
 impl Workspace {
     pub fn new() -> Self {
         Self {
-            root: Mutex::new(default_root()),
+            root: Mutex::new(None),
         }
     }
 
-    pub fn root(&self) -> PathBuf {
+    pub fn root(&self) -> Option<PathBuf> {
         self.root.lock().clone()
     }
 
     pub fn set_root(&self, candidate: &Path) -> Result<PathBuf, String> {
         let canonical = candidate
-            .canonicalize()
+            .canonical()
             .map_err(|e| format!("Cannot open '{}': {e}", candidate.display()))?;
         if !canonical.is_dir() {
             return Err(format!("Not a directory: {}", canonical.display()));
         }
-        *self.root.lock() = canonical.clone();
+        *self.root.lock() = Some(canonical.clone());
         Ok(canonical)
     }
 
+    /// With no folder open there is nothing to confine a path to, so every
+    /// path is refused.
     pub fn confine(&self, path_str: &str) -> Result<PathBuf, String> {
-        confine_to(&self.root(), path_str)
+        let root = self.root().ok_or_else(|| "No folder is open".to_string())?;
+        confine_to(&root, path_str)
+    }
+
+    /// Where a new terminal starts: the requested directory when it lies
+    /// inside the open folder, else the folder itself, else — no folder open —
+    /// the home directory, which is where VS Code starts one too.
+    pub fn spawn_dir(&self, requested: Option<&str>) -> PathBuf {
+        requested
+            .and_then(|path| self.confine(path).ok())
+            .filter(|path| path.is_dir())
+            .or_else(|| self.root())
+            .unwrap_or_else(home_dir)
     }
 }
 
@@ -272,19 +307,6 @@ fn home_dir() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/"))
-}
-
-fn default_root() -> PathBuf {
-    if let Ok(cwd) = std::env::current_dir() {
-        // A bundled .app launches with cwd "/", which is never a useful root.
-        if cwd.parent().is_some() {
-            if let Ok(canonical) = cwd.canonicalize() {
-                return canonical;
-            }
-        }
-    }
-    let home = home_dir();
-    home.canonicalize().unwrap_or(home)
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -323,7 +345,7 @@ pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
     let mut cursor = normalized.as_path();
     let mut pending: Vec<OsString> = Vec::new();
     let resolved = loop {
-        match cursor.canonicalize() {
+        match cursor.canonical() {
             Ok(canonical) => break canonical,
             Err(_) => {
                 let name = cursor
@@ -361,7 +383,7 @@ mod confine_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("inner")).unwrap();
         fs::write(dir.join("inner/file.txt"), "ok").unwrap();
-        dir.canonicalize().unwrap()
+        dir.canonical().unwrap()
     }
 
     #[test]
@@ -395,6 +417,63 @@ mod confine_tests {
         let root = temp_root("abs");
         assert!(confine_to(&root, "/etc/passwd").is_err());
         assert!(confine_to(&root, "~/.ssh/id_rsa").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Windows' own canonicalize answers `\\?\D:\…`, which cmd.exe refuses as a
+    /// working directory and the title bar printed as-is.
+    #[test]
+    fn paths_handed_out_carry_no_verbatim_prefix() {
+        let root = temp_root("verbatim");
+        let workspace = Workspace::new();
+        let set = workspace.set_root(&root).unwrap();
+        let confined = workspace.confine("inner/file.txt").unwrap();
+        for path in [&root, &set, &confined] {
+            assert!(
+                !path.to_string_lossy().starts_with(r"\\?\"),
+                "verbatim path handed out: {}",
+                path.display()
+            );
+        }
+        assert!(confined.starts_with(&set), "{} is not under {}", confined.display(), set.display());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_workspace_has_no_folder_and_confines_nothing() {
+        let workspace = Workspace::new();
+        assert!(
+            workspace.root().is_none(),
+            "NexTerm must not adopt the directory it was launched from"
+        );
+        let err = workspace.confine("Cargo.toml").unwrap_err();
+        assert!(err.contains("No folder"), "unexpected error: {err}");
+        assert!(workspace.confine(&std::env::temp_dir().to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn terminals_start_in_the_requested_folder_else_the_open_folder_else_home() {
+        let workspace = Workspace::new();
+        assert_eq!(workspace.spawn_dir(None), home_dir(), "no folder open: home");
+        assert_eq!(
+            workspace.spawn_dir(Some(&std::env::temp_dir().to_string_lossy())),
+            home_dir(),
+            "no folder open: no directory is inside it"
+        );
+
+        let root = workspace.set_root(&temp_root("spawn")).unwrap();
+        assert_eq!(workspace.spawn_dir(None), root);
+        assert_eq!(workspace.spawn_dir(Some("inner")), root.join("inner"));
+        assert_eq!(
+            workspace.spawn_dir(Some("inner/file.txt")),
+            root,
+            "a file is not somewhere to start"
+        );
+        assert_eq!(
+            workspace.spawn_dir(Some(&home_dir().to_string_lossy())),
+            root,
+            "outside the open folder"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -499,7 +578,7 @@ mod rename_tests {
             .join(format!("nexterm-rename-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        dir.canonical().unwrap()
     }
 
     fn s(p: &Path) -> String {

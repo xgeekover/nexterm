@@ -4,15 +4,28 @@ use crate::AppState;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-/// Resolve a webview-supplied path against the active workspace root,
-/// refusing anything that escapes it (`..`, absolute paths, symlinks).
+/// Resolve a webview-supplied path against the open folder, refusing anything
+/// that escapes it (`..`, absolute paths, symlinks) — and everything while no
+/// folder is open.
 fn confined(state: &State<AppState>, path: &str) -> Result<String, String> {
     Ok(state.workspace.confine(path)?.to_string_lossy().to_string())
 }
 
+/// Whether `path` is the open folder itself.
+fn is_root(state: &State<AppState>, path: &str) -> bool {
+    state
+        .workspace
+        .root()
+        .is_some_and(|root| root.to_string_lossy() == path)
+}
+
+/// The open folder, or `null` until one has been opened.
 #[tauri::command(rename_all = "snake_case")]
-pub fn fs_get_root(state: State<AppState>) -> Result<String, String> {
-    Ok(state.workspace.root().to_string_lossy().to_string())
+pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {
+    Ok(state
+        .workspace
+        .root()
+        .map(|root| root.to_string_lossy().to_string()))
 }
 
 /// Change the workspace root through a native folder picker. This is the only
@@ -66,8 +79,7 @@ pub fn fs_create_dir(state: State<AppState>, path: String) -> Result<(), String>
 pub fn fs_rename_path(state: State<AppState>, from: String, to: String) -> Result<(), String> {
     let from_abs = confined(&state, &from)?;
     let to_abs = confined(&state, &to)?;
-    let root = state.workspace.root().to_string_lossy().to_string();
-    if from_abs == root || to_abs == root {
+    if is_root(&state, &from_abs) || is_root(&state, &to_abs) {
         return Err("Refusing to rename the workspace root".to_string());
     }
     fs::rename_path(&from_abs, &to_abs)
@@ -81,7 +93,7 @@ pub fn fs_delete_path(
 ) -> Result<(), String> {
     let target = confined(&state, &path)?;
     // Never allow the root itself to be deleted through the IPC surface.
-    if target == state.workspace.root().to_string_lossy() {
+    if is_root(&state, &target) {
         return Err("Refusing to delete the workspace root".to_string());
     }
     fs::delete_path(&target, recursive.unwrap_or(false))

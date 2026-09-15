@@ -7,6 +7,7 @@ import { notifyTerminal } from '../lib/terminalNotice.js';
 // version branch; writes still use `saveState` (always the current version).
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
 import { useSettingsStore } from './settingsStore.js';
+import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 
 // ---------------------------------------------------------------------------
 // The two-level layout model
@@ -774,6 +775,8 @@ function regeneratePaneIds(node, idMap = new Map()) {
 
 let unlisteners = [];
 let listening = false;
+// The bootstrap still running, shared by every init() until it settles — see init.
+let initInFlight = null;
 
 /**
  * Drop the persistent xterm instance a closed tab owned (see
@@ -953,7 +956,8 @@ export const useTerminalStore = create((set, get) => {
     const newTabs = [];
     for (const savedTab of saved.tabs) {
       if (!savedTab || !savedTab.id || !referenced.has(savedTab.id)) continue;
-      const wantedCwd = savedTab.cwd || rootPath;
+      // Layouts saved by older builds carry `\\?\D:\…` paths; show and use the plain form.
+      const wantedCwd = withoutVerbatimPrefix(savedTab.cwd) || rootPath;
 
       let ptySession;
       try {
@@ -1739,22 +1743,29 @@ export const useTerminalStore = create((set, get) => {
         const { session_id, data } = payload || {};
         if (!session_id || !data) return;
 
-        set((state) => ({
-          tabs: state.tabs.map((tab) => {
+        // Output with no running block is prompt/banner noise — never appended
+        // to a finished (possibly pinned) block. It also must not touch the
+        // store: this runs for every chunk a shell prints, and a new `tabs`
+        // array re-rendered everything that subscribes to it (the terminals
+        // side bar, the split panes, the status bar) once per chunk. Profiled
+        // `type`-ing 1 MB into a terminal: React's re-renders were the top of
+        // the renderer's JavaScript time, above anything xterm.js did.
+        set((state) => {
+          let changed = false;
+          const tabs = state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
+            const runningIdx = tab.blocks.findIndex((b) => b.status === 'running');
+            if (runningIdx === -1) return tab;
+            changed = true;
             const blocks = [...tab.blocks];
-            const runningIdx = blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx !== -1) {
-              blocks[runningIdx] = {
-                ...blocks[runningIdx],
-                output: blocks[runningIdx].output + data,
-              };
-            }
-            // No running block: this is prompt/banner noise — never append it
-            // to a finished (possibly pinned) block.
+            blocks[runningIdx] = {
+              ...blocks[runningIdx],
+              output: blocks[runningIdx].output + data,
+            };
             return { ...tab, blocks };
-          }),
-        }));
+          });
+          return changed ? { tabs } : state;
+        });
       }));
       unlisteners.push(await listen('pty-command-done', (payload) => {
         const { session_id, exit_code } = payload || {};
@@ -1762,6 +1773,12 @@ export const useTerminalStore = create((set, get) => {
         set((state) => ({
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
+            // Remember the code whether or not a block was tracking this
+            // command: typing straight into the terminal never creates one,
+            // which is the normal case, so anything reading it off `blocks`
+            // only ever saw commands run from the palette.
+            const code = exit_code ?? 0;
+            tab = { ...tab, lastExitCode: code };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
@@ -1840,18 +1857,43 @@ export const useTerminalStore = create((set, get) => {
       flushPersist();
     },
 
-    init: async () => {
+    /**
+     * Bring the terminals up. Safe to call while a call is still running.
+     *
+     * App calls this from its mount effect, which React StrictMode runs twice
+     * in development — and the second call arrived while the first was still
+     * spawning. `isInitialized` is only set once the shells are up, so both
+     * calls restored the saved layout, and the second overwrote the first:
+     * every restored tab left one shell running with no tab to show it (one
+     * reload with two saved tabs: four new backend sessions, two terminals on
+     * screen). Callers now share the run in flight. It is dropped once it
+     * settles, so a later init() — a relaunch — runs from scratch.
+     */
+    init: () => {
+      if (!initInFlight) {
+        initInFlight = get().bootstrap().finally(() => {
+          initInFlight = null;
+        });
+      }
+      return initInFlight;
+    },
+
+    /** The work behind `init`. Call `init` — it keeps concurrent calls from spawning twice. */
+    bootstrap: async () => {
       if (get().isInitialized) {
         await get().attachListeners();
         return;
       }
 
       try {
-        let rootPath = '/workspace';
+        // null while no folder is open: the backend then starts terminals in
+        // the home directory and says where in `ptySession.cwd`.
+        let rootPath = null;
         try {
-          rootPath = (await invoke('fs_get_root')) || rootPath;
+          rootPath = await invoke('fs_get_root');
         } catch (_) {
-          // browser mock or backend unavailable — keep the virtual default
+          // backend unavailable — use the browser mock's virtual root
+          rootPath = '/workspace';
         }
         set({ cwd: rootPath });
 
@@ -2081,6 +2123,7 @@ export const useTerminalStore = create((set, get) => {
           if (t.id !== targetTabId) return t;
           return {
             ...t,
+            lastExitCode: null,
             blocks: [...t.blocks, block],
           };
         });
