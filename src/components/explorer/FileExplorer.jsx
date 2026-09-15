@@ -27,7 +27,9 @@ export function FileExplorer() {
   const fileTree = useEditorStore((s) => s.fileTree);
   const isLoadingTree = useEditorStore((s) => s.isLoadingTree);
   const refreshExplorer = useEditorStore((s) => s.refreshExplorer);
-  const rootPath = useEditorStore((s) => s.rootPath);
+  // Until the backend has been asked, `rootPath` is only a placeholder; showing
+  // it would flash a folder that is not open.
+  const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
   const pickRoot = useEditorStore((s) => s.pickRoot);
   const createFile = useEditorStore((s) => s.createFile);
   const createFolder = useEditorStore((s) => s.createFolder);

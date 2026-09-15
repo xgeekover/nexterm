@@ -1886,11 +1886,14 @@ export const useTerminalStore = create((set, get) => {
       }
 
       try {
-        let rootPath = '/workspace';
+        // null while no folder is open: the backend then starts terminals in
+        // the home directory and says where in `ptySession.cwd`.
+        let rootPath = null;
         try {
-          rootPath = (await invoke('fs_get_root')) || rootPath;
+          rootPath = await invoke('fs_get_root');
         } catch (_) {
-          // browser mock or backend unavailable — keep the virtual default
+          // backend unavailable — use the browser mock's virtual root
+          rootPath = '/workspace';
         }
         set({ cwd: rootPath });
 

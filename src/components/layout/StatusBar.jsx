@@ -49,7 +49,8 @@ export function StatusBar() {
   const activeTabId = useTerminalStore((s) => s.activeTabId);
   const groups = useTerminalStore((s) => s.groups);
   const storeCwd = useTerminalStore((s) => s.cwd);
-  const rootPath = useEditorStore((s) => s.rootPath);
+  // Null until the backend has been asked, and while no folder is open.
+  const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
   const configuredShell = useSettingsStore((s) => s.terminalDefaultShell);
 
   useEffect(() => {

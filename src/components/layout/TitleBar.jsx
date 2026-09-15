@@ -20,7 +20,8 @@ export function TitleBar() {
   const togglePanel = useSettingsStore((s) => s.togglePanel);
   const secondarySidebarVisible = useSettingsStore((s) => s.secondarySidebarVisible);
   const toggleSecondarySidebar = useSettingsStore((s) => s.toggleSecondarySidebar);
-  const rootPath = useEditorStore((s) => s.rootPath);
+  // Null until the backend has been asked, and while no folder is open.
+  const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
 
   // basename reads either separator; splitting on '/' kept the whole Windows path.
   const workspaceName = rootPath ? basename(rootPath) || rootPath : '';

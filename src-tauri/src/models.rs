@@ -35,6 +35,10 @@ pub struct PtySessionInfo {
     pub session_id: String,
     pub shell: String,
     pub created_at: DateTime<Utc>,
+    /// The directory the shell started in, as the backend chose it — the UI
+    /// shows this rather than guessing from what it asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,11 +107,13 @@ mod tests {
             session_id: "pty-1".to_string(),
             shell: "/bin/zsh".to_string(),
             created_at: Utc::now(),
+            cwd: Some("/Users/test".to_string()),
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"id\":\"pty-1\""));
         assert!(json.contains("\"session_id\":\"pty-1\""));
         assert!(json.contains("\"shell\":\"/bin/zsh\""));
+        assert!(json.contains("\"cwd\":\"/Users/test\""));
     }
 
     #[test]

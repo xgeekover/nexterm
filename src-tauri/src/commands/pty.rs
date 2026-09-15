@@ -4,7 +4,8 @@ use crate::models::PtySessionInfo;
 use crate::AppState;
 
 /// The webview never chooses the shell binary and can only start a session
-/// inside the workspace root; anything else falls back to the root itself.
+/// inside the open folder; see `Workspace::spawn_dir` for where it starts
+/// otherwise. The chosen directory comes back as `PtySessionInfo::cwd`.
 ///
 /// `async` here does not make the body asynchronous — it tells Tauri to run
 /// this command off the IPC thread. Spawning forks a shell and writes the
@@ -21,12 +22,9 @@ pub fn pty_spawn(
     // path; empty or absent means the platform default.
     shell: Option<String>,
 ) -> Result<PtySessionInfo, String> {
-    let root = state.workspace.root();
-    let cwd = cwd
-        .as_deref()
-        .and_then(|c| state.workspace.confine(c).ok())
-        .filter(|p| p.is_dir())
-        .unwrap_or(root)
+    let cwd = state
+        .workspace
+        .spawn_dir(cwd.as_deref())
         .to_string_lossy()
         .to_string();
     state.pty_manager.spawn(app, cols, rows, Some(cwd), shell)

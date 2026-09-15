@@ -234,8 +234,15 @@ impl PtyManager {
         let shell_path = Self::resolve_shell(shell.as_deref());
 
         let mut cmd = CommandBuilder::new(&shell_path);
+        // Where the shell really starts, reported back in `PtySessionInfo`.
+        let mut started_in = None;
         if let Some(dir) = cwd {
             if !dir.trim().is_empty() && Path::new(&dir).is_dir() {
+                // A `\\?\` path — as older builds persisted with the layout —
+                // is refused by cmd.exe as a UNC path, and it starts in
+                // C:\Windows instead.
+                let dir = dunce::simplified(Path::new(&dir)).to_path_buf();
+                started_in = Some(dir.to_string_lossy().to_string());
                 cmd.cwd(dir);
             }
         }
@@ -416,6 +423,7 @@ impl PtyManager {
             session_id: session_id.clone(),
             shell: shell_path,
             created_at,
+            cwd: started_in,
         })
     }
 
@@ -506,6 +514,7 @@ impl PtyManager {
                 session_id: s.id.clone(),
                 shell: s.shell.clone(),
                 created_at: s.created_at,
+                cwd: None,
             })
             .collect()
     }

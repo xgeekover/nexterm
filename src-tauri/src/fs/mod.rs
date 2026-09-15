@@ -249,7 +249,10 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 pub struct Workspace {
-    root: Mutex<PathBuf>,
+    /// `None` until a folder is opened. NexTerm starts with no folder, as VS
+    /// Code does, instead of adopting whatever directory it was launched from —
+    /// which in development was src-tauri and in an install the program folder.
+    root: Mutex<Option<PathBuf>>,
 }
 
 impl Default for Workspace {
@@ -261,11 +264,11 @@ impl Default for Workspace {
 impl Workspace {
     pub fn new() -> Self {
         Self {
-            root: Mutex::new(default_root()),
+            root: Mutex::new(None),
         }
     }
 
-    pub fn root(&self) -> PathBuf {
+    pub fn root(&self) -> Option<PathBuf> {
         self.root.lock().clone()
     }
 
@@ -276,12 +279,26 @@ impl Workspace {
         if !canonical.is_dir() {
             return Err(format!("Not a directory: {}", canonical.display()));
         }
-        *self.root.lock() = canonical.clone();
+        *self.root.lock() = Some(canonical.clone());
         Ok(canonical)
     }
 
+    /// With no folder open there is nothing to confine a path to, so every
+    /// path is refused.
     pub fn confine(&self, path_str: &str) -> Result<PathBuf, String> {
-        confine_to(&self.root(), path_str)
+        let root = self.root().ok_or_else(|| "No folder is open".to_string())?;
+        confine_to(&root, path_str)
+    }
+
+    /// Where a new terminal starts: the requested directory when it lies
+    /// inside the open folder, else the folder itself, else — no folder open —
+    /// the home directory, which is where VS Code starts one too.
+    pub fn spawn_dir(&self, requested: Option<&str>) -> PathBuf {
+        requested
+            .and_then(|path| self.confine(path).ok())
+            .filter(|path| path.is_dir())
+            .or_else(|| self.root())
+            .unwrap_or_else(home_dir)
     }
 }
 
@@ -290,19 +307,6 @@ fn home_dir() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/"))
-}
-
-fn default_root() -> PathBuf {
-    if let Ok(cwd) = std::env::current_dir() {
-        // A bundled .app launches with cwd "/", which is never a useful root.
-        if cwd.parent().is_some() {
-            if let Ok(canonical) = cwd.canonical() {
-                return canonical;
-            }
-        }
-    }
-    let home = home_dir();
-    home.canonical().unwrap_or(home)
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -432,6 +436,44 @@ mod confine_tests {
             );
         }
         assert!(confined.starts_with(&set), "{} is not under {}", confined.display(), set.display());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_workspace_has_no_folder_and_confines_nothing() {
+        let workspace = Workspace::new();
+        assert!(
+            workspace.root().is_none(),
+            "NexTerm must not adopt the directory it was launched from"
+        );
+        let err = workspace.confine("Cargo.toml").unwrap_err();
+        assert!(err.contains("No folder"), "unexpected error: {err}");
+        assert!(workspace.confine(&std::env::temp_dir().to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn terminals_start_in_the_requested_folder_else_the_open_folder_else_home() {
+        let workspace = Workspace::new();
+        assert_eq!(workspace.spawn_dir(None), home_dir(), "no folder open: home");
+        assert_eq!(
+            workspace.spawn_dir(Some(&std::env::temp_dir().to_string_lossy())),
+            home_dir(),
+            "no folder open: no directory is inside it"
+        );
+
+        let root = workspace.set_root(&temp_root("spawn")).unwrap();
+        assert_eq!(workspace.spawn_dir(None), root);
+        assert_eq!(workspace.spawn_dir(Some("inner")), root.join("inner"));
+        assert_eq!(
+            workspace.spawn_dir(Some("inner/file.txt")),
+            root,
+            "a file is not somewhere to start"
+        );
+        assert_eq!(
+            workspace.spawn_dir(Some(&home_dir().to_string_lossy())),
+            root,
+            "outside the open folder"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

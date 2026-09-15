@@ -255,10 +255,15 @@ export const useEditorStore = create((set, get) => ({
     // tree twice. Cleared once it settles, so a later init() runs afresh.
     if (initInFlight) return initInFlight;
     initInFlight = (async () => {
-      // The backend owns the workspace root; the browser mock reports '/workspace'.
+      // The backend owns the workspace root and starts with none, as VS Code
+      // does (the browser mock reports '/workspace').
       try {
         const rootPath = await invoke('fs_get_root');
-        if (rootPath) set({ rootPath, expandedFolders: new Set([rootPath]) });
+        set(
+          rootPath
+            ? { rootPath, expandedFolders: new Set([rootPath]) }
+            : { rootPath: null, expandedFolders: new Set(), fileTree: [] }
+        );
       } catch (err) {
         console.error('[EditorStore] Failed to resolve workspace root:', err);
       }
@@ -292,6 +297,11 @@ export const useEditorStore = create((set, get) => ({
   },
 
   refreshExplorer: async () => {
+    // No folder open: there is no tree to read, and the backend would refuse.
+    if (!get().rootPath) {
+      set({ fileTree: [], isLoadingTree: false });
+      return;
+    }
     set({ isLoadingTree: true });
     try {
       const tree = await invoke('fs_read_dir', {
