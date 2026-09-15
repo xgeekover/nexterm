@@ -1741,22 +1741,29 @@ export const useTerminalStore = create((set, get) => {
         const { session_id, data } = payload || {};
         if (!session_id || !data) return;
 
-        set((state) => ({
-          tabs: state.tabs.map((tab) => {
+        // Output with no running block is prompt/banner noise — never appended
+        // to a finished (possibly pinned) block. It also must not touch the
+        // store: this runs for every chunk a shell prints, and a new `tabs`
+        // array re-rendered everything that subscribes to it (the terminals
+        // side bar, the split panes, the status bar) once per chunk. Profiled
+        // `type`-ing 1 MB into a terminal: React's re-renders were the top of
+        // the renderer's JavaScript time, above anything xterm.js did.
+        set((state) => {
+          let changed = false;
+          const tabs = state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
+            const runningIdx = tab.blocks.findIndex((b) => b.status === 'running');
+            if (runningIdx === -1) return tab;
+            changed = true;
             const blocks = [...tab.blocks];
-            const runningIdx = blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx !== -1) {
-              blocks[runningIdx] = {
-                ...blocks[runningIdx],
-                output: blocks[runningIdx].output + data,
-              };
-            }
-            // No running block: this is prompt/banner noise — never append it
-            // to a finished (possibly pinned) block.
+            blocks[runningIdx] = {
+              ...blocks[runningIdx],
+              output: blocks[runningIdx].output + data,
+            };
             return { ...tab, blocks };
-          }),
-        }));
+          });
+          return changed ? { tabs } : state;
+        });
       }));
       unlisteners.push(await listen('pty-command-done', (payload) => {
         const { session_id, exit_code } = payload || {};
