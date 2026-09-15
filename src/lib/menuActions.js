@@ -81,6 +81,15 @@ export function runMenuAction(id) {
 }
 
 /**
+ * One menu entry. `keys` is the chord itself, not just the label it renders
+ * to: `tests/adversarial/keybinding_table.test.js` builds the event a real
+ * keypress would produce from it and checks that a binding actually claims it.
+ * A menu that advertises a shortcut nothing listens for is the bug this
+ * shape exists to make impossible.
+ */
+const item = (id, label, ...keys) => ({ id, label, keys, shortcut: chord(...keys) });
+
+/**
  * The menu NexTerm draws itself, mirroring the non-macOS half of `spec()` in
  * menu.rs. The shortcut strings are labels only — off macOS these chords are
  * served by useKeybindings.js rather than by a native accelerator, precisely
@@ -90,34 +99,34 @@ export const MENU_BAR = [
   {
     title: 'File',
     items: [
-      { id: 'open-folder', label: 'Open Folder…', shortcut: chord('mod', 'shift', 'o') },
-      { id: 'new-terminal', label: 'New Terminal', shortcut: chord('ctrl', 'shift', '`') },
-      { id: 'save', label: 'Save', shortcut: chord('mod', 's') },
+      item('open-folder', 'Open Folder…', 'mod', 'shift', 'o'),
+      item('new-terminal', 'New Terminal', 'ctrl', 'shift', '`'),
+      item('save', 'Save', 'mod', 's'),
       { type: 'separator' },
-      { id: 'preferences', label: 'Settings…', shortcut: chord('mod', ',') },
+      item('preferences', 'Settings…', 'mod', ','),
       { type: 'separator' },
-      { id: 'close-window', label: 'Exit', shortcut: chord('mod', 'shift', 'w') },
+      item('close-window', 'Exit', 'mod', 'shift', 'w'),
     ],
   },
   {
     title: 'View',
     items: [
-      { id: 'command-palette', label: 'Command Palette…', shortcut: chord('mod', 'k') },
-      { id: 'quick-open', label: 'Go to File…', shortcut: chord('mod', 'p') },
+      item('command-palette', 'Command Palette…', 'mod', 'k'),
+      item('quick-open', 'Go to File…', 'mod', 'p'),
       { type: 'separator' },
-      { id: 'toggle-sidebar', label: 'Toggle Primary Side Bar', shortcut: chord('mod', 'b') },
-      { id: 'toggle-panel', label: 'Toggle Terminal Panel', shortcut: chord('ctrl', '`') },
-      { id: 'toggle-secondary', label: 'Toggle Terminals Side Bar', shortcut: chord('mod', 'alt', 'b') },
+      item('toggle-sidebar', 'Toggle Primary Side Bar', 'mod', 'b'),
+      item('toggle-panel', 'Toggle Terminal Panel', 'ctrl', '`'),
+      item('toggle-secondary', 'Toggle Terminals Side Bar', 'mod', 'alt', 'b'),
     ],
   },
   {
     title: 'Terminal',
     items: [
-      { id: 'split-right', label: 'Split Right', shortcut: chord('mod', 'd') },
-      { id: 'split-down', label: 'Split Down', shortcut: chord('mod', 'shift', 'd') },
-      { id: 'close-pane', label: 'Close Pane', shortcut: chord('mod', 'w') },
+      item('split-right', 'Split Right', 'mod', 'd'),
+      item('split-down', 'Split Down', 'mod', 'shift', 'd'),
+      item('close-pane', 'Close Pane', 'mod', 'w'),
       { type: 'separator' },
-      { id: 'clear-terminal', label: 'Clear Unpinned Blocks', shortcut: chord('mod', 'l') },
+      item('clear-terminal', 'Clear Unpinned Blocks', 'mod', 'l'),
     ],
   },
 ];

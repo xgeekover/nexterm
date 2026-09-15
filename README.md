@@ -142,6 +142,8 @@ scrollback, colour theme, and command suggestions.
 | --- | --- |
 | `⌘K` | Command palette |
 | `⌘P` / `⌘⇧P` | Go to file / all commands |
+| `⌘⇧O` | Open a folder |
+| `⌘,` | Settings |
 | `⌃\`` | Toggle the terminal panel |
 | `⌃⇧\`` | New terminal tab in the current group |
 | `⌘D` / `⌘⇧D` | Split the active pane right / down |
@@ -149,6 +151,7 @@ scrollback, colour theme, and command suggestions.
 | `⌘⇧W` | Close the window |
 | `⌥⌘←` / `⌥⌘→` | Focus the previous / next pane |
 | `⌘B` | Toggle the primary sidebar |
+| `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
 | `⌘S` | Save the active editor file |
 

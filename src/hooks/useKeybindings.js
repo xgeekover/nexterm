@@ -1,16 +1,30 @@
 import { useEffect } from 'react';
 import { hasMod } from '../lib/platform.js';
+import { dispatchKeydown } from '../lib/keybindings.js';
+import { windowControls } from '../lib/menuActions.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 
+/**
+ * Wire the keyboard to `KEYBINDINGS`.
+ *
+ * The chords themselves live in src/lib/keybindings.js as data, so the menu's
+ * advertised shortcut and the code that answers it can be compared by a test
+ * instead of by eye — four menu entries were showing a shortcut nothing
+ * listened for. All this hook does is decide what "the app modifier" means on
+ * this platform, hand the stores over, and let the table match.
+ */
 export function useKeybindings() {
   const setCommandPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
   const isCommandPaletteOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
+  const setSettingsModalOpen = useSettingsStore((s) => s.setSettingsModalOpen);
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
+  const toggleSecondarySidebar = useSettingsStore((s) => s.toggleSecondarySidebar);
   const saveFile = useEditorStore((s) => s.saveFile);
   const activeEditorTabId = useEditorStore((s) => s.activeTabId);
+  const pickRoot = useEditorStore((s) => s.pickRoot);
 
   // Terminal actions live in the TERMINAL worker's store — select them
   // individually so a not-yet-implemented action is simply `undefined`
@@ -32,99 +46,25 @@ export function useKeybindings() {
       // own keydown on the textarea in the capture phase and calls
       // preventDefault + stopPropagation for any chord it turns into a control
       // byte, so a window-level listener like this one simply never sees it.
-      const isMod = hasMod(e);
-      const isInMonacoEditor = Boolean(e.target && e.target.closest && e.target.closest('.monaco-editor'));
-
-      // ⌘P: Go to File (quick open) · ⌘⇧P: all commands
-      if (isMod && e.key.toLowerCase() === 'p') {
-        e.preventDefault();
-        setCommandPaletteOpen(true, e.shiftKey ? 'all' : 'files');
-        return;
-      }
-
-      // ⌘K / Ctrl+K: Command Palette
-      if (isMod && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setCommandPaletteOpen(!isCommandPaletteOpen);
-        return;
-      }
-
-      // ⌘S / Ctrl+S: Save active file
-      if (isMod && !e.shiftKey && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        if (activeEditorTabId) {
-          saveFile(activeEditorTabId);
-        }
-        return;
-      }
-
-      // ⌘Shift+D: Split active terminal pane down (vertical)
-      if (isMod && e.shiftKey && e.key.toLowerCase() === 'd') {
-        e.preventDefault();
-        splitActivePane?.('vertical');
-        return;
-      }
-
-      // ⌘D: Split active terminal pane right (horizontal)
-      // Monaco binds ⌘D to "add selection to next find match" — don't fight it.
-      if (isMod && !e.shiftKey && e.key.toLowerCase() === 'd') {
-        if (isInMonacoEditor) return;
-        e.preventDefault();
-        splitActivePane?.('horizontal');
-        return;
-      }
-
-      // ⌘W: Close the active terminal pane. Guarded so it doesn't hijack
-      // whatever ⌘W does while focus is inside Monaco.
-      if (isMod && !e.shiftKey && e.key.toLowerCase() === 'w') {
-        if (isInMonacoEditor) return;
-        e.preventDefault();
-        closeActivePane?.();
-        return;
-      }
-
-      // ⌥⌘→ / ⌥⌘←: Focus next / previous terminal pane
-      if (isMod && e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
-        e.preventDefault();
-        focusNextPane?.(e.key === 'ArrowRight' ? 1 : -1);
-        return;
-      }
-
-      // ⌃⇧` : New terminal tab — checked before plain ⌃` (e.code avoids the
-      // US-layout ambiguity where shift+backtick reports key === '~').
-      if (e.ctrlKey && e.shiftKey && e.code === 'Backquote') {
-        e.preventDefault();
-        createTerminalTab?.();
-        return;
-      }
-
-      // ⌃` : Toggle the bottom panel
-      if (e.ctrlKey && !e.shiftKey && e.code === 'Backquote') {
-        e.preventDefault();
-        togglePanel();
-        return;
-      }
-
-      // ⌘B: Toggle primary sidebar
-      if (isMod && !e.altKey && e.key.toLowerCase() === 'b') {
-        e.preventDefault();
-        toggleSidebar();
-        return;
-      }
-
-      // ⌘L: Clear unpinned terminal blocks
-      if (isMod && e.key.toLowerCase() === 'l') {
-        e.preventDefault();
-        clearBlocks?.();
-        return;
-      }
-
-      // Escape: Close modals
-      if (e.key === 'Escape') {
-        if (isCommandPaletteOpen) {
-          setCommandPaletteOpen(false);
-        }
-      }
+      dispatchKeydown(e, {
+        isMod: hasMod(e),
+        isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
+        isCommandPaletteOpen,
+        activeEditorTabId,
+        setCommandPaletteOpen,
+        setSettingsModalOpen,
+        toggleSidebar,
+        togglePanel,
+        toggleSecondarySidebar,
+        saveFile,
+        pickRoot,
+        splitActivePane,
+        closeActivePane,
+        focusNextPane,
+        createTerminalTab,
+        clearBlocks,
+        closeWindow: windowControls.close,
+      });
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -133,9 +73,12 @@ export function useKeybindings() {
     isCommandPaletteOpen,
     activeEditorTabId,
     saveFile,
+    pickRoot,
     setCommandPaletteOpen,
+    setSettingsModalOpen,
     toggleSidebar,
     togglePanel,
+    toggleSecondarySidebar,
     splitActivePane,
     closeActivePane,
     focusNextPane,
