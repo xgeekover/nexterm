@@ -774,6 +774,8 @@ function regeneratePaneIds(node, idMap = new Map()) {
 
 let unlisteners = [];
 let listening = false;
+// The bootstrap still running, shared by every init() until it settles — see init.
+let initInFlight = null;
 
 /**
  * Drop the persistent xterm instance a closed tab owned (see
@@ -1846,7 +1848,29 @@ export const useTerminalStore = create((set, get) => {
       flushPersist();
     },
 
-    init: async () => {
+    /**
+     * Bring the terminals up. Safe to call while a call is still running.
+     *
+     * App calls this from its mount effect, which React StrictMode runs twice
+     * in development — and the second call arrived while the first was still
+     * spawning. `isInitialized` is only set once the shells are up, so both
+     * calls restored the saved layout, and the second overwrote the first:
+     * every restored tab left one shell running with no tab to show it (one
+     * reload with two saved tabs: four new backend sessions, two terminals on
+     * screen). Callers now share the run in flight. It is dropped once it
+     * settles, so a later init() — a relaunch — runs from scratch.
+     */
+    init: () => {
+      if (!initInFlight) {
+        initInFlight = get().bootstrap().finally(() => {
+          initInFlight = null;
+        });
+      }
+      return initInFlight;
+    },
+
+    /** The work behind `init`. Call `init` — it keeps concurrent calls from spawning twice. */
+    bootstrap: async () => {
       if (get().isInitialized) {
         await get().attachListeners();
         return;

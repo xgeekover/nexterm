@@ -19,6 +19,8 @@ const loadingDirs = new Set();
 let unlisteners = [];
 let listening = false;
 let refreshTimer = null;
+// The init() still running, shared by every caller until it settles — see init.
+let initInFlight = null;
 
 // --- Editor split tree ------------------------------------------------------
 // Mirrors src/stores/terminalStore.js's split-tree model so the editor
@@ -199,6 +201,9 @@ export const useEditorStore = create((set, get) => ({
   rootPath: '/workspace',
   expandedFolders: new Set(['/workspace', '/workspace/src', '/workspace/tests']),
   isLoadingTree: false,
+  // False until init() has asked the backend for the real root; until then
+  // `rootPath` is only the browser mock's placeholder. See FileExplorer.
+  rootResolved: false,
   diffView: null,
 
   // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
@@ -243,18 +248,30 @@ export const useEditorStore = create((set, get) => ({
     unlisteners = [];
     listening = false;
   },
-  init: async () => {
-    // The backend owns the workspace root; the browser mock reports '/workspace'.
-    try {
-      const rootPath = await invoke('fs_get_root');
-      if (rootPath) set({ rootPath, expandedFolders: new Set([rootPath]) });
-    } catch (err) {
-      console.error('[EditorStore] Failed to resolve workspace root:', err);
-    }
-    await get().refreshExplorer();
+  init: () => {
+    // App's effect runs twice under React StrictMode in development, and the
+    // second run arrives while the first is still waiting on the backend.
+    // Share the run in flight rather than resolving the root and reading the
+    // tree twice. Cleared once it settles, so a later init() runs afresh.
+    if (initInFlight) return initInFlight;
+    initInFlight = (async () => {
+      // The backend owns the workspace root; the browser mock reports '/workspace'.
+      try {
+        const rootPath = await invoke('fs_get_root');
+        if (rootPath) set({ rootPath, expandedFolders: new Set([rootPath]) });
+      } catch (err) {
+        console.error('[EditorStore] Failed to resolve workspace root:', err);
+      }
+      // As known as it will get: the placeholder stays if the backend could not say.
+      set({ rootResolved: true });
+      await get().refreshExplorer();
 
-    // Listen to filesystem changes
-    await get().attachListeners();
+      // Listen to filesystem changes
+      await get().attachListeners();
+    })().finally(() => {
+      initInFlight = null;
+    });
+    return initInFlight;
   },
 
   /**

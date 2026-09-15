@@ -56,8 +56,13 @@ export function FileExplorer() {
   const [contextMenu, setContextMenu] = useState(null); // { x, y, target }
   const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, name }
 
+  // A remount (the side bar reopened) re-reads the tree. The FIRST mount runs
+  // before App has asked the backend for the workspace root — a child's
+  // effects run before its parent's — so reading then meant reading the
+  // placeholder '/workspace', which the backend refuses. editorStore.init
+  // loads the tree itself as soon as the real root is known.
   useEffect(() => {
-    refreshExplorer();
+    if (useEditorStore.getState().rootResolved) refreshExplorer();
   }, [refreshExplorer]);
 
   const isCreatingAtRoot = creatingEntry?.parentPath === rootPath;
