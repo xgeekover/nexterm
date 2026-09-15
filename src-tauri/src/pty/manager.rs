@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter};
 
 use super::osc::{Marker, OscFilter};
 use super::shell_integration;
+use super::startup_query::StartupCursorQuery;
 use crate::models::PtyCommandDonePayload;
 use crate::models::PtyCwdPayload;
 
@@ -276,6 +277,15 @@ impl PtyManager {
             .map_err(|e| format!("Failed to take PTY writer: {e}"))?;
 
         let input_tx = spawn_writer_thread(writer, &session_id)?;
+        // ConPTY holds the shell back until its opening cursor query is
+        // answered (see startup_query.rs). The reader thread answers it through
+        // this same input queue, and lets the clone go once the start of the
+        // stream is decided so it cannot keep the queue alive.
+        let mut startup_query = if cfg!(windows) {
+            Some((StartupCursorQuery::default(), input_tx.clone()))
+        } else {
+            None
+        };
 
         let created_at = Utc::now();
         let session = Arc::new(PtySession {
@@ -307,7 +317,25 @@ impl PtyManager {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            let filtered = filter.feed(&buf[..n]);
+                            let mut released = None;
+                            if let Some((query, answer_tx)) = startup_query.as_mut() {
+                                let scan = query.feed(&buf[..n]);
+                                if let Some(answer) = scan.answer {
+                                    let _ = answer_tx.send(answer.to_vec());
+                                }
+                                released = Some((scan.forward, query.is_done()));
+                            }
+                            if matches!(released, Some((_, true))) {
+                                startup_query = None;
+                            }
+                            let chunk: &[u8] = match &released {
+                                Some((forward, _)) => forward,
+                                None => &buf[..n],
+                            };
+                            if chunk.is_empty() {
+                                continue;
+                            }
+                            let filtered = filter.feed(chunk);
                             if !filtered.output.is_empty() {
                                 let payload = PtyOutputPayload {
                                     session_id: session_id_clone.clone(),
@@ -336,6 +364,22 @@ impl PtyManager {
                             }
                         }
                         Err(_) => break,
+                    }
+                }
+
+                // The stream ended while bytes were held back as a possible
+                // cursor query: they are output like any other.
+                if let Some((mut query, _)) = startup_query.take() {
+                    let held = query.take_held();
+                    if !held.is_empty() {
+                        let filtered = filter.feed(&held);
+                        if !filtered.output.is_empty() {
+                            let payload = PtyOutputPayload {
+                                session_id: session_id_clone.clone(),
+                                data: filtered.output,
+                            };
+                            let _ = app_handle_clone.emit("pty-output", &payload);
+                        }
                     }
                 }
 
@@ -564,33 +608,50 @@ mod writer_thread_tests {
 
     /// The unit tests above use a fake writer; this one drives a real shell
     /// through the real queue, because the whole input path was rewritten.
+    ///
+    /// On Windows that shell is cmd.exe behind ConPTY, which runs nothing until
+    /// its opening cursor query is answered. The test answers it with the same
+    /// `StartupCursorQuery` the reader thread in `spawn` uses, so breaking that
+    /// shows up here as a shell that never echoes anything.
     #[test]
     fn a_real_shell_receives_queued_input() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+        #[cfg(unix)]
+        let (shell, enter) = ("/bin/sh".to_string(), "\n");
+        #[cfg(windows)]
+        let (shell, enter) = (PtyManager::default_shell(), "\r");
 
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
             .expect("openpty");
-        let mut cmd = CommandBuilder::new("/bin/sh");
+        let mut cmd = CommandBuilder::new(&shell);
         cmd.env("PS1", "");
-        let mut child = pair.slave.spawn_command(cmd).expect("spawn sh");
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn shell");
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().expect("reader");
         let writer = pair.master.take_writer().expect("writer");
         let tx = spawn_writer_thread(writer, "test-real").unwrap();
 
-        tx.send(b"echo nexterm-queue-ok\n".to_vec()).unwrap();
-        tx.send(b"exit\n".to_vec()).unwrap();
+        tx.send(format!("echo nexterm-queue-ok{enter}").into_bytes()).unwrap();
+        tx.send(format!("exit{enter}").into_bytes()).unwrap();
 
+        let mut startup_query = StartupCursorQuery::default();
         let mut seen = String::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut buf = [0u8; 1024];
         while Instant::now() < deadline && !seen.contains("nexterm-queue-ok") {
             match reader.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Ok(n) => {
+                    let scan = startup_query.feed(&buf[..n]);
+                    if let Some(answer) = scan.answer {
+                        tx.send(answer.to_vec()).unwrap();
+                    }
+                    seen.push_str(&String::from_utf8_lossy(&scan.forward));
+                }
                 Err(_) => break,
             }
         }
