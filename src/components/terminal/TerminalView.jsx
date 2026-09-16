@@ -2,7 +2,7 @@ import React, { useEffect, useReducer, useRef } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { ensureGpuRenderer, getOrCreateTerminal, isFittable } from './terminalRegistry.js';
-import { usablePtySize } from '../../lib/terminalCompat.js';
+import { fitAndReport } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
@@ -126,23 +126,20 @@ export function TerminalView({ tabId, active = false }) {
     ensureGpuRenderer(entry);
 
     const doFit = () => {
-      if (!isFittable(wrapper)) return;
-      try {
-        // A pane too small for the backend (mid-layout) keeps its current size:
-        // otherwise xterm draws for one size while the shell writes for another.
-        const size = usablePtySize(entry.fitAddon.proposeDimensions());
-        if (!size) return;
-        entry.fitAddon.fit();
-        if (entry.term.cols !== size.cols || entry.term.rows !== size.rows) {
-          entry.term.resize(size.cols, size.rows);
-        }
-        resizePty(tabId, entry.term.cols, entry.term.rows);
-        // A resize invalidates any cached cursor pixel position — clear
-        // rather than risk drawing the overlay in a stale spot.
-        setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
-      } catch (_) {
-        // container not laid out yet (zero size) — next observer tick retries
-      }
+      // Shared with the Settings window's live refit so the two cannot drift:
+      // a pane too small for the backend (mid-layout) keeps its current size,
+      // and whatever size does come out is reported to the shell.
+      const fitted = fitAndReport({
+        tabId,
+        term: entry.term,
+        fitAddon: entry.fitAddon,
+        resizePty,
+        fittable: isFittable(wrapper),
+      });
+      if (!fitted) return;
+      // A resize invalidates any cached cursor pixel position — clear
+      // rather than risk drawing the overlay in a stale spot.
+      setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
     };
     doFit();
 

@@ -24,6 +24,7 @@ import './init_once.test.js';
 import './terminal_compat.test.js';
 import './no_folder.test.js';
 import './keybinding_table.test.js';
+import './fit_reports_size.test.js';
 
 async function run() {
   console.log('====================================================');
