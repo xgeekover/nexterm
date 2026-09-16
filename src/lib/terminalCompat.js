@@ -65,3 +65,48 @@ export function withoutVerbatimPrefix(path) {
   if (/^\\\\\?\\[A-Za-z]:/.test(path)) return path.slice(4);
   return path;
 }
+
+/**
+ * Refit a terminal to its pane AND tell the shell the size that came out.
+ *
+ * Both halves matter, and the second one is easy to forget: the app used to
+ * refit after a font or line-height change without reporting, because the pane
+ * itself had not moved so `TerminalView`'s ResizeObserver never fired.
+ * Measured in a real browser — halving the font took the grid from 107x33 to
+ * 251x70 while the shell went on believing it had 107 columns, and stayed
+ * wrong until something else happened to resize the window. Anything drawing a
+ * full screen (vim, htop, a TUI) draws for the wrong width in between.
+ *
+ * Returns the size reported, or null when the pane is not measurable yet — a
+ * pane mid-layout is left at its current size rather than told a nonsense one.
+ *
+ * `term`, `fitAddon` and `resizePty` are passed in rather than imported so this
+ * stays free of xterm and of the store, and can be checked in Node.
+ */
+export function fitAndReport({ tabId, term, fitAddon, resizePty, fittable = true }) {
+  if (!fittable || !term || !fitAddon) return null;
+
+  let size;
+  try {
+    size = usablePtySize(fitAddon.proposeDimensions());
+  } catch (_) {
+    return null;
+  }
+  if (!size) return null;
+
+  try {
+    fitAddon.fit();
+    // `fit` measures again itself and can land a row or two off what
+    // `proposeDimensions` just said; the clamped size is the one both sides
+    // agreed on, so force it rather than let them drift.
+    if (term.cols !== size.cols || term.rows !== size.rows) {
+      term.resize(size.cols, size.rows);
+    }
+  } catch (_) {
+    // container not laid out yet — the next resize retries
+    return null;
+  }
+
+  resizePty?.(tabId, term.cols, term.rows);
+  return { cols: term.cols, rows: term.rows };
+}

@@ -22,8 +22,9 @@ import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { usablePtySize, windowsPtyFor } from '../../lib/terminalCompat.js';
+import { fitAndReport, usablePtySize, windowsPtyFor } from '../../lib/terminalCompat.js';
 import { useSystemStore } from '../../stores/systemStore.js';
+import { useTerminalStore } from '../../stores/terminalStore.js';
 
 const instances = new Map();
 
@@ -178,11 +179,21 @@ function ensureThemeObserverStarted() {
  * instance's `.options`, then refit (reusing `FitAddon`, the same one
  * `TerminalView`'s own resize-observer calls) so a font/line-height change
  * takes effect immediately instead of only on the next natural resize.
+ *
+ * The refit has to be reported to the shell as well. A smaller font fits more
+ * columns into the same pane, but the pane itself does not move, so
+ * `TerminalView`'s ResizeObserver never fires and nothing used to send the new
+ * size on: halving the font took the grid from 107x33 to 251x70 while the
+ * shell went on believing it had 107 columns. Everything drawing a full screen
+ * — vim, htop, a TUI — then drew for the wrong width until something else
+ * happened to resize the window. `resizePty` ignores a size the tab has
+ * already reported, so calling it here costs nothing when nothing moved.
  */
 function applyLiveTerminalSettings(state) {
   const fontFamily = state.terminalFontFamily?.trim() ? state.terminalFontFamily.trim() : readFontFamily();
   const theme = resolveTerminalTheme(state.terminalTheme);
-  for (const entry of instances.values()) {
+  const resizePty = useTerminalStore.getState().resizePty;
+  for (const [tabId, entry] of instances.entries()) {
     entry.term.options.fontFamily = fontFamily;
     entry.term.options.fontSize = state.terminalFontSize;
     entry.term.options.lineHeight = state.terminalLineHeight;
@@ -190,13 +201,13 @@ function applyLiveTerminalSettings(state) {
     entry.term.options.cursorBlink = state.terminalCursorBlink;
     entry.term.options.scrollback = state.terminalScrollback;
     entry.term.options.theme = theme;
-    if (isFittable(entry.container) && usablePtySize(entry.fitAddon.proposeDimensions())) {
-      try {
-        entry.fitAddon.fit();
-      } catch (_) {
-        // container not laid out yet — the next natural resize retries
-      }
-    }
+    fitAndReport({
+      tabId,
+      term: entry.term,
+      fitAddon: entry.fitAddon,
+      resizePty,
+      fittable: isFittable(entry.container),
+    });
   }
 }
 
