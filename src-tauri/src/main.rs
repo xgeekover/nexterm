@@ -1,3 +1,12 @@
+// Windows links a Rust binary as a CONSOLE application unless told otherwise,
+// and then opens a console for it — the empty black terminal window that
+// appeared beside NexTerm when the portable build was run. Tauri's own
+// template carries this line; this project lost it.
+//
+// Kept for debug builds so `cargo run` and `tauri dev` still have somewhere to
+// print: without a console there, every println! and eprintln! in the backend
+// would go nowhere.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![deny(warnings)]
 
 pub mod commands;
@@ -79,4 +88,47 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");
+}
+
+/// The attribute that keeps Windows from opening a console beside the app.
+///
+/// Checked as source text because there is nothing to check at runtime: the
+/// subsystem is decided by the linker, `cargo test` always runs with a console
+/// attached, and on macOS and Linux the attribute does nothing at all. So
+/// deleting it breaks only Windows, only in release builds, and nothing else
+/// here would notice — which is how it went missing in the first place, and
+/// why the portable build shipped with an empty black terminal window next to
+/// it.
+#[cfg(test)]
+mod windows_subsystem_tests {
+    #[test]
+    fn release_builds_do_not_get_a_console_window() {
+        let main_rs = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs"),
+        )
+        .expect("main.rs is readable");
+
+        let attribute = main_rs
+            .lines()
+            .find(|line| line.contains("windows_subsystem"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "main.rs has no `windows_subsystem` attribute — a release build on Windows \
+                     will open an empty console window beside the app"
+                )
+            });
+
+        assert!(
+            attribute.contains("windows_subsystem = \"windows\""),
+            "the subsystem must be `windows`, not a console: {attribute}"
+        );
+        assert!(
+            attribute.contains("not(debug_assertions)"),
+            "keep it to release builds so `tauri dev` still has somewhere to print: {attribute}"
+        );
+        assert!(
+            attribute.trim_start().starts_with("#!["),
+            "it has to be an inner attribute on the crate root: {attribute}"
+        );
+    }
 }
