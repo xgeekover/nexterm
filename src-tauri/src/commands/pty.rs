@@ -41,6 +41,14 @@ pub fn pty_write(
     state.pty_manager.write(&session_id, &data)
 }
 
+/// Reap sessions the frontend does not claim — see `PtyManager::retain_only`.
+/// Async because killing a shell waits for the child in 50ms steps and a
+/// reload can leave several behind.
+#[tauri::command(rename_all = "snake_case", async)]
+pub fn pty_retain_only(state: State<AppState>, session_ids: Vec<String>) -> Result<usize, String> {
+    Ok(state.pty_manager.retain_only(&session_ids))
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn pty_resize(
     state: State<AppState>,

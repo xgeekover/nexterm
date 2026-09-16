@@ -324,6 +324,24 @@ class BrowserMockBridge {
         return null;
       }
 
+      // The browser mock keeps its own session map, and it survives a
+      // reload just as the Rust one does — so it has to reap too, or browser
+      // mode would disagree with the app about what leaking looks like.
+      case 'pty_retain_only': {
+        const { session_ids = [] } = args;
+        const keep = new Set(session_ids);
+        let reaped = 0;
+        for (const id of Array.from(this.ptySessions.keys())) {
+          if (keep.has(id)) continue;
+          const session = this.ptySessions.get(id);
+          if (session) session.active = false;
+          this.ptySessions.delete(id);
+          await this.emit('pty-exit', { session_id: id, exit_code: 130 });
+          reaped += 1;
+        }
+        return reaped;
+      }
+
       // 5. pty_list_sessions
       case 'pty_list_sessions': {
         return Array.from(this.ptySessions.values());

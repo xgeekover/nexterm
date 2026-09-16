@@ -444,8 +444,6 @@ describe('Terminal layout: persistence, restore contents, and live cwd', () => {
   });
 
   test('TL-17: a saved terminal no group references costs no PTY on relaunch', async () => {
-    const sessionsBefore = mockBridge.ptySessions.size;
-
     await resetStore({
       seed: {
         [PERSIST_KEY]: {
@@ -470,8 +468,12 @@ describe('Terminal layout: persistence, restore contents, and live cwd', () => {
       },
     });
 
+    // An absolute count, not a delta: `bootstrap` reaps whatever the backend
+    // was still holding before it spawns anything (a reloaded webview used to
+    // leave its whole previous set running), so after a relaunch the live
+    // sessions are exactly the ones this layout asked for.
     assert.equal(
-      mockBridge.ptySessions.size - sessionsBefore,
+      mockBridge.ptySessions.size,
       1,
       'an orphaned tab id in the payload must not cost a shell process'
     );
