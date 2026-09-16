@@ -505,6 +505,38 @@ impl PtyManager {
         Ok(())
     }
 
+    /// Kill every session except the ones named, and report how many went.
+    ///
+    /// The webview can be reloaded — ⌘R, or Vite replacing a module it cannot
+    /// hot-swap — and when it is, the frontend's state starts from nothing
+    /// while this map does not. The rebuilt frontend restores its saved layout
+    /// by spawning a fresh PTY per tab (the payload stores a title and a
+    /// directory, never a session id), so the previous set was left running
+    /// with no tab to show it: one leaked shell per reload, forever, measured
+    /// as 1 → 2 → 3 → 4 child shells over three reloads with one terminal on
+    /// screen.
+    ///
+    /// NexTerm has a single window, so a session this manager holds that the
+    /// starting frontend does not claim belongs to a frontend that no longer
+    /// exists. Expressed as "keep exactly these" rather than "kill everything"
+    /// so that a frontend which one day reattaches to its old sessions can say
+    /// so, instead of this quietly destroying them.
+    pub fn retain_only(&self, keep: &[String]) -> usize {
+        let doomed: Vec<String> = {
+            let sessions = self.sessions.lock();
+            sessions
+                .keys()
+                .filter(|id| !keep.iter().any(|k| k == *id))
+                .cloned()
+                .collect()
+        };
+        // `kill` takes the same lock, so the ids are collected before killing.
+        for id in &doomed {
+            let _ = self.kill(id);
+        }
+        doomed.len()
+    }
+
     pub fn list_sessions(&self) -> Vec<PtySessionInfo> {
         let sessions = self.sessions.lock();
         sessions
@@ -550,6 +582,65 @@ mod tests {
 
         // Kill on unknown session succeeds gracefully (no-op)
         assert!(manager.kill("invalid-session").is_ok());
+    }
+
+    /// `retain_only` against real spawned shells.
+    ///
+    /// This is what stops a reloaded webview leaking its terminals, so it is
+    /// checked here rather than only through the browser mock — the mock
+    /// implements the same contract in JavaScript and could agree with the
+    /// tests while disagreeing with this.
+    #[test]
+    fn retain_only_keeps_what_it_is_told_and_reaps_the_rest() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+        // `PtyManager::spawn` needs an AppHandle to emit output events, which
+        // a unit test has no way to build — so the sessions are assembled by
+        // hand around real shells. `retain_only` is map bookkeeping plus a
+        // kill, and both are exercised here.
+        let manager = PtyManager::new();
+        let spawn = |id: &str| {
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+                .expect("openpty");
+            let cmd = CommandBuilder::new(PtyManager::default_shell());
+            let child = pair.slave.spawn_command(cmd).expect("a shell must start");
+            drop(pair.slave);
+            manager.sessions.lock().insert(
+                id.to_string(),
+                Arc::new(PtySession {
+                    id: id.to_string(),
+                    shell: PtyManager::default_shell(),
+                    created_at: Utc::now(),
+                    master: Mutex::new(pair.master),
+                    input: Mutex::new(None),
+                    child: Mutex::new(child),
+                }),
+            );
+            id.to_string()
+        };
+
+        let a = spawn("pty-a");
+        let b = spawn("pty-b");
+        let c = spawn("pty-c");
+        assert_eq!(manager.list_sessions().len(), 3);
+
+        let reaped = manager.retain_only(&[b.clone()]);
+        assert_eq!(reaped, 2, "it reports how many it killed");
+
+        let left: Vec<String> = manager.list_sessions().into_iter().map(|s| s.session_id).collect();
+        assert_eq!(left, vec![b.clone()], "only the named session survives");
+        assert!(!left.contains(&a));
+        assert!(!left.contains(&c));
+
+        // Naming a session that is already gone kills nothing and is not an
+        // error: a frontend may legitimately ask to keep what it had.
+        assert_eq!(manager.retain_only(&[b.clone(), a.clone()]), 0);
+        assert_eq!(manager.list_sessions().len(), 1);
+
+        // And the empty list — what `bootstrap` sends — clears everything.
+        assert_eq!(manager.retain_only(&[]), 1);
+        assert!(manager.list_sessions().is_empty());
     }
 }
 

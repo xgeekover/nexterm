@@ -24,6 +24,7 @@ import './init_once.test.js';
 import './terminal_compat.test.js';
 import './no_folder.test.js';
 import './keybinding_table.test.js';
+import './pty_reload_leak.test.js';
 
 async function run() {
   console.log('====================================================');

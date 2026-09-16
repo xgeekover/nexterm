@@ -1897,6 +1897,29 @@ export const useTerminalStore = create((set, get) => {
         }
         set({ cwd: rootPath });
 
+        // Reap whatever the backend is still holding before spawning anything.
+        //
+        // A webview reload (⌘R, or Vite replacing a module it cannot hot-swap)
+        // restarts this store from nothing while the Rust side keeps its
+        // session map, and the restore below always spawns a fresh PTY per tab
+        // — the saved payload carries a title and a directory, never a session
+        // id. So the previous set stayed alive with no tab to show it: one
+        // leaked shell per reload, measured as 1 → 2 → 3 → 4 child shells over
+        // three reloads with a single terminal on screen.
+        //
+        // We claim nothing, because nothing has been spawned yet: this store
+        // only reaches `bootstrap` when it holds no terminals at all.
+        try {
+          const reaped = await invoke('pty_retain_only', { session_ids: [] });
+          if (reaped) {
+            console.info(`[TerminalStore] Reaped ${reaped} terminal session(s) left by a previous page load.`);
+          }
+        } catch (err) {
+          // An older backend has no such command. Leaking is worse than
+          // failing to start, so carry on.
+          console.warn('[TerminalStore] Could not reap previous terminal sessions:', err);
+        }
+
         // Try to bring back last session's groups/panes/tabs. Any failure here
         // (corrupt payload, every pty_spawn rejecting, ...) must fall back to
         // the plain single-terminal bootstrap below rather than leaving the
