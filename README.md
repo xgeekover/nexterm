@@ -157,13 +157,23 @@ scrollback, colour theme, and command suggestions.
 
 On Windows and Linux use `Ctrl` wherever `⌘` is listed.
 
-**Shortcuts yield to the shell.** A chord the terminal needs goes to the
-terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K` kills to end of line,
-`Ctrl+C` interrupts, and the app does nothing. The same chord elsewhere in the
-window does what the table says. On Windows and Linux the items that would
-otherwise collide are reachable from the ☰ menu as well, because a native menu
-accelerator is resolved before the webview and would take the key away from
-every shell in the app.
+**Shortcuts yield to the shell, with two exceptions.** A chord the terminal
+needs goes to the terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K`
+kills to end of line, `Ctrl+C` interrupts, `Ctrl+R` is reverse-i-search, and
+the app does nothing. The same chord elsewhere in the window does what the
+table says.
+
+The exceptions are the two side-bar toggles, `⌘B` / `Ctrl+B` and `⌥⌘B` /
+`Ctrl+Alt+B`. The app claims those even while a terminal has focus, which is
+its resting state — otherwise xterm turned `Ctrl+B` into `^B` and the shortcut
+the menu advertises did nothing at all. VS Code makes the same trade.
+**If you run tmux inside a pane, rebind its prefix**: `Ctrl+B` will not reach
+it. Everything else in the table above is left to the shell.
+
+Packaged builds also refuse the reload chords (`F5`, `Ctrl+Shift+R`, `⌘R`).
+Reloading restarts the frontend, and start-up reaps every terminal the backend
+is holding, so a stray reload would kill every running shell. Development
+builds still reload, because that is the point of them.
 
 ## Develop
 
@@ -187,18 +197,29 @@ the API to confirm the sizes match, and only then makes the release visible.
 A build that loses a platform leaves a draft behind instead of a half-finished
 public release.
 
-CI runs the tests on Ubuntu only. Windows-specific behaviour — ConPTY, `\\?\`
-paths, the Windows build number — is covered by tests that only compile or
-matter on Windows, so run the suites on a Windows machine before tagging a
-release that touches it.
+CI runs the tests on all three platforms, not just Linux. That matters because
+the Rust suite spawns real shells, opens real PTYs and reads real directories,
+so it behaves differently on each: ConPTY is not a unix pty, and
+`C:\Users\me\project\src` is not a path that any `/`-shaped assumption
+survives. The Windows job also reads the PE header of the binary it just built
+and refuses anything that would open a console window beside the app.
 
 ## Test
 
 ```sh
 cd src-tauri && cargo test    # PTY, ConPTY start-up, OSC parsing, fs confinement, native menu
+cd ..
 node tests/e2e/runner.js      # store + UI flows against a mock IPC bridge
 node tests/adversarial/runner.js
 ```
+
+Run `cargo test` **first**: it reads a real directory tree and writes what the
+backend returned to `tests/fixtures/backend-tree.json`, which the adversarial
+suite then pushes through the real explorer code. That pair is how a Windows
+path is checked against the explorer on Windows rather than against a
+hand-written string. Without the fixture those cases report as `SKIPPED`
+rather than passing, so a run that checked nothing cannot look like a run that
+checked everything.
 
 ## How it fits together
 
