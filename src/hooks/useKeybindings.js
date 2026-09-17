@@ -1,19 +1,24 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { hasMod } from '../lib/platform.js';
-import { dispatchKeydown, dispatchKeydownOverTerminal } from '../lib/keybindings.js';
+import {
+  dispatchKeydown,
+  dispatchKeydownOverTerminal,
+  resolveKeybindings,
+} from '../lib/keybindings.js';
 import { windowControls } from '../lib/menuActions.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 
 /**
- * Wire the keyboard to `KEYBINDINGS`.
+ * Wire the keyboard to the resolved keybindings.
  *
- * The chords themselves live in src/lib/keybindings.js as data, so the menu's
- * advertised shortcut and the code that answers it can be compared by a test
- * instead of by eye — four menu entries were showing a shortcut nothing
- * listened for. All this hook does is decide what "the app modifier" means on
- * this platform, hand the stores over, and let the table match.
+ * The chords live in src/lib/keybindings.js as data and the user's overrides
+ * in settings, so the menu's advertised shortcut and the code that answers it
+ * can be compared by a test instead of by eye — four menu entries once showed
+ * a shortcut nothing listened for. All this hook does is decide what "the app
+ * modifier" means on this platform, resolve the bindings, hand the stores
+ * over, and let the table match.
  */
 export function useKeybindings() {
   const setCommandPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
@@ -35,12 +40,21 @@ export function useKeybindings() {
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearBlocks = useTerminalStore((s) => s.clearBlocks);
 
+  // Defaults plus whatever the user changed. Re-resolved only when the
+  // overrides change, not on every keypress.
+  const keybindingOverrides = useSettingsStore((s) => s.keybindings);
+  const bindings = useMemo(
+    () => resolveKeybindings(keybindingOverrides).bindings,
+    [keybindingOverrides]
+  );
+
   useEffect(() => {
     // The app modifier is ⌘ on macOS and Ctrl elsewhere — never both.
     // Treating Ctrl as a modifier on macOS stole ^K/^B/^A from every text
     // field in the app; treating only ⌘ as one on Windows meant half these
     // shortcuts never fired at all.
     const contextFor = (e) => ({
+      bindings,
       isMod: hasMod(e),
       isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
       // Reloading is a development tool. In a packaged build it silently
@@ -88,6 +102,7 @@ export function useKeybindings() {
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [
+    bindings,
     isCommandPaletteOpen,
     activeEditorTabId,
     saveFile,

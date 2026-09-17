@@ -17,8 +17,10 @@
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { MENU_BAR } from '../../src/lib/menuActions.js';
+import { chordMatches } from '../../src/lib/chords.js';
 import {
-  KEYBINDINGS,
+  COMMANDS,
+  DEFAULT_RESOLVED,
   findBinding,
   dispatchKeydown,
   dispatchKeydownOverTerminal,
@@ -237,7 +239,8 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       for (const menuItem of MENU_ITEMS) {
         const e = eventFor(menuItem.keys, platform);
         const ctx = ctxFor(e, platform);
-        const claimants = KEYBINDINGS.filter((b) => b.when(e, ctx)).map((b) => b.id);
+        const claimants = DEFAULT_RESOLVED.filter((b) => chordMatches(b.chord, e, ctx.isMod))
+          .map((b) => b.command);
         if (claimants.length !== 1) {
           ambiguous.push(`${platform}: ${menuItem.shortcut} claimed by [${claimants.join(', ')}]`);
         }
@@ -248,7 +251,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
 
   test('KB-09: every binding either serves a menu entry or is deliberately not in the menu', () => {
     const menuIds = new Set(MENU_ITEMS.map((i) => i.id));
-    const orphans = KEYBINDINGS.map(menuIdOf)
+    const orphans = Object.keys(COMMANDS).map(menuIdOf)
       .filter((id) => id !== null)
       .filter((id) => !menuIds.has(id));
     assert.deepEqual(
@@ -258,15 +261,24 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     );
 
     // The intentional exceptions, spelled out so adding another is a decision.
-    const notInMenu = KEYBINDINGS.filter((b) => menuIdOf(b) === null).map((b) => b.id);
-    assert.deepEqual(notInMenu.sort(), ['escape', 'focus-pane', 'reload-guard']);
+    const notInMenu = Object.keys(COMMANDS).filter((id) => menuIdOf(id) === null);
+    assert.deepEqual(notInMenu.sort(), [
+      // Deliberately keyboard-only. `all-commands` is ⌘⇧P, the other half of
+      // quick open; the pane-focus pair and the two guards have never been
+      // menu items.
+      'all-commands',
+      'escape',
+      'focus-next-pane',
+      'focus-previous-pane',
+      'reload-guard',
+    ]);
   });
 
   test('KB-11: only window chrome may be claimed over a focused terminal', () => {
     // `overTerminal` takes a chord away from the shell. Which chords do that
     // is a product decision, so it is written down here rather than left to
     // whoever edits the table next.
-    const claimed = KEYBINDINGS.filter((b) => b.overTerminal).map((b) => b.id).sort();
+    const claimed = Object.entries(COMMANDS).filter(([, c]) => c.overTerminal).map(([id]) => id).sort();
     assert.deepEqual(claimed, ['reload-guard', 'toggle-secondary', 'toggle-sidebar']);
   });
 

@@ -26,6 +26,13 @@ export const SETTINGS_DEFAULTS = {
   editorWordWrap: false,
   editorMinimap: true,
   reducedMotion: false,
+  /**
+   * Shortcut overrides, `{ [commandId]: 'mod+shift+b' | ['a','b'] | null }`.
+   * Only what the user changed — the defaults live in src/lib/keybindings.js,
+   * so a command that gains a shortcut later gets it without anyone having to
+   * migrate a saved file. `null` unbinds a command outright.
+   */
+  keybindings: {},
 };
 
 /** Saved values, ignoring anything that is not a setting we know about. */
@@ -34,6 +41,15 @@ function loadSettings() {
   if (!saved || typeof saved !== 'object') return {};
   const out = {};
   for (const key of Object.keys(SETTINGS_DEFAULTS)) {
+    if (key === 'keybindings') {
+      // An object, and nothing else: a saved `null` or an array here would
+      // reach `resolveKeybindings` as garbage and cost the user every
+      // shortcut rather than the one they mistyped.
+      if (saved[key] && typeof saved[key] === 'object' && !Array.isArray(saved[key])) {
+        out[key] = saved[key];
+      }
+      continue;
+    }
     if (key in saved && typeof saved[key] === typeof SETTINGS_DEFAULTS[key]) {
       out[key] = saved[key];
     }
