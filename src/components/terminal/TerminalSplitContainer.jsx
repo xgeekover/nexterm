@@ -32,7 +32,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
-import { chord } from '../../lib/platform.js';
+import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -247,6 +247,7 @@ function DragPreview({ drag }) {
  * to move them to that group.
  */
 function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose, canClose, onRenameGroup }) {
+  const { shortcut } = useShortcuts();
   const paneId = node.id;
   const tabs = useTerminalStore((s) => s.tabs);
   const switchTab = useTerminalStore((s) => s.switchTab);
@@ -407,7 +408,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
             onClick={() => createTab(null, { paneId, groupId })}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
             className={cn(paneHeaderBtn, 'shrink-0')}
-            title={`New Terminal in this pane (${chord('ctrl', 'shift', '`')})`}
+            title={`New Terminal in this pane (${shortcut('new-terminal')})`}
           >
             <Plus size={14} />
           </button>
@@ -419,7 +420,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
             onClick={onSplitH}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
             className={paneHeaderBtn}
-            title={`Split Right (${chord('mod', 'd')})`}
+            title={`Split Right (${shortcut('split-right')})`}
           >
             <SplitSquareHorizontal size={14} />
           </button>
@@ -428,7 +429,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
             onClick={onSplitV}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
             className={paneHeaderBtn}
-            title={`Split Down (${chord('mod', 'shift', 'd')})`}
+            title={`Split Down (${shortcut('split-down')})`}
           >
             <SplitSquareVertical size={14} />
           </button>
@@ -438,7 +439,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
               onClick={onClose}
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
               className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
-              title={`Close Pane (${chord('mod', 'w')})`}
+              title={`Close Pane (${shortcut('close-pane')})`}
             >
               <X size={14} />
             </button>

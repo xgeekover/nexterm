@@ -6,7 +6,8 @@
  * the menu and the keyboard shortcuts cannot drift apart.
  */
 import { isTauri } from './ipc.js';
-import { chord } from './platform.js';
+import { isMac } from './platform.js';
+import { DEFAULT_RESOLVED, keysFor, shortcutLabel } from './keybindings.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
@@ -81,54 +82,74 @@ export function runMenuAction(id) {
 }
 
 /**
- * One menu entry. `keys` is the chord itself, not just the label it renders
- * to: `tests/adversarial/keybinding_table.test.js` builds the event a real
- * keypress would produce from it and checks that a binding actually claims it.
- * A menu that advertises a shortcut nothing listens for is the bug this
- * shape exists to make impossible.
- */
-const item = (id, label, ...keys) => ({ id, label, keys, shortcut: chord(...keys) });
-
-/**
  * The menu NexTerm draws itself, mirroring the non-macOS half of `spec()` in
- * menu.rs. The shortcut strings are labels only — off macOS these chords are
- * served by useKeybindings.js rather than by a native accelerator, precisely
- * so the terminal can win them back when it has focus.
+ * menu.rs: ids and labels only. What each entry is called is fixed; which key
+ * runs it is not, so the chord is filled in from the bindings by `menuBarFor`.
  */
-export const MENU_BAR = [
+const MENU_SPEC = [
   {
     title: 'File',
     items: [
-      item('open-folder', 'Open Folder…', 'mod', 'shift', 'o'),
-      item('new-terminal', 'New Terminal', 'ctrl', 'shift', '`'),
-      item('save', 'Save', 'mod', 's'),
+      { id: 'open-folder', label: 'Open Folder…' },
+      { id: 'new-terminal', label: 'New Terminal' },
+      { id: 'save', label: 'Save' },
       { type: 'separator' },
-      item('preferences', 'Settings…', 'mod', ','),
+      { id: 'preferences', label: 'Settings…' },
       { type: 'separator' },
-      item('close-window', 'Exit', 'mod', 'shift', 'w'),
+      { id: 'close-window', label: 'Exit' },
     ],
   },
   {
     title: 'View',
     items: [
-      item('command-palette', 'Command Palette…', 'mod', 'k'),
-      item('quick-open', 'Go to File…', 'mod', 'p'),
+      { id: 'command-palette', label: 'Command Palette…' },
+      { id: 'quick-open', label: 'Go to File…' },
       { type: 'separator' },
-      item('toggle-sidebar', 'Toggle Primary Side Bar', 'mod', 'b'),
-      item('toggle-panel', 'Toggle Terminal Panel', 'ctrl', '`'),
-      item('toggle-secondary', 'Toggle Terminals Side Bar', 'mod', 'alt', 'b'),
+      { id: 'toggle-sidebar', label: 'Toggle Primary Side Bar' },
+      { id: 'toggle-panel', label: 'Toggle Terminal Panel' },
+      { id: 'toggle-secondary', label: 'Toggle Terminals Side Bar' },
     ],
   },
   {
     title: 'Terminal',
     items: [
-      item('split-right', 'Split Right', 'mod', 'd'),
-      item('split-down', 'Split Down', 'mod', 'shift', 'd'),
-      item('close-pane', 'Close Pane', 'mod', 'w'),
+      { id: 'split-right', label: 'Split Right' },
+      { id: 'split-down', label: 'Split Down' },
+      { id: 'close-pane', label: 'Close Pane' },
       { type: 'separator' },
-      item('clear-terminal', 'Clear Unpinned Blocks', 'mod', 'l'),
+      { id: 'clear-terminal', label: 'Clear Unpinned Blocks' },
     ],
   },
 ];
 
-export default { runMenuAction, MENU_BAR, windowControls };
+/**
+ * The menu with the shortcuts actually in force.
+ *
+ * `key` is the chord itself, not just the label it renders to:
+ * `tests/adversarial/keybinding_table.test.js` builds the event a real
+ * keypress would produce from it and checks that a binding claims it. A menu
+ * that advertises a shortcut nothing listens for is the bug this shape exists
+ * to make impossible — and since a user can now rebind, the label has to come
+ * from the same place the handler does rather than from a string beside it.
+ *
+ * An unbound command keeps its menu row and shows no shortcut, exactly as the
+ * native menu does (see `acceleratorOverrides` in nativeMenu.js).
+ */
+export function menuBarFor(bindings = DEFAULT_RESOLVED) {
+  return MENU_SPEC.map((menu) => ({
+    ...menu,
+    items: menu.items.map((entry) => {
+      if (!entry.id) return entry;
+      return {
+        ...entry,
+        key: keysFor(entry.id, bindings)[0] ?? null,
+        shortcut: shortcutLabel(entry.id, bindings, { isMac }),
+      };
+    }),
+  }));
+}
+
+/** The menu as it stands with nobody having rebound anything. */
+export const MENU_BAR = menuBarFor();
+
+export default { runMenuAction, MENU_BAR, menuBarFor, windowControls };

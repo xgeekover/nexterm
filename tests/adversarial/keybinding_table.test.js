@@ -17,7 +17,7 @@
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { MENU_BAR } from '../../src/lib/menuActions.js';
-import { chordMatches } from '../../src/lib/chords.js';
+import { chordMatches, parseChord } from '../../src/lib/chords.js';
 import {
   COMMANDS,
   DEFAULT_RESOLVED,
@@ -28,40 +28,52 @@ import {
 } from '../../src/lib/keybindings.js';
 
 /** Every menu entry that advertises a shortcut. */
-const MENU_ITEMS = MENU_BAR.flatMap((menu) => menu.items).filter((i) => i.id && i.keys);
+const MENU_ITEMS = MENU_BAR.flatMap((menu) => menu.items).filter((i) => i.id && i.key);
+
+/** What the glyph keys report as `event.key` unshifted. */
+const CODE_TO_KEY = { Backquote: '`', Comma: ',', Period: '.', Slash: '/', Minus: '-', Equal: '=' };
 
 /**
- * The event a real keypress for `keys` produces on `platform`.
+ * The event a real keypress for the chord `key` produces on `platform`.
+ *
+ * Built from the chord the menu shows, and deliberately NOT from
+ * `chordMatches` — this models the browser, so the matcher is still free to be
+ * wrong about it.
  *
  * The difference that matters: "mod" is ⌘ on macOS (metaKey, ctrlKey stays
  * FALSE) and Ctrl on Windows and Linux (ctrlKey TRUE) — so a Windows event
  * looks, to any rule written in terms of `e.ctrlKey`, exactly like a literal
  * Ctrl chord. That overlap is where an ordering mistake would hide.
  */
-function eventFor(keys, platform) {
-  const e = { ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, key: '', code: '' };
-  for (const k of keys) {
-    if (k === 'mod') {
-      if (platform === 'macos') e.metaKey = true;
-      else e.ctrlKey = true;
-    } else if (k === 'ctrl') e.ctrlKey = true;
-    else if (k === 'shift') e.shiftKey = true;
-    else if (k === 'alt') e.altKey = true;
-    else if (k === '`') {
-      e.code = 'Backquote';
-      e.key = '`';
-    } else if (k === ',') {
-      e.key = ',';
-      e.code = 'Comma';
-    } else {
-      // A letter. Shift makes the browser report the capital.
-      e.key = keys.includes('shift') ? k.toUpperCase() : k;
-      e.code = `Key${k.toUpperCase()}`;
-    }
+function eventFor(key, platform) {
+  const chord = parseChord(key);
+  assert.ok(chord, `not a chord: ${key}`);
+  const e = {
+    ctrlKey: Boolean(chord.ctrl),
+    metaKey: Boolean(chord.cmd),
+    shiftKey: Boolean(chord.shift),
+    altKey: Boolean(chord.alt),
+    key: '',
+    code: '',
+  };
+  if (chord.mod) {
+    if (platform === 'macos') e.metaKey = true;
+    else e.ctrlKey = true;
   }
-  // `shift` + backtick reports '~' on a US layout, which is exactly why the
-  // table matches on `code` rather than `key` for that one.
-  if (e.code === 'Backquote' && e.shiftKey) e.key = '~';
+  if (chord.code) {
+    e.code = chord.code;
+    e.key = CODE_TO_KEY[chord.code] ?? '';
+    // `shift` + backtick reports '~' on a US layout, which is exactly why the
+    // table matches on `code` rather than `key` for that one.
+    if (chord.code === 'Backquote' && e.shiftKey) e.key = '~';
+  } else if (chord.key.length === 1) {
+    // A letter. Shift makes the browser report the capital.
+    e.key = e.shiftKey ? chord.key.toUpperCase() : chord.key;
+    e.code = `Key${chord.key.toUpperCase()}`;
+  } else {
+    e.key = chord.key;
+    e.code = chord.key;
+  }
   return e;
 }
 
@@ -78,11 +90,24 @@ const ctxFor = (e, platform, extra = {}) => ({
 const PLATFORMS = ['macos', 'windows'];
 
 describe('Keybinding table: the menu and the keyboard cannot drift apart', () => {
+  test('KB-00: there is a menu to check in the first place', () => {
+    // KB-01, KB-02 and KB-10 all loop over MENU_ITEMS, so an empty list would
+    // report three passes having checked nothing. Not hypothetical: the menu
+    // entries stopped carrying their chord under the old name when the
+    // shortcuts started coming from the bindings, and every one of those cases
+    // went green iterating an empty array.
+    const withoutShortcut = MENU_BAR.flatMap((m) => m.items)
+      .filter((i) => i.id && !i.key)
+      .map((i) => i.id);
+    assert.deepEqual(withoutShortcut, [], 'these menu entries advertise no shortcut at all');
+    assert.equal(MENU_ITEMS.length, 14, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
+  });
+
   test('KB-01: every shortcut the menu advertises is claimed by a binding', () => {
     const unclaimed = [];
     for (const platform of PLATFORMS) {
       for (const menuItem of MENU_ITEMS) {
-        const e = eventFor(menuItem.keys, platform);
+        const e = eventFor(menuItem.key, platform);
         const binding = findBinding(e, ctxFor(e, platform));
         if (!binding) {
           unclaimed.push(`${platform}: ${menuItem.id} (${menuItem.shortcut})`);
@@ -100,7 +125,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     const wrong = [];
     for (const platform of PLATFORMS) {
       for (const menuItem of MENU_ITEMS) {
-        const e = eventFor(menuItem.keys, platform);
+        const e = eventFor(menuItem.key, platform);
         const binding = findBinding(e, ctxFor(e, platform));
         if (binding && binding.id !== menuItem.id) {
           wrong.push(`${platform}: ${menuItem.shortcut} is ${menuItem.id} in the menu but ran ${binding.id}`);
@@ -116,7 +141,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       const menuItem = MENU_ITEMS.find((i) => i.id === id);
       assert.ok(menuItem, `${id} is still in the menu`);
       for (const platform of PLATFORMS) {
-        const e = eventFor(menuItem.keys, platform);
+        const e = eventFor(menuItem.key, platform);
         const binding = findBinding(e, ctxFor(e, platform));
         assert.equal(binding?.id, id, `${id} must be claimed on ${platform} (${menuItem.shortcut})`);
       }
@@ -162,7 +187,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
 
     for (const menuItem of MENU_ITEMS) {
       calls.length = 0;
-      const e = { ...eventFor(menuItem.keys, 'windows'), preventDefault: () => {} };
+      const e = { ...eventFor(menuItem.key, 'windows'), preventDefault: () => {} };
       const fired = dispatchKeydown(e, ctxFor(e, 'windows', actions));
       assert.equal(fired, menuItem.id, `${menuItem.id} must be the binding that ran`);
       assert.deepEqual(
@@ -179,18 +204,18 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     // holds that), so check the pairs land where the menu says they do.
     for (const platform of PLATFORMS) {
       const pairs = [
-        [['mod', 'shift', 'd'], 'split-down'],
-        [['mod', 'd'], 'split-right'],
-        [['mod', 'shift', 'w'], 'close-window'],
-        [['mod', 'w'], 'close-pane'],
-        [['mod', 'alt', 'b'], 'toggle-secondary'],
-        [['mod', 'b'], 'toggle-sidebar'],
-        [['ctrl', 'shift', '`'], 'new-terminal'],
-        [['ctrl', '`'], 'toggle-panel'],
+        ['mod+shift+d', 'split-down'],
+        ['mod+d', 'split-right'],
+        ['mod+shift+w', 'close-window'],
+        ['mod+w', 'close-pane'],
+        ['mod+alt+b', 'toggle-secondary'],
+        ['mod+b', 'toggle-sidebar'],
+        ['ctrl+shift+backquote', 'new-terminal'],
+        ['ctrl+backquote', 'toggle-panel'],
       ];
-      for (const [keys, id] of pairs) {
-        const e = eventFor(keys, platform);
-        assert.equal(findBinding(e, ctxFor(e, platform))?.id, id, `${platform}: ${keys.join('+')}`);
+      for (const [key, id] of pairs) {
+        const e = eventFor(key, platform);
+        assert.equal(findBinding(e, ctxFor(e, platform))?.id, id, `${platform}: ${key}`);
       }
     }
   });
@@ -198,12 +223,12 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
   test('KB-06: Monaco keeps the chords it owns, without them being swallowed', () => {
     // ⌘D and ⌘W belong to the editor while the cursor is in a file: the table
     // must step aside AND leave the key unprevented.
-    for (const keys of [['mod', 'd'], ['mod', 'w']]) {
+    for (const key of ['mod+d', 'mod+w']) {
       let prevented = false;
-      const e = { ...eventFor(keys, 'macos'), preventDefault: () => { prevented = true; } };
+      const e = { ...eventFor(key, 'macos'), preventDefault: () => { prevented = true; } };
       const fired = dispatchKeydown(e, ctxFor(e, 'macos', { isInMonacoEditor: true }));
-      assert.ok(String(fired).startsWith('pass:'), `${keys.join('+')} must pass through, got ${fired}`);
-      assert.equal(prevented, false, `${keys.join('+')} must not be swallowed inside Monaco`);
+      assert.ok(String(fired).startsWith('pass:'), `${key} must pass through, got ${fired}`);
+      assert.equal(prevented, false, `${key} must not be swallowed inside Monaco`);
     }
   });
 
@@ -237,7 +262,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     const ambiguous = [];
     for (const platform of PLATFORMS) {
       for (const menuItem of MENU_ITEMS) {
-        const e = eventFor(menuItem.keys, platform);
+        const e = eventFor(menuItem.key, platform);
         const ctx = ctxFor(e, platform);
         const claimants = DEFAULT_RESOLVED.filter((b) => chordMatches(b.chord, e, ctx.isMod))
           .map((b) => b.command);
@@ -322,15 +347,15 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     // nothing whenever a terminal had focus, because xterm turned Ctrl+B into
     // ^B and stopped the event before any window listener ran.
     for (const platform of PLATFORMS) {
-      for (const [keys, expected] of [
-        [['mod', 'b'], 'toggle-sidebar'],
-        [['mod', 'alt', 'b'], 'toggle-secondary'],
+      for (const [key, expected] of [
+        ['mod+b', 'toggle-sidebar'],
+        ['mod+alt+b', 'toggle-secondary'],
       ]) {
         let prevented = false;
         let stopped = false;
         const toggled = [];
         const e = {
-          ...eventFor(keys, platform),
+          ...eventFor(key, platform),
           preventDefault: () => { prevented = true; },
           stopPropagation: () => { stopped = true; },
         };
@@ -338,10 +363,10 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
           e,
           ctxFor(e, platform, { toggleSidebar: () => toggled.push('primary'), toggleSecondarySidebar: () => toggled.push('secondary') })
         );
-        assert.equal(fired, expected, `${platform}: ${keys.join('+')} must be claimed over a terminal`);
+        assert.equal(fired, expected, `${platform}: ${key} must be claimed over a terminal`);
         assert.equal(toggled.length, 1, `${platform}: ${expected} must actually run`);
-        assert.ok(prevented, `${platform}: ${keys.join('+')} must be swallowed`);
-        assert.ok(stopped, `${platform}: xterm must not also see ${keys.join('+')}`);
+        assert.ok(prevented, `${platform}: ${key} must be swallowed`);
+        assert.ok(stopped, `${platform}: xterm must not also see ${key}`);
       }
     }
   });

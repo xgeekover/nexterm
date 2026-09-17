@@ -23,6 +23,8 @@
 //! so the frontend's id-based event handling in `useMenuEvents.js` needs no
 //! platform branching.
 
+use std::collections::HashMap;
+
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -55,7 +57,11 @@ pub enum Predefined {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     /// App-specific item; `id` is what the webview receives.
-    Custom { id: &'static str, label: &'static str, accelerator: Option<&'static str> },
+    ///
+    /// The accelerator is owned rather than `&'static str` because it is no
+    /// longer fixed at compile time: a user can rebind a shortcut in Settings,
+    /// and the menu has to say what the key actually does now.
+    Custom { id: &'static str, label: &'static str, accelerator: Option<String> },
     Predefined(Predefined),
     Separator,
 }
@@ -66,8 +72,8 @@ pub struct Submenu {
     pub items: Vec<Item>,
 }
 
-fn custom(id: &'static str, label: &'static str, accelerator: &'static str) -> Item {
-    Item::Custom { id, label, accelerator: Some(accelerator) }
+fn custom(id: &'static str, label: &'static str, accelerator: &str) -> Item {
+    Item::Custom { id, label, accelerator: Some(accelerator.to_string()) }
 }
 
 /// A menu item whose accelerator would be a bare `Ctrl`+letter off macOS.
@@ -82,10 +88,10 @@ fn custom(id: &'static str, label: &'static str, accelerator: &'static str) -> I
 /// the accelerator is registered normally. Elsewhere the item is menu-only and
 /// `useKeybindings.js` provides the shortcut — a webview-level listener, which
 /// xterm's own capture handler correctly beats whenever a terminal has focus.
-fn terminal_safe(id: &'static str, label: &'static str, mac_accelerator: &'static str) -> Item {
+fn terminal_safe(id: &'static str, label: &'static str, mac_accelerator: &str) -> Item {
     #[cfg(target_os = "macos")]
     {
-        Item::Custom { id, label, accelerator: Some(mac_accelerator) }
+        Item::Custom { id, label, accelerator: Some(mac_accelerator.to_string()) }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -225,6 +231,22 @@ pub fn custom_ids() -> Vec<&'static str> {
 }
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    build_with(app, &HashMap::new())
+}
+
+/// The menu, with the accelerators the user actually has bound.
+///
+/// `overrides` maps a menu item id to the accelerator it should show — or to
+/// `None` for an item the user has unbound, which then appears in the menu
+/// with no shortcut beside it rather than advertising one that no longer
+/// works. Ids the map does not mention keep whatever `spec` gave them.
+///
+/// The frontend owns the keybindings (src/lib/keybindings.js), so it is the
+/// frontend that sends these; see the `menu_set_accelerators` command.
+pub fn build_with<R: Runtime>(
+    app: &AppHandle<R>,
+    overrides: &HashMap<String, Option<String>>,
+) -> tauri::Result<Menu<R>> {
     let mut submenus = Vec::new();
     for sub in spec() {
         let mut b = SubmenuBuilder::new(app, sub.title);
@@ -232,6 +254,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             b = match item {
                 Item::Separator => b.separator(),
                 Item::Custom { id, label, accelerator } => {
+                    let accelerator = match overrides.get(id) {
+                        Some(chosen) => chosen.clone(),
+                        None => accelerator,
+                    };
                     let mut mi = MenuItemBuilder::with_id(id, label);
                     if let Some(acc) = accelerator {
                         mi = mi.accelerator(acc);
@@ -403,6 +429,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Write this platform's accelerators out for the JS half to compare.
+    ///
+    /// The frontend computes the same strings from the keybindings
+    /// (`src/lib/nativeMenu.js`) and sends them back through
+    /// `menu_set_accelerators`. If the two disagree, the menu shows one key
+    /// before the frontend connects and another after — so a test reads this
+    /// file and checks them item by item, on whichever platform it ran on.
+    #[test]
+    fn dump_the_accelerators_for_the_frontend_contract_test() {
+        let mut accelerators = serde_json::Map::new();
+        for sub in spec() {
+            for item in sub.items {
+                if let Item::Custom { id, accelerator, .. } = item {
+                    accelerators.insert(
+                        id.to_string(),
+                        match accelerator {
+                            Some(a) => serde_json::Value::String(a),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                }
+            }
+        }
+        let payload = serde_json::json!({
+            "platform": std::env::consts::OS,
+            "accelerators": accelerators,
+        });
+
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests")
+            .join("fixtures");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("menu-accelerators.json"),
+            serde_json::to_string_pretty(&payload).unwrap(),
+        )
+        .unwrap();
     }
 
     /// The invariant that matters on Windows and Linux: the window resolves

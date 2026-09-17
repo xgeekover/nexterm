@@ -155,7 +155,23 @@ scrollback, colour theme, and command suggestions.
 | `⌘L` | Clear the active terminal |
 | `⌘S` | Save the active editor file |
 
-On Windows and Linux use `Ctrl` wherever `⌘` is listed.
+On Windows and Linux use `Ctrl` wherever `⌘` is listed. That is the table out
+of the box — every row is rebindable.
+
+**Changing a shortcut.** Settings ▸ Keyboard Shortcuts lists every command,
+records the chord you press, and unbinds or resets one per row. Conflicts are
+reported rather than resolved: two commands on one chord is called out, not
+silently decided by which came first. What you change follows through to the
+menus — the native menu bar on macOS and the ☰ menu on Windows and Linux both
+print the key that actually runs the command, and the command palette shows it
+too.
+
+One thing rebinding will not do is take a control character away from the
+shell. Bind something to `Ctrl+D` and the command runs from the keyboard, but
+no menu item registers it as an accelerator — the window resolves its
+accelerators before the terminal ever sees the key, so registering `Ctrl+D`
+would cost every pane in the app its EOF. The menu shows that row without a
+shortcut.
 
 **Shortcuts yield to the shell, with two exceptions.** A chord the terminal
 needs goes to the terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K`
@@ -167,8 +183,9 @@ The exceptions are the two side-bar toggles, `⌘B` / `Ctrl+B` and `⌥⌘B` /
 `Ctrl+Alt+B`. The app claims those even while a terminal has focus, which is
 its resting state — otherwise xterm turned `Ctrl+B` into `^B` and the shortcut
 the menu advertises did nothing at all. VS Code makes the same trade.
-**If you run tmux inside a pane, rebind its prefix**: `Ctrl+B` will not reach
-it. Everything else in the table above is left to the shell.
+**If you run tmux inside a pane, rebind its prefix** — or rebind NexTerm's
+side bar toggle in Settings ▸ Keyboard Shortcuts, which is the other way out:
+`Ctrl+B` will not reach tmux otherwise. Everything else in the table above is left to the shell.
 
 Packaged builds also refuse the reload chords (`F5`, `Ctrl+Shift+R`, `⌘R`).
 Reloading restarts the frontend, and start-up reaps every terminal the backend

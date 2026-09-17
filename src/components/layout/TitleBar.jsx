@@ -4,7 +4,8 @@ import { APP_NAME } from '../../lib/constants.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
-import { chord, isMac } from '../../lib/platform.js';
+import { isMac } from '../../lib/platform.js';
+import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { basename } from '../../lib/paths.js';
 import { MenuBar } from './MenuBar.jsx';
 import { WindowControls } from './WindowControls.jsx';
@@ -13,6 +14,7 @@ const layoutButton =
   'w-6 h-6 flex items-center justify-center rounded transition-colors';
 
 export function TitleBar() {
+  const { shortcut } = useShortcuts();
   const setCommandPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
   const sidebarVisible = useSettingsStore((s) => s.sidebarVisible);
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
@@ -60,7 +62,7 @@ export function TitleBar() {
           className="pointer-events-auto flex items-center justify-center gap-2 h-[22px] w-[38%] max-w-[600px] rounded-md bg-vsc-input border border-vsc-input-border text-vsc-muted text-ui-sm hover:text-vsc-fg transition-colors"
         >
           <Search size={14} />
-          <span>Search NexTerm ({chord('mod', 'k')})</span>
+          <span>Search NexTerm ({shortcut('command-palette')})</span>
         </button>
       </div>
 

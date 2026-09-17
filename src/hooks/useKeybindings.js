@@ -1,10 +1,7 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import { hasMod } from '../lib/platform.js';
-import {
-  dispatchKeydown,
-  dispatchKeydownOverTerminal,
-  resolveKeybindings,
-} from '../lib/keybindings.js';
+import { dispatchKeydown, dispatchKeydownOverTerminal } from '../lib/keybindings.js';
+import { useShortcuts } from './useShortcuts.js';
 import { windowControls } from '../lib/menuActions.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
@@ -41,12 +38,9 @@ export function useKeybindings() {
   const clearBlocks = useTerminalStore((s) => s.clearBlocks);
 
   // Defaults plus whatever the user changed. Re-resolved only when the
-  // overrides change, not on every keypress.
-  const keybindingOverrides = useSettingsStore((s) => s.keybindings);
-  const bindings = useMemo(
-    () => resolveKeybindings(keybindingOverrides).bindings,
-    [keybindingOverrides]
-  );
+  // overrides change, not on every keypress — and resolved in ONE place, so
+  // the keys that run and the keys the menus print cannot come apart.
+  const { bindings } = useShortcuts();
 
   useEffect(() => {
     // The app modifier is ⌘ on macOS and Ctrl elsewhere — never both.

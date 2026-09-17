@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronRight, Menu } from 'lucide-react';
-import { MENU_BAR, runMenuAction } from '../../lib/menuActions.js';
+import { menuBarFor, runMenuAction } from '../../lib/menuActions.js';
 import { CLOSED, hoverItem, hoverTitle, menuKey, openMenu } from '../../lib/appMenuNav.js';
+import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { cn } from '../../lib/utils.js';
 
 const MARGIN = 4;
@@ -32,6 +33,10 @@ const popupClass =
  */
 export function MenuBar() {
   const [state, setState] = useState(CLOSED);
+  // The shortcuts the rows advertise are whatever is bound right now — a
+  // rebind in Settings has to reach the menu, or the menu starts lying.
+  const { bindings } = useShortcuts();
+  const menus = useMemo(() => menuBarFor(bindings), [bindings]);
   const [anchor, setAnchor] = useState({ left: 0, top: 0 });
   const [subPlacement, setSubPlacement] = useState(null);
   const stateRef = useRef(state);
@@ -62,7 +67,7 @@ export function MenuBar() {
     if (!state.open) return undefined;
 
     const onKeyDown = (e) => {
-      const result = menuKey(MENU_BAR, stateRef.current, e.key);
+      const result = menuKey(menus, stateRef.current, e.key);
       // Plain keys must not leak into the terminal behind an open menu;
       // modified chords still reach the app's shortcuts.
       if (result.handled || !(e.ctrlKey || e.metaKey || e.altKey)) {
@@ -87,7 +92,7 @@ export function MenuBar() {
       window.removeEventListener('resize', close);
       window.removeEventListener('blur', close);
     };
-  }, [state.open, close, run]);
+  }, [state.open, close, run, menus]);
 
   // Put the items beside their title, flipping to the left of the list or up
   // from the bottom when the window is too small for them.
@@ -107,7 +112,7 @@ export function MenuBar() {
     setSubPlacement({ left, top });
   }, [state.open, state.expanded]);
 
-  const expandedMenu = state.expanded === -1 ? null : MENU_BAR[state.expanded];
+  const expandedMenu = state.expanded === -1 ? null : menus[state.expanded];
 
   return (
     <>
@@ -141,7 +146,7 @@ export function MenuBar() {
               style={{ position: 'fixed', left: anchor.left, top: anchor.top }}
               className={cn('z-[70] min-w-[160px]', popupClass)}
             >
-              {MENU_BAR.map((menu, index) => (
+              {menus.map((menu, index) => (
                 <div
                   key={menu.title}
                   ref={(el) => {

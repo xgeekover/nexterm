@@ -19,7 +19,7 @@
  * `e.shiftKey` at run time, and are two entries here.
  */
 
-import { chordMatches, parseChord } from './chords.js';
+import { chordMatches, displayChord, parseChord } from './chords.js';
 
 /**
  * Every command, by id. The ids match `src-tauri/src/menu.rs` and
@@ -346,4 +346,17 @@ export function menuIdOf(binding) {
 /** Every chord in force for a command, for a menu label or a settings row. */
 export function keysFor(command, bindings = DEFAULT_RESOLVED) {
   return bindings.filter((b) => b.command === command).map((b) => b.key);
+}
+
+/**
+ * How a command's shortcut should be written where it is advertised — a menu
+ * row, a palette entry — or '' when the user has unbound it.
+ *
+ * The first chord, because there is one place to print it and an OS menu item
+ * carries one key equivalent. `isMac` is an argument rather than read from
+ * `navigator` so this file stays testable on both platforms at once.
+ */
+export function shortcutLabel(command, bindings = DEFAULT_RESOLVED, { isMac = false } = {}) {
+  const key = keysFor(command, bindings)[0];
+  return key ? displayChord(key, { isMac }) : '';
 }

@@ -8,7 +8,8 @@
  */
 
 import { fuzzyMatch } from './utils.js';
-import { chord } from './platform.js';
+import { isMac } from './platform.js';
+import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
 
 /**
  * Every file in an explorer tree, at any depth.
@@ -31,8 +32,15 @@ export function flattenFileNodes(nodes, acc = []) {
   return acc;
 }
 
-/** The built-in actions, independent of any query. */
-export function paletteCommands() {
+/**
+ * The built-in actions, independent of any query.
+ *
+ * The hints are read off the bindings rather than written beside each entry:
+ * these keys are rebindable now, and a palette row showing the shortcut a user
+ * replaced is the same lie a stale menu row is.
+ */
+export function paletteCommands(bindings = DEFAULT_RESOLVED) {
+  const hint = (command) => shortcutLabel(command, bindings, { isMac });
   return [
     {
       type: 'command',
@@ -40,7 +48,7 @@ export function paletteCommands() {
       command: 'new_terminal',
       title: 'New Terminal Tab',
       subtitle: 'Spawns a new independent PTY terminal session',
-      hint: chord('ctrl', 'shift', '`'),
+      hint: hint('new-terminal'),
     },
     {
       type: 'command',
@@ -48,7 +56,7 @@ export function paletteCommands() {
       command: 'clear_terminal',
       title: 'Clear Terminal Output',
       subtitle: 'Purges unpinned blocks in current terminal tab',
-      hint: chord('mod', 'l'),
+      hint: hint('clear-terminal'),
     },
     {
       type: 'command',
@@ -56,7 +64,7 @@ export function paletteCommands() {
       command: 'save_all',
       title: 'Save All Files',
       subtitle: 'Writes all dirty editor buffers to disk',
-      hint: chord('mod', 's'),
+      hint: hint('save'),
     },
   ];
 }
@@ -64,11 +72,12 @@ export function paletteCommands() {
 /**
  * The palette's result groups for `query`, in display order.
  *
- * `mode` is 'all' (⌘K — files and commands) or 'files' (⌘P — files only).
+ * `mode` is 'all' (⌘K — files and commands) or 'files' (⌘P — files only), and
+ * `bindings` decides which shortcut each command advertises.
  * Empty groups are dropped so the rendered list and the keyboard selection
  * always run over exactly the same items.
  */
-export function buildPaletteGroups({ fileTree = [], query = '', mode = 'all' } = {}) {
+export function buildPaletteGroups({ fileTree = [], query = '', mode = 'all', bindings = DEFAULT_RESOLVED } = {}) {
   const q = (query || '').toLowerCase().trim();
 
   const files = flattenFileNodes(fileTree)
@@ -85,7 +94,7 @@ export function buildPaletteGroups({ fileTree = [], query = '', mode = 'all' } =
   const commands =
     mode === 'files'
       ? []
-      : paletteCommands().filter(
+      : paletteCommands(bindings).filter(
           (cmd) => fuzzyMatch(q, cmd.title) || fuzzyMatch(q, cmd.subtitle)
         );
 
