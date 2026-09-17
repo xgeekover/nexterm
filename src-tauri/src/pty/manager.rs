@@ -606,6 +606,56 @@ mod tests {
             let cmd = CommandBuilder::new(PtyManager::default_shell());
             let child = pair.slave.spawn_command(cmd).expect("a shell must start");
             drop(pair.slave);
+
+            // Everything from here to the reader thread is the part of
+            // `PtyManager::spawn` that a hand-assembled session would otherwise
+            // skip — and skipping it did not merely make this case
+            // unrepresentative, it hung.
+            //
+            // portable-pty creates the pseudoconsole with
+            // PSEUDOCONSOLE_INHERIT_CURSOR, so the first thing ConPTY writes is
+            // `ESC[6n` and it then holds the shell back, prompt and input
+            // alike, until the terminal answers (see startup_query.rs). With
+            // nothing draining the master and nothing answering, the three
+            // shells sat blocked behind an output pipe nobody was reading, and
+            // dropping their masters at the end of `retain_only` left
+            // ClosePseudoConsole waiting on clients that could never finish.
+            // The Windows suite stopped dead here: 69 of 70 cases passed and
+            // this one never returned, four runs out of four.
+            //
+            // Answering the query is exactly what the production reader thread
+            // does, so doing it here makes the test both terminate AND resemble
+            // the thing it is testing.
+            let mut reader = pair.master.try_clone_reader().expect("clone the PTY reader");
+            let writer = pair.master.take_writer().expect("take the PTY writer");
+            let input_tx = spawn_writer_thread(writer, id).expect("writer thread");
+            let answer_tx = input_tx.clone();
+            thread::Builder::new()
+                .name(format!("test-pty-reader-{id}"))
+                .spawn(move || {
+                    let mut startup_query = if cfg!(windows) {
+                        Some(StartupCursorQuery::default())
+                    } else {
+                        None
+                    };
+                    let mut buf = [0u8; 4096];
+                    // The bytes are of no interest; draining them is the point.
+                    while let Ok(n) = reader.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        if let Some(query) = startup_query.as_mut() {
+                            if let Some(answer) = query.feed(&buf[..n]).answer {
+                                let _ = answer_tx.send(answer.to_vec());
+                            }
+                            if query.is_done() {
+                                startup_query = None;
+                            }
+                        }
+                    }
+                })
+                .expect("reader thread");
+
             manager.sessions.lock().insert(
                 id.to_string(),
                 Arc::new(PtySession {
@@ -613,7 +663,9 @@ mod tests {
                     shell: PtyManager::default_shell(),
                     created_at: Utc::now(),
                     master: Mutex::new(pair.master),
-                    input: Mutex::new(None),
+                    // As in production: `kill` drops this, which is what ends
+                    // the writer thread.
+                    input: Mutex::new(Some(input_tx)),
                     child: Mutex::new(child),
                 }),
             );
