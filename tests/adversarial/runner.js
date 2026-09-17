@@ -27,6 +27,7 @@ import './keybinding_table.test.js';
 import './pty_reload_leak.test.js';
 import './fit_reports_size.test.js';
 import './tab_names.test.js';
+import './backend_tree_contract.test.js';
 
 async function run() {
   console.log('====================================================');

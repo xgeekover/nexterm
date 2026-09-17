@@ -697,3 +697,131 @@ mod rename_tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+
+/// The contract the file explorer is built on, checked against a real
+/// filesystem on whatever platform this runs.
+///
+/// The explorer rendered EMPTY on Windows for two releases: it re-derived the
+/// root's children with `path.startsWith(root + '/')`, which compares
+/// `C:\Users\me\project\src` against `C:\Users\me\project/` and is false for
+/// every entry. Nothing caught it, because the Rust tests ran only on ubuntu
+/// and the JS tests fed themselves hand-written paths — neither half was wrong
+/// on its own, and nothing checked them against each other.
+///
+/// These cases read a directory tree that really exists and assert the three
+/// properties the UI depends on: it nests, its paths use this platform's
+/// separator, and every child really is a child of the parent it hangs off.
+/// The listing is then written out for the JS half to pick up — see
+/// `tests/adversarial/backend_tree_contract.test.js` — so both sides are
+/// checked against the same bytes, produced by the same filesystem.
+#[cfg(test)]
+mod explorer_contract_tests {
+    use super::*;
+
+    fn build_tree(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("nexterm_contract_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src").join("components")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap(); // must be skipped
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::write(root.join("src").join("index.js"), "//").unwrap();
+        fs::write(root.join("src").join("components").join("App.jsx"), "//").unwrap();
+        fs::write(root.join("tests").join("app.test.js"), "//").unwrap();
+        root
+    }
+
+    fn child<'a>(nodes: &'a [FileNode], name: &str) -> &'a FileNode {
+        nodes.iter().find(|n| n.name == name).unwrap_or_else(|| {
+            panic!(
+                "no entry named {name} in {:?}",
+                nodes.iter().map(|n| &n.name).collect::<Vec<_>>()
+            )
+        })
+    }
+
+    #[test]
+    fn the_root_listing_is_never_empty_and_nests_its_children() {
+        let root = build_tree("nest");
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+
+        // The bug, stated as an assertion: the explorer must be handed
+        // something to draw.
+        assert!(!nodes.is_empty(), "the root listing must not be empty");
+
+        let names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["src", "tests", "package.json"], "directories first, then by name");
+        assert!(!names.contains(&"node_modules"), "build folders stay hidden");
+
+        // Nested, not flattened: `src` carries its own entries, and one of
+        // those carries its own in turn.
+        let src = child(&nodes, "src");
+        assert!(src.is_dir);
+        let src_children = src.children.as_ref().expect("a directory reports its children");
+        let components = child(src_children, "components");
+        let deep = components.children.as_ref().expect("nested directories nest too");
+        assert_eq!(deep.len(), 1);
+        assert_eq!(deep[0].name, "App.jsx");
+
+        assert!(child(&nodes, "package.json").children.is_none(), "a file has no children");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_path_uses_this_platform_separator_and_sits_under_its_parent() {
+        let root = build_tree("sep");
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+
+        /// Check each node against the parent that produced it — the exact
+        /// relationship the explorer's `isDirectChild` has to agree with.
+        fn walk(parent: &str, nodes: &[FileNode], sep: char) {
+            for node in nodes {
+                assert!(node.path.starts_with(parent), "{} is not under {}", node.path, parent);
+                let rest = &node.path[parent.len()..];
+                assert_eq!(
+                    rest.chars().next(),
+                    Some(sep),
+                    "{} must join its parent with {sep:?}",
+                    node.path
+                );
+                assert!(!rest[1..].contains(sep), "{} is not a DIRECT child of {}", node.path, parent);
+                assert!(node.path.ends_with(&node.name), "a node's path ends with its name");
+                if let Some(children) = node.children.as_ref() {
+                    walk(&node.path, children, sep);
+                }
+            }
+        }
+        walk(root.to_string_lossy().as_ref(), &nodes, sep);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Write the real payload out for the JS half of this contract to read.
+    /// Runs on every platform, so on the Windows job the file the JS suite
+    /// picks up was produced by a Windows filesystem.
+    #[test]
+    fn dump_a_real_listing_for_the_frontend_contract_test() {
+        let root = build_tree("dump");
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+
+        let payload = serde_json::json!({
+            "platform": std::env::consts::OS,
+            "separator": std::path::MAIN_SEPARATOR.to_string(),
+            "root": root.to_string_lossy(),
+            "nodes": nodes,
+        });
+
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests")
+            .join("fixtures");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("backend-tree.json"), serde_json::to_string_pretty(&payload).unwrap())
+            .unwrap();
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}
