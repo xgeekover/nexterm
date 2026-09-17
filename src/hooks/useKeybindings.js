@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { hasMod } from '../lib/platform.js';
-import { dispatchKeydown } from '../lib/keybindings.js';
+import { dispatchKeydown, dispatchKeydownOverTerminal } from '../lib/keybindings.js';
 import { windowControls } from '../lib/menuActions.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
@@ -36,39 +36,57 @@ export function useKeybindings() {
   const clearBlocks = useTerminalStore((s) => s.clearBlocks);
 
   useEffect(() => {
+    // The app modifier is ⌘ on macOS and Ctrl elsewhere — never both.
+    // Treating Ctrl as a modifier on macOS stole ^K/^B/^A from every text
+    // field in the app; treating only ⌘ as one on Windows meant half these
+    // shortcuts never fired at all.
+    const contextFor = (e) => ({
+      isMod: hasMod(e),
+      isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
+      // Reloading is a development tool. In a packaged build it silently
+      // destroys every running shell — see the `reload-guard` binding.
+      blockReload: !import.meta.env.DEV,
+      isCommandPaletteOpen,
+      activeEditorTabId,
+      setCommandPaletteOpen,
+      setSettingsModalOpen,
+      toggleSidebar,
+      togglePanel,
+      toggleSecondarySidebar,
+      saveFile,
+      pickRoot,
+      splitActivePane,
+      closeActivePane,
+      focusNextPane,
+      createTerminalTab,
+      clearBlocks,
+      closeWindow: windowControls.close,
+    });
+
+    // Bubble phase, as before: xterm has already swallowed anything it turns
+    // into a control byte by the time an event gets here, which is what leaves
+    // ^C and ^D to the shell.
     const handleKeyDown = (e) => {
-      // The app modifier is ⌘ on macOS and Ctrl elsewhere — never both.
-      // Treating Ctrl as a modifier on macOS stole ^K/^B/^A from every text
-      // field in the app; treating only ⌘ as one on Windows meant half these
-      // shortcuts never fired at all.
-      //
-      // Nothing here needs a "is the terminal focused?" test: xterm binds its
-      // own keydown on the textarea in the capture phase and calls
-      // preventDefault + stopPropagation for any chord it turns into a control
-      // byte, so a window-level listener like this one simply never sees it.
-      dispatchKeydown(e, {
-        isMod: hasMod(e),
-        isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
-        isCommandPaletteOpen,
-        activeEditorTabId,
-        setCommandPaletteOpen,
-        setSettingsModalOpen,
-        toggleSidebar,
-        togglePanel,
-        toggleSecondarySidebar,
-        saveFile,
-        pickRoot,
-        splitActivePane,
-        closeActivePane,
-        focusNextPane,
-        createTerminalTab,
-        clearBlocks,
-        closeWindow: windowControls.close,
-      });
+      dispatchKeydown(e, contextFor(e));
     };
 
+    // Capture phase, and only while a terminal has focus: runs BEFORE xterm's
+    // own textarea handler so the handful of bindings marked `overTerminal`
+    // can be claimed at all. Ctrl+B is the reason — the side bar toggle the
+    // menu advertises did nothing whenever a terminal was focused, because
+    // xterm turned it into ^B first. Everything not marked falls through here
+    // untouched and still reaches the shell.
+    const handleKeyDownCapture = (e) => {
+      if (!e.target?.closest?.('.xterm')) return;
+      dispatchKeydownOverTerminal(e, contextFor(e));
+    };
+
+    window.addEventListener('keydown', handleKeyDownCapture, true);
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDownCapture, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, [
     isCommandPaletteOpen,
     activeEditorTabId,
