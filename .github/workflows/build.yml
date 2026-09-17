@@ -25,9 +25,32 @@ env:
 # readable diff.
 
 jobs:
+  # Runs on all three platforms, not just Linux.
+  #
+  # What this actually buys: the Rust suite spawns real shells, opens real
+  # PTYs and reads real directories, so it behaves differently on each OS —
+  # ConPTY is not a unix pty, and `C:\Users\me\project\src` is not a path
+  # any `/`-shaped assumption survives. The JS suites feed themselves
+  # synthetic input and would pass anywhere; they run here because they are
+  # quick and catch a harness that does not work on Windows, not because they
+  # test the platform.
+  #
+  # It does NOT, on its own, catch the kind of defect that shipped in v0.2.1
+  # (menu shortcuts with no handler) or v0.2.3 (a missing `windows_subsystem`
+  # attribute). Those needed a test to exist at all; writing one is what found
+  # them. What the matrix adds is that a platform-sensitive test is actually
+  # run on that platform — and that a Windows compile error in test-only code
+  # surfaces here rather than ten minutes later in `build`, where it reads as
+  # a packaging problem.
   test:
-    name: test (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.platform }})
+    strategy:
+      # One platform failing must not hide the others: seeing that a case fails
+      # on Windows and passes on macOS is most of the diagnosis.
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -36,6 +59,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Tauri Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -55,10 +79,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
+          key: test-${{ matrix.platform }}
 
       - name: Install npm dependencies
         run: npm ci
 
+      # Runs first on purpose: it writes tests/fixtures/backend-tree.json from a
+      # real directory tree on THIS platform, which the adversarial suite below
+      # reads back and pushes through the real explorer code.
       - name: Cargo test
         working-directory: src-tauri
         run: cargo test
