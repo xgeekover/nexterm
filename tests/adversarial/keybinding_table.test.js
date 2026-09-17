@@ -287,6 +287,22 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       const fired = dispatchKeydownOverTerminal(e, ctxFor(e, 'windows', { blockReload: true }));
       assert.equal(fired, null, `Ctrl+${letter} must reach the shell, got ${fired}`);
     }
+
+    // And the macOS half, through the same entry point. KB-08 shows that no
+    // binding MATCHES a bare Ctrl there, which is the reason nothing can claim
+    // it — but the capture listener is what actually runs over a terminal, and
+    // the worry after it was added is precisely that ^C stopped reaching the
+    // shell. Cheap to state outright rather than leave to inference.
+    for (const letter of ['c', 'd', 'l', 'a', 'e', 'k', 'w', 'u', 'r']) {
+      const e = {
+        ctrlKey: true, metaKey: false, shiftKey: false, altKey: false,
+        key: letter, code: `Key${letter.toUpperCase()}`,
+        preventDefault: () => assert.ok(false, `macOS: Ctrl+${letter} must not be swallowed`),
+        stopPropagation: () => assert.ok(false, `macOS: Ctrl+${letter} must reach xterm`),
+      };
+      const fired = dispatchKeydownOverTerminal(e, ctxFor(e, 'macos', { blockReload: true }));
+      assert.equal(fired, null, `macOS: Ctrl+${letter} must reach the shell, got ${fired}`);
+    }
   });
 
   test('KB-13: Ctrl+B toggles the side bar even though xterm would eat it', () => {

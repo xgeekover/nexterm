@@ -13,3 +13,7 @@ src-tauri/gen/schemas/
 # local secrets
 .env
 .env.*
+
+# Written by `cargo test` (src-tauri/src/fs/mod.rs) for the frontend
+# contract test to read back. Platform-specific; never committed.
+tests/fixtures/backend-tree.json
