@@ -13,7 +13,7 @@
  * hand-written paths. Neither half was wrong on its own; nothing checked them
  * against each other.
  */
-import { describe, test, assert } from '../e2e/harness/testFramework.js';
+import { describe, test, assert, skip } from '../e2e/harness/testFramework.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -42,20 +42,22 @@ describe('Backend → explorer contract, against a real filesystem listing', () 
       // In CI `cargo test` always runs before this, so a missing fixture there
       // means the contract went unchecked — which is the state this whole file
       // exists to prevent. Locally it just means the JS suite was run alone.
+      // In CI `cargo test` always runs first, so a missing fixture there means
+      // the contract went unchecked — a hard failure, not a skip. Locally it
+      // just means the JS suite was run on its own.
       assert.equal(
         Boolean(process.env.CI),
         false,
         `${where} is missing in CI — the backend contract went unchecked`
       );
-      console.log(`      ↳ skipped: no ${where} (run \`cd src-tauri && cargo test\` first)`);
-      return;
+      skip(`no ${where} — run \`cd src-tauri && cargo test\` first`);
     }
     assert.ok(fixture.platform, 'the fixture records which platform produced it');
     assert.ok(Array.isArray(fixture.nodes), 'and the listing itself');
   });
 
   test('BT-01: the explorer renders rows — it must never come up empty', () => {
-    if (!available) return;
+    if (!available) skip('no tests/fixtures/backend-tree.json — run `cd src-tauri && cargo test` first');
     // The store puts `fs_read_dir`'s result straight into `fileTree`, and the
     // panel renders `flattenVisible(fileTree, expanded)`. Nothing in between.
     const rows = flattenVisible(fixture.nodes, new Set());
@@ -68,10 +70,23 @@ describe('Backend → explorer contract, against a real filesystem listing', () 
       ['src', 'tests', 'package.json'],
       'and in the order the backend chose'
     );
+
+    // Rendering rows is not the whole of it. The explorer used to derive the
+    // root's listing by testing each path against the root, and on Windows
+    // that test was false for every entry — so the tree was handed data and
+    // still drew nothing. `flattenVisible` alone never touches a path, so
+    // without this the case passes with the path helpers completely broken,
+    // which is exactly what it claims to cover.
+    for (const row of rows) {
+      assert.ok(
+        isDirectChild(fixture.root, row.node.path),
+        `a rendered row is not understood as a child of the root: ${row.node.path}`
+      );
+    }
   });
 
   test('BT-02: expanding a folder reveals what the backend nested inside it', () => {
-    if (!available) return;
+    if (!available) skip('no tests/fixtures/backend-tree.json — run `cd src-tauri && cargo test` first');
     const src = fixture.nodes.find((n) => n.name === 'src');
     assert.ok(src, 'the fixture has a src directory');
 
@@ -92,7 +107,7 @@ describe('Backend → explorer contract, against a real filesystem listing', () 
   });
 
   test('BT-03: the path helpers agree with the paths the backend actually produced', () => {
-    if (!available) return;
+    if (!available) skip('no tests/fixtures/backend-tree.json — run `cd src-tauri && cargo test` first');
     const { root, nodes, separator } = fixture;
 
     assert.equal(sepOf(nodes[0].path), separator, 'the separator is the one the OS reported');
@@ -122,7 +137,7 @@ describe('Backend → explorer contract, against a real filesystem listing', () 
   });
 
   test('BT-04: a Windows listing is exercised on Windows, not merely simulated', () => {
-    if (!available) return;
+    if (!available) skip('no tests/fixtures/backend-tree.json — run `cd src-tauri && cargo test` first');
     if (fixture.platform === 'windows') {
       assert.equal(fixture.separator, '\\', 'a Windows fixture uses backslashes');
       assert.ok(/^[A-Za-z]:\\/.test(fixture.root), `and a drive-rooted path: ${fixture.root}`);

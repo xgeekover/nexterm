@@ -111,6 +111,18 @@ class TestRunnerContext {
           }
           stats.passed++;
         } catch (err) {
+          if (err instanceof SkippedTest) {
+            status = 'skipped';
+            stats.skipped++;
+            suiteResult.tests.push({
+              name: t.name,
+              status,
+              reason: err.reason,
+              durationMs: Date.now() - testStartTime,
+              error: null,
+            });
+            continue;
+          }
           status = 'failed';
           error = err;
           stats.failed++;
@@ -144,6 +156,25 @@ class TestRunnerContext {
 }
 
 export const runnerContext = new TestRunnerContext();
+
+/**
+ * Thrown by `skip()` to say a case did not run, as opposed to ran and was
+ * fine. Without this the two are indistinguishable: a case that returned early
+ * because its fixture was missing counted as passed, and a suite could report
+ * every case green while checking nothing at all.
+ */
+export class SkippedTest extends Error {
+  constructor(reason) {
+    super(reason || 'skipped');
+    this.name = 'SkippedTest';
+    this.reason = reason || '';
+  }
+}
+
+/** Stop this case and report it as skipped, with a reason worth reading. */
+export function skip(reason) {
+  throw new SkippedTest(reason);
+}
 
 export function describe(name, fn) {
   runnerContext.describe(name, fn);

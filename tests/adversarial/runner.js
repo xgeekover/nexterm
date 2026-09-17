@@ -41,6 +41,10 @@ async function run() {
     for (const t of suite.tests) {
       if (t.status === 'passed') {
         console.log(`  ✔ ${t.name} (${t.durationMs}ms)`);
+      } else if (t.status === 'skipped') {
+        // Loud on purpose: a skipped case checked nothing, and reading it as a
+        // tick is how a suite comes to report green while testing nothing.
+        console.log(`  ○ ${t.name} — SKIPPED${t.reason ? `: ${t.reason}` : ''}`);
       } else {
         console.log(`  ✖ ${t.name} (${t.durationMs}ms)`);
         if (t.error) {
@@ -55,6 +59,7 @@ async function run() {
   console.log(`  Suites:   ${stats.totalSuites} executed`);
   console.log(`  Tests:    ${stats.totalTests} total`);
   console.log(`  Passed:   ${stats.passed}`);
+  if (stats.skipped > 0) console.log(`  Skipped:  ${stats.skipped}   <- checked nothing`);
   console.log(`  Failed:   ${stats.failed}`);
   console.log(`  Duration: ${(stats.durationMs / 1000).toFixed(2)}s`);
   console.log('----------------------------------------------------');

@@ -147,6 +147,32 @@ jobs:
       # A Tauri app is a single self-contained exe; zipping it gives Windows
       # users a no-install build. It still needs the WebView2 runtime, which
       # ships with Windows 10 22H2+ and Windows 11.
+      # The real check that no console window appears. The Rust test only greps
+      # main.rs for the attribute; whether the LINKER honoured it is a property
+      # of the binary, and this is the first moment a binary exists. v0.2.2
+      # shipped with Subsystem=3 and users got an empty black terminal beside
+      # the app.
+      - name: The app must not be a console application
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "src-tauri/target/release" -Filter *.exe -File |
+            Where-Object { $_.BaseName -ieq "nexterm" } |
+            Select-Object -First 1
+          if (-not $exe) { throw "no NexTerm binary in src-tauri/target/release" }
+          $bytes = [IO.File]::ReadAllBytes($exe.FullName)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ([Text.Encoding]::ASCII.GetString($bytes, $peOffset, 2) -ne 'PE') {
+            throw "$($exe.Name) has no PE signature at $peOffset"
+          }
+          # COFF header is 20 bytes; Subsystem sits 68 bytes into the optional
+          # header that follows it, for both PE32 and PE32+.
+          $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 4 + 20 + 68)
+          "Subsystem = $subsystem (2 = WINDOWS_GUI, 3 = WINDOWS_CUI)"
+          if ($subsystem -ne 2) {
+            throw "$($exe.Name) is Subsystem=$subsystem — Windows will open a console window beside the app"
+          }
+
       - name: Package Windows portable build
         if: matrix.platform == 'windows-latest'
         shell: pwsh

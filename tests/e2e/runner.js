@@ -135,6 +135,10 @@ async function main() {
     for (const t of suite.tests) {
       if (t.status === 'passed') {
         console.log(`  ${colors.green}✔${colors.reset} ${t.name} ${colors.dim}(${t.durationMs}ms)${colors.reset}`);
+      } else if (t.status === 'skipped') {
+        // A skipped case checked nothing; reading it as a tick is how a suite
+        // comes to report green while testing nothing.
+        console.log(`  ${colors.yellow}○${colors.reset} ${t.name} ${colors.yellow}SKIPPED${colors.reset}${t.reason ? ` — ${t.reason}` : ''}`);
       } else {
         console.log(`  ${colors.red}✖${colors.reset} ${colors.bold}${t.name}${colors.reset} ${colors.dim}(${t.durationMs}ms)${colors.reset}`);
         if (t.error) {
@@ -150,6 +154,9 @@ async function main() {
   console.log(`  Suites:   ${stats.totalSuites} executed`);
   console.log(`  Tests:    ${colors.bold}${stats.totalTests}${colors.reset} total`);
   console.log(`  Passed:   ${colors.green}${colors.bold}${stats.passed}${colors.reset}`);
+  if (stats.skipped > 0) {
+    console.log(`  Skipped:  ${colors.yellow}${colors.bold}${stats.skipped}${colors.reset}   ${colors.dim}<- checked nothing${colors.reset}`);
+  }
   if (stats.failed > 0) {
     console.log(`  Failed:   ${colors.red}${colors.bold}${stats.failed}${colors.reset}`);
   } else {

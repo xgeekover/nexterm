@@ -92,17 +92,23 @@ fn main() {
 
 /// The attribute that keeps Windows from opening a console beside the app.
 ///
-/// Checked as source text because there is nothing to check at runtime: the
-/// subsystem is decided by the linker, `cargo test` always runs with a console
-/// attached, and on macOS and Linux the attribute does nothing at all. So
-/// deleting it breaks only Windows, only in release builds, and nothing else
-/// here would notice — which is how it went missing in the first place, and
-/// why the portable build shipped with an empty black terminal window next to
-/// it.
+/// This checks the SOURCE, not the binary, and cannot do otherwise: the
+/// subsystem is decided by the linker, `cargo test` builds a test harness
+/// rather than the app, and on macOS and Linux the attribute does nothing at
+/// all. So it catches the attribute being deleted — which is how it went
+/// missing in the first place, and why v0.2.2 shipped with an empty black
+/// terminal window beside the app — but it would still pass if the attribute
+/// were present and the link ignored it.
+///
+/// The binary itself is checked in CI, on the one machine where a Windows
+/// binary exists: the "The app must not be a console application" step in
+/// .github/workflows/build.yml reads the PE header of the built exe and
+/// refuses anything but Subsystem=2. Verified against the shipped artifacts —
+/// v0.2.2 reads 3 (WINDOWS_CUI) and v0.2.4 reads 2 (WINDOWS_GUI).
 #[cfg(test)]
 mod windows_subsystem_tests {
     #[test]
-    fn release_builds_do_not_get_a_console_window() {
+    fn the_source_still_asks_for_a_windowed_subsystem() {
         let main_rs = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs"),
         )

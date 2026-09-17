@@ -7,6 +7,8 @@ export {
   beforeEach,
   afterEach,
   assert,
+  skip,
+  SkippedTest,
   runnerContext,
 } from './testFramework.js';
 export { SAMPLE_PROJECT_FILES } from '../fixtures/sampleFiles.js';
