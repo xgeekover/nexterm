@@ -186,6 +186,72 @@ describe('Default terminal names stay unique', () => {
     );
   });
 
+  test('TN-07: loading a saved group beside the names it saved does not duplicate them', async () => {
+    // The gap TN-01..TN-05 left open. Those all go through `createTab()` with
+    // no title, where the number is chosen fresh. `loadSavedGroup` instead
+    // calls `spawnTab(saved.title, ...)`, and a saved title was forced through
+    // as the VISIBLE name while only `defaultTitle` was renumbered — so a
+    // group saved as "Terminal 1" loaded next to a live "Terminal 1" put two
+    // tabs called "Terminal 1" in the strip.
+    assert.deepEqual(titles(), ['Terminal 1'], 'one live terminal to collide with');
+
+    S.setState({
+      savedGroups: [
+        {
+          id: 'saved-collide',
+          name: 'Saved',
+          tabs: [
+            { slotId: 'slot-0', title: 'Terminal 1', cwd: null },
+            { slotId: 'slot-1', title: 'Terminal 2', cwd: null },
+          ],
+          tree: null,
+          activePaneId: null,
+        },
+      ],
+    });
+
+    await S.getState().loadSavedGroup('saved-collide');
+    await wait(120);
+
+    assert.equal(tabs().length, 3, 'the two saved terminals really were created');
+    assert.deepEqual(
+      duplicatesIn(titles()),
+      [],
+      `loading a saved group duplicated a visible name: ${JSON.stringify(titles())}`
+    );
+    assert.deepEqual(
+      duplicatesIn(defaults()),
+      [],
+      `...and the default names collided too: ${JSON.stringify(defaults())}`
+    );
+    // The first saved slot wanted a number already in use and had to move; the
+    // second one asked for a number that was free and should have kept it.
+    assert.ok(titles().includes('Terminal 2'), `"Terminal 2" was free and should be kept: ${JSON.stringify(titles())}`);
+  });
+
+  test('TN-08: a name the user typed is never renumbered, even when it repeats', async () => {
+    // The other half of the rule: uniqueness is enforced on the numbers the
+    // app hands out, not on names a person chose. Two panes both called
+    // "build" is the user's business, and silently renaming one would be worse
+    // than the duplicate.
+    S.getState().renameTab(tabs()[0].id, 'build');
+    await wait(20);
+
+    S.setState({
+      savedGroups: [
+        { id: 'saved-named', name: 'Saved', tabs: [{ slotId: 'slot-0', title: 'build', cwd: null }], tree: null, activePaneId: null },
+      ],
+    });
+    await S.getState().loadSavedGroup('saved-named');
+    await wait(120);
+
+    assert.equal(
+      titles().filter((t) => t === 'build').length,
+      2,
+      `a user's own name was renumbered: ${JSON.stringify(titles())}`
+    );
+  });
+
   test('TN-06: teardown — leave the store as the next suite expects it', () => {
     S.getState().dispose();
     S.setState({ tabs: [], activeTabId: null, isInitialized: false });

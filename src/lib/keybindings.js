@@ -26,6 +26,23 @@
 const isLetter = (e, letter) => typeof e.key === 'string' && e.key.toLowerCase() === letter;
 
 /**
+ * The reload chords it is safe to refuse.
+ *
+ * Measured on the shipped 0.2.3 portable build on Windows: F5 and Ctrl+R do
+ * NOT reload (WebView2 already suppresses them) and Ctrl+Shift+R DOES.
+ *
+ * Deliberately NOT here: a plain Ctrl+R. It is reverse-i-search in bash, zsh
+ * and PSReadLine — one of the most-used keys a shell has — and off macOS the
+ * app modifier IS Ctrl, so a rule written as "mod+R" would quietly take it
+ * away from every pane. It does not reload anyway, so there is nothing to
+ * refuse. ⌘R is listed because ⌘ never reaches the shell.
+ */
+const isReloadChord = (e, ctx) =>
+  e.key === 'F5' ||
+  ((ctx.isMod || e.ctrlKey) && e.shiftKey && isLetter(e, 'r')) ||
+  (e.metaKey && isLetter(e, 'r'));
+
+/**
  * The bindings, in the order they are tried.
  *
  * Order is deliberately NOT load-bearing: every rule that could overlap
@@ -41,6 +58,9 @@ const isLetter = (e, letter) => typeof e.key === 'string' && e.key.toLowerCase()
  *                   while the cursor is in a file).
  * - `run(e, ctx)`   perform the action.
  * - `preventDefault: false` for bindings that must not swallow the key.
+ * - `overTerminal`  claim this chord even while a terminal has focus, ahead of
+ *                   xterm — see `dispatchKeydownOverTerminal`. Reserved for
+ *                   window chrome; KB-08 keeps ^C, ^D, ^L and friends out.
  */
 export const KEYBINDINGS = [
   {
@@ -117,12 +137,29 @@ export const KEYBINDINGS = [
     run: (e, ctx) => ctx.togglePanel(),
   },
   {
+    // ⌘⌥B / Ctrl+Alt+B. `overTerminal` because off macOS this chord reached
+    // the window only by accident: xterm's `_isThirdLevelShift` treats
+    // Ctrl+Alt as AltGr ON WINDOWS and returns without cancelling, so the
+    // event bubbles — while on LINUX no such branch applies, xterm turns the
+    // chord into ESC ^B and the side bar never toggles. Claiming it up front
+    // makes the three platforms agree on purpose instead of by luck.
     id: 'toggle-secondary',
+    overTerminal: true,
     when: (e, ctx) => ctx.isMod && e.altKey && isLetter(e, 'b'),
     run: (e, ctx) => ctx.toggleSecondarySidebar?.(),
   },
   {
+    // ⌘B on macOS, where the terminal never sees the app modifier at all. Off
+    // macOS the very same rule is Ctrl+B, which xterm turns into ^B and
+    // swallows before any window listener runs — so the shortcut the menu
+    // advertises did nothing whenever a terminal had focus, which is this
+    // app's resting state. `overTerminal` claims it first, as VS Code does.
+    //
+    // That is the trade, stated plainly: ^B no longer reaches the shell, so a
+    // tmux prefix inside a pane has to be rebound. Only window chrome may make
+    // this trade — see KB-08, which holds the line for ^C, ^D, ^L and the rest.
     id: 'toggle-sidebar',
+    overTerminal: true,
     when: (e, ctx) => ctx.isMod && !e.altKey && isLetter(e, 'b'),
     run: (e, ctx) => ctx.toggleSidebar(),
   },
@@ -130,6 +167,24 @@ export const KEYBINDINGS = [
     id: 'clear-terminal',
     when: (e, ctx) => ctx.isMod && isLetter(e, 'l'),
     run: (e, ctx) => ctx.clearBlocks?.(),
+  },
+  {
+    // Not a feature — a guard, and the only binding whose whole job is to
+    // swallow a key.
+    //
+    // A reload restarts the frontend from nothing, and `bootstrap` reaps every
+    // PTY the backend still holds before it spawns anything (see
+    // `PtyManager::retain_only`). So one stray Ctrl+Shift+R kills every shell
+    // in the window — running builds, ssh sessions, the lot — with no warning
+    // and no undo. Nobody reloads a terminal IDE on purpose; the chord is here
+    // from the browser, not from the product.
+    //
+    // `ctx.blockReload` is false in development, where reloading IS the point.
+    id: 'reload-guard',
+    menuId: null,
+    overTerminal: true,
+    when: (e, ctx) => Boolean(ctx.blockReload) && isReloadChord(e, ctx),
+    run: () => {},
   },
   {
     // Escape belongs to whatever is on screen; closing the palette must not
@@ -164,6 +219,33 @@ export function dispatchKeydown(e, ctx) {
   if (!binding) return null;
   if (binding.passThrough?.(e, ctx)) return `pass:${binding.id}`;
   if (binding.preventDefault !== false) e.preventDefault();
+  binding.run(e, ctx);
+  return binding.id;
+}
+
+/**
+ * Run whatever `e` maps to while a TERMINAL has focus. Returns the binding's
+ * id when it claimed the key, and null when the terminal keeps it.
+ *
+ * xterm binds its own keydown on the textarea and calls preventDefault +
+ * stopPropagation for every chord it turns into a control byte, so a
+ * window-level listener in the bubble phase never sees those at all. Almost
+ * always that is right: ^C, ^D and ^L belong to whatever is running in the
+ * pane, not to the window around it.
+ *
+ * The exceptions are the window-chrome chords the menu advertises, which have
+ * to work wherever focus happens to be — an advertised shortcut that does
+ * nothing is the bug this whole file exists to prevent. They mark themselves
+ * `overTerminal`, and this runs from a capture-phase listener, ahead of xterm.
+ * Anything not marked is left untouched, still bound for the shell.
+ */
+export function dispatchKeydownOverTerminal(e, ctx) {
+  const binding = findBinding(e, ctx);
+  if (!binding?.overTerminal) return null;
+  if (binding.preventDefault !== false) e.preventDefault();
+  // The point of running in capture: xterm must not also see this and turn it
+  // into a control byte.
+  e.stopPropagation();
   binding.run(e, ctx);
   return binding.id;
 }

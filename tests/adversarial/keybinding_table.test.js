@@ -17,7 +17,13 @@
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { MENU_BAR } from '../../src/lib/menuActions.js';
-import { KEYBINDINGS, findBinding, dispatchKeydown, menuIdOf } from '../../src/lib/keybindings.js';
+import {
+  KEYBINDINGS,
+  findBinding,
+  dispatchKeydown,
+  dispatchKeydownOverTerminal,
+  menuIdOf,
+} from '../../src/lib/keybindings.js';
 
 /** Every menu entry that advertises a shortcut. */
 const MENU_ITEMS = MENU_BAR.flatMap((menu) => menu.items).filter((i) => i.id && i.keys);
@@ -253,6 +259,103 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
 
     // The intentional exceptions, spelled out so adding another is a decision.
     const notInMenu = KEYBINDINGS.filter((b) => menuIdOf(b) === null).map((b) => b.id);
-    assert.deepEqual(notInMenu.sort(), ['escape', 'focus-pane']);
+    assert.deepEqual(notInMenu.sort(), ['escape', 'focus-pane', 'reload-guard']);
+  });
+
+  test('KB-11: only window chrome may be claimed over a focused terminal', () => {
+    // `overTerminal` takes a chord away from the shell. Which chords do that
+    // is a product decision, so it is written down here rather than left to
+    // whoever edits the table next.
+    const claimed = KEYBINDINGS.filter((b) => b.overTerminal).map((b) => b.id).sort();
+    assert.deepEqual(claimed, ['reload-guard', 'toggle-secondary', 'toggle-sidebar']);
+  });
+
+  test('KB-12: the terminal keeps every control byte, including the ones mod maps to', () => {
+    // KB-08 covers macOS, where Ctrl is not the app modifier so nothing can
+    // claim it. This is the Windows/Linux half, which KB-08 could not reach:
+    // there Ctrl IS the app modifier, so ^C/^D/^L/^W/^K/^U all match a binding
+    // in the table — and must still be left alone over a terminal.
+    // 'r' is in this list on purpose: Ctrl+R is reverse-i-search in bash, zsh
+    // and PSReadLine. The reload guard must never grow to cover it.
+    for (const letter of ['c', 'd', 'l', 'a', 'e', 'k', 'w', 'u', 'r']) {
+      const e = {
+        ctrlKey: true, metaKey: false, shiftKey: false, altKey: false,
+        key: letter, code: `Key${letter.toUpperCase()}`,
+        preventDefault: () => assert.ok(false, `Ctrl+${letter} must not be swallowed over a terminal`),
+        stopPropagation: () => assert.ok(false, `Ctrl+${letter} must reach xterm`),
+      };
+      const fired = dispatchKeydownOverTerminal(e, ctxFor(e, 'windows', { blockReload: true }));
+      assert.equal(fired, null, `Ctrl+${letter} must reach the shell, got ${fired}`);
+    }
+  });
+
+  test('KB-13: Ctrl+B toggles the side bar even though xterm would eat it', () => {
+    // The defect: off macOS the side bar toggle the menu advertises did
+    // nothing whenever a terminal had focus, because xterm turned Ctrl+B into
+    // ^B and stopped the event before any window listener ran.
+    for (const platform of PLATFORMS) {
+      for (const [keys, expected] of [
+        [['mod', 'b'], 'toggle-sidebar'],
+        [['mod', 'alt', 'b'], 'toggle-secondary'],
+      ]) {
+        let prevented = false;
+        let stopped = false;
+        const toggled = [];
+        const e = {
+          ...eventFor(keys, platform),
+          preventDefault: () => { prevented = true; },
+          stopPropagation: () => { stopped = true; },
+        };
+        const fired = dispatchKeydownOverTerminal(
+          e,
+          ctxFor(e, platform, { toggleSidebar: () => toggled.push('primary'), toggleSecondarySidebar: () => toggled.push('secondary') })
+        );
+        assert.equal(fired, expected, `${platform}: ${keys.join('+')} must be claimed over a terminal`);
+        assert.equal(toggled.length, 1, `${platform}: ${expected} must actually run`);
+        assert.ok(prevented, `${platform}: ${keys.join('+')} must be swallowed`);
+        assert.ok(stopped, `${platform}: xterm must not also see ${keys.join('+')}`);
+      }
+    }
+  });
+
+  test('KB-14: a packaged build refuses the reload chords, and a dev build does not', () => {
+    // A reload restarts the frontend, and bootstrap reaps every PTY — so a
+    // stray Ctrl+Shift+R kills every shell in the window. Measured on the
+    // shipped 0.2.3 Windows build: F5 and Ctrl+R are already suppressed by
+    // WebView2, Ctrl+Shift+R is not.
+    const chords = [
+      ['F5', { key: 'F5', code: 'F5', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false }],
+      ['Ctrl+Shift+R', { key: 'R', code: 'KeyR', ctrlKey: true, metaKey: false, shiftKey: true, altKey: false }],
+      ['Cmd+R', { key: 'r', code: 'KeyR', ctrlKey: false, metaKey: true, shiftKey: false, altKey: false }],
+      ['Cmd+Shift+R', { key: 'R', code: 'KeyR', ctrlKey: false, metaKey: true, shiftKey: true, altKey: false }],
+    ];
+
+    for (const [label, base] of chords) {
+      let prevented = false;
+      const e = { ...base, preventDefault: () => { prevented = true; } };
+      const platform = base.metaKey ? 'macos' : 'windows';
+      const fired = dispatchKeydown(e, ctxFor(e, platform, { blockReload: true }));
+      assert.equal(fired, 'reload-guard', `${label} must be refused in a packaged build`);
+      assert.ok(prevented, `${label} must be swallowed, or the webview still reloads`);
+
+      // Development is the one place reloading is wanted.
+      const devEvent = { ...base, preventDefault: () => assert.ok(false, `${label} must work in dev`) };
+      assert.equal(
+        dispatchKeydown(devEvent, ctxFor(devEvent, platform, { blockReload: false })),
+        null,
+        `${label} must still reload in development`
+      );
+    }
+
+    // And the one that must NOT be refused, packaged or not: reverse-i-search.
+    const search = {
+      key: 'r', code: 'KeyR', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false,
+      preventDefault: () => assert.ok(false, 'Ctrl+R must reach the shell'),
+    };
+    assert.equal(
+      dispatchKeydown(search, ctxFor(search, 'windows', { blockReload: true })),
+      null,
+      'a plain Ctrl+R is reverse-i-search and does not reload — it must be left alone'
+    );
   });
 });

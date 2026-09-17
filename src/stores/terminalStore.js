@@ -775,6 +775,17 @@ function regeneratePaneIds(node, idMap = new Map()) {
 
 let unlisteners = [];
 let listening = false;
+
+/**
+ * True for the auto-generated `Terminal N` names.
+ *
+ * The distinction matters wherever a title is handed in rather than chosen: a
+ * default name is a NUMBER the app gave out and may give out differently,
+ * while anything else is a name the user typed and is theirs to keep,
+ * duplicate or not.
+ */
+const isDefaultTitle = (name) => /^Terminal \d+$/.test(name || '');
+
 /**
  * The name a new terminal gets when the user has not chosen one.
  *
@@ -855,10 +866,19 @@ export const useTerminalStore = create((set, get) => {
         shell: useSettingsStore.getState().terminalDefaultShell,
       });
 
-      const defaultTitle = nextDefaultTitle(get().tabs);
+      // A caller may ask for a title: `materializeGroup` and `loadSavedGroup`
+      // pass the one the terminal had when it was saved. When that title is a
+      // default `Terminal N` name its number is a PREFERENCE, not a claim —
+      // the tab keeps it while it is free and takes the next free number when
+      // it is not. Loading a saved group beside a live "Terminal 1" used to
+      // put a SECOND visible "Terminal 1" in the strip, because uniqueness was
+      // only ever enforced on `defaultTitle` while `title` was forced through
+      // untouched. A title the user typed is never renumbered.
+      const wantedNumber = isDefaultTitle(title) ? title : null;
+      const defaultTitle = nextDefaultTitle(get().tabs, wantedNumber);
       const newTab = {
         id: makeTabId(),
-        title: title || defaultTitle,
+        title: wantedNumber ? defaultTitle : title || defaultTitle,
         defaultTitle,
         sessionId: ptySession.session_id,
         cwd: ptySession.cwd || get().cwd,
@@ -1029,7 +1049,11 @@ export const useTerminalStore = create((set, get) => {
       const defaultTitle = nextDefaultTitle(newTabs, savedTab.title);
       newTabs.push({
         id: savedTab.id,
-        title: savedTab.title || defaultTitle,
+        // Same rule as `spawnTab`: a saved `Terminal N` title follows the
+        // number it was actually given, so a payload written by the version
+        // that handed out duplicates is restored WITHOUT them rather than
+        // faithfully reproducing two tabs called "Terminal 3".
+        title: isDefaultTitle(savedTab.title) ? defaultTitle : savedTab.title || defaultTitle,
         defaultTitle,
         sessionId: ptySession.session_id,
         cwd: ptySession.cwd || wantedCwd,
