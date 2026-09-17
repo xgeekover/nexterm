@@ -26,6 +26,7 @@ import './no_folder.test.js';
 import './keybinding_table.test.js';
 import './pty_reload_leak.test.js';
 import './fit_reports_size.test.js';
+import './tab_names.test.js';
 
 async function run() {
   console.log('====================================================');

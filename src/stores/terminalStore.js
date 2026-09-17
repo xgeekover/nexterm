@@ -775,6 +775,48 @@ function regeneratePaneIds(node, idMap = new Map()) {
 
 let unlisteners = [];
 let listening = false;
+/**
+ * The name a new terminal gets when the user has not chosen one.
+ *
+ * Numbered by the lowest number nothing is using, not by how many terminals
+ * there are. `Terminal ${tabs.length + 1}` reused a number the moment a tab in
+ * the middle was closed: open three, close "Terminal 2", open one more, and
+ * two tabs are both called "Terminal 3".
+ *
+ * A number counts as taken when EITHER name uses it:
+ *
+ *  - `defaultTitle`, because a renamed terminal still holds its number.
+ *    Clearing a rename puts `defaultTitle` back (see `renameTab`), so two tabs
+ *    handed the same one would collide the moment both were cleared — long
+ *    after anything could explain why.
+ *  - the visible `title`, because a restored layout carries the titles it was
+ *    saved with while their `defaultTitle`s are renumbered from one. Saved
+ *    "Terminal 1" and "Terminal 3" come back as defaults 1 and 2, and the next
+ *    new terminal would then be shown as "Terminal 3" beside the restored one.
+ */
+function nextDefaultTitle(tabs, preferred = null) {
+  const numberIn = (name) => {
+    const match = /^Terminal (\d+)$/.exec(name || '');
+    return match ? Number(match[1]) : null;
+  };
+
+  const taken = new Set();
+  for (const tab of tabs || []) {
+    for (const name of [tab?.defaultTitle, tab?.title]) {
+      const n = numberIn(name);
+      if (n !== null) taken.add(n);
+    }
+  }
+
+  // A caller restoring a saved terminal asks to keep the number it had.
+  const wanted = numberIn(preferred);
+  if (wanted !== null && !taken.has(wanted)) return `Terminal ${wanted}`;
+
+  let n = 1;
+  while (taken.has(n)) n += 1;
+  return `Terminal ${n}`;
+}
+
 // The bootstrap still running, shared by every init() until it settles — see init.
 let initInFlight = null;
 
@@ -813,7 +855,7 @@ export const useTerminalStore = create((set, get) => {
         shell: useSettingsStore.getState().terminalDefaultShell,
       });
 
-      const defaultTitle = `Terminal ${get().tabs.length + 1}`;
+      const defaultTitle = nextDefaultTitle(get().tabs);
       const newTab = {
         id: makeTabId(),
         title: title || defaultTitle,
@@ -979,7 +1021,12 @@ export const useTerminalStore = create((set, get) => {
         }
       }
 
-      const defaultTitle = `Terminal ${newTabs.length + 1}`;
+      // A terminal saved as "Terminal 3" keeps that as its default, so the
+      // numbering a user arranged survives a restart and the next new terminal
+      // takes the gap rather than counting past it. Only when the number is
+      // already spoken for — a payload written by the version that handed out
+      // duplicates — does it fall back to the next free one.
+      const defaultTitle = nextDefaultTitle(newTabs, savedTab.title);
       newTabs.push({
         id: savedTab.id,
         title: savedTab.title || defaultTitle,
@@ -1961,7 +2008,7 @@ export const useTerminalStore = create((set, get) => {
           shell: useSettingsStore.getState().terminalDefaultShell,
         });
 
-        const defaultTitle = 'Terminal 1';
+        const defaultTitle = nextDefaultTitle(get().tabs);
         const initialTab = {
           id: makeTabId(),
           title: defaultTitle,
