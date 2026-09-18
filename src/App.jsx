@@ -9,6 +9,7 @@ import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useTheme } from './hooks/useTheme.js';
 import { useTerminalStore } from './stores/terminalStore.js';
+import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
 import { useSettingsStore } from './stores/settingsStore.js';
 import { mockBridge } from './lib/ipc.js';
@@ -29,6 +30,9 @@ export default function App() {
   const initEditor = useEditorStore((s) => s.init);
 
   useEffect(() => {
+    // What earlier sessions ran. Read once, before anything can record over
+    // it — the history palette is worth much more when it outlives the window.
+    loadCommandHistory();
     // Proactively initialize all IDE subsystems
     initTerminal();
     initEditor();

@@ -138,6 +138,14 @@ group's chip shows the same for every terminal inside it. The point is the ones
 you are not looking at: switching groups replaces the whole arrangement, so
 without this a build finishing — or failing — in another group is invisible.
 Hovering says it in words. Nothing flashes for an empty prompt line.
+**Run something again.** `⌘⇧H` opens the command history: every command line
+this machine has run, newest first, with the directory it ran in. Typing
+narrows it by plain substring — a command line is not a filename — and `Enter`
+types the chosen one into the active terminal without pressing return, so a
+command from yesterday can be edited before it runs. The history outlives the
+window. It is **not** on `Ctrl+R`: that is reverse-i-search in every shell, and
+a history palette that costs you the shell's own is a bad trade.
+
 **Find something in the scrollback.** `⌘F` opens a find bar over the focused
 terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
 `Esc` to close. Match case, whole word and regular expressions are there, every
@@ -192,6 +200,7 @@ scrollback, colour theme, and command suggestions.
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
 | `⌘F` | Find in the active terminal's scrollback |
+| `⌘⇧H` | Command history |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / default text |
 | `⌘S` | Save the active editor file |
 
