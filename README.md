@@ -103,6 +103,15 @@ terminal. Nothing is said about a command you watched finish, and nothing is
 said about a quick one; the threshold is Settings ▸ Terminal ▸ Notify After,
 and 0 turns it off.
 
+**Search across the files.** `⇧⌘F`, or the magnifying glass in the activity
+bar, opens a search over the open folder — match case, whole word, regular
+expressions — grouped by file, and clicking a result opens that file with the
+caret on the line. It skips exactly what the Explorer skips (`node_modules`,
+`.git`, `target`, `dist`), so the results and the tree agree about what is in
+the project; `.gitignore` itself is not read. Searching happens on `Enter`, not
+on every keystroke: a grep of a real repository is not something to fire on the
+`e` of `error`.
+
 **Narrow the Explorer.** The funnel in the Explorer header opens a filter: type
 part of a name and the tree keeps only what matches, plus the folders that lead
 to it, opened. It counts the matches, `Esc` clears it, and clearing puts your
@@ -196,6 +205,7 @@ scrollback, colour theme, and command suggestions.
 | --- | --- |
 | `⌘K` | Command palette |
 | `⌘P` / `⌘⇧P` | Go to file / all commands |
+| `⌘⇧F` | Search across files |
 | `⌘⇧O` | Open a folder |
 | `⌘,` | Settings |
 | `⌃\`` | Toggle the terminal panel |
