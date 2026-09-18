@@ -70,6 +70,21 @@ pub fn fs_pick_root(app: AppHandle, state: State<AppState>) -> Result<Option<Str
     Ok(Some(root_str))
 }
 
+/// Open a folder the user has opened before, without a dialog.
+///
+/// Same validation as the picker: `set_root` canonicalises and refuses
+/// anything that is not a directory, so a recent entry whose folder has been
+/// moved or deleted comes back as an error the UI can act on rather than a
+/// half-open workspace. This is the only way in besides the dialog, and it
+/// still goes through the one function that decides what a root may be.
+#[tauri::command(rename_all = "snake_case")]
+pub fn fs_set_root(app: AppHandle, state: State<AppState>, path: String) -> Result<String, String> {
+    let root = state.workspace.set_root(std::path::Path::new(&path))?;
+    let root_str = root.to_string_lossy().to_string();
+    state.fs_watcher.start_watching(app.clone(), &root_str)?;
+    Ok(root_str)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_read_dir(
     state: State<AppState>,

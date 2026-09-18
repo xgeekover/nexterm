@@ -50,6 +50,10 @@ export const COMMANDS = {
     title: 'Command Palette',
     run: (ctx) => ctx.setCommandPaletteOpen(!ctx.isCommandPaletteOpen),
   },
+  'open-recent': {
+    title: 'Open Recent…',
+    run: (ctx) => ctx.setCommandPaletteOpen(true, 'recent'),
+  },
   'open-folder': {
     title: 'Open Folder…',
     run: (ctx) => ctx.pickRoot?.(),
@@ -224,6 +228,8 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'all-commands', key: 'mod+shift+p' },
   { command: 'command-palette', key: 'mod+k' },
   { command: 'open-folder', key: 'mod+shift+o' },
+  // Next to Open Folder, and nothing in a shell wants ⌥⌘O / Ctrl+Alt+O.
+  { command: 'open-recent', key: 'mod+alt+o' },
   { command: 'preferences', key: 'mod+comma' },
   { command: 'save', key: 'mod+s' },
   { command: 'split-down', key: 'mod+shift+d' },

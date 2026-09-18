@@ -145,6 +145,15 @@ scenario('RN-02', 'no folder opened — the Explorer offers to open one', () => 
   useEditorStore.setState({ rootPath: null, rootResolved: true });
 });
 
+scenario('RN-14', 'no folder open, with recent ones to offer', () => {
+  reset();
+  useEditorStore.setState({
+    rootPath: null,
+    rootResolved: true,
+    recentRoots: ['/w/alpha', '/w/beta'],
+  });
+});
+
 scenario('RN-03', 'a pane holding no terminal', () => {
   // The state a split reaches when its last tab is closed. Renders the pane's
   // empty branch AND the group switcher's aggregate over zero tabs.

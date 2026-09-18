@@ -129,6 +129,7 @@ pub fn spec() -> Vec<Submenu> {
             title: "File",
             items: vec![
                 custom("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
+                custom("open-recent", "Open Recent…", "CmdOrCtrl+Alt+O"),
                 custom("new-terminal", "New Terminal", "Ctrl+Shift+`"),
                 Sep,
                 terminal_safe("save", "Save", "CmdOrCtrl+S"),
@@ -153,6 +154,7 @@ pub fn spec() -> Vec<Submenu> {
             title: "File",
             items: vec![
                 custom("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
+                custom("open-recent", "Open Recent…", "CmdOrCtrl+Alt+O"),
                 custom("new-terminal", "New Terminal", "Ctrl+Shift+`"),
                 terminal_safe("save", "Save", "CmdOrCtrl+S"),
                 Sep,
@@ -373,8 +375,9 @@ mod tests {
         // menu and the one the app draws off macOS dispatch through.
         #[cfg(target_os = "macos")]
         let expected = [
-            "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
-            "search-in-files", "toggle-sidebar", "toggle-panel", "toggle-secondary",
+            "preferences", "open-folder", "open-recent", "new-terminal", "save",
+            "command-palette", "quick-open", "search-in-files",
+            "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
             "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
             "clear-terminal", "close-window",
@@ -383,8 +386,9 @@ mod tests {
         // Quit lives in the File menu as a predefined item.
         #[cfg(not(target_os = "macos"))]
         let expected = [
-            "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
-            "search-in-files", "toggle-sidebar", "toggle-panel", "toggle-secondary",
+            "preferences", "open-folder", "open-recent", "new-terminal", "save",
+            "command-palette", "quick-open", "search-in-files",
+            "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
             "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
             "clear-terminal",

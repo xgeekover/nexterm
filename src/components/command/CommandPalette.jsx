@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Search,
   FileCode,
+  FolderOpen,
   History,
   Terminal,
   Save,
@@ -21,6 +22,8 @@ export function CommandPalette() {
 
   const fileTree = useEditorStore((s) => s.fileTree);
   const openFile = useEditorStore((s) => s.openFile);
+  const recentRoots = useEditorStore((s) => s.recentRoots);
+  const openRoot = useEditorStore((s) => s.openRoot);
   const saveAll = useEditorStore((s) => s.saveAll);
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
@@ -56,11 +59,13 @@ export function CommandPalette() {
     query,
     mode: paletteMode,
     bindings,
+    recentRoots,
     history: paletteMode === 'history' ? commandHistory() : [],
   });
   const allFiltered = groups.flatMap((g) => g.items);
 
   const iconFor = (item) => {
+    if (item.type === 'recent') return <FolderOpen size={16} />;
     if (item.type === 'history') return <History size={16} />;
     if (item.type === 'file') return <FileCode size={16} />;
     if (item.command === 'save_all') return <Save size={16} />;
@@ -68,6 +73,10 @@ export function CommandPalette() {
   };
 
   const runItem = async (item) => {
+    if (item.type === 'recent') {
+      await openRoot(item.path);
+      return;
+    }
     if (item.type === 'history') {
       // Typed into the terminal rather than executed behind the user's back:
       // a command from yesterday may want editing, and the newline is the

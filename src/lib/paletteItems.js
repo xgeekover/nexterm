@@ -8,6 +8,7 @@
  */
 
 import { fuzzyMatch } from './utils.js';
+import { basename } from './paths.js';
 import { isMac } from './platform.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
 
@@ -83,9 +84,28 @@ export function buildPaletteGroups({
   query = '',
   mode = 'all',
   bindings = DEFAULT_RESOLVED,
+  recentRoots = [],
   history = [],
 } = {}) {
   const q = (query || '').toLowerCase().trim();
+
+  // Its own mode rather than a section of "all": you reach for it knowing you
+  // want a folder, and there is nothing to mix it with — with no folder open
+  // there are no files to list in the first place.
+  if (mode === 'recent') {
+    const rows = recentRoots
+      .filter((path) => typeof path === 'string' && path)
+      .filter((path) => !q || path.toLowerCase().includes(q))
+      .map((path) => ({
+        type: 'recent',
+        id: `recent-${path}`,
+        title: basename(path) || path,
+        subtitle: path,
+        path,
+        hint: 'Folder',
+      }));
+    return rows.length > 0 ? [{ label: 'recent folders', items: rows }] : [];
+  }
 
   // History is its own mode rather than a section of "all": you reach for it
   // knowing you want something you have already run, and mixing it with files
