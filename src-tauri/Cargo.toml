@@ -19,6 +19,9 @@ parking_lot = "0.12.5"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 walkdir = "2.5.0"
+# Search across files: the regex mode, and what "whole word" compiles to.
+# Already in the tree as a transitive dependency, so this costs no build time.
+regex = "1"
 # canonicalize without the \\?\ prefix Windows adds — see `Canonical` in src/fs/mod.rs.
 dunce = "1.0.5"
 tauri-plugin-dialog = "2"

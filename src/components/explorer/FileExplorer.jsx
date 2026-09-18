@@ -31,6 +31,8 @@ export function FileExplorer() {
   // Until the backend has been asked, `rootPath` is only a placeholder; showing
   // it would flash a folder that is not open.
   const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
+  const recentRoots = useEditorStore((s) => s.recentRoots);
+  const openRoot = useEditorStore((s) => s.openRoot);
   const pickRoot = useEditorStore((s) => s.pickRoot);
   const createFile = useEditorStore((s) => s.createFile);
   const createFolder = useEditorStore((s) => s.createFolder);
@@ -307,7 +309,7 @@ export function FileExplorer() {
             Explorer
           </span>
         </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center">
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4 text-center overflow-y-auto">
           <p className="text-ui-sm text-vsc-muted">No folder opened</p>
           <button
             type="button"
@@ -316,6 +318,30 @@ export function FileExplorer() {
           >
             Open Folder
           </button>
+
+          {/* This is where the recent list is most use: the app opens with no
+              folder, and the only way back was a native dialog — on Windows,
+              clicking through a tree to a path you have typed a hundred times
+              in the terminal below. */}
+          {recentRoots.length > 0 && (
+            <div className="w-full mt-2">
+              <p className="mb-1 text-ui-sm uppercase tracking-wide text-vsc-muted">Recent</p>
+              {recentRoots.slice(0, 6).map((path) => (
+                <button
+                  key={path}
+                  type="button"
+                  onClick={() => openRoot(path)}
+                  title={path}
+                  className="w-full h-[22px] px-2 flex items-center gap-2 text-left rounded-sm hover:bg-vsc-hover"
+                >
+                  <span className="truncate text-ui text-vsc-fg">{basename(path) || path}</span>
+                  <span className="ml-auto truncate max-w-[55%] text-ui-sm text-vsc-muted">
+                    {dirname(path)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );

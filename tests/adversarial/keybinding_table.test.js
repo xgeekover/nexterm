@@ -100,7 +100,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       .filter((i) => i.id && !i.key)
       .map((i) => i.id);
     assert.deepEqual(withoutShortcut, [], 'these menu entries advertise no shortcut at all');
-    assert.equal(MENU_ITEMS.length, 18, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
+    assert.equal(MENU_ITEMS.length, 21, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
   });
 
   test('KB-01: every shortcut the menu advertises is claimed by a binding', () => {
@@ -165,6 +165,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       createTerminalTab: stub('newTerminal'),
       clearBlocks: stub('clear'),
       openFind: stub('find'),
+      showView: stub('showView'),
       zoomFont: stub('zoom'),
       resetZoom: stub('zoomReset'),
       closeWindow: stub('closeWindow'),
@@ -173,6 +174,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
 
     const expected = {
       'open-folder': 'pickRoot()',
+      'open-recent': 'palette(true,recent)',
       'preferences': 'settings(true)',
       'close-window': 'closeWindow()',
       'toggle-secondary': 'secondary()',
@@ -187,6 +189,8 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'command-palette': 'palette(true)',
       'quick-open': 'palette(true,files)',
       'find-in-terminal': 'find()',
+      'search-in-files': 'showView(search)',
+      'command-history': 'palette(true,history)',
       'zoom-in': 'zoom(1)',
       'zoom-out': 'zoom(-1)',
       'zoom-reset': 'zoomReset()',
@@ -312,12 +316,18 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     // whoever edits the table next.
     const claimed = Object.entries(COMMANDS).filter(([, c]) => c.overTerminal).map(([id]) => id).sort();
     assert.deepEqual(claimed, [
+      // The history palette. Bound to ⌘⇧H precisely BECAUSE Ctrl+R — the
+      // obvious key for it — is reverse-i-search and KB-12 keeps it.
+      'command-history',
       // Ctrl+F off macOS, which readline uses for forward-char. Taken on
       // purpose: a find bar that stops working whenever a terminal has focus
       // would never work at all, VS Code makes the same trade, and Settings
       // can move it. The arrow keys do the same job in the shell.
       'find-in-terminal',
       'reload-guard',
+      // ⇧⌘F. The terminal has no use for it, and shifted it is not a bare
+      // Ctrl+letter, so nothing is taken from the shell.
+      'search-in-files',
       'toggle-secondary',
       'toggle-sidebar',
       // Punctuation and a digit — no control byte is given up for these.

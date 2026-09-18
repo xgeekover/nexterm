@@ -244,7 +244,11 @@ export function TerminalView({ tabId, active = false }) {
             // for a shell without OSC 133 integration. If the shell does report
             // an exit code and it is non-zero, the command is taken back out
             // below — a typo should not be suggested for the rest of the day.
-            recordCommand(cmd);
+            // The directory as well as the line: it is most of what tells
+            // two similar-looking commands apart in the history palette.
+            recordCommand(cmd, {
+              cwd: useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.cwd ?? null,
+            });
             lastSubmittedRef.current = cmd;
           }
           bufferRef.current = '';

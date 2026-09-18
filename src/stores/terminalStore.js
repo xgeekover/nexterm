@@ -861,13 +861,15 @@ export const useTerminalStore = create((set, get) => {
    * instead of it also lingering wherever focus happened to be when the PTY
    * finished spawning.
    */
-  const spawnTab = async (title = null, cwd = null) => {
+  const spawnTab = async (title = null, cwd = null, shell = null) => {
     try {
       const ptySession = await invoke('pty_spawn', {
         cols: 80,
         rows: 24,
         cwd: cwd || get().cwd || '/workspace',
-        shell: useSettingsStore.getState().terminalDefaultShell,
+        // A profile picked for THIS terminal wins over the default setting.
+        // `resolve_shell` takes a name or a path, so a profile is just a spec.
+        shell: shell || useSettingsStore.getState().terminalDefaultShell,
       });
 
       // A caller may ask for a title: `materializeGroup` and `loadSavedGroup`
@@ -888,6 +890,11 @@ export const useTerminalStore = create((set, get) => {
         cwd: ptySession.cwd || get().cwd,
         blocks: [],
         activePrompt: '',
+        // What the backend actually ran, not what was asked for. The status
+        // bar names the active terminal's shell, and once terminals can differ
+        // a bar reading the global SETTING would be wrong for every terminal
+        // but one — the same way it once claimed a git branch it never read.
+        shell: ptySession.shell || null,
         // Stated rather than left undefined: `tabActivity` reads both, and a
         // restored tab gets a NEW shell, so neither may survive a respawn.
         running: false,
@@ -2191,17 +2198,20 @@ export const useTerminalStore = create((set, get) => {
       let title = null;
       let paneId = null;
       let groupId = null;
+      let shell = null;
       if (titleOrOptions && typeof titleOrOptions === 'object') {
         title = titleOrOptions.title ?? null;
         paneId = titleOrOptions.paneId ?? null;
         groupId = titleOrOptions.groupId ?? null;
+        shell = titleOrOptions.shell ?? null;
       } else {
         title = titleOrOptions;
         paneId = options?.paneId ?? null;
         groupId = options?.groupId ?? null;
+        shell = options?.shell ?? null;
       }
 
-      const newTab = await spawnTab(title);
+      const newTab = await spawnTab(title, null, shell);
       if (!newTab) return null;
 
       set((state) => {
@@ -2238,7 +2248,9 @@ export const useTerminalStore = create((set, get) => {
       const sourceGroup = groupOfTab(get(), tabId);
       const holder = sourceGroup ? leafHoldingTab(sourceGroup.tree, tabId) : null;
 
-      const newTab = await spawnTab(null, source.cwd);
+      // Duplicate keeps the source's shell as well as its directory — a copy
+      // of a Git Bash terminal that opens PowerShell is not a copy.
+      const newTab = await spawnTab(null, source.cwd, source.shell);
       if (!newTab) return null;
 
       set((state) => {

@@ -111,6 +111,7 @@ export const useSettingsStore = create((set, get) => ({
   // which view(s) render inside whichever region is shown.
   viewLocations: {
     explorer: 'left',
+    search: 'left',
     terminal: 'bottom',
     terminals: 'right',
   },
@@ -160,6 +161,32 @@ export const useSettingsStore = create((set, get) => ({
     });
   },
   setSecondaryTab: (tab) => set({ secondaryTab: tab }),
+
+  /**
+   * Bring one view on screen and make it the visible one in its region.
+   *
+   * The activity bar lives outside `PanelLayout`, which owns "which tab of a
+   * region is showing" as local state — so this is the one line of it that
+   * has to be shared. `requestedView` is a request, not a second source of
+   * truth: the layout honours it when that view is in that region and forgets
+   * about it otherwise.
+   */
+  showView: (view) =>
+    set((state) => {
+      const region = state.viewLocations[view];
+      if (!region) return {};
+      const visibility =
+        region === 'left'
+          ? { sidebarVisible: true }
+          : region === 'right'
+            ? { secondarySidebarVisible: true }
+            : { panelVisible: true };
+      return { ...visibility, requestedView: { view, region, at: Date.now() } };
+    }),
+
+  /** The last `showView` request, or null. Cleared once the layout applies it. */
+  requestedView: null,
+  clearRequestedView: () => set({ requestedView: null }),
 
   // Drag & drop layout: move a view ('explorer' | 'agents' | 'terminal') to
   // a region ('left' | 'right' | 'bottom'). Dropping onto the region a view

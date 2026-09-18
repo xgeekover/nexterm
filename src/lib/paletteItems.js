@@ -8,6 +8,7 @@
  */
 
 import { fuzzyMatch } from './utils.js';
+import { basename } from './paths.js';
 import { isMac } from './platform.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
 
@@ -72,13 +73,60 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
 /**
  * The palette's result groups for `query`, in display order.
  *
- * `mode` is 'all' (⌘K — files and commands) or 'files' (⌘P — files only), and
- * `bindings` decides which shortcut each command advertises.
+ * `mode` is 'all' (⌘K — files and commands), 'files' (⌘P — files only) or
+ * 'history' (⌘⇧H — command lines already run), and `bindings` decides which
+ * shortcut each command advertises.
  * Empty groups are dropped so the rendered list and the keyboard selection
  * always run over exactly the same items.
  */
-export function buildPaletteGroups({ fileTree = [], query = '', mode = 'all', bindings = DEFAULT_RESOLVED } = {}) {
+export function buildPaletteGroups({
+  fileTree = [],
+  query = '',
+  mode = 'all',
+  bindings = DEFAULT_RESOLVED,
+  recentRoots = [],
+  history = [],
+} = {}) {
   const q = (query || '').toLowerCase().trim();
+
+  // Its own mode rather than a section of "all": you reach for it knowing you
+  // want a folder, and there is nothing to mix it with — with no folder open
+  // there are no files to list in the first place.
+  if (mode === 'recent') {
+    const rows = recentRoots
+      .filter((path) => typeof path === 'string' && path)
+      .filter((path) => !q || path.toLowerCase().includes(q))
+      .map((path) => ({
+        type: 'recent',
+        id: `recent-${path}`,
+        title: basename(path) || path,
+        subtitle: path,
+        path,
+        hint: 'Folder',
+      }));
+    return rows.length > 0 ? [{ label: 'recent folders', items: rows }] : [];
+  }
+
+  // History is its own mode rather than a section of "all": you reach for it
+  // knowing you want something you have already run, and mixing it with files
+  // and commands would bury it under both.
+  if (mode === 'history') {
+    const rows = history
+      .filter((entry) => entry && typeof entry.command === 'string')
+      // Plain substring, not fuzzy: a command line is not a filename, and
+      // fuzzy matching over `git commit -m "..."` turns every query into a
+      // wall of near-misses.
+      .filter((entry) => !q || entry.command.toLowerCase().includes(q))
+      .map((entry) => ({
+        type: 'history',
+        id: `history-${entry.command}`,
+        title: entry.command,
+        subtitle: entry.cwd || '',
+        command: entry.command,
+        hint: entry.count > 1 ? `${entry.count}×` : 'Ran once',
+      }));
+    return rows.length > 0 ? [{ label: 'history', items: rows }] : [];
+  }
 
   const files = flattenFileNodes(fileTree)
     .filter((node) => fuzzyMatch(q, node.path) || fuzzyMatch(q, node.name))

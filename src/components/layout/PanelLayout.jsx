@@ -5,6 +5,7 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { TerminalSplitContainer } from '../terminal/index.js';
 import { TerminalsPanel } from '../terminal/index.js';
 import { FileExplorer } from '../explorer/FileExplorer.jsx';
+import { SearchPanel } from '../search/SearchPanel.jsx';
 import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 
@@ -43,10 +44,11 @@ const PANEL_TRANSITION_MS = 180;
 
 // The three draggable views and where each one is allowed to render.
 // Order here also controls tab order within a region.
-const VIEW_ORDER = ['explorer', 'terminal', 'terminals'];
+const VIEW_ORDER = ['explorer', 'search', 'terminal', 'terminals'];
 
 const VIEW_META = {
   explorer: { title: 'Explorer', Component: FileExplorer },
+  search: { title: 'Search', Component: SearchPanel },
   // The terminal renders its own tab strip, so the region chrome is merged
   // into it instead of stacking a second bar above it.
   terminal: { title: 'Terminal', Component: TerminalSplitContainer, providesOwnHeader: true },
@@ -430,6 +432,20 @@ export function PanelLayout() {
     (region, view) => setExplicitActive((prev) => ({ ...prev, [region]: view })),
     []
   );
+
+  // The activity bar asks for a view from outside this component; honour the
+  // request once and drop it, so it can never become a second opinion about
+  // which tab is showing.
+  const requestedView = useSettingsStore((s) => s.requestedView);
+  const clearRequestedView = useSettingsStore((s) => s.clearRequestedView);
+  useEffect(() => {
+    if (!requestedView) return;
+    const { view, region } = requestedView;
+    if (regionViews[region]?.includes(view)) {
+      setExplicitActive((prev) => ({ ...prev, [region]: view }));
+    }
+    clearRequestedView();
+  }, [requestedView, regionViews, clearRequestedView]);
 
   // --- Drag & drop -----------------------------------------------------
   const [draggingView, setDraggingView] = useState(null);
