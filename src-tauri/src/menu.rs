@@ -182,6 +182,7 @@ pub fn spec() -> Vec<Submenu> {
         items: vec![
             terminal_safe("command-palette", "Command Palette…", "CmdOrCtrl+K"),
             terminal_safe("quick-open", "Go to File…", "CmdOrCtrl+P"),
+            custom("search-in-files", "Search in Files…", "CmdOrCtrl+Shift+F"),
             Sep,
             terminal_safe("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
             custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
@@ -370,7 +371,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         let expected = [
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
-            "toggle-sidebar", "toggle-panel", "toggle-secondary",
+            "search-in-files", "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
             "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
             "close-window",
@@ -380,7 +381,7 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         let expected = [
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
-            "toggle-sidebar", "toggle-panel", "toggle-secondary",
+            "search-in-files", "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
             "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
         ];

@@ -132,6 +132,13 @@ export const COMMANDS = {
     title: 'Clear Unpinned Blocks',
     run: (ctx) => ctx.clearBlocks?.(),
   },
+  'search-in-files': {
+    title: 'Search in Files',
+    // The terminal has no use for ⇧⌘F, and off macOS Ctrl+Shift+F is not a
+    // bare Ctrl+letter, so the window may claim it everywhere.
+    overTerminal: true,
+    run: (ctx) => ctx.showView?.('search'),
+  },
   'find-in-terminal': {
     title: 'Find in Terminal',
     // The scrollback is 5000 lines deep, and a find bar that stops working the
@@ -223,6 +230,7 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'toggle-secondary', key: 'mod+alt+b' },
   { command: 'toggle-sidebar', key: 'mod+b' },
   { command: 'clear-terminal', key: 'mod+l' },
+  { command: 'search-in-files', key: 'mod+shift+f' },
   { command: 'find-in-terminal', key: 'mod+f' },
   // Two spellings of "bigger", because `+` is the shifted `=` on most layouts
   // and people press whichever they think of. The menu shows the first.

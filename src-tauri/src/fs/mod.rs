@@ -1,4 +1,5 @@
 pub mod watcher;
+pub mod search;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;

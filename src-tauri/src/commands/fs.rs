@@ -19,6 +19,32 @@ fn is_root(state: &State<AppState>, path: &str) -> bool {
         .is_some_and(|root| root.to_string_lossy() == path)
 }
 
+/// Search the open folder's files.
+///
+/// Confined by construction: the walk starts at the workspace root, so there
+/// is no webview-supplied path to confine in the first place. Every cap lives
+/// in `fs::search` and what was cut comes back in `truncated` rather than
+/// being dropped quietly.
+#[tauri::command(rename_all = "snake_case")]
+pub fn fs_search(
+    state: State<AppState>,
+    query: String,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    regex: Option<bool>,
+) -> Result<fs::search::SearchResults, String> {
+    let root = fs::search::root_of(state.workspace.root())?;
+    fs::search::search(
+        &root,
+        &query,
+        fs::search::SearchOptions {
+            case_sensitive: case_sensitive.unwrap_or(false),
+            whole_word: whole_word.unwrap_or(false),
+            regex: regex.unwrap_or(false),
+        },
+    )
+}
+
 /// The open folder, or `null` until one has been opened.
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {

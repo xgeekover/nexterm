@@ -76,6 +76,9 @@ export function runMenuAction(id) {
     case 'find-in-terminal':
       terminal.openFind?.();
       break;
+    case 'search-in-files':
+      settings.showView?.('search');
+      break;
     case 'zoom-in':
       settings.zoomFont?.(1);
       break;
@@ -116,6 +119,7 @@ const MENU_SPEC = [
     items: [
       { id: 'command-palette', label: 'Command Palette…' },
       { id: 'quick-open', label: 'Go to File…' },
+      { id: 'search-in-files', label: 'Search in Files…' },
       { type: 'separator' },
       { id: 'toggle-sidebar', label: 'Toggle Primary Side Bar' },
       { id: 'toggle-panel', label: 'Toggle Terminal Panel' },
