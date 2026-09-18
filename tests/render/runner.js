@@ -170,6 +170,11 @@ scenario('RN-15', 'a repository with a branch and changed files', () => {
   });
 });
 
+scenario('RN-16', 'the sticky command header turned off', () => {
+  reset();
+  useSettingsStore.getState().setSetting('terminalStickyHeader', false);
+});
+
 scenario('RN-03', 'a pane holding no terminal', () => {
   // The state a split reaches when its last tab is closed. Renders the pane's
   // empty branch AND the group switcher's aggregate over zero tabs.

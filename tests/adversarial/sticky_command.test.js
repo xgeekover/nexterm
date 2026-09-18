@@ -8,6 +8,7 @@
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { stickyCommandFor, addCommandMark } from '../../src/lib/stickyCommand.js';
+import { useSettingsStore } from '../../src/stores/settingsStore.js';
 
 const marks = [
   { line: 0, command: 'npm install' },
@@ -92,5 +93,26 @@ describe('Sticky command header: what to remember', () => {
     const snapshot = JSON.stringify(original);
     addCommandMark(original, { line: 2, command: 'pwd' });
     assert.equal(JSON.stringify(original), snapshot);
+  });
+});
+
+describe('Sticky command header: the setting', () => {
+  test('SK-12: on by default, because it is absent most of the time', () => {
+    const defaults = useSettingsStore.getState().settingsDefaults;
+    assert.equal(defaults.terminalStickyHeader, true);
+  });
+
+  test('SK-13: it can be turned off and back on', () => {
+    const S = useSettingsStore.getState();
+    S.setSetting('terminalStickyHeader', false);
+    assert.equal(useSettingsStore.getState().terminalStickyHeader, false);
+    S.setSetting('terminalStickyHeader', true);
+    assert.equal(useSettingsStore.getState().terminalStickyHeader, true);
+  });
+
+  test('SK-14: resetting the settings brings it back', () => {
+    useSettingsStore.getState().setSetting('terminalStickyHeader', false);
+    useSettingsStore.getState().resetSettings();
+    assert.equal(useSettingsStore.getState().terminalStickyHeader, true);
   });
 });

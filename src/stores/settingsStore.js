@@ -20,6 +20,16 @@ export const SETTINGS_DEFAULTS = {
   terminalScrollback: 5000,
   terminalTheme: 'dark-modern',
   terminalSuggestions: true,
+  /**
+   * The bar naming the command you are scrolled into.
+   *
+   * On by default because it is absent most of the time — it appears only
+   * while the view is scrolled back, never over a full-screen program, and
+   * never for a command the view did not see typed. The reason to turn it off
+   * is that a sticky header covers the row it describes, as every sticky
+   * header does, and that row is sometimes the one you scrolled up to read.
+   */
+  terminalStickyHeader: true,
   terminalDefaultShell: 'default',
   /**
    * Tell me when a command finishes in a terminal I am not looking at, once it
