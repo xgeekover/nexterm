@@ -700,9 +700,14 @@ export function TerminalsPanel() {
               </div>
 
               {!groupCollapsed && tabCount === 0 && (
-                <p className="text-ui-sm text-vsc-muted py-0.5" style={{ paddingLeft: padFor(1) }}>
-                  No terminals
-                </p>
+                <button
+                  type="button"
+                  onClick={() => createTab({ groupId: group.id })}
+                  className="w-full text-left text-ui-sm text-vsc-muted hover:text-vsc-fg py-0.5"
+                  style={{ paddingLeft: padFor(1) }}
+                >
+                  No terminals — add one
+                </button>
               )}
 
               {!groupCollapsed &&

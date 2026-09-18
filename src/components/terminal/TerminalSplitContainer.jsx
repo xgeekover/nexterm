@@ -522,8 +522,16 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
         {boundTab ? (
           <TerminalView tabId={boundTab.id} active={isActivePane} />
         ) : (
-          <div className="h-full flex items-center justify-center text-ui-sm text-vsc-muted select-none">
-            No terminal
+          <div className="h-full flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none">
+            <p className="m-0">No terminal in this pane</p>
+            <button
+              type="button"
+              onClick={() => createTab(null, { paneId, groupId })}
+              className="px-3 py-1 rounded-sm bg-vsc-button-secondary hover:bg-vsc-item-hover text-vsc-fg transition"
+            >
+              New Terminal
+              <span className="ml-2 text-vsc-muted font-mono">{shortcut('new-terminal')}</span>
+            </button>
           </div>
         )}
         {/* While dragging, swallow pointer events so the xterm cannot eat them. */}

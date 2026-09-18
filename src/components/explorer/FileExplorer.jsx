@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
+import { Filter,
   FolderPlus,
   FolderOpen,
   FilePlus,
@@ -10,10 +10,11 @@ import {
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TreeRow, NameInput, indentFor, ROW_HEIGHT } from './TreeRow.jsx';
-import { flattenVisible, navigate } from './treeRows.js';
+import { filterTree, flattenVisible, navigate } from './treeRows.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
+import { cn } from '../../lib/utils.js';
 
 async function writeToSystemClipboard(text) {
   try {
@@ -192,7 +193,23 @@ export function FileExplorer() {
   };
 
   // --- the visible rows, and the keyboard that walks them ----------------
-  const rows = useMemo(() => flattenVisible(fileTree, expandedFolders), [fileTree, expandedFolders]);
+  // Narrowing the tree you are looking at, which is a different question from
+  // the one ⌘P answers ("find me this file anywhere"). Kept out of the store:
+  // nothing else needs to know, and it must not survive a reload as a tree
+  // that silently hides most of the project.
+  const [filter, setFilter] = useState('');
+  const [filterOpen, setFilterOpen] = useState(false);
+
+  const filtered = useMemo(() => filterTree(fileTree, filter), [fileTree, filter]);
+
+  const rows = useMemo(() => {
+    if (!filter.trim()) return flattenVisible(fileTree, expandedFolders);
+    // Every folder leading to a match is opened for the duration, without
+    // touching what the user had expanded — clearing the filter puts their own
+    // tree back exactly as it was.
+    const opened = new Set([...expandedFolders, ...filtered.expand]);
+    return flattenVisible(filtered.nodes, opened);
+  }, [fileTree, expandedFolders, filter, filtered]);
 
   const [focusIndex, setFocusIndex] = useState(0);
   const [treeFocused, setTreeFocused] = useState(false);
@@ -317,11 +334,66 @@ export function FileExplorer() {
   return (
     <div className="group flex flex-col h-full w-full bg-vsc-sidebar select-none overflow-hidden">
       {/* Section header */}
-      <div className="h-[35px] flex items-center px-4 shrink-0">
+      <div className="h-[35px] flex items-center justify-between pl-4 pr-1 shrink-0">
         <span className="text-ui-sm uppercase tracking-wide text-vsc-fg font-semibold">
           Explorer
         </span>
+        <button
+          type="button"
+          aria-pressed={filterOpen}
+          onClick={() => {
+            setFilterOpen((open) => {
+              if (open) setFilter('');
+              return !open;
+            });
+          }}
+          className={cn(
+            'p-1 rounded-sm transition',
+            filterOpen
+              ? 'bg-vsc-item-active text-vsc-fg'
+              : 'text-vsc-muted hover:bg-vsc-item-hover hover:text-vsc-fg'
+          )}
+          title="Filter the tree"
+        >
+          <Filter size={14} />
+        </button>
       </div>
+
+      {filterOpen && (
+        <div className="px-2 pb-1 shrink-0">
+          <div className="flex items-center gap-1 px-1 bg-vsc-input border border-vsc-input-border rounded-[2px] focus-within:border-vsc-focus">
+            <input
+              autoFocus
+              type="text"
+              value={filter}
+              placeholder="Filter by name"
+              aria-label="Filter the tree by name"
+              spellCheck={false}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => {
+                // The field owns these: Escape would otherwise also read as
+                // "dismiss whatever is on screen", and the arrows belong to
+                // the tree only while the tree has focus.
+                e.stopPropagation();
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  if (filter) setFilter('');
+                  else setFilterOpen(false);
+                }
+              }}
+              className="flex-1 min-w-0 h-[22px] px-1 bg-transparent text-ui-sm text-vsc-fg outline-none placeholder:text-vsc-placeholder"
+            />
+            {filter.trim() && (
+              <span
+                data-filter-count
+                className={cn('shrink-0 pr-1 text-ui-sm tabular-nums', filtered.matches === 0 ? 'text-vsc-error' : 'text-vsc-muted')}
+              >
+                {filtered.matches === 0 ? 'none' : filtered.matches}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Folder header row */}
       <div className="h-[22px] flex items-center justify-between pl-2 pr-1 shrink-0">
