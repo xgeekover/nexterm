@@ -32,6 +32,61 @@ export function flattenVisible(nodes, expanded, depth = 0, acc = []) {
   return acc;
 }
 
+/**
+ * The tree narrowed to what matches `query`, with the folders that lead to it.
+ *
+ * A filter that only kept matching nodes would hide every match that lives in
+ * a folder whose own name does not match — which is most of them. So a folder
+ * is kept when it matches OR when anything beneath it does, and the result is
+ * a real tree rather than a flat list of hits: where a file sits is half of
+ * what identifies it in a project.
+ *
+ * Matching is on the entry's NAME, not its path. Filtering for `test` in a
+ * project checked out under `~/tests/` would otherwise match everything, and
+ * the path is already visible in the rows around it.
+ *
+ * Case-insensitive and plain substring, deliberately: this narrows a tree you
+ * are looking at. Fuzzy matching belongs to the command palette, which is what
+ * ⌘P is for.
+ *
+ * A folder whose children have not been fetched yet (`children: undefined`)
+ * can only be judged on its own name — there is nothing else to look at, and
+ * reading the disk to answer a keystroke is not this function's job.
+ */
+export function filterTree(nodes, query) {
+  const needle = typeof query === 'string' ? query.trim().toLowerCase() : '';
+  if (!needle) return { nodes, matches: 0, expand: [] };
+
+  const expand = [];
+  let matches = 0;
+
+  const walk = (list) => {
+    if (!Array.isArray(list)) return [];
+    const kept = [];
+    for (const node of list) {
+      const self = String(node.name || '').toLowerCase().includes(needle);
+      const children = node.is_dir ? walk(node.children) : [];
+      const keepsChildren = children.length > 0;
+
+      if (!self && !keepsChildren) continue;
+      if (self && !node.is_dir) matches += 1;
+      if (self && node.is_dir) matches += 1;
+
+      if (node.is_dir && keepsChildren) {
+        // Anything with a surviving child is opened: a filter whose results
+        // are hidden behind closed twisties has not narrowed anything.
+        expand.push(node.path);
+        kept.push({ ...node, children });
+      } else {
+        kept.push(node);
+      }
+    }
+    return kept;
+  };
+
+  return { nodes: walk(nodes), matches, expand };
+}
+
 /** Replace one directory's `children`, returning a new tree. */
 export function setChildrenAt(nodes, path, children) {
   if (!Array.isArray(nodes)) return nodes;

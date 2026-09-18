@@ -96,6 +96,12 @@ The recording above walks through most of this.
 Explorer, or ☰ → File → *Open Folder…*. The Explorer, the title bar and new
 terminals then follow that folder.
 
+**Narrow the Explorer.** The funnel in the Explorer header opens a filter: type
+part of a name and the tree keeps only what matches, plus the folders that lead
+to it, opened. It counts the matches, `Esc` clears it, and clearing puts your
+own expanded folders back exactly as they were. This is a different question
+from ⌘P — "what is in here that looks like X, and where does it sit".
+
 **Open a terminal.** The window starts as one group holding one terminal.
 `⌃⇧\`` adds a tab to the current group; the `+` in the tab bar does the same.
 

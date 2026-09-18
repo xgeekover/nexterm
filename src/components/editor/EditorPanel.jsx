@@ -230,8 +230,18 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
           </div>
         </div>
       ) : (
-        <div data-editor-pane-body={paneId} className="relative flex-1 flex items-center justify-center text-ui-sm text-vsc-muted select-none">
-          No file open
+        <div data-editor-pane-body={paneId} className="relative flex-1 flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none">
+          {/* "No file open" on its own is a statement, not help. The two ways
+              to put a file here are named, and the shortcut is read from the
+              bindings rather than written beside them — the same rule the
+              menus follow, so a rebind cannot leave this printing a dead key. */}
+          <p className="m-0">No file open</p>
+          <p className="m-0 text-center">
+            Pick one in the Explorer, or press{' '}
+            <kbd className="px-1 py-0.5 rounded-sm bg-vsc-button-secondary text-vsc-fg font-mono">
+              {shortcut('quick-open')}
+            </kbd>
+          </p>
           {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
           <DropIndicator zone={dropZone} />
         </div>
