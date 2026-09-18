@@ -1,3 +1,4 @@
+import { loadState, saveState } from './persistence.js';
 /**
  * Ranked command-line suggestion source for the terminal's inline
  * intellisense (see TerminalView.jsx). This is deliberately an *app-side*
@@ -88,12 +89,100 @@ let historyLog = []; // ordered, oldest → newest, de-duplicated (re-running a
 // command moves it to the end instead of adding a second entry)
 const historyFreq = new Map(); // command -> times executed
 
-export function recordCommand(cmd) {
+/**
+ * Where and when each command was last run, for the history palette.
+ *
+ * Kept beside the log rather than inside it because the log's shape — a
+ * de-duplicated array of strings — is what the suggestion ranking reads, and
+ * that is covered by cases nothing here should disturb.
+ */
+const historyMeta = new Map(); // command -> { cwd, at }
+
+/**
+ * The history outlives the window.
+ *
+ * It used to live only in module scope, so every reload started from nothing —
+ * which is fine for ranking the next keystroke and useless for "what did I run
+ * yesterday". Stored through the same helper the layout and settings use, and
+ * capped, because a machine left running for a month should not accumulate an
+ * unbounded log in localStorage.
+ *
+ * Saving is best-effort on purpose: a full or blocked store must cost a
+ * suggestion, never a keystroke.
+ */
+const HISTORY_KEY = 'nexterm.commandHistory';
+
+function persistHistory() {
+  try {
+    saveState(HISTORY_KEY, historyLog.map((command) => ({
+      c: command,
+      n: historyFreq.get(command) || 1,
+      d: historyMeta.get(command)?.cwd ?? null,
+      t: historyMeta.get(command)?.at ?? null,
+    })));
+  } catch (_) {
+    // Never worth interrupting typing for.
+  }
+}
+
+/**
+ * Read back what an earlier session ran. Called once, by the app's bootstrap.
+ *
+ * Tolerant of anything: this is a file on the user's disk, and one bad entry
+ * must not cost them the rest of their history.
+ */
+export function loadCommandHistory() {
+  const saved = loadState(HISTORY_KEY, null);
+  if (!Array.isArray(saved)) return 0;
+  let restored = 0;
+  for (const entry of saved) {
+    const command = typeof entry?.c === 'string' ? entry.c.trim() : '';
+    if (!command || historyFreq.has(command)) continue;
+    historyLog.push(command);
+    historyFreq.set(command, Number.isFinite(entry.n) && entry.n > 0 ? entry.n : 1);
+    historyMeta.set(command, {
+      cwd: typeof entry.d === 'string' ? entry.d : null,
+      at: Number.isFinite(entry.t) ? entry.t : null,
+    });
+    restored += 1;
+  }
+  return restored;
+}
+
+/** How many commands survive a restart. Enough to be a history, not a log. */
+const HISTORY_LIMIT = 500;
+
+export function recordCommand(cmd, { cwd = null, at = Date.now() } = {}) {
   const trimmed = (cmd || '').trim();
   if (!trimmed) return;
   historyLog = historyLog.filter((c) => c !== trimmed);
   historyLog.push(trimmed);
   historyFreq.set(trimmed, (historyFreq.get(trimmed) || 0) + 1);
+  historyMeta.set(trimmed, { cwd: cwd || historyMeta.get(trimmed)?.cwd || null, at });
+  if (historyLog.length > HISTORY_LIMIT) {
+    const dropped = historyLog.splice(0, historyLog.length - HISTORY_LIMIT);
+    for (const command of dropped) {
+      historyFreq.delete(command);
+      historyMeta.delete(command);
+    }
+  }
+  persistHistory();
+}
+
+/**
+ * The history, newest first, as the palette shows it.
+ *
+ * `count` is how often the command has been run and `cwd` where it last ran —
+ * which is most of what tells two similar-looking commands apart.
+ */
+export function commandHistory() {
+  const out = [];
+  for (let i = historyLog.length - 1; i >= 0; i -= 1) {
+    const command = historyLog[i];
+    const meta = historyMeta.get(command) || {};
+    out.push({ command, cwd: meta.cwd ?? null, at: meta.at ?? null, count: historyFreq.get(command) || 1 });
+  }
+  return out;
 }
 
 /**
@@ -117,13 +206,16 @@ export function forgetCommand(cmd) {
     return;
   }
   historyFreq.delete(key);
+  historyMeta.delete(key);
   historyLog = historyLog.filter((c) => c !== key);
+  persistHistory();
 }
 
 /** Test-only: drop everything recordCommand has accumulated so far. */
 export function __resetCommandHistory() {
   historyLog = [];
   historyFreq.clear();
+  historyMeta.clear();
 }
 
 // ---------------------------------------------------------------------------

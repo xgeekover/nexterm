@@ -118,6 +118,14 @@ to it, opened. It counts the matches, `Esc` clears it, and clearing puts your
 own expanded folders back exactly as they were. This is a different question
 from ⌘P — "what is in here that looks like X, and where does it sit".
 
+**Pick a shell per terminal.** Right-click a group in the TERMINALS panel →
+*New Terminal With ▸* lists the shells this machine actually has — found on the
+real box rather than guessed, so it names Git Bash and WSL when they are there
+and does not offer PowerShell 7 when they are not. Terminals in one window may
+differ, the status bar names the one you are looking at, and *Duplicate* keeps
+a terminal's shell as well as its directory. Settings ▸ Terminal ▸ Default
+Shell picks what a plain new terminal opens, and still takes a typed path.
+
 **Open a terminal.** The window starts as one group holding one terminal.
 `⌃⇧\`` adds a tab to the current group; the `+` in the tab bar does the same.
 
@@ -147,6 +155,14 @@ group's chip shows the same for every terminal inside it. The point is the ones
 you are not looking at: switching groups replaces the whole arrangement, so
 without this a build finishing — or failing — in another group is invisible.
 Hovering says it in words. Nothing flashes for an empty prompt line.
+**Run something again.** `⌘⇧H` opens the command history: every command line
+this machine has run, newest first, with the directory it ran in. Typing
+narrows it by plain substring — a command line is not a filename — and `Enter`
+types the chosen one into the active terminal without pressing return, so a
+command from yesterday can be edited before it runs. The history outlives the
+window. It is **not** on `Ctrl+R`: that is reverse-i-search in every shell, and
+a history palette that costs you the shell's own is a bad trade.
+
 **Find something in the scrollback.** `⌘F` opens a find bar over the focused
 terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
 `Esc` to close. Match case, whole word and regular expressions are there, every
@@ -202,6 +218,7 @@ scrollback, colour theme, and command suggestions.
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
 | `⌘F` | Find in the active terminal's scrollback |
+| `⌘⇧H` | Command history |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / default text |
 | `⌘S` | Save the active editor file |
 

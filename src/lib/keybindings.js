@@ -139,6 +139,15 @@ export const COMMANDS = {
     overTerminal: true,
     run: (ctx) => ctx.showView?.('search'),
   },
+  'command-history': {
+    title: 'Command History',
+    // Deliberately NOT Ctrl+R. That is reverse-i-search in bash, zsh and
+    // PSReadLine, KB-12 names it as a key that must reach the shell, and a
+    // history palette that costs you the shell's own history search is a bad
+    // trade whichever way you look at it.
+    overTerminal: true,
+    run: (ctx) => ctx.setCommandPaletteOpen(true, 'history'),
+  },
   'find-in-terminal': {
     title: 'Find in Terminal',
     // The scrollback is 5000 lines deep, and a find bar that stops working the
@@ -231,6 +240,7 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'toggle-sidebar', key: 'mod+b' },
   { command: 'clear-terminal', key: 'mod+l' },
   { command: 'search-in-files', key: 'mod+shift+f' },
+  { command: 'command-history', key: 'mod+shift+h' },
   { command: 'find-in-terminal', key: 'mod+f' },
   // Two spellings of "bigger", because `+` is the shifted `=` on most layouts
   // and people press whichever they think of. The menu shows the first.

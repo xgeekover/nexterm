@@ -1,4 +1,5 @@
 use crate::models::SystemInfo;
+use crate::pty::shells::{self, ShellProfile};
 use crate::pty::PtyManager;
 
 #[tauri::command(rename_all = "snake_case")]
@@ -24,6 +25,17 @@ pub fn system_get_info() -> Result<SystemInfo, String> {
         rust_version: Some("1.97.1".to_string()),
         os_build: os_build(),
     })
+}
+
+/// The shells this machine actually has, for the profile picker.
+///
+/// Found rather than assumed: the Settings window used to offer a fixed list
+/// per platform, which promised "PowerShell 7" on boxes without it and never
+/// mentioned Git Bash or WSL. An empty list is a legitimate answer — the caller
+/// still has "Default".
+#[tauri::command(rename_all = "snake_case")]
+pub fn system_list_shells() -> Result<Vec<ShellProfile>, String> {
+    Ok(shells::list())
 }
 
 /// The Windows build number, as the registry records it (e.g. 19045).

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Search,
   FileCode,
+  History,
   Terminal,
   Save,
 } from 'lucide-react';
@@ -10,6 +11,7 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups } from '../../lib/paletteItems.js';
+import { commandHistory } from '../../lib/commandIndex.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 export function CommandPalette() {
@@ -23,6 +25,7 @@ export function CommandPalette() {
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminalBlocks = useTerminalStore((s) => s.clearBlocks);
+  const writeRaw = useTerminalStore((s) => s.writeRaw);
 
   const [query, setQuery] = useState('');
 
@@ -45,16 +48,38 @@ export function CommandPalette() {
   // The result rows and the order the arrow keys walk them both come from
   // `buildPaletteGroups` (src/lib/paletteItems.js), so the selection can never
   // run past the last visible row onto an item the user cannot see.
-  const groups = buildPaletteGroups({ fileTree, query, mode: paletteMode, bindings });
+  // Read when the palette opens, not subscribed to: history changes on every
+  // Enter in every terminal, and a list that reshuffles under the cursor while
+  // you are choosing from it is worse than a stale one.
+  const groups = buildPaletteGroups({
+    fileTree,
+    query,
+    mode: paletteMode,
+    bindings,
+    history: paletteMode === 'history' ? commandHistory() : [],
+  });
   const allFiltered = groups.flatMap((g) => g.items);
 
   const iconFor = (item) => {
+    if (item.type === 'history') return <History size={16} />;
     if (item.type === 'file') return <FileCode size={16} />;
     if (item.command === 'save_all') return <Save size={16} />;
     return <Terminal size={16} />;
   };
 
   const runItem = async (item) => {
+    if (item.type === 'history') {
+      // Typed into the terminal rather than executed behind the user's back:
+      // a command from yesterday may want editing, and the newline is the
+      // user's to press. It also keeps this off the `executeCommand` path,
+      // which nothing in the UI uses.
+      const tabId = useTerminalStore.getState().activeTabId;
+      if (tabId) {
+        writeRaw(tabId, item.command);
+        setActiveView('terminal');
+      }
+      return;
+    }
     if (item.type === 'file') {
       await openFile(item.path);
       setActiveView('editor');

@@ -206,6 +206,9 @@ pub fn spec() -> Vec<Submenu> {
             terminal_safe("close-pane", "Close Pane", "CmdOrCtrl+W"),
             Sep,
             terminal_safe("find-in-terminal", "Find…", "CmdOrCtrl+F"),
+            // Shift makes it not a bare Ctrl+letter, so the window may claim
+            // it everywhere — and it is not Ctrl+R, which is the shell's.
+            custom("command-history", "Command History…", "CmdOrCtrl+Shift+H"),
             terminal_safe("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
         ],
     });
@@ -373,8 +376,8 @@ mod tests {
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
             "search-in-files", "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
-            "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
-            "close-window",
+            "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
+            "clear-terminal", "close-window",
         ];
         // Off macOS the window is closed from the app's own title bar, and
         // Quit lives in the File menu as a predefined item.
@@ -383,7 +386,8 @@ mod tests {
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
             "search-in-files", "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
-            "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
+            "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
+            "clear-terminal",
         ];
         for e in expected {
             assert!(ids.contains(&e), "missing menu item id: {e}");

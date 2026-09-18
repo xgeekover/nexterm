@@ -78,6 +78,8 @@ export function runMenuAction(id) {
       break;
     case 'search-in-files':
       settings.showView?.('search');
+    case 'command-history':
+      settings.setCommandPaletteOpen(true, 'history');
       break;
     case 'zoom-in':
       settings.zoomFont?.(1);
@@ -138,6 +140,7 @@ const MENU_SPEC = [
       { id: 'close-pane', label: 'Close Pane' },
       { type: 'separator' },
       { id: 'find-in-terminal', label: 'Find…' },
+      { id: 'command-history', label: 'Command History…' },
       { id: 'clear-terminal', label: 'Clear Unpinned Blocks' },
     ],
   },
