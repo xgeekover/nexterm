@@ -76,6 +76,9 @@ export function runMenuAction(id) {
     case 'find-in-terminal':
       terminal.openFind?.();
       break;
+    case 'command-history':
+      settings.setCommandPaletteOpen(true, 'history');
+      break;
     case 'zoom-in':
       settings.zoomFont?.(1);
       break;
@@ -134,6 +137,7 @@ const MENU_SPEC = [
       { id: 'close-pane', label: 'Close Pane' },
       { type: 'separator' },
       { id: 'find-in-terminal', label: 'Find…' },
+      { id: 'command-history', label: 'Command History…' },
       { id: 'clear-terminal', label: 'Clear Unpinned Blocks' },
     ],
   },
