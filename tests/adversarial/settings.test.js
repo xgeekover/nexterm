@@ -13,6 +13,10 @@ const S = useSettingsStore;
 
 // Every key the Settings window renders a control for.
 const SETTINGS_KEYS = [
+  // Rendered by KeybindingSettings rather than by a SettingRow — a table of
+  // commands, not a single control — but it is still a setting the window
+  // edits and persists.
+  'keybindings',
   'terminalFontFamily',
   'terminalFontSize',
   'terminalLineHeight',

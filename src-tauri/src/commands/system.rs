@@ -53,3 +53,31 @@ mod tests {
         assert!(build >= 10240, "implausible Windows build {build}");
     }
 }
+
+/// Re-register the native menu with the accelerators the user has bound.
+///
+/// The menu is built once at startup from `menu::spec`, so a shortcut rebound
+/// in Settings changed what the key did while the menu went on printing the
+/// old chord beside it — the same "the label and the handler disagree" bug
+/// this app has already shipped twice, just in the other direction.
+///
+/// macOS only: it is the only platform where a native menu is installed (see
+/// `main.rs`). Elsewhere the app draws its own menu from the same data the
+/// keybindings come from, so there is nothing to synchronise.
+#[tauri::command(rename_all = "snake_case")]
+pub fn menu_set_accelerators(
+    app: tauri::AppHandle,
+    accelerators: std::collections::HashMap<String, Option<String>>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = crate::menu::build_with(&app, &accelerators)
+            .map_err(|e| format!("could not rebuild the menu: {e}"))?;
+        app.set_menu(menu).map_err(|e| format!("could not install the menu: {e}"))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, accelerators);
+    }
+    Ok(())
+}

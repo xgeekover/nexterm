@@ -8,13 +8,13 @@ node tests/e2e/runner.js
 node tests/adversarial/runner.js
 ```
 
-The order matters — see [The fixture](#the-fixture) below.
+The order matters — see [The fixtures](#the-fixtures) below.
 
 | Suite | Cases | What it is for |
 | --- | --- | --- |
-| `cargo test` (`src-tauri/`) | 79 | The backend against the real machine: PTYs, real shells, the real filesystem, OSC parsing, path confinement, the native menu |
+| `cargo test` (`src-tauri/`) | 80 | The backend against the real machine: PTYs, real shells, the real filesystem, OSC parsing, path confinement, the native menu |
 | `tests/e2e/` | 44 | The app's own stores and flows, through the browser IPC mock |
-| `tests/adversarial/` | 276 | Everything that has ever gone wrong, plus the invariants that keep it from going wrong again |
+| `tests/adversarial/` | 304 | Everything that has ever gone wrong, plus the invariants that keep it from going wrong again |
 
 Counts are what the suites reported on macOS at the time of writing; they are
 here to make a large discrepancy obvious, not to be kept to the digit.
@@ -41,7 +41,7 @@ emitted `pty-exit` after every command where the backend emits
 `pty-command-done`. **If you change the mock, check it against
 `src-tauri/src/` first.**
 
-## The fixture
+## The fixtures
 
 `cargo test` writes `tests/fixtures/backend-tree.json`: what `fs_read_dir`
 actually returned for a directory tree that really exists, on the platform the
@@ -55,9 +55,17 @@ the Rust tests ran only on Linux and the JS tests fed themselves hand-written
 paths. Neither half was wrong on its own; nothing checked them against each
 other.
 
-The fixture is gitignored: it is per-platform output, not source. Run the JS
-suites without it and those cases report `SKIPPED`, never `passed`. In CI they
-fail outright, because there `cargo test` always runs first and a missing
+`cargo test` writes `tests/fixtures/menu-accelerators.json` the same way — the
+accelerator `src-tauri/src/menu.rs` gives each menu item on this platform.
+`tests/adversarial/native_menu.test.js` checks that what the frontend computes
+from the default keybindings is exactly that, item for item. The two halves are
+in different languages and either one can be edited alone, and the symptom of
+drift is a menu that shows one key at launch and another a moment later, once
+the frontend pushes its own down.
+
+The fixtures are gitignored: they are per-platform output, not source. Run the
+JS suites without them and those cases report `SKIPPED`, never `passed`. In CI
+they fail outright, because there `cargo test` always runs first and a missing
 fixture means the contract went unchecked.
 
 ## Skipped is not passed

@@ -10,6 +10,7 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups } from '../../lib/paletteItems.js';
+import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 export function CommandPalette() {
   const isOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
@@ -26,6 +27,8 @@ export function CommandPalette() {
   const [query, setQuery] = useState('');
 
   const paletteMode = useSettingsStore((st) => st.commandPaletteMode);
+  // So a row never advertises a shortcut the user has rebound.
+  const { bindings } = useShortcuts();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
 
@@ -42,7 +45,7 @@ export function CommandPalette() {
   // The result rows and the order the arrow keys walk them both come from
   // `buildPaletteGroups` (src/lib/paletteItems.js), so the selection can never
   // run past the last visible row onto an item the user cannot see.
-  const groups = buildPaletteGroups({ fileTree, query, mode: paletteMode });
+  const groups = buildPaletteGroups({ fileTree, query, mode: paletteMode, bindings });
   const allFiltered = groups.flatMap((g) => g.items);
 
   const iconFor = (item) => {

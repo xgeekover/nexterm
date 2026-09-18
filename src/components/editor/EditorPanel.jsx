@@ -14,7 +14,7 @@ import { EditorTabs, EditorDragContext, markEditorDragEnded } from './EditorTabs
 import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
-import { chord } from '../../lib/platform.js';
+import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
 // Monaco theme is a fixed constant instead of a live settingsStore read.
@@ -148,6 +148,7 @@ function relativeSegments(filePath, rootPath) {
  * between groups, or onto a group's edge to split it.
  */
 function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
+  const { shortcut } = useShortcuts();
   const monacoOptions = useMonacoOptions();
   const paneId = node.id;
   const tabs = useEditorStore((s) => s.tabs);
@@ -199,7 +200,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
                 type="button"
                 onClick={() => saveFile(activeTab.id)}
                 className="shrink-0 ml-2 text-vsc-link hover:underline"
-                title={`Save (${chord('mod', 's')})`}
+                title={`Save (${shortcut('save')})`}
               >
                 Save
               </button>

@@ -17,3 +17,4 @@ src-tauri/gen/schemas/
 # Written by `cargo test` (src-tauri/src/fs/mod.rs) for the frontend
 # contract test to read back. Platform-specific; never committed.
 tests/fixtures/backend-tree.json
+tests/fixtures/menu-accelerators.json

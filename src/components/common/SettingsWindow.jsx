@@ -16,7 +16,10 @@ function readInheritedMonoStack() {
   return cs.getPropertyValue('--font-mono').trim() || 'monospace';
 }
 
+import { KeybindingSettings } from './KeybindingSettings.jsx';
+
 const SECTIONS = [
+  { id: 'keyboard', label: 'Keyboard Shortcuts' },
   { id: 'editor', label: 'Text Editor' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'workbench', label: 'Workbench' },
@@ -428,7 +431,9 @@ export function SettingsWindow() {
   );
 
   const visibleSections = SECTIONS.filter((section) =>
-    filteredItems.some((item) => item.section === section.id)
+    // Keyboard Shortcuts builds its own rows rather than coming from ITEMS,
+    // so it decides for itself whether the query matches anything.
+    section.id === 'keyboard' ? true : filteredItems.some((item) => item.section === section.id)
   );
 
   const jumpToSection = (sectionId) => {
@@ -535,6 +540,7 @@ export function SettingsWindow() {
                 <h3 className="text-ui font-semibold text-vsc-fg pb-2 border-b border-vsc-border uppercase tracking-wide text-ui-sm">
                   {section.label}
                 </h3>
+                {section.id === 'keyboard' && <KeybindingSettings query={query} />}
                 {filteredItems
                   .filter((item) => item.section === section.id)
                   .map((item) => {
