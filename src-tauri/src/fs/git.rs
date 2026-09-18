@@ -90,6 +90,23 @@ fn tracked_status(xy: &str) -> (GitFileStatus, bool) {
     (status, staged)
 }
 
+/// Join git's repo-relative path onto the repository root, natively.
+///
+/// git always writes `/` as the separator, on every platform. `PathBuf::join`
+/// with the whole relative string keeps those slashes, so on Windows the
+/// result is `C:\\proj\\src/app.js` — a path that matches NOTHING the Explorer
+/// holds, because `read_dir_hierarchy` produces `C:\\proj\\src\\app.js`. Every
+/// file would simply go uncoloured, silently, on the one platform this app is
+/// mostly used on. Pushing component by component lets `PathBuf` use the
+/// platform's own separator.
+fn join_repo_path(repo_root: &Path, relative: &str) -> String {
+    let mut full = repo_root.to_path_buf();
+    for part in relative.split('/').filter(|p| !p.is_empty()) {
+        full.push(part);
+    }
+    full.to_string_lossy().to_string()
+}
+
 /// Parse `git status --porcelain=v2 --branch -z` into a status.
 ///
 /// `-z` on purpose: without it git quotes and escapes any path that is not
@@ -160,7 +177,7 @@ pub fn parse_status(stdout: &str, repo_root: &Path) -> GitStatus {
             break;
         }
         status.files.push(GitFile {
-            path: repo_root.join(&relative).to_string_lossy().to_string(),
+            path: join_repo_path(repo_root, &relative),
             status: file_status,
             staged,
         });
@@ -175,10 +192,14 @@ pub fn status_of(root: &Path) -> Option<GitStatus> {
     // the status output's paths are relative to — which is NOT necessarily the
     // open folder, since you may have opened a subdirectory.
     let toplevel = git(root, &["rev-parse", "--show-toplevel"])?;
-    let repo_root = PathBuf::from(toplevel.trim());
-    if repo_root.as_os_str().is_empty() {
+    let trimmed = toplevel.trim();
+    if trimmed.is_empty() {
         return None;
     }
+    // git prints this with forward slashes on Windows too. Canonicalising
+    // gives the platform's own spelling — the same one `read_dir_hierarchy`
+    // hands the Explorer, which is what these paths have to match.
+    let repo_root = crate::fs::canonical_or(Path::new(trimmed));
     let stdout = git(root, &["status", "--porcelain=v2", "--branch", "-z"])?;
     Some(parse_status(&stdout, &repo_root))
 }
@@ -302,7 +323,26 @@ mod tests {
         // always from the top level.
         let out = z(&["# branch.head main", "1 .M N... 100644 100644 100644 aaa bbb apps/web/src/a.js"]);
         let status = parse_status(&out, Path::new("/w/monorepo"));
-        assert_eq!(status.files[0].path, "/w/monorepo/apps/web/src/a.js");
+        let expected = Path::new("/w/monorepo").join("apps").join("web").join("src").join("a.js");
+        assert_eq!(status.files[0].path, expected.to_string_lossy());
+    }
+
+    #[test]
+    fn a_path_is_joined_with_the_platform_separator() {
+        // git writes `/` on every platform. Keeping those on Windows produces
+        // `C:\\proj\\src/app.js`, which matches nothing the Explorer holds —
+        // every file would go uncoloured, silently, on the platform this app
+        // is mostly used on. CI on windows-latest is what caught it.
+        let joined = join_repo_path(Path::new("/w/proj"), "src/deep/app.js");
+        let expected = Path::new("/w/proj").join("src").join("deep").join("app.js");
+        assert_eq!(joined, expected.to_string_lossy());
+        assert_eq!(
+            joined.contains(std::path::MAIN_SEPARATOR),
+            true,
+            "nothing was joined natively: {joined}"
+        );
+        #[cfg(windows)]
+        assert!(!joined.contains('/'), "a forward slash survived: {joined}");
     }
 
     #[test]
