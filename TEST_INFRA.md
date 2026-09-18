@@ -14,9 +14,9 @@ The order matters — see [The fixtures](#the-fixtures) below.
 
 | Suite | Cases | What it is for |
 | --- | --- | --- |
-| `cargo test` (`src-tauri/`) | 80 | The backend against the real machine: PTYs, real shells, the real filesystem, OSC parsing, path confinement, the native menu |
+| `cargo test` (`src-tauri/`) | 84 | The backend against the real machine: PTYs, real shells, the real filesystem, OSC parsing, path confinement, the native menu |
 | `tests/e2e/` | 44 | The app's own stores and flows, through the browser IPC mock |
-| `tests/adversarial/` | 367 | Everything that has ever gone wrong, plus the invariants that keep it from going wrong again |
+| `tests/adversarial/` | 373 | Everything that has ever gone wrong, plus the invariants that keep it from going wrong again |
 | `tests/render/` | 13 | Whether the app DRAWS — the only suite that mounts a component |
 
 Counts are what the suites reported on macOS at the time of writing; they are

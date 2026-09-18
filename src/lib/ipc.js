@@ -509,6 +509,16 @@ class BrowserMockBridge {
         return this.systemInfo;
       }
 
+      // 18. system_list_shells — the backend FINDS these on the real machine.
+      // The mock answers with a plausible pair so the picker has something to
+      // show in browser QA, and never claims a path that means anything.
+      case 'system_list_shells': {
+        return [
+          { id: 'login-shell', label: 'zsh (login shell)', spec: '/bin/zsh' },
+          { id: 'bash', label: 'bash', spec: '/bin/bash' },
+        ];
+      }
+
       default:
         throw new Error(`Unknown IPC command: ${command}`);
     }
