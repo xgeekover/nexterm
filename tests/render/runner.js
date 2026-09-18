@@ -81,6 +81,7 @@ const { renderToString } = await import('react-dom/server');
 const { useTerminalStore } = await import('../../src/stores/terminalStore.js');
 const { useEditorStore } = await import('../../src/stores/editorStore.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
+const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { default: App } = await import('../../src/App.jsx');
 
 const results = [];
@@ -90,7 +91,13 @@ let failed = 0;
 function scenario(id, description, arrange) {
   const started = Date.now();
   try {
-    arrange();
+    const pending = arrange();
+    // An `async` arrange would resolve AFTER the render below, so the case
+    // would pass having exercised nothing — the shape of a test that checks
+    // nothing and says it passed. Refuse it outright.
+    if (pending && typeof pending.then === 'function') {
+      throw new Error('arrange must be synchronous — an async one renders before its state is set');
+    }
     renderToString(React.createElement(App));
     results.push({ id, description, ok: true, ms: Date.now() - started });
   } catch (err) {
@@ -124,6 +131,7 @@ const baseGroups = (tabIds) => [
 
 /** Back to a plain one-terminal workspace before each case. */
 function reset() {
+  useGitStore.setState({ status: null, isLoaded: false });
   useSettingsStore.getState().resetSettings();
   useSettingsStore.setState({ isCommandPaletteOpen: false, isSettingsModalOpen: false });
   useEditorStore.setState({ tabs: [], activeTabId: null, rootPath: '/workspace', rootResolved: true });
@@ -143,6 +151,20 @@ scenario('RN-01', 'the app renders at all', () => {
 scenario('RN-02', 'no folder opened — the Explorer offers to open one', () => {
   reset();
   useEditorStore.setState({ rootPath: null, rootResolved: true });
+});
+
+scenario('RN-15', 'a repository with a branch and changed files', () => {
+  reset();
+  useGitStore.setState({
+    isLoaded: true,
+    status: {
+      branch: 'main',
+      ahead: 2,
+      behind: 1,
+      truncated: false,
+      files: [{ path: '/workspace/src/App.jsx', status: 'modified', staged: false }],
+    },
+  });
 });
 
 scenario('RN-03', 'a pane holding no terminal', () => {

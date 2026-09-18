@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo } from 'react';
-import { Folder, TerminalSquare, XCircle } from 'lucide-react';
+import { Folder, GitBranch, TerminalSquare, XCircle } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { buildStatusItems } from '../../lib/statusInfo.js';
 import { runMenuAction } from '../../lib/menuActions.js';
+import { useGitStore } from '../../stores/gitStore.js';
 import { NotificationCenter } from './NotificationCenter.jsx';
 import { cn } from '../../lib/utils.js';
 
-const ICONS = { folder: Folder, terminal: TerminalSquare, x: XCircle };
+const ICONS = { folder: Folder, terminal: TerminalSquare, x: XCircle, branch: GitBranch };
 
 /**
  * One chip. An item carrying an `action` is a real control and renders as a
@@ -78,6 +79,7 @@ export function StatusBar() {
   // Null until the backend has been asked, and while no folder is open.
   const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
   const configuredShell = useSettingsStore((s) => s.terminalDefaultShell);
+  const git = useGitStore((s) => s.status);
   const terminalFontSize = useSettingsStore((s) => s.terminalFontSize);
   const defaultFontSize = useSettingsStore((s) => s.settingsDefaults.terminalFontSize);
 
@@ -115,11 +117,12 @@ export function StatusBar() {
         shellExited: Boolean(activeTab?.exited),
         fontSize: terminalFontSize,
         defaultFontSize,
+        git,
       }),
     [
       os, arch, homeDir, rootPath, activeTab?.cwd, activeTab?.exited, storeCwd,
       configuredShell, systemShell, cols, rows, groups.length, tabs.length, lastExitCode,
-      terminalFontSize, defaultFontSize,
+      terminalFontSize, defaultFontSize, git,
     ]
   );
 

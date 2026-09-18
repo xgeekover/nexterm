@@ -85,6 +85,7 @@ fn main() {
             commands::fs::fs_create_dir,
             commands::fs::fs_rename_path,
             commands::fs::fs_delete_path,
+            commands::fs::git_status,
             commands::system::system_get_info,
             commands::system::menu_set_accelerators,
         ])

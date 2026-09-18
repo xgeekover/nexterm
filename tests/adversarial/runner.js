@@ -30,6 +30,7 @@ import './tab_names.test.js';
 import './backend_tree_contract.test.js';
 import './configurable_keybindings.test.js';
 import './native_menu.test.js';
+import './git_status.test.js';
 import './explorer_filter.test.js';
 import './terminal_links.test.js';
 import './tab_activity.test.js';

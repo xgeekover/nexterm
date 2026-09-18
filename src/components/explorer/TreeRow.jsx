@@ -84,8 +84,28 @@ export function NameInput({ initialValue = '', placeholder, onCommit, onCancel, 
  * over every row sat exactly where the mouse lands on the way to a file, and
  * nothing else in the app looks like that.
  */
+/**
+ * The colour git's status gives a name, and the letter beside it.
+ *
+ * The `--vsc-git-*` tokens have been in the stylesheet and in the Tailwind
+ * config since the first release, used by nothing — this is what they were
+ * for. The letter matters as much as the colour: green for added and green for
+ * untracked are the same green in VS Code too, and on a monochrome display or
+ * to anyone who cannot tell those greens apart the row would say nothing at
+ * all without it.
+ */
+const GIT_DECORATION = {
+  modified: { className: 'text-vsc-git-modified', mark: 'M' },
+  added: { className: 'text-vsc-git-added', mark: 'A' },
+  deleted: { className: 'text-vsc-git-deleted', mark: 'D' },
+  renamed: { className: 'text-vsc-git-modified', mark: 'R' },
+  untracked: { className: 'text-vsc-git-untracked', mark: 'U' },
+  conflicted: { className: 'text-vsc-git-deleted', mark: '!' },
+};
+
 export function TreeRow({
   row,
+  gitStatus,
   isSelected,
   isFocused,
   isCut,
@@ -97,6 +117,7 @@ export function TreeRow({
   onRenameCancel,
 }) {
   const { node, depth, isFolder, isExpanded } = row;
+  const decoration = gitStatus ? GIT_DECORATION[gitStatus.status] ?? null : null;
   const paddingLeft = indentFor(depth);
 
   return (
@@ -164,7 +185,17 @@ export function TreeRow({
           onCancel={onRenameCancel}
         />
       ) : (
-        <span className="truncate min-w-0">{node.name}</span>
+        <>
+          <span className={cn('truncate min-w-0', decoration?.className)}>{node.name}</span>
+          {decoration && (
+            <span
+              title={gitStatus.staged ? `${gitStatus.status}, staged` : gitStatus.status}
+              className={cn('ml-auto shrink-0 pl-1 text-ui-sm font-mono', decoration.className)}
+            >
+              {decoration.mark}
+            </span>
+          )}
+        </>
       )}
     </div>
   );

@@ -15,6 +15,7 @@ import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
+import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
 
 async function writeToSystemClipboard(text) {
   try {
@@ -31,6 +32,7 @@ export function FileExplorer() {
   // Until the backend has been asked, `rootPath` is only a placeholder; showing
   // it would flash a folder that is not open.
   const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
+  const gitStatus = useGitStore((s) => s.status);
   const pickRoot = useEditorStore((s) => s.pickRoot);
   const createFile = useEditorStore((s) => s.createFile);
   const createFolder = useEditorStore((s) => s.createFolder);
@@ -492,6 +494,7 @@ export function FileExplorer() {
                   {i === createIndex && renderCreateRow()}
                   <TreeRow
                     row={row}
+                    gitStatus={fileStatusIn(gitStatus, row.node.path)}
                     isSelected={
                       samePath(selectedPath || '', row.node.path) ||
                       (!selectedPath && samePath(activeFilePath || '', row.node.path))
