@@ -2,7 +2,6 @@ import React from 'react';
 import { DiffEditor } from '@monaco-editor/react';
 import { X, GitCompare, ChevronRight } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
-import { useSettingsStore } from '../../stores/settingsStore.js';
 
 const MONACO_DIFF_OPTIONS = {
   readOnly: true,

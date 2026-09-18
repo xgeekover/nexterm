@@ -7,6 +7,7 @@ import { notifyTerminal } from '../lib/terminalNotice.js';
 // version branch; writes still use `saveState` (always the current version).
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
 import { useSettingsStore } from './settingsStore.js';
+import { notificationFor } from '../lib/tabActivity.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 
 // ---------------------------------------------------------------------------
@@ -848,6 +849,9 @@ async function disposeTerminalView(tabId) {
   }
 }
 
+/** A machine left running overnight must not grow this without bound. */
+const NOTIFICATION_LIMIT = 50;
+
 export const useTerminalStore = create((set, get) => {
   /**
    * Spawn a PTY-backed tab and register it in `tabs`, WITHOUT placing it
@@ -1154,6 +1158,24 @@ export const useTerminalStore = create((set, get) => {
     // It used to be nameless, with "workspaces" existing only as save slots
     // beside it, which left no answer to "which one am I in?".
     workspaceName: 'Default',
+
+    // ---- What finished while you were looking elsewhere ------------------
+    //
+    // The status bar used to end in a Notifications bell with no handler at
+    // all; it was removed rather than left lying. This is what puts one back,
+    // now that there is something real to put in it: the shell says when a
+    // command starts (OSC 133 "C") and when it ends, so the app can know that
+    // a build in another group finished four minutes ago — which is the whole
+    // point of running things in a terminal you are not watching.
+    //
+    // Newest first. Capped, because a machine left running overnight would
+    // otherwise grow this without bound.
+    notifications: [],
+
+    dismissNotification: (id) =>
+      set((state) => ({ notifications: state.notifications.filter((n) => n.id !== id) })),
+
+    clearNotifications: () => set({ notifications: [] }),
 
     // ---- Find in the terminal ------------------------------------------
     // One bar at a time, bound to whichever terminal had focus when it opened
@@ -1907,7 +1929,7 @@ export const useTerminalStore = create((set, get) => {
             // The previous command's verdict goes now rather than when the new
             // one lands: a red dot beside a terminal that is visibly working
             // again describes nothing that is still true.
-            return { ...tab, running: true, lastExitCode: null };
+            return { ...tab, running: true, runStartedAt: Date.now(), lastExitCode: null };
           });
           // Same discipline as the pty-output handler above — a new `tabs`
           // array re-renders the side bar, every pane and the status bar, so
@@ -1918,15 +1940,26 @@ export const useTerminalStore = create((set, get) => {
       unlisteners.push(await listen('pty-command-done', (payload) => {
         const { session_id, exit_code } = payload || {};
         if (!session_id) return;
-        set((state) => ({
-          tabs: state.tabs.map((tab) => {
+        set((state) => {
+          // Built inside the same update as the tabs it describes: a second
+          // `set` from within an updater is how two writes to one store end up
+          // racing each other.
+          const raised = [];
+          const nextTabs = state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember the code whether or not a block was tracking this
             // command: typing straight into the terminal never creates one,
             // which is the normal case, so anything reading it off `blocks`
             // only ever saw commands run from the palette.
             const code = exit_code ?? 0;
-            tab = { ...tab, lastExitCode: code, running: false };
+            const note = notificationFor(
+              tab,
+              code,
+              state.activeTabId,
+              (useSettingsStore.getState().terminalNotifyAfterSeconds ?? 0) * 1000
+            );
+            if (note) raised.push(note);
+            tab = { ...tab, lastExitCode: code, running: false, runStartedAt: null };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
@@ -1942,8 +1975,14 @@ export const useTerminalStore = create((set, get) => {
               durationMs: Date.now() - (running.startTime || Date.now()),
             };
             return { ...tab, blocks };
-          }),
-        }));
+          });
+          return raised.length === 0
+            ? { tabs: nextTabs }
+            : {
+                tabs: nextTabs,
+                notifications: [...raised, ...state.notifications].slice(0, NOTIFICATION_LIMIT),
+              };
+        });
       }));
       unlisteners.push(await listen('pty-exit', (payload) => {
         const { session_id, exit_code } = payload || {};
@@ -1961,6 +2000,7 @@ export const useTerminalStore = create((set, get) => {
               // A shell killed mid-command never sends its "D" marker, so this
               // is the only thing that stops the tab pulsing forever.
               running: false,
+              runStartedAt: null,
             };
             const blocks = [...tab.blocks];
             const runningIdx = blocks.findIndex((b) => b.status === 'running');

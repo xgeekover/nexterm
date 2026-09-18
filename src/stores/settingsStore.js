@@ -21,6 +21,15 @@ export const SETTINGS_DEFAULTS = {
   terminalTheme: 'dark-modern',
   terminalSuggestions: true,
   terminalDefaultShell: 'default',
+  /**
+   * Tell me when a command finishes in a terminal I am not looking at, once it
+   * has run at least this long. 0 turns it off.
+   *
+   * Ten seconds because that is roughly the point where you stop watching: a
+   * notification per `ls` would have the whole feature switched off within a
+   * minute, and one per two-minute build is the entire reason it exists.
+   */
+  terminalNotifyAfterSeconds: 10,
   editorFontSize: 12,
   editorTabSize: 2,
   editorWordWrap: false,

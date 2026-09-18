@@ -26,6 +26,7 @@ const SETTINGS_KEYS = [
   'terminalTheme',
   'terminalSuggestions',
   'terminalDefaultShell',
+  'terminalNotifyAfterSeconds',
   'editorFontSize',
   'editorTabSize',
   'editorWordWrap',

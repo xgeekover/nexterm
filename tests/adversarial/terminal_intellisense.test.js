@@ -118,8 +118,12 @@ describe('terminalThemes: theme registry shape', () => {
 
   test('TT-04: ships at least the 11 named themes the task called for', () => {
     const required = [
-      'dark-modern', 'light-modern', 'monokai', 'material', 'dracula',
-      'solarized-dark', 'solarized-light', 'nord', 'one-dark',
+      // Every one is dark: the app has no light shell, and a white terminal
+      // inside a #181818 window was the app lighting one rectangle unlike
+      // itself. The two light entries were removed rather than kept as a
+      // setting nothing else in the window agrees with.
+      'dark-modern', 'monokai', 'material', 'dracula',
+      'solarized-dark', 'nord', 'one-dark',
       'gruvbox-dark', 'tomorrow-night',
     ];
     for (const id of required) {

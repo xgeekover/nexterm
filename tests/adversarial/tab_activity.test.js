@@ -12,7 +12,7 @@
  * frontend half; `src-tauri` pins the marker itself.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { tabActivity, activityLabel, hasActivityDot, groupActivity } from '../../src/lib/tabActivity.js';
+import { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, durationLabel } from '../../src/lib/tabActivity.js';
 
 const { useTerminalStore: S } = await import('../../src/stores/terminalStore.js');
 
@@ -157,5 +157,77 @@ describe('The indicator follows the shell', () => {
     S.getState().dispose();
     S.setState({ tabs: [], activeTabId: null });
     assert.equal(S.getState().tabs.length, 0);
+  });
+});
+
+describe('Telling someone a command finished', () => {
+  const NOW = 1_000_000;
+  const ran = (ms, extra = {}) => ({ id: 't2', title: 'build', runStartedAt: NOW - ms, ...extra });
+
+  test('TA-14: only for a terminal you were NOT looking at', () => {
+    // Watching a command finish is not something to be told about.
+    assert.equal(notificationFor(ran(30_000), 0, 't2', 10_000, NOW), null);
+    assert.ok(notificationFor(ran(30_000), 0, 't1', 10_000, NOW));
+  });
+
+  test('TA-15: only once it has run long enough to walk away from', () => {
+    // A notification per `ls` would have the whole feature switched off within
+    // a minute, which is worse than not having it.
+    assert.equal(notificationFor(ran(400), 0, 't1', 10_000, NOW), null);
+    assert.equal(notificationFor(ran(9_999), 0, 't1', 10_000, NOW), null);
+    assert.ok(notificationFor(ran(10_000), 0, 't1', 10_000, NOW), 'exactly the threshold counts');
+  });
+
+  test('TA-16: zero seconds means the user turned it off', () => {
+    assert.equal(notificationFor(ran(600_000), 1, 't1', 0, NOW), null);
+    assert.equal(notificationFor(ran(600_000), 1, 't1', null, NOW), null);
+  });
+
+  test('TA-17: nothing to time means nothing to report', () => {
+    // No "C" marker ever arrived — a shell with no integration, or output that
+    // began before the app was listening.
+    assert.equal(notificationFor({ id: 't2', title: 'x' }, 0, 't1', 10_000, NOW), null);
+    assert.equal(notificationFor(null, 0, 't1', 10_000, NOW), null);
+  });
+
+  test('TA-18: what it says is what the row shows', () => {
+    const note = notificationFor(ran(125_000, { title: 'tests' }), 1, 't1', 10_000, NOW);
+    assert.equal(note.tabId, 't2');
+    assert.equal(note.title, 'tests');
+    assert.equal(note.exitCode, 1);
+    assert.equal(note.durationMs, 125_000);
+    // An unnamed terminal still has to say something.
+    assert.equal(notificationFor({ id: 't2', runStartedAt: NOW - 20_000 }, 0, 't1', 10_000, NOW).title, 'Terminal');
+  });
+
+  test('TA-19: durations read the way a person would say them', () => {
+    assert.equal(durationLabel(900), '1s');
+    assert.equal(durationLabel(38_000), '38s');
+    assert.equal(durationLabel(60_000), '1m');
+    assert.equal(durationLabel(252_000), '4m 12s');
+    assert.equal(durationLabel(3_900_000), '1h 5m');
+    assert.equal(durationLabel(0), '0s');
+    assert.equal(durationLabel(undefined), '0s');
+  });
+});
+
+describe('The notification list', () => {
+  beforeEach(() => {
+    S.setState({ notifications: [] });
+  });
+
+  test('TA-20: entries are dropped one at a time, or all at once', () => {
+    S.setState({
+      notifications: [
+        { id: 'n1', tabId: 'a', title: 'a', exitCode: 0, durationMs: 1, at: 1 },
+        { id: 'n2', tabId: 'b', title: 'b', exitCode: 1, durationMs: 2, at: 2 },
+      ],
+    });
+    S.getState().dismissNotification('n1');
+    assert.deepEqual(S.getState().notifications.map((n) => n.id), ['n2']);
+    S.getState().dismissNotification('nope');
+    assert.deepEqual(S.getState().notifications.map((n) => n.id), ['n2'], 'an unknown id changes nothing');
+    S.getState().clearNotifications();
+    assert.deepEqual(S.getState().notifications, []);
   });
 });
