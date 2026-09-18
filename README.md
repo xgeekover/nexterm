@@ -109,6 +109,14 @@ to it, opened. It counts the matches, `Esc` clears it, and clearing puts your
 own expanded folders back exactly as they were. This is a different question
 from ⌘P — "what is in here that looks like X, and where does it sit".
 
+**Pick a shell per terminal.** Right-click a group in the TERMINALS panel →
+*New Terminal With ▸* lists the shells this machine actually has — found on the
+real box rather than guessed, so it names Git Bash and WSL when they are there
+and does not offer PowerShell 7 when they are not. Terminals in one window may
+differ, the status bar names the one you are looking at, and *Duplicate* keeps
+a terminal's shell as well as its directory. Settings ▸ Terminal ▸ Default
+Shell picks what a plain new terminal opens, and still takes a typed path.
+
 **Open a terminal.** The window starts as one group holding one terminal.
 `⌃⇧\`` adds a tab to the current group; the `+` in the tab bar does the same.
 

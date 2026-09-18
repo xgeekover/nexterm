@@ -28,10 +28,32 @@ export const useSystemStore = create((set, get) => ({
   appVersion: null,
   isLoaded: false,
 
+  /**
+   * The shells this machine actually has, as `{ id, label, spec }`.
+   *
+   * Found by the backend rather than assumed: the Settings window used to
+   * offer a fixed list per platform, which promised "PowerShell 7" on boxes
+   * without it and never mentioned Git Bash or WSL. Empty is a legitimate
+   * answer — "Default" always works, because the backend decides at spawn.
+   */
+  shells: [],
+
   init: async () => {
     if (get().isLoaded) return;
     try {
       const info = await invoke('system_get_info');
+      // Asked for alongside the rest; a backend too old to answer just leaves
+      // the list empty, and every picker falls back to "Default".
+      let shells = [];
+      try {
+        const found = await invoke('system_list_shells');
+        if (Array.isArray(found)) {
+          shells = found.filter((s) => s && typeof s.spec === 'string' && s.spec);
+        }
+      } catch (err) {
+        console.warn('[system] could not list shells:', err);
+      }
+      set({ shells });
       if (info && typeof info === 'object') {
         set({
           os: info.os || browserFallback().os,

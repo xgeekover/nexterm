@@ -106,7 +106,12 @@ export function StatusBar() {
         homeDir,
         workspacePath: rootPath,
         cwd: activeTab?.cwd || storeCwd,
-        shell: configuredShell && configuredShell !== 'default' ? configuredShell : systemShell,
+        // The ACTIVE terminal's own shell first. Terminals can now differ —
+        // a Git Bash tab beside a PowerShell one — so reading the global
+        // setting here would be right for at most one of them, which is the
+        // shape of every lie this bar has already had removed from it.
+        shell: activeTab?.shell
+          || (configuredShell && configuredShell !== 'default' ? configuredShell : systemShell),
         cols,
         rows,
         groupCount: groups.length,
@@ -118,7 +123,7 @@ export function StatusBar() {
       }),
     [
       os, arch, homeDir, rootPath, activeTab?.cwd, activeTab?.exited, storeCwd,
-      configuredShell, systemShell, cols, rows, groups.length, tabs.length, lastExitCode,
+      configuredShell, systemShell, activeTab?.shell, cols, rows, groups.length, tabs.length, lastExitCode,
       terminalFontSize, defaultFontSize,
     ]
   );
