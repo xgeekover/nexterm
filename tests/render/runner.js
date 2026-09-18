@@ -25,9 +25,15 @@
  * is what driving the app is for (see TEST_INFRA.md).
  */
 import { register } from 'node:module';
-import { pathToFileURL } from 'node:url';
 
-register('./jsxLoader.mjs', pathToFileURL(new URL('.', import.meta.url).pathname));
+// `import.meta.url` straight through, never via `.pathname`. On Windows that
+// property is `/D:/a/nexterm/...` — a URL path, leading slash and all — and
+// feeding it back to `pathToFileURL` makes it relative, so the drive letter
+// gets prepended twice and the loader is looked for at `D:\D:\a\nexterm`.
+// CI caught it on windows-latest while macOS and Linux passed, which is this
+// project's recurring shape: a path fix verified on one platform is not
+// verified.
+register('./jsxLoader.mjs', import.meta.url);
 
 // The app reads these at module scope. jsdom would provide them; the point of
 // this suite is that it does not need jsdom.
