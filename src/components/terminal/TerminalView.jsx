@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useRef } from 'react';
+import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch } from './terminalRegistry.js';
@@ -7,6 +7,7 @@ import { fitAndReport } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
+import { addCommandMark, stickyCommandFor } from '../../lib/stickyCommand.js';
 
 // Re-exported so `terminalStore.js` can dispose a tab's terminal on close
 // without ever eagerly importing this component module (see the guarded
@@ -102,6 +103,19 @@ export function TerminalView({ tabId, active = false }) {
   const suggestStateRef = useRef(EMPTY_SUGGEST_STATE);
   /** The last line submitted, kept until its exit code arrives. */
   const lastSubmittedRef = useRef('');
+
+  /**
+   * Where each command's output began, so a scrolled-back viewport can say
+   * which command produced what is on screen.
+   *
+   * `{ line, command }` with `line` an ABSOLUTE buffer row (`baseY + cursorY`
+   * at the moment the shell reported the command starting), oldest first.
+   * Warp's sticky header, built on the OSC 133 "C" marker the backend already
+   * emits — scrolling up through a long build and losing track of which
+   * command you are inside is the thing it fixes.
+   */
+  const commandMarksRef = useRef([]);
+  const [stickyCommand, setStickyCommand] = useState('');
   const [, forceRender] = useReducer((c) => c + 1, 0);
   const setSuggestState = (next) => {
     const resolved = typeof next === 'function' ? next(suggestStateRef.current) : next;
@@ -336,6 +350,48 @@ export function TerminalView({ tabId, active = false }) {
     };
     entry.term.attachCustomKeyEventHandler(handleKeyEvent);
 
+    /**
+     * Which command owns the top of the viewport right now, or ''.
+     *
+     * Nothing is shown while the view is at the bottom — there the last line
+     * IS the current command and a header would only repeat it — nor in the
+     * alternate buffer, where vim and htop own the whole screen and there is
+     * no scrollback to be lost in.
+     */
+    const updateSticky = () => {
+      const buffer = entry.term.buffer.active;
+      setStickyCommand(
+        stickyCommandFor({
+          marks: commandMarksRef.current,
+          viewportY: buffer.viewportY,
+          baseY: buffer.baseY,
+          alternate: buffer.type === 'alternate',
+        })
+      );
+    };
+
+    const scrollDisposable = entry.term.onScroll(updateSticky);
+
+    // OSC 133 "C": output is about to begin, so this row is where this
+    // command's output starts. The text comes from what was submitted, which
+    // is the only place it exists — the marker carries none.
+    let startedUnlisten = null;
+    let startedCancelled = false;
+    listen('pty-command-started', (payload) => {
+      if (payload?.session_id !== sessionId) return;
+      const buffer = entry.term.buffer.active;
+      commandMarksRef.current = addCommandMark(commandMarksRef.current, {
+        line: buffer.baseY + buffer.cursorY,
+        command: lastSubmittedRef.current,
+        // What has scrolled out of the buffer entirely: keeping those would
+        // grow this for the life of the session.
+        oldestLine: buffer.baseY - (entry.term.options.scrollback || 0),
+      });
+    }).then((off) => {
+      if (startedCancelled) off();
+      else startedUnlisten = off;
+    });
+
     // The backend's OSC 133 "D" (command done) marker means a fresh prompt
     // is about to be printed — whatever we thought was on the input line no
     // longer applies.
@@ -356,6 +412,9 @@ export function TerminalView({ tabId, active = false }) {
 
     return () => {
       resizeObserver?.disconnect();
+      scrollDisposable.dispose();
+      startedCancelled = true;
+      startedUnlisten?.();
       suggestDataDisposable.dispose();
       entry.term.attachCustomKeyEventHandler(null);
       promptCancelled = true;
@@ -391,6 +450,22 @@ export function TerminalView({ tabId, active = false }) {
         className="w-full h-full overflow-hidden"
       />
       {findOpen && <TerminalFindBar tabId={tabId} onClose={dismissFind} />}
+      {stickyCommand && (
+        <div
+          data-sticky-command
+          aria-hidden="true"
+          // Decoration over the terminal: it must not take a click that was
+          // meant for the text underneath it, nor a selection drag.
+          // Solid, not translucent: Tailwind's `/95` opacity modifier does
+          // nothing to a colour that is a bare `var(--x)`, so the first line of
+          // output read straight through the header. A sticky header covers
+          // the row it describes — every one does — but it has to cover it.
+          className="absolute top-0 left-0 right-0 z-10 px-2 py-[2px] flex items-center gap-2 pointer-events-none bg-vsc-panel border-b border-vsc-border text-ui-sm font-mono text-vsc-muted"
+        >
+          <span className="shrink-0 text-vsc-accent">❯</span>
+          <span className="truncate">{stickyCommand}</span>
+        </div>
+      )}
       {suggestState.visible && (
         <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
           {suggestState.ghost && (

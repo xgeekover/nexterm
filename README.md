@@ -159,6 +159,11 @@ group's chip shows the same for every terminal inside it. The point is the ones
 you are not looking at: switching groups replaces the whole arrangement, so
 without this a build finishing — or failing — in another group is invisible.
 Hovering says it in words. Nothing flashes for an empty prompt line.
+**Know which command you are scrolled into.** Scroll back through a long build
+and a small header appears at the top of the pane naming the command whose
+output you are looking at. It is gone at the bottom, where the header would
+only repeat what is on screen, and never appears over a full-screen program
+like vim or htop.
 **Run something again.** `⌘⇧H` opens the command history: every command line
 this machine has run, newest first, with the directory it ran in. Typing
 narrows it by plain substring — a command line is not a filename — and `Enter`

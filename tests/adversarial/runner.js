@@ -30,6 +30,7 @@ import './tab_names.test.js';
 import './backend_tree_contract.test.js';
 import './configurable_keybindings.test.js';
 import './native_menu.test.js';
+import './sticky_command.test.js';
 import './open_recent.test.js';
 import './search_contract.test.js';
 import './command_history.test.js';
