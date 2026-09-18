@@ -111,6 +111,13 @@ cramming both onto one screen.
 **Move a terminal to another group.** Drag its tab onto the target group's chip,
 or right-click it in the TERMINALS panel → *Move to Group*.
 
+**See what the other terminals are doing.** A tab shows a blue dot while a
+command is running in it and a red one when the last command failed, and a
+group's chip shows the same for every terminal inside it. The point is the ones
+you are not looking at: switching groups replaces the whole arrangement, so
+without this a build finishing — or failing — in another group is invisible.
+Hovering says it in words. Nothing flashes for an empty prompt line.
+
 **Rename.** Double-click a terminal tab, or right-click it → *Rename*. Groups
 rename the same way, from their chip or from the TERMINALS panel.
 

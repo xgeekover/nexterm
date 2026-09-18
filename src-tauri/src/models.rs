@@ -13,6 +13,17 @@ pub struct PtyExitPayload {
     pub exit_code: Option<u32>,
 }
 
+/// Emitted when the shell reports (via OSC 133's "C" marker) that a command
+/// has begun running — the moment its output starts.
+///
+/// No command text: the marker carries none, and the backend deliberately does
+/// not reconstruct it from the echoed prompt line. What this says is only
+/// "something is running in this session", which is what a tab indicator needs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PtyCommandStartedPayload {
+    pub session_id: String,
+}
+
 /// Emitted when the shell reports (via OSC 133) that a command finished.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PtyCommandDonePayload {

@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
+import { ActivityDot } from './ActivityDot.jsx';
+import { activityLabel } from '../../lib/tabActivity.js';
 import { cn } from '../../lib/utils.js';
 
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
@@ -528,7 +530,9 @@ export function TerminalsPanel() {
           }
         }}
         style={{ paddingLeft: padFor(level) }}
-        title={tab.cwd || tab.title}
+        // Same sentence the tab chip carries, from the same place, so the two
+        // cannot describe one terminal differently.
+        title={activityLabel(tab) ? `${tab.cwd || tab.title} — ${activityLabel(tab)}` : tab.cwd || tab.title}
         className={cn(
           ROW,
           'relative',
@@ -543,6 +547,7 @@ export function TerminalsPanel() {
           renameInput
         ) : (
           <>
+            <ActivityDot tab={tab} />
             <span className="truncate">{tab.title}</span>
             {tab.cwd && (
               <span className="ml-auto text-ui-sm text-vsc-muted shrink-0 truncate max-w-[45%]">
