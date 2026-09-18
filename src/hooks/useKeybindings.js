@@ -24,6 +24,8 @@ export function useKeybindings() {
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
   const toggleSecondarySidebar = useSettingsStore((s) => s.toggleSecondarySidebar);
+  const zoomFont = useSettingsStore((s) => s.zoomFont);
+  const resetZoom = useSettingsStore((s) => s.resetZoom);
   const saveFile = useEditorStore((s) => s.saveFile);
   const activeEditorTabId = useEditorStore((s) => s.activeTabId);
   const pickRoot = useEditorStore((s) => s.pickRoot);
@@ -36,6 +38,7 @@ export function useKeybindings() {
   const focusNextPane = useTerminalStore((s) => s.focusNextPane);
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearBlocks = useTerminalStore((s) => s.clearBlocks);
+  const openFind = useTerminalStore((s) => s.openFind);
 
   // Defaults plus whatever the user changed. Re-resolved only when the
   // overrides change, not on every keypress — and resolved in ONE place, so
@@ -68,6 +71,9 @@ export function useKeybindings() {
       focusNextPane,
       createTerminalTab,
       clearBlocks,
+      openFind,
+      zoomFont,
+      resetZoom,
       closeWindow: windowControls.close,
     });
 
@@ -111,6 +117,9 @@ export function useKeybindings() {
     focusNextPane,
     createTerminalTab,
     clearBlocks,
+    openFind,
+    zoomFont,
+    resetZoom,
   ]);
 }
 

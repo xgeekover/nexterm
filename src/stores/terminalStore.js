@@ -1151,6 +1151,56 @@ export const useTerminalStore = create((set, get) => {
     // beside it, which left no answer to "which one am I in?".
     workspaceName: 'Default',
 
+    // ---- Find in the terminal ------------------------------------------
+    // One bar at a time, bound to whichever terminal had focus when it opened
+    // — the shape VS Code's terminal find has, and the reason `tabId` is kept:
+    // a search still settling in a background tab must not overwrite the count
+    // the user is reading. The highlighting itself belongs to xterm's search
+    // addon (see `searchInTerminal` in terminalRegistry.js); this is only what
+    // the bar shows and what it asks for.
+    find: {
+      open: false,
+      tabId: null,
+      query: '',
+      caseSensitive: false,
+      wholeWord: false,
+      regex: false,
+      resultIndex: -1,
+      resultCount: 0,
+    },
+
+    openFind: (tabId = null) =>
+      set((state) => ({
+        find: { ...state.find, open: true, tabId: tabId ?? state.activeTabId },
+      })),
+
+    // The query survives a close, as it does in every editor: reopening and
+    // pressing Enter repeats the last search instead of starting from nothing.
+    closeFind: () =>
+      set((state) => ({ find: { ...state.find, open: false, resultIndex: -1, resultCount: 0 } })),
+
+    setFindQuery: (query) =>
+      set((state) => ({ find: { ...state.find, query: typeof query === 'string' ? query : '' } })),
+
+    toggleFindOption: (key) =>
+      set((state) =>
+        ['caseSensitive', 'wholeWord', 'regex'].includes(key)
+          ? { find: { ...state.find, [key]: !state.find[key] } }
+          : {}
+      ),
+
+    // Unchanged counts return the SAME object, not an equal one. xterm re-reports
+    // its results freely — on every decoration refresh, and on selection changes
+    // that move nothing — and a new object each time re-rendered the bar
+    // continuously. That was not merely wasteful: it remounted the bar's option
+    // buttons often enough to swallow real mouse clicks.
+    setFindResults: (tabId, { resultIndex = -1, resultCount = 0 } = {}) =>
+      set((state) => {
+        if (state.find.tabId !== tabId) return {};
+        if (state.find.resultIndex === resultIndex && state.find.resultCount === resultCount) return {};
+        return { find: { ...state.find, resultIndex, resultCount } };
+      }),
+
     // ---- Reading the layout -------------------------------------------
     getActiveGroup: () => {
       const { groups, activeGroupId } = get();
