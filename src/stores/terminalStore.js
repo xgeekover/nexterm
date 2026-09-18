@@ -884,6 +884,10 @@ export const useTerminalStore = create((set, get) => {
         cwd: ptySession.cwd || get().cwd,
         blocks: [],
         activePrompt: '',
+        // Stated rather than left undefined: `tabActivity` reads both, and a
+        // restored tab gets a NEW shell, so neither may survive a respawn.
+        running: false,
+        lastExitCode: null,
       };
 
       set((state) => ({ tabs: [...state.tabs, newTab] }));
@@ -1888,6 +1892,29 @@ export const useTerminalStore = create((set, get) => {
           return changed ? { tabs } : state;
         });
       }));
+      // OSC 133 "C" (see src-tauri/src/pty/osc.rs): a command has begun. This
+      // is the only signal that a terminal is BUSY rather than sitting at a
+      // prompt, and without it the tab strip could report a verdict but never
+      // that one was still coming.
+      unlisteners.push(await listen('pty-command-started', (payload) => {
+        const { session_id } = payload || {};
+        if (!session_id) return;
+        set((state) => {
+          let changed = false;
+          const tabs = state.tabs.map((tab) => {
+            if (tab.sessionId !== session_id || tab.running) return tab;
+            changed = true;
+            // The previous command's verdict goes now rather than when the new
+            // one lands: a red dot beside a terminal that is visibly working
+            // again describes nothing that is still true.
+            return { ...tab, running: true, lastExitCode: null };
+          });
+          // Same discipline as the pty-output handler above — a new `tabs`
+          // array re-renders the side bar, every pane and the status bar, so
+          // it is only ever built when something actually changed.
+          return changed ? { tabs } : state;
+        });
+      }));
       unlisteners.push(await listen('pty-command-done', (payload) => {
         const { session_id, exit_code } = payload || {};
         if (!session_id) return;
@@ -1899,7 +1926,7 @@ export const useTerminalStore = create((set, get) => {
             // which is the normal case, so anything reading it off `blocks`
             // only ever saw commands run from the palette.
             const code = exit_code ?? 0;
-            tab = { ...tab, lastExitCode: code };
+            tab = { ...tab, lastExitCode: code, running: false };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
@@ -1928,7 +1955,13 @@ export const useTerminalStore = create((set, get) => {
             // Remember that this shell is gone. Without it the tab looked
             // alive — blinking cursor, full scrollback — while every
             // keystroke went nowhere.
-            tab = { ...tab, exited: { code: typeof exit_code === 'number' ? exit_code : null } };
+            tab = {
+              ...tab,
+              exited: { code: typeof exit_code === 'number' ? exit_code : null },
+              // A shell killed mid-command never sends its "D" marker, so this
+              // is the only thing that stops the tab pulsing forever.
+              running: false,
+            };
             const blocks = [...tab.blocks];
             const runningIdx = blocks.findIndex((b) => b.status === 'running');
             if (runningIdx !== -1) {
