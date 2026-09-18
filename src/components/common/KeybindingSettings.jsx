@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { RotateCcw, X, AlertTriangle } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { isMac } from '../../lib/platform.js';
-import { chordFromEvent, displayChord, stringifyChord, parseChord } from '../../lib/chords.js';
+import { chordFromEvent, displayChord, stringifyChord } from '../../lib/chords.js';
 import {
   configurableCommands,
   resolveKeybindings,

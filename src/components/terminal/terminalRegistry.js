@@ -23,7 +23,7 @@ import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { fitAndReport, usablePtySize, windowsPtyFor } from '../../lib/terminalCompat.js';
+import { fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';

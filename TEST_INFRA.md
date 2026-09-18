@@ -1,11 +1,13 @@
 # How NexTerm is tested
 
-Three suites, run in this order:
+A lint pass and four suites, run in this order:
 
 ```sh
+npm run lint
 cd src-tauri && cargo test && cd ..
 node tests/e2e/runner.js
 node tests/adversarial/runner.js
+node tests/render/runner.js
 ```
 
 The order matters — see [The fixtures](#the-fixtures) below.
@@ -15,9 +17,38 @@ The order matters — see [The fixtures](#the-fixtures) below.
 | `cargo test` (`src-tauri/`) | 80 | The backend against the real machine: PTYs, real shells, the real filesystem, OSC parsing, path confinement, the native menu |
 | `tests/e2e/` | 44 | The app's own stores and flows, through the browser IPC mock |
 | `tests/adversarial/` | 360 | Everything that has ever gone wrong, plus the invariants that keep it from going wrong again |
+| `tests/render/` | 12 | Whether the app DRAWS — the only suite that mounts a component |
 
 Counts are what the suites reported on macOS at the time of writing; they are
 here to make a large discrepancy obvious, not to be kept to the digit.
+
+## The two nets nothing else provides
+
+**`npm run lint` is not a style check.** Three rules are there because each one
+caught a real bug:
+
+| rule | the bug |
+| --- | --- |
+| `no-undef` | `GroupSwitcher` read the `tabs` binding of a DIFFERENT component in the same file; `FileExplorer` used `cn` without importing it. Both built cleanly, passed every suite, and took the whole React tree down on sight. |
+| `react/no-unstable-nested-components` | a component declared inside another's render is a new type every render, so React remounts it — and a real click needs mousedown and mouseup on the SAME element. The buttons rendered perfectly and did nothing; a scripted `.click()` still worked, which is why no test noticed. |
+| `react-hooks/rules-of-hooks` | not yet, but a conditional hook reorders state between renders and the symptom is nonsense somewhere else. |
+
+Formatting rules are deliberately absent, so a lint failure always means
+something is actually wrong. `--max-warnings 3` is a ratchet over the three
+hook-dependency advisories that predate the config; it stops them growing.
+
+**`tests/render/` is the only suite that mounts a component.** Node cannot
+parse JSX, which is the whole reason this did not exist: `tests/render/
+jsxLoader.mjs` transforms it with esbuild (already present via Vite) and stubs
+`@xterm/*`, which touches a canvas at import time. Cases are STATES, not
+components — a component rendered with no props proves very little, while
+putting the stores into a state a user reaches and rendering the whole tree is
+what catches the empty-state and split-pane branches that a smoke-open never
+touches. `renderToString` runs each body but no effects, which is the right
+depth; effects need the real backend, and that is what driving the app is for.
+
+Both nets were checked by REINTRODUCING the `GroupSwitcher` bug: lint reported
+`'tabs' is not defined`, and all twelve render cases failed.
 
 ## What each suite can and cannot tell you
 

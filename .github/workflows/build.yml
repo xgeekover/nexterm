@@ -84,6 +84,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # Before anything is run: the suites below never mount a component, so a
+      # mistake in a render reaches CI as several hundred green cases and a
+      # white screen on the user's machine. `no-undef` and
+      # react/no-unstable-nested-components are the two rules that would have
+      # caught every instance of that this project has had.
+      - name: Lint
+        run: npm run lint
+
       # Runs first on purpose: it writes tests/fixtures/backend-tree.json from a
       # real directory tree on THIS platform, which the adversarial suite below
       # reads back and pushes through the real explorer code.
@@ -96,6 +104,12 @@ jobs:
 
       - name: Adversarial tests
         run: node tests/adversarial/runner.js
+
+      # The only suite that mounts a component. The other three run against a
+      # mock backend and never draw anything, so this is what stands between a
+      # render-time mistake and a white screen on the user's machine.
+      - name: Render tests
+        run: node tests/render/runner.js
 
   build:
     name: build (${{ matrix.platform }})

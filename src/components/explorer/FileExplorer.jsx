@@ -68,7 +68,6 @@ export function FileExplorer() {
     if (useEditorStore.getState().rootResolved) refreshExplorer();
   }, [refreshExplorer]);
 
-  const isCreatingAtRoot = creatingEntry?.parentPath === rootPath;
 
   const handleCollapseAll = () => {
     Array.from(expandedFolders).forEach((path) => toggleFolder(path));
@@ -322,13 +321,12 @@ export function FileExplorer() {
     );
   }
 
-  // `fs_read_dir` already returns exactly the root's direct children, each
-  // carrying its own `children` — so the tree IS the root listing. The old
-  // code re-derived it by matching a "<root>/" prefix against every path,
-  // which on Windows compared `C:\\proj\\src` against `C:\\proj/` and
-  // discarded every entry, leaving the explorer permanently empty.
-  const rootNodes = fileTree;
-
+  // NOTE: `fs_read_dir` already returns exactly the root's direct children,
+  // each carrying its own `children` — so `fileTree` IS the root listing and
+  // nothing here re-derives it. The old code did, by matching a "<root>/"
+  // prefix against every path, which on Windows compared `C:\\proj\\src`
+  // against `C:\\proj/` and discarded every entry, leaving the explorer
+  // permanently empty.
   const rootName = basename(rootPath) || rootPath;
 
   return (
