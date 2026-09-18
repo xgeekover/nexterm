@@ -50,6 +50,10 @@ export const COMMANDS = {
     title: 'Command Palette',
     run: (ctx) => ctx.setCommandPaletteOpen(!ctx.isCommandPaletteOpen),
   },
+  'open-recent': {
+    title: 'Open Recent…',
+    run: (ctx) => ctx.setCommandPaletteOpen(true, 'recent'),
+  },
   'open-folder': {
     title: 'Open Folder…',
     run: (ctx) => ctx.pickRoot?.(),
@@ -132,6 +136,22 @@ export const COMMANDS = {
     title: 'Clear Unpinned Blocks',
     run: (ctx) => ctx.clearBlocks?.(),
   },
+  'search-in-files': {
+    title: 'Search in Files',
+    // The terminal has no use for ⇧⌘F, and off macOS Ctrl+Shift+F is not a
+    // bare Ctrl+letter, so the window may claim it everywhere.
+    overTerminal: true,
+    run: (ctx) => ctx.showView?.('search'),
+  },
+  'command-history': {
+    title: 'Command History',
+    // Deliberately NOT Ctrl+R. That is reverse-i-search in bash, zsh and
+    // PSReadLine, KB-12 names it as a key that must reach the shell, and a
+    // history palette that costs you the shell's own history search is a bad
+    // trade whichever way you look at it.
+    overTerminal: true,
+    run: (ctx) => ctx.setCommandPaletteOpen(true, 'history'),
+  },
   'find-in-terminal': {
     title: 'Find in Terminal',
     // The scrollback is 5000 lines deep, and a find bar that stops working the
@@ -208,6 +228,8 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'all-commands', key: 'mod+shift+p' },
   { command: 'command-palette', key: 'mod+k' },
   { command: 'open-folder', key: 'mod+shift+o' },
+  // Next to Open Folder, and nothing in a shell wants ⌥⌘O / Ctrl+Alt+O.
+  { command: 'open-recent', key: 'mod+alt+o' },
   { command: 'preferences', key: 'mod+comma' },
   { command: 'save', key: 'mod+s' },
   { command: 'split-down', key: 'mod+shift+d' },
@@ -223,6 +245,8 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'toggle-secondary', key: 'mod+alt+b' },
   { command: 'toggle-sidebar', key: 'mod+b' },
   { command: 'clear-terminal', key: 'mod+l' },
+  { command: 'search-in-files', key: 'mod+shift+f' },
+  { command: 'command-history', key: 'mod+shift+h' },
   { command: 'find-in-terminal', key: 'mod+f' },
   // Two spellings of "bigger", because `+` is the shifted `=` on most layouts
   // and people press whichever they think of. The menu shows the first.

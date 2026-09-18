@@ -34,8 +34,12 @@ export function Sidebar() {
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const panelVisible = useSettingsStore((s) => s.panelVisible);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
-  const isCommandPaletteOpen = useSettingsStore((s) => s.isCommandPaletteOpen);
-  const setCommandPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
+  const showView = useSettingsStore((s) => s.showView);
+  const requestedView = useSettingsStore((s) => s.requestedView);
+  // Best-effort: the layout owns which tab of a region is showing, so this
+  // only reflects a request still in flight. Getting the highlight slightly
+  // late is a far smaller problem than a button that does the wrong thing.
+  const requestedOrActiveLeftView = requestedView?.region === 'left' ? requestedView.view : null;
   const setSettingsModalOpen = useSettingsStore((s) => s.setSettingsModalOpen);
 
   // Order: 1) Terminal, 2) Explorer, 3) Search.
@@ -51,15 +55,24 @@ export function Sidebar() {
       id: 'explorer',
       label: 'Explorer',
       icon: Files,
-      isActive: sidebarVisible,
-      onClick: toggleSidebar,
+      isActive: sidebarVisible && requestedOrActiveLeftView !== 'search',
+      // Now that the left region hosts two views, "Explorer" has to mean the
+      // Explorer rather than "toggle whatever is over there".
+      onClick: () => (sidebarVisible && requestedOrActiveLeftView !== 'search'
+        ? toggleSidebar()
+        : showView('explorer')),
     },
     {
       id: 'search',
       label: 'Search',
       icon: Search,
-      isActive: isCommandPaletteOpen,
-      onClick: () => setCommandPaletteOpen(true),
+      // This button has been here since the first release, with a magnifying
+      // glass, labelled "Search", in exactly the slot VS Code puts search in —
+      // and it opened the command palette. A control that says one thing and
+      // does another is the same family as the notifications bell with no
+      // handler and the status bar's invented git branch. It searches now.
+      isActive: sidebarVisible && requestedOrActiveLeftView === 'search',
+      onClick: () => showView('search'),
     },
   ];
 

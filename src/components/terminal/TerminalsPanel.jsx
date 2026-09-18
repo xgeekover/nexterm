@@ -14,6 +14,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
+import { useSystemStore } from '../../stores/systemStore.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
 import { activityLabel } from '../../lib/tabActivity.js';
@@ -103,6 +104,8 @@ export function TerminalsPanel() {
   const setActivePane = useTerminalStore((s) => s.setActivePane);
   const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const createTab = useTerminalStore((s) => s.createTab);
+  // Found on the real machine, so this offers nothing that is not installed.
+  const shells = useSystemStore((s) => s.shells);
   const createGroup = useTerminalStore((s) => s.createGroup);
   const duplicateTab = useTerminalStore((s) => s.duplicateTab);
   const closeTab = useTerminalStore((s) => s.closeTab);
@@ -216,7 +219,7 @@ export function TerminalsPanel() {
   );
 
   // ---- context menus -------------------------------------------------
-  const groupItems = (entry) => {
+  const groupItems = (entry, at) => {
     const { group, panes, tabCount } = entry;
     const isActive = group.id === activeGroupId;
     const onlyGroup = groups.length <= 1;
@@ -229,6 +232,16 @@ export function TerminalsPanel() {
         onSelect: () => setActiveGroup(group.id),
       },
       { key: 'new', label: 'New Terminal in Group', onSelect: () => createTab({ groupId: group.id }) },
+      // Only when there is a choice to make. One shell is not a menu.
+      ...(shells.length > 1
+        ? [{
+            key: 'new-with',
+            label: 'New Terminal With ▸',
+            // Drills down in place, like "Move to Group ▸". `ContextMenu` has
+            // no nested-menu prop; `menu.view` is how this file does it.
+            onSelect: () => setMenu({ ...at, kind: 'group', id: group.id, view: 'shells' }),
+          }]
+        : []),
       { type: 'separator', key: 's1' },
       {
         key: 'split-r',
@@ -352,6 +365,22 @@ export function TerminalsPanel() {
     ];
   };
 
+  /** The "New Terminal With ▸" drill-down: the shells this machine has. */
+  const shellItems = (group, at) => [
+    {
+      key: 'back',
+      label: 'Back',
+      icon: ChevronLeft,
+      onSelect: () => setMenu({ ...at, kind: 'group', id: group.id }),
+    },
+    { type: 'separator', key: 's1' },
+    ...shells.map((profile) => ({
+      key: `shell-${profile.id}`,
+      label: profile.label,
+      onSelect: () => createTab({ groupId: group.id, shell: profile.spec }),
+    })),
+  ];
+
   /** The "Move to Group ▸" drill-down: every group except the tab's own. */
   const moveToGroupItems = (group, tab, at) => [
     {
@@ -467,7 +496,8 @@ export function TerminalsPanel() {
     const at = { x: menu.x, y: menu.y };
     if (menu.kind === 'group') {
       const entry = layout.find((l) => l.group.id === menu.id);
-      return entry ? groupItems(entry) : [];
+      if (!entry) return [];
+      return menu.view === 'shells' ? shellItems(entry.group, at) : groupItems(entry, at);
     }
     if (menu.kind === 'pane') {
       const entry = layout.find((l) => l.panes.some((p) => p.pane.id === menu.id));

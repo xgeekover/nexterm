@@ -29,6 +29,32 @@ pub fn git_status(state: State<AppState>) -> Result<Option<fs::git::GitStatus>, 
     Ok(state.workspace.root().and_then(|root| fs::git::status_of(&root)))
 }
 
+/// Search the open folder's files.
+///
+/// Confined by construction: the walk starts at the workspace root, so there
+/// is no webview-supplied path to confine in the first place. Every cap lives
+/// in `fs::search` and what was cut comes back in `truncated` rather than
+/// being dropped quietly.
+#[tauri::command(rename_all = "snake_case")]
+pub fn fs_search(
+    state: State<AppState>,
+    query: String,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    regex: Option<bool>,
+) -> Result<fs::search::SearchResults, String> {
+    let root = fs::search::root_of(state.workspace.root())?;
+    fs::search::search(
+        &root,
+        &query,
+        fs::search::SearchOptions {
+            case_sensitive: case_sensitive.unwrap_or(false),
+            whole_word: whole_word.unwrap_or(false),
+            regex: regex.unwrap_or(false),
+        },
+    )
+}
+
 /// The open folder, or `null` until one has been opened.
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {
@@ -52,6 +78,21 @@ pub fn fs_pick_root(app: AppHandle, state: State<AppState>) -> Result<Option<Str
     let root_str = root.to_string_lossy().to_string();
     state.fs_watcher.start_watching(app.clone(), &root_str)?;
     Ok(Some(root_str))
+}
+
+/// Open a folder the user has opened before, without a dialog.
+///
+/// Same validation as the picker: `set_root` canonicalises and refuses
+/// anything that is not a directory, so a recent entry whose folder has been
+/// moved or deleted comes back as an error the UI can act on rather than a
+/// half-open workspace. This is the only way in besides the dialog, and it
+/// still goes through the one function that decides what a root may be.
+#[tauri::command(rename_all = "snake_case")]
+pub fn fs_set_root(app: AppHandle, state: State<AppState>, path: String) -> Result<String, String> {
+    let root = state.workspace.set_root(std::path::Path::new(&path))?;
+    let root_str = root.to_string_lossy().to_string();
+    state.fs_watcher.start_watching(app.clone(), &root_str)?;
+    Ok(root_str)
 }
 
 #[tauri::command(rename_all = "snake_case")]

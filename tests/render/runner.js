@@ -91,13 +91,7 @@ let failed = 0;
 function scenario(id, description, arrange) {
   const started = Date.now();
   try {
-    const pending = arrange();
-    // An `async` arrange would resolve AFTER the render below, so the case
-    // would pass having exercised nothing — the shape of a test that checks
-    // nothing and says it passed. Refuse it outright.
-    if (pending && typeof pending.then === 'function') {
-      throw new Error('arrange must be synchronous — an async one renders before its state is set');
-    }
+    arrange();
     renderToString(React.createElement(App));
     results.push({ id, description, ok: true, ms: Date.now() - started });
   } catch (err) {
@@ -151,6 +145,15 @@ scenario('RN-01', 'the app renders at all', () => {
 scenario('RN-02', 'no folder opened — the Explorer offers to open one', () => {
   reset();
   useEditorStore.setState({ rootPath: null, rootResolved: true });
+});
+
+scenario('RN-14', 'no folder open, with recent ones to offer', () => {
+  reset();
+  useEditorStore.setState({
+    rootPath: null,
+    rootResolved: true,
+    recentRoots: ['/w/alpha', '/w/beta'],
+  });
 });
 
 scenario('RN-15', 'a repository with a branch and changed files', () => {

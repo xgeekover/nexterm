@@ -12,6 +12,7 @@ import {
   stripTrailingSep,
 } from '../lib/paths.js';
 import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
+import { loadState, saveState } from '../lib/persistence.js';
 import { useGitStore } from './gitStore.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
@@ -115,6 +116,10 @@ function addTabToPane(node, paneId, tabId) {
 }
 
 /** An empty root, used when the last editor tab goes away. */
+/** How many folders "Open Recent" remembers. */
+const RECENT_ROOT_LIMIT = 12;
+const RECENT_ROOTS_KEY = 'nexterm.recentRoots';
+
 const emptyEditorTree = () => ({ type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null });
 
 // --- Path helpers shared by the move/rename/duplicate flows below ---------
@@ -272,8 +277,10 @@ export const useEditorStore = create((set, get) => ({
         console.error('[EditorStore] Failed to resolve workspace root:', err);
       }
       // As known as it will get: the placeholder stays if the backend could not say.
-      set({ rootResolved: true });
+      set({ rootResolved: true, recentRoots: loadState(RECENT_ROOTS_KEY, []) || [] });
       useGitStore.getState().refreshNow();
+      const opened = get().rootPath;
+      if (opened) get().rememberRoot(opened);
       await get().refreshExplorer();
 
       // Listen to filesystem changes
@@ -320,6 +327,67 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
+  /**
+   * Folders opened before, newest first.
+   *
+   * VS Code's "Open Recent". The app opens with no folder and the only way
+   * back to one was the native dialog — which on Windows means clicking
+   * through a tree to a path you have typed a hundred times in the terminal
+   * below. Capped and persisted like everything else the user would be
+   * annoyed to lose.
+   */
+  recentRoots: [],
+
+  /** Remember a root, newest first, without duplicates. */
+  rememberRoot: (rootPath) => {
+    if (typeof rootPath !== 'string' || !rootPath) return;
+    set((state) => {
+      const next = [rootPath, ...state.recentRoots.filter((p) => !samePath(p, rootPath))]
+        .slice(0, RECENT_ROOT_LIMIT);
+      saveState(RECENT_ROOTS_KEY, next);
+      return { recentRoots: next };
+    });
+  },
+
+  /** Drop one — the folder is gone, or the user does not want it listed. */
+  forgetRoot: (rootPath) => {
+    set((state) => {
+      const next = state.recentRoots.filter((p) => !samePath(p, rootPath));
+      saveState(RECENT_ROOTS_KEY, next);
+      return { recentRoots: next };
+    });
+  },
+
+  /**
+   * Open a folder from the recent list.
+   *
+   * A recent folder may have been moved, renamed or deleted since. The
+   * backend refuses it (`set_root` canonicalises and checks it is a
+   * directory), and rather than leaving a row that fails every time it is
+   * clicked, the entry comes out of the list.
+   */
+  openRoot: async (rootPath) => {
+    try {
+      const resolved = await invoke('fs_set_root', { path: rootPath });
+      set({
+        rootPath: resolved,
+        expandedFolders: new Set([resolved]),
+        tabs: [],
+        activeTabId: null,
+        diffView: null,
+        editorSplitTree: emptyEditorTree(),
+        activeEditorPaneId: 'editor-pane-root',
+      });
+      get().rememberRoot(resolved);
+      await get().refreshExplorer();
+      return resolved;
+    } catch (err) {
+      console.error(`[EditorStore] Could not open ${rootPath}:`, err);
+      get().forgetRoot(rootPath);
+      return null;
+    }
+  },
+
   pickRoot: async () => {
     try {
       const rootPath = await invoke('fs_pick_root');
@@ -333,6 +401,7 @@ export const useEditorStore = create((set, get) => ({
         editorSplitTree: emptyEditorTree(),
         activeEditorPaneId: 'editor-pane-root',
       });
+      get().rememberRoot(rootPath);
       await get().refreshExplorer();
       useGitStore.getState().refreshNow();
       return rootPath;
