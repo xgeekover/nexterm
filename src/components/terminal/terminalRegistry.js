@@ -17,6 +17,7 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
@@ -331,6 +332,14 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  const searchAddon = new SearchAddon();
+  term.loadAddon(searchAddon);
+  // The find bar reads its "n of m" from here. Reported per tab because the
+  // bar belongs to whichever terminal is focused, and a search left running in
+  // a background tab must not overwrite the count the user is looking at.
+  searchAddon.onDidChangeResults((results) => {
+    useTerminalStore.getState().setFindResults?.(tabId, results);
+  });
   term.open(container);
 
   const dataDisposable = onData ? term.onData(onData) : null;
@@ -345,6 +354,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   entry = {
     term,
     fitAddon,
+    searchAddon,
     sessionId: null,
     container,
     dataDisposable,
@@ -354,6 +364,60 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
   return entry;
+}
+
+/**
+ * Colours for the search decorations, read from the app's own tokens.
+ *
+ * xterm parses these itself and accepts `#RRGGBB` ONLY — a token carrying an
+ * alpha channel (several of ours do) is dropped without a word, and the
+ * matches then highlight in xterm's own yellow instead of the app's. Hence the
+ * shape check and the literal fallback.
+ */
+function searchDecorations() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => {
+    const val = cs.getPropertyValue(name).trim();
+    return /^#[0-9a-f]{6}$/i.test(val) ? val : fallback;
+  };
+  const other = v('--vsc-find-match-other', '#613214');
+  const active = v('--vsc-find-match', '#9e6a03');
+  return {
+    matchBackground: other,
+    matchOverviewRuler: other,
+    activeMatchBackground: active,
+    activeMatchColorOverviewRuler: active,
+  };
+}
+
+/**
+ * Run a search over a tab's scrollback.
+ *
+ * `direction` is 'next', 'previous' or 'incremental' — the last is what typing
+ * does: xterm then grows the current selection while it still matches, instead
+ * of jumping to the following occurrence on every keystroke.
+ *
+ * `decorations` is not optional in practice. Without it xterm highlights only
+ * the current match and never fires `onDidChangeResults`, so the bar could not
+ * say "3 of 17" — which is the part that makes searching a 5000-line buffer
+ * worth anything.
+ */
+export function searchInTerminal(tabId, query, { direction = 'next', ...options } = {}) {
+  const entry = instances.get(tabId);
+  if (!entry?.searchAddon) return false;
+  if (!query) {
+    entry.searchAddon.clearDecorations();
+    return false;
+  }
+  const searchOptions = { ...options, decorations: searchDecorations() };
+  if (direction === 'previous') return entry.searchAddon.findPrevious(query, searchOptions);
+  return entry.searchAddon.findNext(query, { ...searchOptions, incremental: direction === 'incremental' });
+}
+
+/** Drop every highlight — the find bar closing, or its query emptying. */
+export function clearTerminalSearch(tabId) {
+  const entry = instances.get(tabId);
+  entry?.searchAddon?.clearDecorations();
 }
 
 /** Tear down a tab's xterm instance for good. Call only when its tab closes. */
@@ -378,6 +442,7 @@ export function disposeTerminal(tabId) {
   if (!entry) return;
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
+  entry.searchAddon?.dispose();
   entry.term.dispose();
   instances.delete(tabId);
 }

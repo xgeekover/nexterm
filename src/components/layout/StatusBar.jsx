@@ -1,29 +1,54 @@
 import React, { useEffect, useMemo } from 'react';
-import { Folder, TerminalSquare, XCircle, Bell } from 'lucide-react';
+import { Folder, TerminalSquare, XCircle } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { buildStatusItems } from '../../lib/statusInfo.js';
+import { runMenuAction } from '../../lib/menuActions.js';
 import { cn } from '../../lib/utils.js';
 
 const ICONS = { folder: Folder, terminal: TerminalSquare, x: XCircle };
 
+/**
+ * One chip. An item carrying an `action` is a real control and renders as a
+ * button; everything else is a read-out and stays a div, so nothing on this
+ * bar looks clickable without being clickable — which is exactly what the
+ * notifications bell that used to sit at the end of it did for four versions.
+ */
 function StatusItem({ item }) {
   const Icon = item.icon ? ICONS[item.icon] : null;
-  return (
-    <div
-      data-status-id={item.id}
-      title={item.title || undefined}
-      className={cn(
-        'h-full px-2 flex items-center gap-1 shrink-0 cursor-default whitespace-nowrap',
-        item.kind === 'accent' && 'bg-vsc-accent text-vsc-accent-fg font-medium',
-        item.kind === 'error' && 'bg-vsc-error text-white',
-        item.kind === 'plain' && 'text-vsc-fg hover:bg-vsc-item-hover'
-      )}
-    >
+  const className = cn(
+    'h-full px-2 flex items-center gap-1 shrink-0 whitespace-nowrap',
+    item.action ? 'cursor-pointer' : 'cursor-default',
+    item.kind === 'accent' && 'bg-vsc-accent text-vsc-accent-fg font-medium',
+    item.kind === 'error' && 'bg-vsc-error text-white',
+    item.kind === 'plain' && 'text-vsc-fg hover:bg-vsc-item-hover'
+  );
+  const body = (
+    <>
       {Icon && <Icon size={13} className="shrink-0" />}
       <span className="truncate">{item.text}</span>
+    </>
+  );
+
+  if (item.action) {
+    return (
+      <button
+        type="button"
+        data-status-id={item.id}
+        title={item.title || undefined}
+        onClick={() => runMenuAction(item.action)}
+        className={className}
+      >
+        {body}
+      </button>
+    );
+  }
+
+  return (
+    <div data-status-id={item.id} title={item.title || undefined} className={className}>
+      {body}
     </div>
   );
 }
@@ -52,6 +77,8 @@ export function StatusBar() {
   // Null until the backend has been asked, and while no folder is open.
   const rootPath = useEditorStore((s) => (s.rootResolved ? s.rootPath : null));
   const configuredShell = useSettingsStore((s) => s.terminalDefaultShell);
+  const terminalFontSize = useSettingsStore((s) => s.terminalFontSize);
+  const defaultFontSize = useSettingsStore((s) => s.settingsDefaults.terminalFontSize);
 
   useEffect(() => {
     initSystem();
@@ -85,10 +112,13 @@ export function StatusBar() {
         terminalCount: tabs.length,
         lastExitCode,
         shellExited: Boolean(activeTab?.exited),
+        fontSize: terminalFontSize,
+        defaultFontSize,
       }),
     [
       os, arch, homeDir, rootPath, activeTab?.cwd, activeTab?.exited, storeCwd,
       configuredShell, systemShell, cols, rows, groups.length, tabs.length, lastExitCode,
+      terminalFontSize, defaultFontSize,
     ]
   );
 
@@ -107,9 +137,6 @@ export function StatusBar() {
         {right.map((it) => (
           <StatusItem key={it.id} item={it} />
         ))}
-        <button type="button" title="Notifications" className="h-full px-2 flex items-center text-vsc-fg hover:bg-vsc-item-hover shrink-0">
-          <Bell size={13} />
-        </button>
       </div>
     </footer>
   );

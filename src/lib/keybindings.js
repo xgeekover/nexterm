@@ -132,6 +132,36 @@ export const COMMANDS = {
     title: 'Clear Unpinned Blocks',
     run: (ctx) => ctx.clearBlocks?.(),
   },
+  'find-in-terminal': {
+    title: 'Find in Terminal',
+    // The scrollback is 5000 lines deep, and a find bar that stops working the
+    // moment a terminal has focus would never work at all — focus on a
+    // terminal IS this app's resting state. So it is claimed ahead of xterm,
+    // like the side bar toggle above.
+    //
+    // The trade, stated plainly: off macOS `mod` is Ctrl, so Ctrl+F no longer
+    // reaches readline as forward-char. VS Code makes the same trade with the
+    // same key, the arrow keys do the same job, and this is one of the
+    // shortcuts a user can now change in Settings. On macOS nothing is given
+    // up — ⌘ never reaches the pty.
+    overTerminal: true,
+    run: (ctx) => ctx.openFind?.(),
+  },
+  'zoom-in': {
+    title: 'Zoom In',
+    overTerminal: true,
+    run: (ctx) => ctx.zoomFont?.(1),
+  },
+  'zoom-out': {
+    title: 'Zoom Out',
+    overTerminal: true,
+    run: (ctx) => ctx.zoomFont?.(-1),
+  },
+  'zoom-reset': {
+    title: 'Reset Zoom',
+    overTerminal: true,
+    run: (ctx) => ctx.resetZoom?.(),
+  },
   'reload-guard': {
     title: 'Block reload',
     menuId: null,
@@ -193,6 +223,13 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'toggle-secondary', key: 'mod+alt+b' },
   { command: 'toggle-sidebar', key: 'mod+b' },
   { command: 'clear-terminal', key: 'mod+l' },
+  { command: 'find-in-terminal', key: 'mod+f' },
+  // Two spellings of "bigger", because `+` is the shifted `=` on most layouts
+  // and people press whichever they think of. The menu shows the first.
+  { command: 'zoom-in', key: 'mod+equal' },
+  { command: 'zoom-in', key: 'mod+shift+equal' },
+  { command: 'zoom-out', key: 'mod+minus' },
+  { command: 'zoom-reset', key: 'mod+0' },
   // The guard's several spellings of "reload". `mod+r` is deliberately absent:
   // off macOS that is Ctrl+R, which is reverse-i-search in every shell.
   { command: 'reload-guard', key: 'f5' },
