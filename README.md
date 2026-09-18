@@ -111,6 +111,15 @@ cramming both onto one screen.
 **Move a terminal to another group.** Drag its tab onto the target group's chip,
 or right-click it in the TERMINALS panel → *Move to Group*.
 
+**Click what the output names.** A stack trace's `src/app.js:42:13`, a
+compiler's `--> src/main.rs:10:5`, a Python traceback's `File "x.py", line 9` —
+click it and the file opens in the editor above with the caret on that line.
+Relative paths are read against the terminal's current directory, not the
+workspace root, so a `cargo` run inside `src-tauri/` lands on the right file.
+`http://` and `https://` addresses open in your browser; nothing else is ever
+offered as a link, and a path without a line number is left as plain text so
+ordinary output does not fill up with underlines.
+
 **Rename.** Double-click a terminal tab, or right-click it → *Rename*. Groups
 rename the same way, from their chip or from the TERMINALS panel.
 

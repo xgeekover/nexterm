@@ -158,16 +158,51 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const saveFile = useEditorStore((s) => s.saveFile);
   const rootPath = useEditorStore((s) => s.rootPath);
 
+  const pendingReveal = useEditorStore((s) => s.pendingReveal);
+  const clearReveal = useEditorStore((s) => s.clearReveal);
+  const editorRef = useRef(null);
+
   const { drag } = useContext(EditorDragContext);
 
   const isActivePane = activeEditorPaneId === paneId;
   const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
+
+  /**
+   * Put the caret where a terminal link asked for, if that link meant the file
+   * THIS pane is showing.
+   *
+   * Every pane runs this, and the first one holding the file wins and clears
+   * the request — the same file can be open in two groups, and jumping in both
+   * would move a caret the user was not looking at.
+   */
+  const applyPendingReveal = useCallback(
+    (editor, filePath) => {
+      const reveal = useEditorStore.getState().pendingReveal;
+      if (!editor || !reveal || reveal.filePath !== filePath) return;
+      const lineCount = editor.getModel()?.getLineCount?.() ?? reveal.line;
+      // A stack trace can name a line past the end of a file that has since
+      // been edited. Land on the last line rather than refusing to move.
+      const line = Math.min(Math.max(1, reveal.line), Math.max(1, lineCount));
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: Math.max(1, reveal.column || 1) });
+      editor.focus();
+      clearReveal();
+    },
+    [clearReveal]
+  );
 
   // Only the tabs that belong to this group, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
 
   const segments = activeTab ? relativeSegments(activeTab.filePath, rootPath) : [];
+
+  // Clicking a second link into a file that is already open remounts nothing,
+  // so `onMount` never fires again and this is the only thing that moves.
+  useEffect(() => {
+    if (!pendingReveal || !activeTab) return;
+    applyPendingReveal(editorRef.current, activeTab.filePath);
+  }, [pendingReveal, activeTab, applyPendingReveal]);
 
   return (
     <div
@@ -222,6 +257,10 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               theme={MONACO_THEME}
               value={activeTab.content}
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
+              onMount={(editor) => {
+                editorRef.current = editor;
+                applyPendingReveal(editor, activeTab.filePath);
+              }}
               options={monacoOptions}
             />
             {/* While dragging, swallow pointer events so Monaco cannot eat them. */}

@@ -25,6 +25,9 @@ import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalTh
 import { fitAndReport, usablePtySize, windowsPtyFor } from '../../lib/terminalCompat.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
+import { useEditorStore } from '../../stores/editorStore.js';
+import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
+import { openExternal } from '../../lib/openExternal.js';
 
 const instances = new Map();
 
@@ -237,6 +240,93 @@ useSystemStore.subscribe((state, prev) => {
 });
 
 /**
+ * The whole logical line a rendered row belongs to.
+ *
+ * xterm hands a link provider ONE row at a time, but a terminal wraps: in an
+ * 80-column pane `at Object.<anonymous> (/very/long/path/app.test.js:42:13)`
+ * is split across two rows, and a provider that only ever sees one row finds
+ * no link in either. So walk back to the row that started the wrap, join the
+ * group, and remember where it began — offsets map back to (x, y) from there.
+ */
+function logicalLineAt(term, row) {
+  const buffer = term.buffer.active;
+  let start = row;
+  while (start > 1 && buffer.getLine(start - 1)?.isWrapped) start -= 1;
+
+  let text = '';
+  for (let i = start; i <= buffer.length; i += 1) {
+    const line = buffer.getLine(i - 1);
+    if (!line) break;
+    if (i > start && !line.isWrapped) break;
+    // No trimming: every wrapped row is exactly `cols` wide, and that is what
+    // makes `positionOf` arithmetic rather than a search.
+    text += line.translateToString(false);
+  }
+  return { text, start };
+}
+
+/** An offset into the joined text, as xterm's 1-based (x, y). */
+function positionOf(offset, startRow, cols) {
+  return { x: (offset % cols) + 1, y: startRow + Math.floor(offset / cols) };
+}
+
+/**
+ * Make paths and URLs in the output clickable.
+ *
+ * A stack trace names a file and a line, and this app has that file's editor
+ * in the same window — having to retype the path to reach it was most of the
+ * reason that pairing did not pay off. What counts as a link is decided by
+ * `src/lib/terminalLinks.js`, which is pure and tested; this maps the matches
+ * onto the screen and says what a click does.
+ *
+ * A relative path is resolved against the TAB'S live cwd, read at click time
+ * rather than captured here — the shell may have `cd`'d twenty times since
+ * this instance was created.
+ */
+function registerLinks(term, tabId) {
+  return term.registerLinkProvider({
+    provideLinks(row, callback) {
+      const { text, start } = logicalLineAt(term, row);
+      const matches = findLinks(text);
+      if (matches.length === 0) {
+        callback(undefined);
+        return;
+      }
+      const cols = term.cols || 80;
+      callback(
+        matches.map((match) => ({
+          range: {
+            start: positionOf(match.start, start, cols),
+            // xterm's ranges are inclusive at both ends, hence the -1.
+            end: positionOf(match.start + match.length - 1, start, cols),
+          },
+          text: match.text,
+          decorations: { pointerCursor: true, underline: true },
+          activate: (event) => {
+            event?.preventDefault?.();
+            if (match.kind === 'url') {
+              openExternal(match.href);
+              return;
+            }
+            const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
+            const editor = useEditorStore.getState();
+            const resolved = resolveLinkPath(match.path, tab?.cwd || editor.rootPath);
+            if (!resolved) return;
+            // A path a tool printed may not exist, may sit outside the
+            // workspace the backend confines reads to, or may have been
+            // deleted since it was printed. Say so in the terminal and carry
+            // on — a click that cannot land must not take the window down.
+            editor.openFileAt(resolved, match.line, match.column).catch(() => {
+              writeNotice(tabId, `could not open ${resolved}`);
+            });
+          },
+        }))
+      );
+    },
+  });
+}
+
+/**
  * Get the persistent xterm instance for a tab, creating it on first use.
  * `sessionId` and `onData` are only consulted the first time — the PTY
  * listener and keystroke wiring are set up once, for the lifetime of the
@@ -331,6 +421,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  const linkProvider = registerLinks(term, tabId);
   term.open(container);
 
   const dataDisposable = onData ? term.onData(onData) : null;
@@ -345,6 +436,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   entry = {
     term,
     fitAddon,
+    linkProvider,
     sessionId: null,
     container,
     dataDisposable,
@@ -378,6 +470,7 @@ export function disposeTerminal(tabId) {
   if (!entry) return;
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
+  entry.linkProvider?.dispose();
   entry.term.dispose();
   instances.delete(tabId);
 }

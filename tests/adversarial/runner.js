@@ -30,6 +30,7 @@ import './tab_names.test.js';
 import './backend_tree_contract.test.js';
 import './configurable_keybindings.test.js';
 import './native_menu.test.js';
+import './terminal_links.test.js';
 
 async function run() {
   console.log('====================================================');
