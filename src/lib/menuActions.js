@@ -73,6 +73,18 @@ export function runMenuAction(id) {
     case 'clear-terminal':
       terminal.clearBlocks?.();
       break;
+    case 'find-in-terminal':
+      terminal.openFind?.();
+      break;
+    case 'zoom-in':
+      settings.zoomFont?.(1);
+      break;
+    case 'zoom-out':
+      settings.zoomFont?.(-1);
+      break;
+    case 'zoom-reset':
+      settings.resetZoom?.();
+      break;
     case 'close-window':
       windowControls.close();
       break;
@@ -108,6 +120,10 @@ const MENU_SPEC = [
       { id: 'toggle-sidebar', label: 'Toggle Primary Side Bar' },
       { id: 'toggle-panel', label: 'Toggle Terminal Panel' },
       { id: 'toggle-secondary', label: 'Toggle Terminals Side Bar' },
+      { type: 'separator' },
+      { id: 'zoom-in', label: 'Zoom In' },
+      { id: 'zoom-out', label: 'Zoom Out' },
+      { id: 'zoom-reset', label: 'Reset Zoom' },
     ],
   },
   {
@@ -117,6 +133,7 @@ const MENU_SPEC = [
       { id: 'split-down', label: 'Split Down' },
       { id: 'close-pane', label: 'Close Pane' },
       { type: 'separator' },
+      { id: 'find-in-terminal', label: 'Find…' },
       { id: 'clear-terminal', label: 'Clear Unpinned Blocks' },
     ],
   },

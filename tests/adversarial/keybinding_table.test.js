@@ -100,7 +100,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       .filter((i) => i.id && !i.key)
       .map((i) => i.id);
     assert.deepEqual(withoutShortcut, [], 'these menu entries advertise no shortcut at all');
-    assert.equal(MENU_ITEMS.length, 14, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
+    assert.equal(MENU_ITEMS.length, 18, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
   });
 
   test('KB-01: every shortcut the menu advertises is claimed by a binding', () => {
@@ -164,6 +164,9 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       focusNextPane: stub('focusPane'),
       createTerminalTab: stub('newTerminal'),
       clearBlocks: stub('clear'),
+      openFind: stub('find'),
+      zoomFont: stub('zoom'),
+      resetZoom: stub('zoomReset'),
       closeWindow: stub('closeWindow'),
       activeEditorTabId: 'tab-1',
     };
@@ -183,6 +186,10 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'clear-terminal': 'clear()',
       'command-palette': 'palette(true)',
       'quick-open': 'palette(true,files)',
+      'find-in-terminal': 'find()',
+      'zoom-in': 'zoom(1)',
+      'zoom-out': 'zoom(-1)',
+      'zoom-reset': 'zoomReset()',
     };
 
     for (const menuItem of MENU_ITEMS) {
@@ -304,7 +311,20 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     // is a product decision, so it is written down here rather than left to
     // whoever edits the table next.
     const claimed = Object.entries(COMMANDS).filter(([, c]) => c.overTerminal).map(([id]) => id).sort();
-    assert.deepEqual(claimed, ['reload-guard', 'toggle-secondary', 'toggle-sidebar']);
+    assert.deepEqual(claimed, [
+      // Ctrl+F off macOS, which readline uses for forward-char. Taken on
+      // purpose: a find bar that stops working whenever a terminal has focus
+      // would never work at all, VS Code makes the same trade, and Settings
+      // can move it. The arrow keys do the same job in the shell.
+      'find-in-terminal',
+      'reload-guard',
+      'toggle-secondary',
+      'toggle-sidebar',
+      // Punctuation and a digit — no control byte is given up for these.
+      'zoom-in',
+      'zoom-out',
+      'zoom-reset',
+    ]);
   });
 
   test('KB-12: the terminal keeps every control byte, including the ones mod maps to', () => {

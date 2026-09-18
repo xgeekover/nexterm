@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useId } from 'react';
 import { X, Search, RotateCcw } from 'lucide-react';
-import { useSettingsStore } from '../../stores/settingsStore.js';
+import { useSettingsStore, FONT_SIZE_RANGE } from '../../stores/settingsStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
 import { isWindows } from '../../lib/platform.js';
@@ -37,8 +37,8 @@ function buildItems(monoPlaceholder) {
       title: 'Font Size',
       description: 'Controls the font size in pixels for the editor.',
       control: 'number',
-      min: 8,
-      max: 32,
+      min: FONT_SIZE_RANGE.min,
+      max: FONT_SIZE_RANGE.max,
       step: 1,
     },
     {
@@ -90,8 +90,8 @@ function buildItems(monoPlaceholder) {
       title: 'Font Size',
       description: 'Controls the font size in pixels of the terminal.',
       control: 'number',
-      min: 8,
-      max: 32,
+      min: FONT_SIZE_RANGE.min,
+      max: FONT_SIZE_RANGE.max,
       step: 1,
     },
     {

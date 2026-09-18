@@ -187,6 +187,13 @@ pub fn spec() -> Vec<Submenu> {
             custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
             custom("toggle-secondary", "Toggle Terminals Side Bar", "CmdOrCtrl+Alt+B"),
             Sep,
+            // Not `terminal_safe`: these are punctuation and a digit, not the
+            // Ctrl+letter the shell turns into a control byte, so the window
+            // may claim them on every platform.
+            custom("zoom-in", "Zoom In", "CmdOrCtrl+="),
+            custom("zoom-out", "Zoom Out", "CmdOrCtrl+-"),
+            custom("zoom-reset", "Reset Zoom", "CmdOrCtrl+0"),
+            Sep,
             P(Fullscreen),
         ],
     });
@@ -197,6 +204,7 @@ pub fn spec() -> Vec<Submenu> {
             custom("split-down", "Split Down", "CmdOrCtrl+Shift+D"),
             terminal_safe("close-pane", "Close Pane", "CmdOrCtrl+W"),
             Sep,
+            terminal_safe("find-in-terminal", "Find…", "CmdOrCtrl+F"),
             terminal_safe("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
         ],
     });
@@ -363,7 +371,9 @@ mod tests {
         let expected = [
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",
-            "split-right", "split-down", "close-pane", "clear-terminal", "close-window",
+            "zoom-in", "zoom-out", "zoom-reset",
+            "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
+            "close-window",
         ];
         // Off macOS the window is closed from the app's own title bar, and
         // Quit lives in the File menu as a predefined item.
@@ -371,7 +381,8 @@ mod tests {
         let expected = [
             "preferences", "open-folder", "new-terminal", "save", "command-palette", "quick-open",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",
-            "split-right", "split-down", "close-pane", "clear-terminal",
+            "zoom-in", "zoom-out", "zoom-reset",
+            "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
         ];
         for e in expected {
             assert!(ids.contains(&e), "missing menu item id: {e}");
@@ -413,6 +424,10 @@ mod tests {
             "toggle-sidebar",
             "split-right",
             "close-pane",
+            // Ctrl+F is readline's forward-char. The item stays menu-only
+            // here and `useKeybindings.js` claims the chord in the webview,
+            // where xterm could still win it back if it had to.
+            "find-in-terminal",
             "clear-terminal",
         ];
         #[cfg(target_os = "macos")]

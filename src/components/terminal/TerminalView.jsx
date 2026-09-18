@@ -1,7 +1,8 @@
 import React, { useEffect, useReducer, useRef } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { ensureGpuRenderer, getOrCreateTerminal, isFittable } from './terminalRegistry.js';
+import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch } from './terminalRegistry.js';
+import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
 import { listen } from '../../lib/ipc.js';
@@ -86,6 +87,11 @@ export function TerminalView({ tabId, active = false }) {
   const writeRaw = useTerminalStore((s) => s.writeRaw);
   const resizePty = useTerminalStore((s) => s.resizePty);
   const sessionId = useTerminalStore((s) => s.tabs.find((t) => t.id === tabId)?.sessionId);
+
+  // The find bar belongs to the terminal it was opened over, not to the window
+  // — in a split it has to be obvious which pane is being searched.
+  const findOpen = useTerminalStore((s) => s.find.open && s.find.tabId === tabId);
+  const closeFind = useTerminalStore((s) => s.closeFind);
 
   // Suggestion UI state lives in a ref (not React state) because it's
   // written from long-lived xterm event-handler closures (onData / the
@@ -358,10 +364,18 @@ export function TerminalView({ tabId, active = false }) {
   }, [tabId, sessionId, writeRaw, resizePty]);
 
   // Sole focus owner in the terminal area: focus the xterm when its pane
-  // becomes the active one.
+  // becomes the active one. Not while the find bar is up — it owns the caret
+  // until it closes, and stealing it back would make the field untypeable.
   useEffect(() => {
-    if (active) termRef.current?.focus();
-  }, [active, tabId]);
+    if (active && !findOpen) termRef.current?.focus();
+  }, [active, tabId, findOpen]);
+
+  const dismissFind = () => {
+    clearTerminalSearch(tabId);
+    closeFind();
+    // Closing hands the keyboard back to the shell, which is where it was.
+    termRef.current?.focus();
+  };
 
   const suggestState = suggestStateRef.current;
 
@@ -372,6 +386,7 @@ export function TerminalView({ tabId, active = false }) {
         onMouseDown={() => termRef.current?.focus()}
         className="w-full h-full overflow-hidden"
       />
+      {findOpen && <TerminalFindBar tabId={tabId} onClose={dismissFind} />}
       {suggestState.visible && (
         <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
           {suggestState.ghost && (
