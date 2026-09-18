@@ -16,7 +16,10 @@
 //! passed as a list, never through a shell, and the only path involved is the
 //! workspace root the backend already owns.
 
-use std::path::{Path, PathBuf};
+// `PathBuf` is only named by the tests below; `#![deny(warnings)]` turns an
+// unused import into a failed build, and `cargo test` would not have caught it
+// because there the import IS used.
+use std::path::Path;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -207,6 +210,7 @@ pub fn status_of(root: &Path) -> Option<GitStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn root() -> PathBuf {
         PathBuf::from("/w/proj")
