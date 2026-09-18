@@ -377,6 +377,22 @@ class BrowserMockBridge {
         return wanted;
       }
 
+      // The real one shells out to the user's own git. The mock stands in with
+      // a repository shaped like one — a branch, a couple of changed files —
+      // so browser QA and the render suite exercise the same code paths.
+      case 'git_status': {
+        return {
+          branch: 'main',
+          ahead: 1,
+          behind: 0,
+          truncated: false,
+          files: [
+            { path: '/workspace/src/App.jsx', status: 'modified', staged: false },
+            { path: '/workspace/README.md', status: 'untracked', staged: false },
+          ],
+        };
+      }
+
       case 'fs_read_dir': {
         const { path, max_depth = 10 } = args;
         const normalized = (path || '/workspace').replace(/\/+$/, '');

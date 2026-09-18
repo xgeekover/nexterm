@@ -101,6 +101,7 @@ export function buildStatusItems({
   shellExited = false,
   fontSize = null,
   defaultFontSize = null,
+  git = null,
 } = {}) {
   const platform = platformOf(os);
   const sep = sepOf(cwd || workspacePath || '/');
@@ -112,6 +113,30 @@ export function buildStatusItems({
     text: workspacePath ? basename(workspacePath) : 'NexTerm',
     title: workspacePath || 'No folder opened',
   });
+
+  // The branch, read from git rather than hard-coded — this bar printed "main"
+  // whatever was checked out until that was removed for lying. Absent entirely
+  // when there is nothing to say: no repository, or no git on the machine.
+  if (git) {
+    const changed = Array.isArray(git.files) ? git.files.length : 0;
+    const name = git.branch || 'detached';
+    const arrows = [
+      git.behind ? `\u2193${git.behind}` : '',
+      git.ahead ? `\u2191${git.ahead}` : '',
+    ].filter(Boolean).join(' ');
+    left.push({
+      id: 'git',
+      kind: 'plain',
+      icon: 'branch',
+      text: [name, arrows, changed ? `${changed}${git.truncated ? '+' : ''}\u25cf` : ''].filter(Boolean).join(' '),
+      title: [
+        git.branch ? `On branch ${git.branch}` : 'Detached head',
+        git.ahead ? `${git.ahead} commit${git.ahead === 1 ? '' : 's'} to push` : '',
+        git.behind ? `${git.behind} commit${git.behind === 1 ? '' : 's'} to pull` : '',
+        changed ? `${changed}${git.truncated ? ' or more' : ''} changed file${changed === 1 ? '' : 's'}` : 'Nothing changed',
+      ].filter(Boolean).join(' \u00b7 '),
+    });
+  }
 
   if (cwd) {
     left.push({

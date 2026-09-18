@@ -19,6 +19,16 @@ fn is_root(state: &State<AppState>, path: &str) -> bool {
         .is_some_and(|root| root.to_string_lossy() == path)
 }
 
+/// What git says about the open folder, or `null` when it has nothing to say.
+///
+/// Null covers three cases that are all the same to the UI: no folder open,
+/// the folder is not a repository, and `git` is not installed. None of them is
+/// worth an error over a status bar decoration.
+#[tauri::command(rename_all = "snake_case")]
+pub fn git_status(state: State<AppState>) -> Result<Option<fs::git::GitStatus>, String> {
+    Ok(state.workspace.root().and_then(|root| fs::git::status_of(&root)))
+}
+
 /// Search the open folder's files.
 ///
 /// Confined by construction: the walk starts at the workspace root, so there

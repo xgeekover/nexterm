@@ -1,3 +1,4 @@
+pub mod git;
 pub mod watcher;
 pub mod search;
 pub use watcher::FsWatcherManager;
@@ -27,6 +28,18 @@ impl Canonical for Path {
     fn canonical(&self) -> std::io::Result<PathBuf> {
         dunce::canonicalize(self)
     }
+}
+
+/// A path in the filesystem's own spelling, or unchanged when it cannot be
+/// resolved.
+///
+/// git prints its top level with forward slashes on Windows as well, while
+/// everything the Explorer holds comes from `read_dir_hierarchy` in the
+/// platform's own spelling. The two have to agree or every file goes
+/// uncoloured, so the git side canonicalises through the same `dunce` the rest
+/// of this module uses.
+pub fn canonical_or(path: &Path) -> PathBuf {
+    path.canonical().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn resolve_path(path_str: &str) -> PathBuf {

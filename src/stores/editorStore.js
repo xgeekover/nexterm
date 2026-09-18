@@ -13,6 +13,7 @@ import {
 } from '../lib/paths.js';
 import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
+import { useGitStore } from './gitStore.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
 const loadingDirs = new Set();
@@ -239,6 +240,9 @@ export const useEditorStore = create((set, get) => ({
       // A build or install fires hundreds of events; refresh once they settle.
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => get().refreshExplorer(), 300);
+      // Git's answer changes with the files. Its own debounce coalesces a
+      // checkout's thousands of events into one `git status`.
+      useGitStore.getState().refresh();
     }));
   },
 
@@ -274,6 +278,7 @@ export const useEditorStore = create((set, get) => ({
       }
       // As known as it will get: the placeholder stays if the backend could not say.
       set({ rootResolved: true, recentRoots: loadState(RECENT_ROOTS_KEY, []) || [] });
+      useGitStore.getState().refreshNow();
       const opened = get().rootPath;
       if (opened) get().rememberRoot(opened);
       await get().refreshExplorer();
@@ -398,6 +403,7 @@ export const useEditorStore = create((set, get) => ({
       });
       get().rememberRoot(rootPath);
       await get().refreshExplorer();
+      useGitStore.getState().refreshNow();
       return rootPath;
     } catch (err) {
       console.error('[EditorStore] Failed to change workspace root:', err);

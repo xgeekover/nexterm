@@ -81,6 +81,7 @@ const { renderToString } = await import('react-dom/server');
 const { useTerminalStore } = await import('../../src/stores/terminalStore.js');
 const { useEditorStore } = await import('../../src/stores/editorStore.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
+const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { default: App } = await import('../../src/App.jsx');
 
 const results = [];
@@ -124,6 +125,7 @@ const baseGroups = (tabIds) => [
 
 /** Back to a plain one-terminal workspace before each case. */
 function reset() {
+  useGitStore.setState({ status: null, isLoaded: false });
   useSettingsStore.getState().resetSettings();
   useSettingsStore.setState({ isCommandPaletteOpen: false, isSettingsModalOpen: false });
   useEditorStore.setState({ tabs: [], activeTabId: null, rootPath: '/workspace', rootResolved: true });
@@ -151,6 +153,20 @@ scenario('RN-14', 'no folder open, with recent ones to offer', () => {
     rootPath: null,
     rootResolved: true,
     recentRoots: ['/w/alpha', '/w/beta'],
+  });
+});
+
+scenario('RN-15', 'a repository with a branch and changed files', () => {
+  reset();
+  useGitStore.setState({
+    isLoaded: true,
+    status: {
+      branch: 'main',
+      ahead: 2,
+      behind: 1,
+      truncated: false,
+      files: [{ path: '/workspace/src/App.jsx', status: 'modified', staged: false }],
+    },
   });
 });
 

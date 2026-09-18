@@ -204,6 +204,15 @@ File, View and Terminal. Hover or use the arrow keys to step into a menu,
 `Enter` to run an item, `Esc` to back out; keys typed while it is open never
 reach the terminal behind it.
 
+**See what git sees.** When the open folder is a repository, the status bar
+carries the branch, how far it is from upstream and how many files have
+changed, and the Explorer colours the ones that have — modified, added,
+deleted, untracked — with a letter beside each, so the row still says something
+where the colours do not. It shells out to your own `git`, which is what makes
+worktrees, submodules and your own `core.*` behave here the way they behave in
+the terminal below. There is no staging or committing: that is a second
+application, and this one has git in it already.
+
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
 scrollback, colour theme, and command suggestions.
