@@ -14,6 +14,7 @@ use super::osc::{Marker, OscFilter};
 use super::shell_integration;
 use super::startup_query::StartupCursorQuery;
 use crate::models::PtyCommandDonePayload;
+use crate::models::PtyCommandStartedPayload;
 use crate::models::PtyCwdPayload;
 
 use crate::models::{PtyExitPayload, PtyOutputPayload, PtySessionInfo};
@@ -366,7 +367,23 @@ impl PtyManager {
                                         };
                                         let _ = app_handle_clone.emit("pty-cwd", &payload);
                                     }
-                                    Marker::PromptStart | Marker::CommandStart | Marker::CommandExecuted => {}
+                                    // OSC 133 "C": output is about to begin, so
+                                    // something is running now. The parser has
+                                    // always recognised this marker and the
+                                    // backend always dropped it, which left the
+                                    // frontend able to say what a command
+                                    // finished WITH but never that one was still
+                                    // going.
+                                    Marker::CommandExecuted => {
+                                        let payload = PtyCommandStartedPayload {
+                                            session_id: session_id_clone.clone(),
+                                        };
+                                        let _ = app_handle_clone.emit("pty-command-started", &payload);
+                                    }
+                                    // A is the prompt drawing and B is where the
+                                    // user's typing begins; neither says anything
+                                    // about work being done.
+                                    Marker::PromptStart | Marker::CommandStart => {}
                                 }
                             }
                         }

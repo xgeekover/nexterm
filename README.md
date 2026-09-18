@@ -117,6 +117,31 @@ cramming both onto one screen.
 **Move a terminal to another group.** Drag its tab onto the target group's chip,
 or right-click it in the TERMINALS panel → *Move to Group*.
 
+**Click what the output names.** A stack trace's `src/app.js:42:13`, a
+compiler's `--> src/main.rs:10:5`, a Python traceback's `File "x.py", line 9` —
+click it and the file opens in the editor above with the caret on that line.
+Relative paths are read against the terminal's current directory, not the
+workspace root, so a `cargo` run inside `src-tauri/` lands on the right file.
+`http://` and `https://` addresses open in your browser; nothing else is ever
+offered as a link, and a path without a line number is left as plain text so
+ordinary output does not fill up with underlines.
+**See what the other terminals are doing.** A tab shows a blue dot while a
+command is running in it and a red one when the last command failed, and a
+group's chip shows the same for every terminal inside it. The point is the ones
+you are not looking at: switching groups replaces the whole arrangement, so
+without this a build finishing — or failing — in another group is invisible.
+Hovering says it in words. Nothing flashes for an empty prompt line.
+**Find something in the scrollback.** `⌘F` opens a find bar over the focused
+terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
+`Esc` to close. Match case, whole word and regular expressions are there, every
+match is highlighted at once, and the bar counts them ("3 of 17"). The buffer is
+5000 lines deep by default, so this is how you get back to the error that
+scrolled past.
+
+**Make the text bigger.** `⌘=` and `⌘-` step the terminal and editor font
+together, `⌘0` puts them back. While the size is not the default, the status bar
+says so and clicking it resets.
+
 **Rename.** Double-click a terminal tab, or right-click it → *Rename*. Groups
 rename the same way, from their chip or from the TERMINALS panel.
 
@@ -159,6 +184,8 @@ scrollback, colour theme, and command suggestions.
 | `⌘B` | Toggle the primary sidebar |
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
+| `⌘F` | Find in the active terminal's scrollback |
+| `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / default text |
 | `⌘S` | Save the active editor file |
 
 On Windows and Linux use `Ctrl` wherever `⌘` is listed. That is the table out
@@ -179,19 +206,28 @@ accelerators before the terminal ever sees the key, so registering `Ctrl+D`
 would cost every pane in the app its EOF. The menu shows that row without a
 shortcut.
 
-**Shortcuts yield to the shell, with two exceptions.** A chord the terminal
+**Shortcuts yield to the shell, with a few exceptions.** A chord the terminal
 needs goes to the terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K`
 kills to end of line, `Ctrl+C` interrupts, `Ctrl+R` is reverse-i-search, and
 the app does nothing. The same chord elsewhere in the window does what the
 table says.
 
-The exceptions are the two side-bar toggles, `⌘B` / `Ctrl+B` and `⌥⌘B` /
-`Ctrl+Alt+B`. The app claims those even while a terminal has focus, which is
-its resting state — otherwise xterm turned `Ctrl+B` into `^B` and the shortcut
-the menu advertises did nothing at all. VS Code makes the same trade.
-**If you run tmux inside a pane, rebind its prefix** — or rebind NexTerm's
-side bar toggle in Settings ▸ Keyboard Shortcuts, which is the other way out:
-`Ctrl+B` will not reach tmux otherwise. Everything else in the table above is left to the shell.
+The exceptions are the shortcuts that would be useless if they stopped working
+whenever a terminal had focus — which is this app's resting state. The app
+claims these ahead of xterm:
+
+- the side-bar toggles, `⌘B` / `Ctrl+B` and `⌥⌘B` / `Ctrl+Alt+B`; otherwise
+  xterm turned `Ctrl+B` into `^B` and the shortcut the menu advertises did
+  nothing at all
+- find, `⌘F` / `Ctrl+F`
+- the zoom keys, which are punctuation and a digit and cost the shell nothing
+
+VS Code makes the same trades with the same keys. Two of them do take something
+away on Windows and Linux, where `⌘` is `Ctrl`: **`Ctrl+B` will not reach tmux**
+(rebind tmux's prefix, or rebind the toggle) and **`Ctrl+F` no longer moves the
+cursor forward in readline** (the arrow keys still do). Both rows are rebindable
+in Settings ▸ Keyboard Shortcuts. On macOS nothing is given up — `⌘` never
+reaches the pty. Everything else in the table above is left to the shell.
 
 Packaged builds also refuse the reload chords (`F5`, `Ctrl+Shift+R`, `⌘R`).
 Reloading restarts the frontend, and start-up reaps every terminal the backend

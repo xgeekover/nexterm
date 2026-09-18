@@ -99,6 +99,8 @@ export function buildStatusItems({
   terminalCount = 0,
   lastExitCode = null,
   shellExited = false,
+  fontSize = null,
+  defaultFontSize = null,
 } = {}) {
   const platform = platformOf(os);
   const sep = sepOf(cwd || workspacePath || '/');
@@ -147,6 +149,19 @@ export function buildStatusItems({
   }
   if (cols && rows) {
     right.push({ id: 'size', kind: 'plain', text: `${cols}\u00d7${rows}`, title: `${cols} columns by ${rows} rows` });
+  }
+  // Only while zoomed. A permanent "12px" would be noise; a size that is not
+  // the default is worth saying, because the shortcut that changed it is easy
+  // to hit by accident and there was previously nothing on screen to explain
+  // why the text had shrunk. `action` makes it the way back.
+  if (fontSize && defaultFontSize && fontSize !== defaultFontSize) {
+    right.push({
+      id: 'zoom',
+      kind: 'plain',
+      text: `${fontSize}px`,
+      title: `Font size ${fontSize}px (default ${defaultFontSize}px) — click to reset`,
+      action: 'zoom-reset',
+    });
   }
   right.push({
     id: 'shell',

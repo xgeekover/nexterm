@@ -22,6 +22,10 @@ walkdir = "2.5.0"
 # canonicalize without the \\?\ prefix Windows adds — see `Canonical` in src/fs/mod.rs.
 dunce = "1.0.5"
 tauri-plugin-dialog = "2"
+# Hands a URL to the system browser for the links in terminal output. Scoped to
+# http/https in capabilities/default.json — see src/lib/openExternal.js for why
+# that matters when the text came from a program's output.
+tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 
 # getuid(), so the shell-integration files go somewhere only this user can reach.

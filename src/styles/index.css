@@ -53,6 +53,10 @@
   --vsc-selection:          #04395e;
   --vsc-selection-fg:       #ffffff;
   --vsc-inactive-selection: #37373d;
+  /* Terminal find. #RRGGBB and nothing else: xterm's search decorations parse
+     these themselves and silently drop anything with an alpha channel. */
+  --vsc-find-match:         #9e6a03;
+  --vsc-find-match-other:   #613214;
   --vsc-item-hover:         rgba(255, 255, 255, 0.10);
   --vsc-item-active:        rgba(255, 255, 255, 0.18);
 

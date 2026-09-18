@@ -377,6 +377,29 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
+  /**
+   * Where the editor should jump once the file is on screen.
+   *
+   * A click on `src/main.rs:10:5` in the terminal has to do two things that
+   * cannot happen in one step: open the file (async, may fail) and move the
+   * caret (only possible once Monaco has mounted that model). So the position
+   * is parked here and `EditorPanel` applies it when its editor is ready,
+   * which also means a file already open is handled by the same path.
+   */
+  pendingReveal: null,
+
+  /** Open `filePath` and put the caret on that line. */
+  openFileAt: async (filePath, line, column = null) => {
+    const tab = await get().openFile(filePath);
+    if (Number.isFinite(line) && line > 0) {
+      set({ pendingReveal: { filePath, line, column: Number.isFinite(column) ? column : 1 } });
+    }
+    return tab;
+  },
+
+  /** Applied — or abandoned, if nothing could show it. */
+  clearReveal: () => set({ pendingReveal: null }),
+
   openFile: async (filePath) => {
     // Check if already open — reveal it in whichever group already shows it
     // (VS Code's "revealIfOpen") rather than yanking it into the active

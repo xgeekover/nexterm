@@ -32,6 +32,8 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
+import { ActivityDot } from './ActivityDot.jsx';
+import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // ---------------------------------------------------------------------------
@@ -134,6 +136,15 @@ function collectPanes(node, acc = []) {
 /** How many terminals a whole group holds — shown on its switcher chip. */
 function countTerminals(tree) {
   return collectPanes(tree).reduce((sum, pane) => sum + pane.tabIds.length, 0);
+}
+
+/** The tab objects a group's tree holds, in pane order. */
+function tabsOfGroup(tree, tabs) {
+  const byId = new Map(tabs.map((t) => [t.id, t]));
+  return collectPanes(tree)
+    .flatMap((pane) => pane.tabIds)
+    .map((id) => byId.get(id))
+    .filter(Boolean);
 }
 
 
@@ -343,11 +354,12 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                 aria-selected={isActive}
                 aria-grabbed={isBeingDragged}
                 data-tab-chip={tab.id}
+                // The activity is said in words as well as drawn as a dot —
+                // a colour is not something a screen reader can read out, and
+                // "why is that one red" should be answerable by hovering.
                 title={
-                  tab.exited
-                    ? `${tab.title} — this shell has exited${
-                        tab.exited.code === null ? '' : ` (code ${tab.exited.code})`
-                      }`
+                  activityLabel(tab)
+                    ? `${tab.title} — ${activityLabel(tab)}`
                     : `${tab.title} — drag onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
                 }
                 onPointerDown={(e) => {
@@ -389,6 +401,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   isBeingDragged && 'opacity-40'
                 )}
               >
+                <ActivityDot tab={tab} className="mr-1.5" />
                 <span
                   className={cn(
                     'truncate max-w-[120px]',
@@ -661,6 +674,12 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
  * `elementFromPoint` path the panes' `data-pane-body` uses.
  */
 function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGroupId, headerSlot }) {
+  // Its own subscription: this component is rendered outside the one that
+  // holds the pane tree, so it has no `tabs` of its own to read a group's
+  // activity from. (Referencing the other component's binding here compiled
+  // fine and white-screened the app at run time — the exact failure mode React
+  // has no way to warn about.)
+  const tabs = useTerminalStore((s) => s.tabs);
   const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const createGroup = useTerminalStore((s) => s.createGroup);
   const closeGroup = useTerminalStore((s) => s.closeGroup);
@@ -718,6 +737,9 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
           const isActive = group.id === activeGroupId;
           const isDropTarget = Boolean(drag?.active) && drag.targetGroupId === group.id;
           const terminals = countTerminals(group.tree);
+          // Switching groups replaces the whole arrangement, so a command
+          // failing in one you are not looking at is invisible without this.
+          const activity = groupActivity(tabsOfGroup(group.tree, tabs));
 
           if (renamingGroupId === group.id) {
             return (
@@ -748,7 +770,13 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               role="tab"
               tabIndex={0}
               aria-selected={isActive}
-              title={`${group.name} — ${terminals} terminal${terminals === 1 ? '' : 's'}. Click to switch, drop a terminal here to move it, double-click to rename.`}
+              title={`${group.name} — ${terminals} terminal${terminals === 1 ? '' : 's'}${
+                activity === 'running'
+                  ? ', one of them running a command'
+                  : activity === 'failed'
+                    ? ', one of them ended on a failure'
+                    : ''
+              }. Click to switch, drop a terminal here to move it, double-click to rename.`}
               onClick={() => {
                 if (Date.now() - lastDragEndAt < 200) return;
                 setActiveGroup(group.id);
@@ -781,6 +809,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                   'ring-1 ring-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]'
               )}
             >
+              <ActivityDot state={activity} />
               <span className="truncate max-w-[140px]">{group.name}</span>
               <span className="text-[10px] tabular-nums opacity-60">{terminals}</span>
               {canClose && (

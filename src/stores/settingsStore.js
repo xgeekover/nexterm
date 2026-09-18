@@ -35,6 +35,18 @@ export const SETTINGS_DEFAULTS = {
   keybindings: {},
 };
 
+/**
+ * The font sizes the app will accept, in pixels.
+ *
+ * One range, used by the Settings window's number fields AND by the zoom
+ * commands — a user who holds ⌘- must not be able to reach a size the settings
+ * UI refuses to show.
+ */
+export const FONT_SIZE_RANGE = { min: 8, max: 32 };
+
+const clampFontSize = (size) =>
+  Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, Math.round(size)));
+
 /** Saved values, ignoring anything that is not a setting we know about. */
 function loadSettings() {
   const saved = loadState(SETTINGS_KEY, null);
@@ -158,6 +170,37 @@ export const useSettingsStore = create((set, get) => ({
   /** Update one setting by key, and remember it. */
   setSetting: (key, value) => {
     set({ [key]: value });
+    persistSettings(get());
+  },
+
+  /**
+   * Make the text one step bigger or smaller.
+   *
+   * Terminal and editor move together, because "make it bigger" is about the
+   * window rather than about whichever surface happens to have focus — a zoom
+   * that depended on focus would be a hidden mode, and the user would have to
+   * know which half they were in before pressing a key. The two sizes stay
+   * independent in Settings; this only nudges both.
+   *
+   * Nothing else is needed to make it show: `terminalFontSize` is one of the
+   * live keys terminalRegistry.js subscribes to, so every open terminal
+   * re-lays out and re-reports its size to the shell on the same tick.
+   */
+  zoomFont: (delta) => {
+    const state = get();
+    set({
+      terminalFontSize: clampFontSize((state.terminalFontSize ?? SETTINGS_DEFAULTS.terminalFontSize) + delta),
+      editorFontSize: clampFontSize((state.editorFontSize ?? SETTINGS_DEFAULTS.editorFontSize) + delta),
+    });
+    persistSettings(get());
+  },
+
+  /** Both font sizes back to their defaults — the ⌘0 of every editor. */
+  resetZoom: () => {
+    set({
+      terminalFontSize: SETTINGS_DEFAULTS.terminalFontSize,
+      editorFontSize: SETTINGS_DEFAULTS.editorFontSize,
+    });
     persistSettings(get());
   },
 

@@ -211,6 +211,13 @@ class BrowserMockBridge {
           const cmd = tokens[0];
           const cmdArgs = tokens.slice(1);
 
+          // The real backend emits this from OSC 133's "C" marker the moment a
+          // command starts producing output, and every branch below ends with
+          // the matching `pty-command-done`. Emitting it once here keeps the
+          // pair honest: when the mock and the backend disagree, the mock wins
+          // the test and the user loses — it has happened twice.
+          await this.emit('pty-command-started', { session_id });
+
           if (cmd === 'ls' || cmd === 'dir') {
             const targetDir = cmdArgs[0] ? resolvePath(session.cwd, cmdArgs[0]) : session.cwd;
             const normalized = targetDir.replace(/\/+$/, '');

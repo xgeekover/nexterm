@@ -31,6 +31,9 @@ import './backend_tree_contract.test.js';
 import './configurable_keybindings.test.js';
 import './native_menu.test.js';
 import './explorer_filter.test.js';
+import './terminal_links.test.js';
+import './tab_activity.test.js';
+import './find_and_zoom.test.js';
 
 async function run() {
   console.log('====================================================');
