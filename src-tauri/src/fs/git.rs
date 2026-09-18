@@ -253,7 +253,7 @@ mod tests {
         ]);
         let status = parse_status(&out, &root());
         assert_eq!(status.files.len(), 1);
-        assert_eq!(status.files[0].path, root().join("src/app.js").to_string_lossy());
+        assert_eq!(status.files[0].path, root().join("src").join("app.js").to_string_lossy());
         assert_eq!(status.files[0].status, GitFileStatus::Modified);
         assert_eq!(status.files[0].staged, false);
     }
@@ -299,7 +299,11 @@ mod tests {
         let status = parse_status(&out, &root());
         assert_eq!(status.files.len(), 2, "the file after the rename must survive");
         assert_eq!(status.files[0].status, GitFileStatus::Renamed);
-        assert!(status.files[0].path.ends_with("new/name.js"));
+        assert!(
+            status.files[0].path.ends_with(&*Path::new("new").join("name.js").to_string_lossy()),
+            "{}",
+            status.files[0].path
+        );
         assert!(status.files[1].path.ends_with("after.js"));
     }
 
@@ -313,7 +317,8 @@ mod tests {
             "? 새 파일.txt",
         ]);
         let status = parse_status(&out, &root());
-        assert!(status.files[0].path.ends_with("src/한글 폴더/파일.js"), "{}", status.files[0].path);
+        let tail = Path::new("src").join("한글 폴더").join("파일.js");
+        assert!(status.files[0].path.ends_with(&*tail.to_string_lossy()), "{}", status.files[0].path);
         assert!(status.files[1].path.ends_with("새 파일.txt"));
     }
 
@@ -341,8 +346,15 @@ mod tests {
             true,
             "nothing was joined natively: {joined}"
         );
+        // Only the part this function joined is checked for the separator.
+        // The ROOT here is written `/w/proj`, and on Windows those slashes are
+        // left exactly as given — it is the joining that had to change, not
+        // whatever the caller handed in.
+        let tail = &joined[joined.len() - "src/deep/app.js".len()..];
         #[cfg(windows)]
-        assert!(!joined.contains('/'), "a forward slash survived: {joined}");
+        assert!(!tail.contains('/'), "a forward slash survived the join: {tail}");
+        #[cfg(not(windows))]
+        assert_eq!(tail, "src/deep/app.js");
     }
 
     #[test]
