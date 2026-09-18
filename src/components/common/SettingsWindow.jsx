@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useId } from 'react';
 import { X, Search, RotateCcw } from 'lucide-react';
 import { useSettingsStore, FONT_SIZE_RANGE } from '../../stores/settingsStore.js';
+import { useSystemStore } from '../../stores/systemStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
 import { isWindows } from '../../lib/platform.js';
@@ -26,7 +27,7 @@ const SECTIONS = [
 ];
 
 /** Every row the Settings window can render, grouped by section. */
-function buildItems(monoPlaceholder) {
+function buildItems(monoPlaceholder, detectedShells) {
   return [
     // ---- Text Editor ----
     {
@@ -160,19 +161,16 @@ function buildItems(monoPlaceholder) {
       description:
         'Which shell new terminals open. "Default" is the system one — the command prompt on Windows, $SHELL elsewhere. A path may be typed in place of a name.',
       control: 'select',
-      options: isWindows
-        ? [
-            { value: 'default', label: 'Default (Command Prompt)' },
-            { value: 'powershell', label: 'Windows PowerShell' },
-            { value: 'pwsh', label: 'PowerShell 7' },
-            { value: 'cmd', label: 'Command Prompt' },
-          ]
-        : [
-            { value: 'default', label: 'Default ($SHELL)' },
-            { value: 'zsh', label: 'zsh' },
-            { value: 'bash', label: 'bash' },
-            { value: 'sh', label: 'sh' },
-          ],
+      // Built from what the backend FOUND on this machine, not from a fixed
+      // list per platform. The old one promised "PowerShell 7" on every
+      // Windows box whether or not pwsh was installed, and never mentioned
+      // Git Bash or WSL — the two a developer on Windows most often wants.
+      // An empty list still leaves "Default", which the backend resolves at
+      // spawn time.
+      options: [
+        { value: 'default', label: isWindows ? 'Default (Command Prompt)' : 'Default ($SHELL)' },
+        ...detectedShells.map((profile) => ({ value: profile.spec, label: profile.label })),
+      ],
     },
     {
       id: 'terminalNotifyAfterSeconds',
@@ -364,7 +362,11 @@ export function SettingsWindow() {
   const titleId = useId();
 
   const monoPlaceholder = useMemo(() => readInheritedMonoStack(), [isOpen]);
-  const ITEMS = useMemo(() => buildItems(monoPlaceholder), [monoPlaceholder]);
+  const detectedShells = useSystemStore((s) => s.shells);
+  const ITEMS = useMemo(
+    () => buildItems(monoPlaceholder, detectedShells),
+    [monoPlaceholder, detectedShells]
+  );
 
   // Reset transient UI state (search, scroll spy) every time the window opens.
   useEffect(() => {

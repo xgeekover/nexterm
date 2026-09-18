@@ -435,6 +435,46 @@ class BrowserMockBridge {
       }
 
       // 8. fs_write_file
+      // The real one walks the disk in Rust (src-tauri/src/fs/search.rs) with
+      // caps and the Explorer's ignore list. This searches the virtual files
+      // the mock holds, with the same result shape — when the mock and the
+      // backend disagree the mock wins the test and the user loses, and that
+      // has happened twice.
+      case 'fs_search': {
+        const { query, case_sensitive, whole_word, regex } = args || {};
+        const needle = String(query || '').trim();
+        if (!needle) return { files: [], total_matches: 0, files_searched: 0, truncated: false };
+        let test;
+        try {
+          const escaped = regex ? needle : needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const pattern = whole_word ? `\\b(?:${escaped})\\b` : escaped;
+          const re = new RegExp(pattern, case_sensitive ? '' : 'i');
+          test = (line) => {
+            const m = re.exec(line);
+            return m ? m.index : -1;
+          };
+        } catch (err) {
+          throw new Error(`bad pattern: ${err.message}`);
+        }
+        const files = [];
+        let total = 0;
+        let searched = 0;
+        for (const [path, content] of this.files.entries()) {
+          if (/node_modules|\.git|target|dist/.test(path)) continue;
+          searched += 1;
+          const matches = [];
+          String(content || '').split('\n').forEach((line, i) => {
+            const at = test(line);
+            if (at >= 0 && matches.length < 50) {
+              matches.push({ line: i + 1, column: at + 1, text: line.slice(0, 400) });
+              total += 1;
+            }
+          });
+          if (matches.length) files.push({ path, matches, truncated: false });
+        }
+        return { files, total_matches: total, files_searched: searched, truncated: false };
+      }
+
       case 'fs_write_file': {
         const { path, content } = args;
         this.files.set(path, content);
@@ -521,6 +561,16 @@ class BrowserMockBridge {
       // 17. system_get_info
       case 'system_get_info': {
         return this.systemInfo;
+      }
+
+      // 18. system_list_shells — the backend FINDS these on the real machine.
+      // The mock answers with a plausible pair so the picker has something to
+      // show in browser QA, and never claims a path that means anything.
+      case 'system_list_shells': {
+        return [
+          { id: 'login-shell', label: 'zsh (login shell)', spec: '/bin/zsh' },
+          { id: 'bash', label: 'bash', spec: '/bin/bash' },
+        ];
       }
 
       default:

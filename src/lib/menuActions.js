@@ -79,6 +79,11 @@ export function runMenuAction(id) {
     case 'find-in-terminal':
       terminal.openFind?.();
       break;
+    case 'search-in-files':
+      settings.showView?.('search');
+    case 'command-history':
+      settings.setCommandPaletteOpen(true, 'history');
+      break;
     case 'zoom-in':
       settings.zoomFont?.(1);
       break;
@@ -120,6 +125,7 @@ const MENU_SPEC = [
     items: [
       { id: 'command-palette', label: 'Command Palette…' },
       { id: 'quick-open', label: 'Go to File…' },
+      { id: 'search-in-files', label: 'Search in Files…' },
       { type: 'separator' },
       { id: 'toggle-sidebar', label: 'Toggle Primary Side Bar' },
       { id: 'toggle-panel', label: 'Toggle Terminal Panel' },
@@ -138,6 +144,7 @@ const MENU_SPEC = [
       { id: 'close-pane', label: 'Close Pane' },
       { type: 'separator' },
       { id: 'find-in-terminal', label: 'Find…' },
+      { id: 'command-history', label: 'Command History…' },
       { id: 'clear-terminal', label: 'Clear Unpinned Blocks' },
     ],
   },

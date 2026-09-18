@@ -86,7 +86,9 @@ fn main() {
             commands::fs::fs_rename_path,
             commands::fs::fs_delete_path,
             commands::fs::fs_set_root,
+            commands::fs::fs_search,
             commands::system::system_get_info,
+            commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
         ])
         .run(tauri::generate_context!())

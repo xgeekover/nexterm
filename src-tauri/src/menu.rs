@@ -184,6 +184,7 @@ pub fn spec() -> Vec<Submenu> {
         items: vec![
             terminal_safe("command-palette", "Command Palette…", "CmdOrCtrl+K"),
             terminal_safe("quick-open", "Go to File…", "CmdOrCtrl+P"),
+            custom("search-in-files", "Search in Files…", "CmdOrCtrl+Shift+F"),
             Sep,
             terminal_safe("toggle-sidebar", "Toggle Primary Side Bar", "CmdOrCtrl+B"),
             custom("toggle-panel", "Toggle Terminal Panel", "Ctrl+`"),
@@ -207,6 +208,9 @@ pub fn spec() -> Vec<Submenu> {
             terminal_safe("close-pane", "Close Pane", "CmdOrCtrl+W"),
             Sep,
             terminal_safe("find-in-terminal", "Find…", "CmdOrCtrl+F"),
+            // Shift makes it not a bare Ctrl+letter, so the window may claim
+            // it everywhere — and it is not Ctrl+R, which is the shell's.
+            custom("command-history", "Command History…", "CmdOrCtrl+Shift+H"),
             terminal_safe("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
         ],
     });
@@ -371,20 +375,23 @@ mod tests {
         // menu and the one the app draws off macOS dispatch through.
         #[cfg(target_os = "macos")]
         let expected = [
-            "preferences", "open-folder", "open-recent", "new-terminal", "save", "command-palette", "quick-open",
+            "preferences", "open-folder", "open-recent", "new-terminal", "save",
+            "command-palette", "quick-open", "search-in-files",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
-            "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
-            "close-window",
+            "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
+            "clear-terminal", "close-window",
         ];
         // Off macOS the window is closed from the app's own title bar, and
         // Quit lives in the File menu as a predefined item.
         #[cfg(not(target_os = "macos"))]
         let expected = [
-            "preferences", "open-folder", "open-recent", "new-terminal", "save", "command-palette", "quick-open",
+            "preferences", "open-folder", "open-recent", "new-terminal", "save",
+            "command-palette", "quick-open", "search-in-files",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
-            "split-right", "split-down", "close-pane", "find-in-terminal", "clear-terminal",
+            "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
+            "clear-terminal",
         ];
         for e in expected {
             assert!(ids.contains(&e), "missing menu item id: {e}");

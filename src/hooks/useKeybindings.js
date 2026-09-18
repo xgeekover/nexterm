@@ -24,6 +24,7 @@ export function useKeybindings() {
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
   const toggleSecondarySidebar = useSettingsStore((s) => s.toggleSecondarySidebar);
+  const showView = useSettingsStore((s) => s.showView);
   const zoomFont = useSettingsStore((s) => s.zoomFont);
   const resetZoom = useSettingsStore((s) => s.resetZoom);
   const saveFile = useEditorStore((s) => s.saveFile);
@@ -64,6 +65,7 @@ export function useKeybindings() {
       toggleSidebar,
       togglePanel,
       toggleSecondarySidebar,
+      showView,
       saveFile,
       pickRoot,
       splitActivePane,
@@ -112,6 +114,7 @@ export function useKeybindings() {
     toggleSidebar,
     togglePanel,
     toggleSecondarySidebar,
+    showView,
     splitActivePane,
     closeActivePane,
     focusNextPane,
