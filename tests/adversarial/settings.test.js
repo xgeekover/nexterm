@@ -25,6 +25,7 @@ const SETTINGS_KEYS = [
   'terminalScrollback',
   'terminalTheme',
   'terminalSuggestions',
+  'terminalStickyHeader',
   'terminalDefaultShell',
   'terminalNotifyAfterSeconds',
   'editorFontSize',

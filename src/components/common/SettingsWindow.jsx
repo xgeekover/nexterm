@@ -131,6 +131,16 @@ function buildItems(monoPlaceholder, detectedShells) {
       control: 'checkbox',
     },
     {
+      id: 'terminalStickyHeader',
+      section: 'terminal',
+      key: 'terminalStickyHeader',
+      settingKey: 'terminal.integrated.stickyCommandHeader',
+      title: 'Sticky Command Header',
+      description:
+        'While the terminal is scrolled back, show a bar naming the command whose output is on screen. It covers the top row, which is occasionally the one you scrolled up to read.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalScrollback',
       section: 'terminal',
       key: 'terminalScrollback',
@@ -326,6 +336,7 @@ export function SettingsWindow() {
   const terminalScrollback = useSettingsStore((s) => s.terminalScrollback);
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
+  const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
@@ -343,6 +354,7 @@ export function SettingsWindow() {
     terminalScrollback,
     terminalTheme,
     terminalSuggestions,
+    terminalStickyHeader,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
     editorFontSize,

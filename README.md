@@ -163,7 +163,8 @@ Hovering says it in words. Nothing flashes for an empty prompt line.
 and a small header appears at the top of the pane naming the command whose
 output you are looking at. It is gone at the bottom, where the header would
 only repeat what is on screen, and never appears over a full-screen program
-like vim or htop.
+like vim or htop. Settings ▸ Terminal ▸ *Sticky Command Header* turns it off —
+it covers the top row, which is occasionally the row you scrolled up to read.
 **Run something again.** `⌘⇧H` opens the command history: every command line
 this machine has run, newest first, with the directory it ran in. Typing
 narrows it by plain substring — a command line is not a filename — and `Enter`

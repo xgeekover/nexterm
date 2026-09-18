@@ -358,7 +358,17 @@ export function TerminalView({ tabId, active = false }) {
      * alternate buffer, where vim and htop own the whole screen and there is
      * no scrollback to be lost in.
      */
+    // Read at call time, not captured: this effect is keyed on the tab and its
+    // session, and rebuilding the whole terminal wiring because a checkbox
+    // moved would throw the xterm instance away with it. Same shape as
+    // `suggestionsEnabled` above.
+    const stickyEnabled = () => useSettingsStore.getState().terminalStickyHeader ?? true;
+
     const updateSticky = () => {
+      if (!stickyEnabled()) {
+        setStickyCommand('');
+        return;
+      }
       const buffer = entry.term.buffer.active;
       setStickyCommand(
         stickyCommandFor({
@@ -432,6 +442,14 @@ export function TerminalView({ tabId, active = false }) {
   useEffect(() => {
     if (active && !findOpen) termRef.current?.focus();
   }, [active, tabId, findOpen]);
+
+  // `updateSticky` only runs on scroll, so without this the bar would sit there
+  // until the next one — a setting you can watch not take effect is worse than
+  // no setting.
+  const stickyHeaderEnabled = useSettingsStore((s) => s.terminalStickyHeader);
+  useEffect(() => {
+    if (!stickyHeaderEnabled) setStickyCommand('');
+  }, [stickyHeaderEnabled]);
 
   const dismissFind = () => {
     clearTerminalSearch(tabId);
