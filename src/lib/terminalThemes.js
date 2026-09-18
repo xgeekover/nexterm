@@ -11,11 +11,15 @@
  * resolve to". The app is dark-only (light mode was removed), so those
  * tokens are now a constant — `followsAppTheme` just means "read the live
  * CSS custom properties instead of a literal below" rather than "track a
- * light/dark flip" (there is no flip anymore). `light-modern` and
- * `solarized-light` remain as fixed, explicitly-selectable terminal colour
- * schemes independent of the (now single) app theme — picking one of them
- * still forces that terminal look even though the app shell itself is
- * always dark.
+ * light/dark flip" (there is no flip anymore).
+ *
+ * Every palette here is a DARK one, and that is the point. `light-modern` and
+ * `solarized-light` used to sit in this list, which let a user put a white
+ * terminal inside a window whose every other surface is #181818 — the app
+ * lighting one rectangle differently from itself, with no light shell to go
+ * with it. They are gone. A settings file still naming one is not an error:
+ * `getTerminalThemeEntry` falls back to the default for any unknown id, which
+ * is the same path an older app version's value already took.
  *
  * Shape: every `theme` object is a complete xterm `ITheme` — background,
  * foreground, cursor, cursorAccent, selectionBackground, and all 16 ANSI
@@ -40,36 +44,6 @@ export const TERMINAL_THEMES = {
     theme: null,
   },
 
-  // VS Code's built-in "Light Modern" terminal ANSI palette, fixed here as a
-  // literal (the app's own tokens are dark-only now, so this can no longer
-  // be sourced by snapshotting :root — it is a standalone, user-selectable
-  // terminal colour scheme like every other fixed entry below).
-  'light-modern': {
-    label: 'Light Modern',
-    theme: {
-      background: '#f8f8f8',
-      foreground: '#3b3b3b',
-      cursor: '#000000',
-      cursorAccent: '#f8f8f8',
-      selectionBackground: '#e8e8e8',
-      black: '#000000',
-      red: '#cd3131',
-      green: '#107c10',
-      yellow: '#949800',
-      blue: '#0451a5',
-      magenta: '#bc05bc',
-      cyan: '#0598bc',
-      white: '#555555',
-      brightBlack: '#666666',
-      brightRed: '#cd3131',
-      brightGreen: '#14ce14',
-      brightYellow: '#b5ba00',
-      brightBlue: '#0451a5',
-      brightMagenta: '#bc05bc',
-      brightCyan: '#0598bc',
-      brightWhite: '#a5a5a5',
-    },
-  },
 
   // Monokai (the original Sublime Text scheme), as republished by every
   // major terminal-theme collection (iTerm2-color-schemes, Gogh, ...).
@@ -187,34 +161,6 @@ export const TERMINAL_THEMES = {
     },
   },
 
-  // Solarized Light — same official 16 ANSI hues as Solarized Dark, with
-  // the project's light base3/base00 background and foreground.
-  'solarized-light': {
-    label: 'Solarized Light',
-    theme: {
-      background: '#fdf6e3',
-      foreground: '#657b83',
-      cursor: '#586e75',
-      cursorAccent: '#fdf6e3',
-      selectionBackground: '#eee8d5',
-      black: '#073642',
-      red: '#dc322f',
-      green: '#859900',
-      yellow: '#b58900',
-      blue: '#268bd2',
-      magenta: '#d33682',
-      cyan: '#2aa198',
-      white: '#eee8d5',
-      brightBlack: '#002b36',
-      brightRed: '#cb4b16',
-      brightGreen: '#586e75',
-      brightYellow: '#657b83',
-      brightBlue: '#839496',
-      brightMagenta: '#6c71c4',
-      brightCyan: '#93a1a1',
-      brightWhite: '#fdf6e3',
-    },
-  },
 
   // Nord — official palette from nordtheme.com; nord1/nord3 for
   // black/bright-black and nord2 for selection are the spec's own documented

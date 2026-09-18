@@ -96,6 +96,13 @@ The recording above walks through most of this.
 Explorer, or ☰ → File → *Open Folder…*. The Explorer, the title bar and new
 terminals then follow that folder.
 
+**Be told when something finishes.** A command that runs for more than ten
+seconds in a terminal you are NOT looking at puts an entry in the status bar's
+bell — name, exit code, how long it took — and clicking it takes you to that
+terminal. Nothing is said about a command you watched finish, and nothing is
+said about a quick one; the threshold is Settings ▸ Terminal ▸ Notify After,
+and 0 turns it off.
+
 **Narrow the Explorer.** The funnel in the Explorer header opens a filter: type
 part of a name and the tree keeps only what matches, plus the folders that lead
 to it, opened. It counts the matches, `Esc` clears it, and clearing puts your

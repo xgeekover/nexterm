@@ -85,4 +85,47 @@ export function hasActivityDot(tab) {
   return state === 'running' || state === 'failed';
 }
 
-export default { tabActivity, activityLabel, hasActivityDot, groupActivity };
+/**
+ * Should a finished command be reported, and as what?
+ *
+ * Two conditions, and both matter:
+ *
+ *   - the terminal was NOT the one on screen. Someone watching a command
+ *     finish does not need to be told that it finished.
+ *   - it ran for at least `afterMs`. A command that takes half a second is not
+ *     something you walked away from, and a notification per `ls` would make
+ *     the whole thing worth turning off within a minute.
+ *
+ * `afterMs` of 0 means the user turned notifications off, which is checked
+ * here rather than at the call site so there is one place that decides.
+ *
+ * Returns null when there is nothing to say, or the notification to raise.
+ */
+export function notificationFor(tab, exitCode, activeTabId, afterMs, now = Date.now()) {
+  if (!tab || !afterMs || afterMs <= 0) return null;
+  if (tab.id === activeTabId) return null;
+  if (!tab.runStartedAt) return null;
+  const durationMs = now - tab.runStartedAt;
+  if (durationMs < afterMs) return null;
+  return {
+    id: `note-${tab.id}-${now}`,
+    tabId: tab.id,
+    title: tab.title || tab.defaultTitle || 'Terminal',
+    exitCode: typeof exitCode === 'number' ? exitCode : 0,
+    durationMs,
+    at: now,
+  };
+}
+
+/** "4m 12s", "38s" — a duration as a person would say it. */
+export function durationLabel(ms) {
+  const seconds = Math.max(0, Math.round((ms || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+export default { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, durationLabel };

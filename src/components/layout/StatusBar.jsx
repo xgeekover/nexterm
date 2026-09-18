@@ -6,6 +6,7 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { buildStatusItems } from '../../lib/statusInfo.js';
 import { runMenuAction } from '../../lib/menuActions.js';
+import { NotificationCenter } from './NotificationCenter.jsx';
 import { cn } from '../../lib/utils.js';
 
 const ICONS = { folder: Folder, terminal: TerminalSquare, x: XCircle };
@@ -137,6 +138,7 @@ export function StatusBar() {
         {right.map((it) => (
           <StatusItem key={it.id} item={it} />
         ))}
+        <NotificationCenter />
       </div>
     </footer>
   );

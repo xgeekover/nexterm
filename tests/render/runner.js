@@ -208,6 +208,16 @@ scenario('RN-11', 'every panel hidden at once', () => {
   useSettingsStore.setState({ sidebarVisible: false, panelVisible: false, secondarySidebarVisible: false });
 });
 
+scenario('RN-13', 'notifications waiting in the status bar', () => {
+  reset();
+  useTerminalStore.setState({
+    notifications: [
+      { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1 },
+      { id: 'n2', tabId: 't1', title: 'tests', exitCode: 0, durationMs: 38000, at: 2 },
+    ],
+  });
+});
+
 scenario('RN-12', 'a file open in the editor', () => {
   reset();
   useEditorStore.setState({

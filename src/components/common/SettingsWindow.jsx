@@ -175,6 +175,19 @@ function buildItems(monoPlaceholder) {
           ],
     },
     {
+      id: 'terminalNotifyAfterSeconds',
+      section: 'terminal',
+      key: 'terminalNotifyAfterSeconds',
+      settingKey: 'terminal.integrated.notifyAfterSeconds',
+      title: 'Notify After',
+      description:
+        'Tell me when a command finishes in a terminal I am not looking at, once it has run at least this many seconds. 0 turns it off.',
+      control: 'number',
+      min: 0,
+      max: 600,
+      step: 5,
+    },
+    {
       id: 'terminalSuggestions',
       section: 'terminal',
       key: 'terminalSuggestions',
@@ -316,6 +329,7 @@ export function SettingsWindow() {
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
+  const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
@@ -332,6 +346,7 @@ export function SettingsWindow() {
     terminalTheme,
     terminalSuggestions,
     terminalDefaultShell,
+    terminalNotifyAfterSeconds,
     editorFontSize,
     editorTabSize,
     editorWordWrap,
