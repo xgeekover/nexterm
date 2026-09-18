@@ -10,6 +10,20 @@ import { cn } from '../../lib/utils.js';
 
 // The editor brings Monaco with it, the largest part of the app's JavaScript.
 // Loaded the first time the editor region is shown instead of at launch.
+//
+// Measured (2026-09-18, production build, Chrome), because `dist/assets` is
+// 15 MB and that number invites someone to "fix" it:
+//
+//   launch         2 files, 229 KB, first paint at 160 ms
+//   first file     4 more files, ~1.1 MB — this chunk, one language, one worker
+//
+// So the 15 MB is INSTALL size, not start-up cost: nothing here is on the
+// launch path, and Monaco fetches a language's worker only when a file of that
+// language is opened (`ts.worker` is 6.7 MB of the total and a session that
+// never opens TypeScript never sees it). Trimming languages would cut the
+// download at the price of highlighting in files this app exists to open —
+// there is nothing to win here, which is why this comment exists rather than a
+// build-config change.
 const EditorPanel = React.lazy(() =>
   import('../editor/EditorPanel.jsx').then((module) => ({ default: module.EditorPanel }))
 );
