@@ -40,6 +40,9 @@ export function runMenuAction(id) {
     case 'open-folder':
       editor.pickRoot?.();
       break;
+    case 'open-recent':
+      settings.setCommandPaletteOpen(true, 'recent');
+      break;
     case 'new-terminal':
       terminal.createTab?.();
       break;
@@ -103,6 +106,7 @@ const MENU_SPEC = [
     title: 'File',
     items: [
       { id: 'open-folder', label: 'Open Folder…' },
+      { id: 'open-recent', label: 'Open Recent…' },
       { id: 'new-terminal', label: 'New Terminal' },
       { id: 'save', label: 'Save' },
       { type: 'separator' },

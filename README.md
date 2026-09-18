@@ -109,6 +109,11 @@ to it, opened. It counts the matches, `Esc` clears it, and clearing puts your
 own expanded folders back exactly as they were. This is a different question
 from ⌘P — "what is in here that looks like X, and where does it sit".
 
+**Go back to a folder you had open.** `⌥⌘O`, File → *Open Recent…*, or the
+list the Explorer shows when nothing is open. A folder that has since been
+moved or deleted is refused by the backend and drops out of the list rather
+than staying as a row that fails every time it is clicked.
+
 **Open a terminal.** The window starts as one group holding one terminal.
 `⌃⇧\`` adds a tab to the current group; the `+` in the tab bar does the same.
 
@@ -181,6 +186,7 @@ scrollback, colour theme, and command suggestions.
 | `⌘K` | Command palette |
 | `⌘P` / `⌘⇧P` | Go to file / all commands |
 | `⌘⇧O` | Open a folder |
+| `⌥⌘O` | Open a recent folder |
 | `⌘,` | Settings |
 | `⌃\`` | Toggle the terminal panel |
 | `⌃⇧\`` | New terminal tab in the current group |

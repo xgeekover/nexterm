@@ -363,6 +363,20 @@ class BrowserMockBridge {
       }
 
       // 6. fs_read_dir
+      // The real one validates through `Workspace::set_root` and refuses a
+      // folder that has moved. The mock only knows its own virtual tree, so it
+      // accepts a path it has directories for and refuses anything else —
+      // which is the behaviour the UI branches on.
+      case 'fs_set_root': {
+        const { path } = args || {};
+        const wanted = String(path || '').replace(/\/+$/, '');
+        const known = this.directories.has(wanted)
+          || [...this.files.keys()].some((f) => f.startsWith(wanted + '/'));
+        if (!wanted || !known) throw new Error(`Cannot open '${path}'`);
+        this.root = wanted;
+        return wanted;
+      }
+
       case 'fs_read_dir': {
         const { path, max_depth = 10 } = args;
         const normalized = (path || '/workspace').replace(/\/+$/, '');

@@ -100,7 +100,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       .filter((i) => i.id && !i.key)
       .map((i) => i.id);
     assert.deepEqual(withoutShortcut, [], 'these menu entries advertise no shortcut at all');
-    assert.equal(MENU_ITEMS.length, 18, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
+    assert.equal(MENU_ITEMS.length, 19, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
   });
 
   test('KB-01: every shortcut the menu advertises is claimed by a binding', () => {
@@ -173,6 +173,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
 
     const expected = {
       'open-folder': 'pickRoot()',
+      'open-recent': 'palette(true,recent)',
       'preferences': 'settings(true)',
       'close-window': 'closeWindow()',
       'toggle-secondary': 'secondary()',

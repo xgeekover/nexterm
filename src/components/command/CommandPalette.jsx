@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Search,
   FileCode,
+  FolderOpen,
   Terminal,
   Save,
 } from 'lucide-react';
@@ -19,6 +20,8 @@ export function CommandPalette() {
 
   const fileTree = useEditorStore((s) => s.fileTree);
   const openFile = useEditorStore((s) => s.openFile);
+  const recentRoots = useEditorStore((s) => s.recentRoots);
+  const openRoot = useEditorStore((s) => s.openRoot);
   const saveAll = useEditorStore((s) => s.saveAll);
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
@@ -45,16 +48,27 @@ export function CommandPalette() {
   // The result rows and the order the arrow keys walk them both come from
   // `buildPaletteGroups` (src/lib/paletteItems.js), so the selection can never
   // run past the last visible row onto an item the user cannot see.
-  const groups = buildPaletteGroups({ fileTree, query, mode: paletteMode, bindings });
+  const groups = buildPaletteGroups({
+    fileTree,
+    query,
+    mode: paletteMode,
+    bindings,
+    recentRoots,
+  });
   const allFiltered = groups.flatMap((g) => g.items);
 
   const iconFor = (item) => {
+    if (item.type === 'recent') return <FolderOpen size={16} />;
     if (item.type === 'file') return <FileCode size={16} />;
     if (item.command === 'save_all') return <Save size={16} />;
     return <Terminal size={16} />;
   };
 
   const runItem = async (item) => {
+    if (item.type === 'recent') {
+      await openRoot(item.path);
+      return;
+    }
     if (item.type === 'file') {
       await openFile(item.path);
       setActiveView('editor');
