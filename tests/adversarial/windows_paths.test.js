@@ -9,6 +9,7 @@
  * help. These cases pin the path handling that replaced it.
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
+import { cwdLabel } from '../../src/lib/statusInfo.js';
 import {
   basename,
   depthOf,
@@ -111,5 +112,34 @@ describe('Windows paths: the explorer must not render empty', () => {
       'a long path keeps its tail'
     );
     assert.equal(displayPath('/a/b', { keep: 3 }), '/a/b', 'a short one is left alone');
+  });
+
+  test('WP-09: a terminal\'s directory is shortened from the FRONT, never the back', () => {
+    // The TERMINALS panel used to run its own `basename`, splitting on '/'
+    // alone. A Windows cwd has none, so `.pop()` handed back the WHOLE path
+    // and CSS cut the end off it — the panel showed `C:\Users\geekover\w…`
+    // and never the folder the terminal was actually in. Both the status bar
+    // and the panel go through `cwdLabel` now.
+    const deep = 'C:\\Users\\geekover\\workspace\\ai\\projects\\nexterm\\src-tauri\\src';
+    const label = cwdLabel(deep, { platform: 'windows', homeDir: 'C:\\Users\\geekover' });
+
+    assert.equal(label, '…\\src-tauri\\src');
+    assert.equal(label.endsWith('src-tauri\\src'), true, 'the tail is what identifies it');
+    assert.equal(label.includes('Users'), false, 'the shared front is what gets dropped');
+    assert.equal(label.length < deep.length, true);
+
+    // Off Windows the home directory folds to `~`; on Windows it does not,
+    // because `~\project` is not how a Windows path is read.
+    assert.equal(
+      cwdLabel('/Users/me/work/nexterm/src', { platform: 'macos', homeDir: '/Users/me' }),
+      '~/…/nexterm/src'
+    );
+    assert.equal(
+      cwdLabel('C:\\Users\\me\\project', { platform: 'windows', homeDir: 'C:\\Users\\me' }).startsWith('~'),
+      false
+    );
+
+    // A path that already fits is left exactly as the backend reported it.
+    assert.equal(cwdLabel('C:\\proj', { platform: 'windows' }), 'C:\\proj');
   });
 });

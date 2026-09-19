@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
+import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
 import { activityLabel } from '../../lib/tabActivity.js';
@@ -53,8 +54,6 @@ function relativeTime(ts) {
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
 }
-
-const basename = (p) => (p || '').replace(/\/+$/, '').split('/').pop() || p || '';
 
 /** The indent guides a row at `level` sits behind, matching the Explorer tree. */
 function IndentGuides({ level }) {
@@ -99,6 +98,11 @@ export function TerminalsPanel() {
   const savedGroups = useTerminalStore((s) => s.savedGroups);
   const savedWorkspaces = useTerminalStore((s) => s.savedWorkspaces);
   const workspaceName = useTerminalStore((s) => s.workspaceName);
+  // The status bar already decides how a cwd is written (`~` off Windows,
+  // last two segments, ellipsis in front). Same helper here so the bar and
+  // this panel cannot describe one terminal's directory differently.
+  const homeDir = useSystemStore((s) => s.homeDir);
+  const platform = useSystemStore((s) => s.os);
 
   const switchTab = useTerminalStore((s) => s.switchTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
@@ -580,8 +584,12 @@ export function TerminalsPanel() {
             <ActivityDot tab={tab} />
             <span className="truncate">{tab.title}</span>
             {tab.cwd && (
-              <span className="ml-auto text-ui-sm text-vsc-muted shrink-0 truncate max-w-[45%]">
-                {basename(tab.cwd)}
+              // The END of a path is the part that identifies it; the front is
+              // the part every terminal shares. So this drops leading segments
+              // first (`…/project/src`) and, when even that will not fit, lets
+              // the ellipsis fall at the START instead of the end.
+              <span className="ml-auto text-ui-sm text-vsc-muted shrink-0 truncate-start max-w-[45%]">
+                <bdi>{cwdLabel(tab.cwd, { platform, homeDir })}</bdi>
               </span>
             )}
           </>
