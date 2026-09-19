@@ -2,7 +2,7 @@
   "app": {
     "windows": [
       {
-        "title": "NexTerm \u2014 Multi-AI Terminal IDE",
+        "title": "NexTerm",
         "width": 1360,
         "height": 880,
         "minWidth": 960,
