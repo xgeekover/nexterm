@@ -22,6 +22,15 @@
 //! fragile than doing the (already-implemented, already-tested) decoding
 //! once in Rust. The PTY reader turns this into a `pty-cwd` event.
 //!
+//! cmd.exe is a special case: it has no hooks of any kind, only the `PROMPT`
+//! environment variable, which it re-expands before every prompt. `$E` is an
+//! escape and `$P` is the current directory, so cmd CAN report where it is —
+//! and since cmd is the Windows default, without this the headline behaviour
+//! on Windows was a working directory frozen at whatever it was when the tab
+//! opened. What it still cannot report is where a command starts, ends or what
+//! it exited with, so command blocks, the sticky header and completion
+//! notifications stay off there. That is a limit of the shell.
+//!
 //! Every other shell falls back to plain spawning (no markers, blocks only
 //! close when the shell exits, and the tab's cwd never updates after spawn).
 
@@ -58,6 +67,7 @@ pub fn for_shell(shell_path: &str) -> ShellIntegration {
         "zsh" => zsh_integration(),
         "bash" => bash_integration(),
         "pwsh" | "powershell" => pwsh_integration(),
+        "cmd" => cmd_integration(),
         _ => ShellIntegration::none(),
     }
 }
@@ -358,6 +368,41 @@ if (Get-Module -Name PSReadLine) {
 }
 "#;
 
+// ---------------------------------------------------------------------
+// cmd.exe
+// ---------------------------------------------------------------------
+
+/// cmd.exe: the live working directory, and nothing else.
+///
+/// The only hook cmd offers is `PROMPT`, re-expanded before every prompt.
+/// `$E` is an escape and `$P` is the current directory, which is exactly
+/// enough for OSC 7 and not enough for anything else.
+///
+/// Two details that are not obvious:
+///
+/// - The terminator is ST (`$E\`), not BEL. `PROMPT` has no escape for a
+///   BEL byte at all, and `osc.rs` accepts both.
+/// - A `file://` URI path is absolute, so the drive letter gets a `/` in
+///   front of it (`file:///C:\Users\dev`). `osc.rs::as_native_path` takes it
+///   back off. `$P` already uses backslashes and needs no other translation.
+///
+/// The user's own `PROMPT` is kept and drawn after the marker, so their
+/// prompt still looks like theirs. `$P$G` — `C:\dir>` — is cmd's default and
+/// the fallback when they have not set one.
+fn cmd_integration() -> ShellIntegration {
+    cmd_integration_with_prompt(&std::env::var("PROMPT").unwrap_or_default())
+}
+
+/// The env-free half, so a test can pin the prompt without writing to the
+/// process environment — which every other test in this file would then see.
+fn cmd_integration_with_prompt(user: &str) -> ShellIntegration {
+    let visible = if user.trim().is_empty() { "$P$G" } else { user };
+    ShellIntegration {
+        env: vec![("PROMPT".to_string(), format!("$E]7;file:///$P$E\\{visible}"))],
+        args: Vec::new(),
+    }
+}
+
 fn pwsh_integration() -> ShellIntegration {
     match prepare_pwsh_integration() {
         Ok(path) => {
@@ -404,6 +449,65 @@ pub fn prepare_pwsh_integration() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cmd is the Windows default, so this is the path most Windows users are
+    /// actually on. It round-trips the real `PROMPT` value through the real
+    /// filter rather than asserting on the string.
+    #[test]
+    fn cmd_reports_its_directory_and_still_draws_the_users_prompt() {
+        use crate::pty::osc::{Marker, OscFilter};
+
+        // A backslash path is only split by `Path` on Windows, so the
+        // full-path case is written the way the pwsh test writes it.
+        for name in ["cmd.exe", "cmd", "CMD.EXE", "C:/Windows/System32/cmd.exe"] {
+            assert!(
+                for_shell(name).env.iter().any(|(k, _)| k == "PROMPT"),
+                "{name} was not recognised as cmd"
+            );
+            let integration = cmd_integration_with_prompt("");
+            let (_, prompt) = integration.env.iter().find(|(k, _)| k == "PROMPT").unwrap();
+
+            // What cmd itself prints, expanding its own codes.
+            let emitted = prompt
+                .replace("$E", "\x1b")
+                .replace("$P", "C:\\Users\\dev\\project")
+                .replace("$G", ">");
+
+            let mut filter = OscFilter::new();
+            let filtered = filter.feed(emitted.as_bytes());
+
+            assert_eq!(
+                filtered.markers,
+                vec![Marker::WorkingDirectory("C:\\Users\\dev\\project".to_string())],
+                "{name}: no usable cwd came out of its prompt"
+            );
+            assert_eq!(
+                filtered.output, "C:\\Users\\dev\\project>",
+                "{name}: the marker must be invisible and the prompt untouched"
+            );
+        }
+    }
+
+    /// The marker is added to the user's prompt, not put in place of it.
+    #[test]
+    fn cmd_keeps_a_prompt_the_user_set() {
+        let integration = cmd_integration_with_prompt("[mine]$P$G");
+        let (_, prompt) = integration.env.iter().find(|(k, _)| k == "PROMPT").unwrap();
+        assert!(prompt.ends_with("[mine]$P$G"), "the user's prompt is gone: {prompt}");
+        assert!(prompt.starts_with("$E]7;file:///$P"), "no cwd marker: {prompt}");
+
+        // Nothing set: cmd's own default is drawn, so the prompt looks normal.
+        let (_, default) = cmd_integration_with_prompt("   ").env.into_iter().next().unwrap();
+        assert!(default.ends_with("$P$G"), "{default}");
+    }
+
+    /// A shell we have nothing for must be left completely alone.
+    #[test]
+    fn an_unknown_shell_gets_no_environment_at_all() {
+        let integration = for_shell("fish");
+        assert!(integration.env.is_empty());
+        assert!(integration.args.is_empty());
+    }
 
     #[test]
     fn generates_all_four_rc_files() {
