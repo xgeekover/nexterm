@@ -215,7 +215,37 @@ fn parse_marker(payload: &[u8]) -> Option<Marker> {
 fn parse_osc7_path(rest: &str) -> Option<String> {
     let uri = rest.strip_prefix("file://")?;
     let path_start = uri.find('/')?;
-    Some(percent_decode(&uri[path_start..]))
+    Some(as_native_path(&percent_decode(&uri[path_start..])))
+}
+
+/// Turn an OSC 7 URI path back into a path the OS can actually use.
+///
+/// A `file://` URI path is always absolute and always starts with `/`, so a
+/// Windows directory travels as `/C:/Users/dev` — the shape our PowerShell
+/// integration deliberately produces, and the shape cmd produces too once the
+/// drive letter is spliced in. Nothing turned it back, so `tab.cwd` held
+/// `/C:/Users/dev`: a string Windows cannot open. It went into the panel, into
+/// *Copy Path*, and into saved sessions, where respawning a terminal at it
+/// failed and silently fell back to the workspace root.
+///
+/// The decision is made by the SHAPE of the path, never by the host OS: a
+/// `/C:/…` payload is a Windows path whichever machine parses it, which also
+/// means the tests mean the same thing everywhere.
+fn as_native_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let is_drive = bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/' || bytes[3] == b'\\');
+    if !is_drive {
+        return path.to_string();
+    }
+    // "/C:" is the drive itself: it needs its separator back, or it reads as
+    // "the current directory on C:" rather than the root of it.
+    let rest = &path[1..];
+    let rooted = if rest.len() == 2 { format!("{rest}\\") } else { rest.to_string() };
+    rooted.replace('/', "\\")
 }
 
 /// RFC 3986 percent-decoding. Invalid/incomplete `%XX` escapes are copied
@@ -372,6 +402,42 @@ mod tests {
             r.markers,
             vec![Marker::WorkingDirectory("/Users/dev/My Project%20".to_string())]
         );
+    }
+
+    #[test]
+    fn a_windows_drive_path_comes_back_as_a_windows_path() {
+        // What PowerShell and cmd actually put on the wire. `tab.cwd` used to
+        // keep the URI form, which Windows cannot open.
+        assert_eq!(
+            parse_osc7_path("file:///C:/Users/dev/project"),
+            Some("C:\\Users\\dev\\project".to_string())
+        );
+        // cmd's $P already uses backslashes; only the leading slash is ours.
+        assert_eq!(
+            parse_osc7_path("file:///C:\\Users\\dev"),
+            Some("C:\\Users\\dev".to_string())
+        );
+        // A drive root keeps its separator: "C:" alone means "wherever I last
+        // was on C:", which is not what the shell said.
+        assert_eq!(parse_osc7_path("file:///C:/"), Some("C:\\".to_string()));
+        assert_eq!(parse_osc7_path("file:///D:"), Some("D:\\".to_string()));
+        // A percent-encoded drive path decodes first, then normalises.
+        assert_eq!(
+            parse_osc7_path("file:///C:/Users/my%20name"),
+            Some("C:\\Users\\my name".to_string())
+        );
+    }
+
+    #[test]
+    fn a_posix_path_is_left_exactly_as_it_arrived() {
+        assert_eq!(
+            parse_osc7_path("file:///Users/dev/project"),
+            Some("/Users/dev/project".to_string())
+        );
+        // Not a drive letter — a directory that merely starts with one.
+        assert_eq!(parse_osc7_path("file:///C/notadrive"), Some("/C/notadrive".to_string()));
+        assert_eq!(parse_osc7_path("file:///Cx:/nope"), Some("/Cx:/nope".to_string()));
+        assert_eq!(parse_osc7_path("file:///"), Some("/".to_string()));
     }
 
     #[test]
