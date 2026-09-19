@@ -10,6 +10,16 @@ import { useSettingsStore } from './settingsStore.js';
 import { notificationFor } from '../lib/tabActivity.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 
+/**
+ * How long a terminal's size has to hold still before the shell is told about
+ * it. Short enough that letting go of a divider feels instant, long enough
+ * that a drag is one SIGWINCH instead of one per frame.
+ */
+const RESIZE_SETTLE_MS = 80;
+
+/** tabId -> the resize waiting to be sent: {key, timer, resolve}. */
+const pendingResizes = new Map();
+
 // ---------------------------------------------------------------------------
 // The two-level layout model
 // ---------------------------------------------------------------------------
@@ -2453,19 +2463,51 @@ export const useTerminalStore = create((set, get) => {
     },
 
     // Keep the backend PTY's window size in step with the pane (debounced by the caller).
-    resizePty: async (tabId, cols, rows) => {
+    /**
+     * Tell the shell how big its terminal is — once the size has stopped
+     * changing.
+     *
+     * Dragging a divider produces a new size every frame, and each one used to
+     * go straight through: a `set` on `tabs` (so every component watching
+     * `tabs` re-rendered — the terminals panel, the split container, the tab
+     * strips) and a `pty_resize` (so the shell got a SIGWINCH and redrew its
+     * prompt). Sixty times a second, for as long as the drag lasted. That is
+     * the flicker; xterm itself was keeping up fine.
+     *
+     * So the local terminal still follows the pointer — `fitAndReport` resizes
+     * xterm on every frame, and it is cheap — but the shell and the store hear
+     * about it once, when the drag settles. The returned promise resolves when
+     * that has happened, and a superseded one resolves as soon as it is
+     * superseded, so `await resizePty(...)` never hangs and never lies.
+     */
+    resizePty: (tabId, cols, rows) => {
       const tab = get().tabs.find((t) => t.id === (tabId || get().activeTabId));
-      if (!tab || !cols || !rows) return;
+      if (!tab || !cols || !rows) return Promise.resolve();
       const key = `${cols}x${rows}`;
-      if (tab.lastSize === key) return;
-      set((state) => ({
-        tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
-      }));
-      try {
-        await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
-      } catch (err) {
-        console.error('[TerminalStore] Resize failed:', err);
+
+      const pending = pendingResizes.get(tab.id);
+      // Already on its way to exactly this size, or already there.
+      if (pending ? pending.key === key : tab.lastSize === key) return Promise.resolve();
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.resolve();
       }
+
+      return new Promise((resolve) => {
+        const timer = setTimeout(async () => {
+          pendingResizes.delete(tab.id);
+          set((state) => ({
+            tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
+          }));
+          try {
+            await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
+          } catch (err) {
+            console.error('[TerminalStore] Resize failed:', err);
+          }
+          resolve();
+        }, RESIZE_SETTLE_MS);
+        pendingResizes.set(tab.id, { key, timer, resolve });
+      });
     },
 
     setCwd: (cwd) => set({ cwd }),

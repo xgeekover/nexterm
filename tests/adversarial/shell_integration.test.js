@@ -99,6 +99,35 @@ describe('Shell integration: OSC 133 command boundaries (store bookkeeping)', ()
     assert.equal(session.cols, 100);
   });
 
+  test('SI-10: a drag reaches the shell once, at the size it ended on', async () => {
+    // Dragging a divider hands `resizePty` a new size every frame. Each one
+    // used to be a `set` on `tabs` — re-rendering the terminals panel, the
+    // split container and the tab strips — and a SIGWINCH the shell redrew
+    // its prompt for. That storm is what the flicker was.
+    const session = mockBridge.ptySessions.get(sessionId());
+    let resizes = 0;
+    const invoke = mockBridge.invoke.bind(mockBridge);
+    mockBridge.invoke = async (cmd, args) => {
+      if (cmd === 'pty_resize') resizes += 1;
+      return invoke(cmd, args);
+    };
+
+    try {
+      const frames = [];
+      for (let cols = 100; cols <= 130; cols += 1) {
+        frames.push(store.getState().resizePty(tab().id, cols, 30));
+      }
+      await Promise.all(frames);
+
+      assert.equal(resizes, 1, `31 frames of a drag must be one pty_resize, not ${resizes}`);
+      assert.equal(session.cols, 130, 'and it must be the size the drag ended on');
+      assert.equal(session.rows, 30);
+      assert.equal(tab().lastSize, '130x30', 'the status bar shows the settled size');
+    } finally {
+      mockBridge.invoke = invoke;
+    }
+  });
+
   test('SI-07: writeRaw sends bytes to the bound session without throwing', async () => {
     // This is what every keystroke in the live xterm goes through
     // (`term.onData(d => writeRaw(tabId, d))`).
