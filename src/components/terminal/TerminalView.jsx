@@ -163,9 +163,26 @@ export function TerminalView({ tabId, active = false }) {
     };
     doFit();
 
+    // A drag fires the observer far more often than the screen refreshes, and
+    // every call measured the container twice (`proposeDimensions`, then
+    // `fit`) and reflowed the whole buffer. Coalescing to one fit per frame
+    // makes a drag cost what it looks like it should.
+    let fitFrame = 0;
+    const scheduleFit = () => {
+      if (typeof requestAnimationFrame === 'undefined') {
+        doFit();
+        return;
+      }
+      if (fitFrame) return;
+      fitFrame = requestAnimationFrame(() => {
+        fitFrame = 0;
+        doFit();
+      });
+    };
+
     let resizeObserver = null;
     if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(doFit);
+      resizeObserver = new ResizeObserver(scheduleFit);
       resizeObserver.observe(wrapper);
     }
 
@@ -422,6 +439,7 @@ export function TerminalView({ tabId, active = false }) {
 
     return () => {
       resizeObserver?.disconnect();
+      if (fitFrame && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(fitFrame);
       scrollDisposable.dispose();
       startedCancelled = true;
       startedUnlisten?.();
