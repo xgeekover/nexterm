@@ -122,6 +122,25 @@ code, kbd, pre, .font-mono {
   outline-offset: -1px;
 }
 
+/* A strip of tabs scrolls, but must not show a bar for it.
+   ---------------------------------------------------------------------------
+   The tab strips (region tabs, terminal tabs, group chips, editor tabs) are
+   22-34px tall and the scrollbar rule below gives every scroller a 10px one —
+   a stripe across a third of the strip. Worse, macOS with "Show scroll bars:
+   Always" keeps that bar visible whether or not anything overflows, so a strip
+   holding two tabs shows a scrollbar with nothing to scroll.
+
+   The overflow itself stays: up to four views can be dragged into one region,
+   and a narrow sidebar really does run out of room. It scrolls by wheel and
+   trackpad, as VS Code's tab strips do — it just does not advertise it. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* VS Code-style scrollbars: invisible track, translucent slider */
 ::-webkit-scrollbar {
   width: 10px;
