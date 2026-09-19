@@ -146,7 +146,7 @@ function RegionHeader({
 }) {
   return (
     <div className="h-panel-header shrink-0 flex items-center justify-between border-b border-vsc-border pr-1.5 select-none">
-      <div className="h-full flex items-center overflow-x-auto">
+      <div className="h-full flex items-center overflow-x-auto no-scrollbar">
         {views.map((view) => {
           const meta = VIEW_META[view];
           const isActive = view === activeView;

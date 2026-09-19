@@ -64,7 +64,7 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
 
   return (
     <div className="flex items-center h-tab bg-vsc-tab-inactive border-b border-vsc-border select-none">
-      <div className="flex-1 flex items-center overflow-x-auto">
+      <div className="flex-1 flex items-center overflow-x-auto no-scrollbar">
         {paneTabs.map((tab) => {
           const isActive = tab.id === activeTab?.id;
           const isBeingDragged = drag?.active && drag.tabId === tab.id;

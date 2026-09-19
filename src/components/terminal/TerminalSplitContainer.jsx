@@ -319,7 +319,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
           setPaneMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto">
+        <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
           {paneTabs.map((tab) => {
             const isActive = tab.id === boundTab?.id;
             const isBeingDragged = drag?.active && drag.tabId === tab.id;
@@ -732,7 +732,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
       className="h-7 shrink-0 flex items-center gap-1 px-1 bg-vsc-panel border-b border-vsc-border select-none"
     >
       <LayoutGrid size={12} className="shrink-0 ml-0.5 text-vsc-muted" />
-      <div role="tablist" aria-label="Terminal groups" className="flex-1 flex items-center gap-0.5 overflow-x-auto">
+      <div role="tablist" aria-label="Terminal groups" className="flex-1 flex items-center gap-0.5 overflow-x-auto no-scrollbar">
         {groups.map((group) => {
           const isActive = group.id === activeGroupId;
           const isDropTarget = Boolean(drag?.active) && drag.targetGroupId === group.id;
