@@ -17,11 +17,38 @@ pub mod pty;
 
 use std::sync::Arc;
 use tauri::Manager;
+use tauri_plugin_window_state::StateFlags;
 
 pub struct AppState {
     pub pty_manager: Arc<pty::PtyManager>,
     pub fs_watcher: Arc<fs::FsWatcherManager>,
     pub workspace: Arc<fs::Workspace>,
+}
+
+/// What the window-state plugin is allowed to remember: everything but the
+/// window frame.
+///
+/// Whether the window has a native title bar is a design decision — macOS keeps
+/// its traffic lights over the webview, every other platform is frameless and
+/// the app draws its own title row — and there is no way for the user to change
+/// it. So there is nothing to remember, and remembering it is actively harmful:
+/// `restore_state` calls `set_decorations` with the saved value, and it does so
+/// AFTER the window has been built from tauri.conf.json, so a stale entry
+/// silently overrules the config.
+///
+/// That is not hypothetical. v0.1.0 and v0.1.1 shipped before
+/// tauri.windows.conf.json existed, so on Windows they ran with the base
+/// config's `decorations: true` and the plugin wrote `"decorated": true` into
+/// %APPDATA%\com.nexterm.ide\.window-state.json. Every release since has asked
+/// for `decorations: false` there and been overruled by that file — anyone who
+/// ever ran 0.1.x got the native title bar stacked on top of the app's own one,
+/// with a second set of minimise/maximise/close buttons, and no new version
+/// could fix it because the file outlives the install.
+///
+/// Dropping the flag fixes those machines without touching the file: the value
+/// is no longer read, so the config wins, and it is no longer written either.
+fn window_state_flags() -> StateFlags {
+    StateFlags::all() & !StateFlags::DECORATIONS
 }
 
 fn main() {
@@ -38,7 +65,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(window_state_flags())
+                .build(),
+        )
         .manage(state)
         .setup(|app| {
             // No folder is open at launch; `fs_pick_root` starts watching the
@@ -142,5 +173,46 @@ mod windows_subsystem_tests {
             attribute.trim_start().starts_with("#!["),
             "it has to be an inner attribute on the crate root: {attribute}"
         );
+    }
+}
+
+/// The window frame is the app's decision, not remembered state.
+///
+/// See [`window_state_flags`]. This is the guard on the one flag that must stay
+/// off: turning it back on would re-break every Windows machine that still has
+/// `"decorated": true` sitting in its .window-state.json from 0.1.x, and the
+/// symptom — two stacked title bars — only shows up on a machine with that
+/// file, which is not this one and not CI.
+#[cfg(test)]
+mod window_state_tests {
+    use super::window_state_flags;
+    use tauri_plugin_window_state::StateFlags;
+
+    #[test]
+    fn decorations_are_never_restored() {
+        assert!(
+            !window_state_flags().contains(StateFlags::DECORATIONS),
+            "the window-state plugin must not restore decorations — a saved \
+             `decorated` overrules tauri.conf.json and puts the native title bar \
+             back above the app's own one"
+        );
+    }
+
+    #[test]
+    fn everything_the_user_can_actually_change_is_still_remembered() {
+        let flags = window_state_flags();
+        for (name, flag) in [
+            ("size", StateFlags::SIZE),
+            ("position", StateFlags::POSITION),
+            ("maximized", StateFlags::MAXIMIZED),
+            ("visible", StateFlags::VISIBLE),
+            ("fullscreen", StateFlags::FULLSCREEN),
+        ] {
+            assert!(
+                flags.contains(flag),
+                "dropping decorations must not drop {name} — reopening where you \
+                 left off is the reason the plugin is here"
+            );
+        }
     }
 }
