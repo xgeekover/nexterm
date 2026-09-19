@@ -141,6 +141,26 @@ code, kbd, pre, .font-mono {
   display: none;
 }
 
+/* Ellipsis at the START of a line, not the end.
+
+   A directory path is identified by its tail — `…/nexterm/src-tauri/src` says
+   where you are, `C:\Users\geekover\workspace\…` says only that you are
+   somewhere under your home like everything else. Tailwind's `truncate` cuts
+   the end, which throws away the only part worth reading.
+
+   `direction: rtl` moves the overflow (and so the ellipsis) to the left edge.
+   The text itself must still read left-to-right, and path punctuation
+   (`/`, `\`, `:`) is bidi-neutral, so it WOULD be reordered by that alone —
+   the content goes inside a `<bdi>`, which isolates it and keeps it LTR.
+   `text-align: left` keeps a short path against the left edge like any other. */
+.truncate-start {
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* VS Code-style scrollbars: invisible track, translucent slider */
 ::-webkit-scrollbar {
   width: 10px;
