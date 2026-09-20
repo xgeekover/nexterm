@@ -262,11 +262,21 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
 // webview cannot widen its own access by calling a command.
 // ---------------------------------------------------------------------------
 
+/// The file inside the app config directory that remembers the open folder,
+/// next to the window-state plugin's `.window-state.json`. One line, one path.
+pub const OPEN_FOLDER_FILE: &str = ".open-folder";
+
 pub struct Workspace {
-    /// `None` until a folder is opened. NexTerm starts with no folder, as VS
-    /// Code does, instead of adopting whatever directory it was launched from —
-    /// which in development was src-tauri and in an install the program folder.
+    /// `None` until a folder is opened or `restore_root` brings back the one
+    /// from last time. NexTerm never adopts whatever directory it was launched
+    /// from — which in development was src-tauri and in an install the program
+    /// folder — but it does reopen the folder the user last chose, as VS Code
+    /// does.
     root: Mutex<Option<PathBuf>>,
+    /// Where to write the root so the next launch can find it. `None` until
+    /// `restore_root` names it, which makes remembering a no-op in tests and
+    /// before setup has run, rather than a guess at the path.
+    store: Mutex<Option<PathBuf>>,
 }
 
 impl Default for Workspace {
@@ -279,6 +289,7 @@ impl Workspace {
     pub fn new() -> Self {
         Self {
             root: Mutex::new(None),
+            store: Mutex::new(None),
         }
     }
 
@@ -294,7 +305,47 @@ impl Workspace {
             return Err(format!("Not a directory: {}", canonical.display()));
         }
         *self.root.lock() = Some(canonical.clone());
+        self.remember(&canonical);
         Ok(canonical)
+    }
+
+    /// Name the file that remembers the open folder, and adopt whatever it
+    /// holds. Returns the folder that came back, if any.
+    ///
+    /// This has to run before the webview loads. The frontend asks the backend
+    /// for the root — `fs_get_root` — twice during startup: once to draw the
+    /// explorer, and once in the terminal store's `bootstrap`, which then hands
+    /// each saved terminal's directory to `pty_spawn`. With no root, every one
+    /// of those directories is refused by `confine` and the terminal starts in
+    /// the home directory instead, so a restored session lost every cwd it had.
+    ///
+    /// A folder that has since been moved or deleted simply does not come back:
+    /// `set_root` canonicalises and refuses anything that is not a directory.
+    pub fn restore_root(&self, store: PathBuf) -> Option<PathBuf> {
+        *self.store.lock() = Some(store.clone());
+        let remembered = fs::read_to_string(&store).ok()?;
+        let remembered = remembered.trim();
+        if remembered.is_empty() {
+            return None;
+        }
+        self.set_root(Path::new(remembered)).ok()
+    }
+
+    /// Write the open folder down for the next launch.
+    ///
+    /// Best-effort on purpose: a read-only or missing config directory must not
+    /// stop the user opening a folder, so a failure here is reported and
+    /// dropped rather than turned into an error `set_root` would return.
+    fn remember(&self, root: &Path) {
+        let Some(store) = self.store.lock().clone() else {
+            return;
+        };
+        if let Some(parent) = store.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = fs::write(&store, root.to_string_lossy().as_bytes()) {
+            eprintln!("[NexTerm] Could not remember the open folder: {e}");
+        }
     }
 
     /// With no folder open there is nothing to confine a path to, so every
@@ -488,6 +539,82 @@ mod confine_tests {
             root,
             "outside the open folder"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn temp_store(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-open-folder-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir.join(OPEN_FOLDER_FILE)
+    }
+
+    #[test]
+    fn the_open_folder_is_remembered_and_comes_back_next_launch() {
+        let root = temp_root("remember");
+        let store = temp_store("remember");
+
+        // First launch: nothing is remembered yet, then the user opens a folder.
+        let first = Workspace::new();
+        assert_eq!(first.restore_root(store.clone()), None, "nothing to restore yet");
+        first.set_root(&root).unwrap();
+
+        // Next launch reads the same file and reopens it, with nobody asking.
+        let second = Workspace::new();
+        assert_eq!(second.restore_root(store.clone()), Some(root.clone()));
+        assert_eq!(second.root(), Some(root.clone()));
+
+        let _ = fs::remove_dir_all(store.parent().unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_remembered_folder_that_has_gone_is_not_reopened() {
+        let root = temp_root("gone");
+        let store = temp_store("gone");
+        let first = Workspace::new();
+        first.restore_root(store.clone());
+        first.set_root(&root).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        let second = Workspace::new();
+        assert_eq!(
+            second.restore_root(store.clone()),
+            None,
+            "a folder that has been deleted must not come back"
+        );
+        assert!(second.root().is_none(), "and must not leave a half-open workspace");
+
+        let _ = fs::remove_dir_all(store.parent().unwrap());
+    }
+
+    /// The regression this store exists for. Restoring a session hands every
+    /// saved terminal's directory to `spawn_dir`; with no root, `confine`
+    /// refused all of them and every terminal started at home, which then
+    /// overwrote the saved directories with the home one.
+    #[test]
+    fn a_restored_root_lets_saved_terminals_start_where_they_were() {
+        let root = temp_root("restored-spawn");
+        let store = temp_store("restored-spawn");
+        let saved_cwd = root.join("inner").to_string_lossy().to_string();
+
+        let opener = Workspace::new();
+        opener.restore_root(store.clone());
+        opener.set_root(&root).unwrap();
+
+        // What used to happen on every relaunch.
+        let forgetful = Workspace::new();
+        assert_eq!(
+            forgetful.spawn_dir(Some(&saved_cwd)),
+            home_dir(),
+            "without the root there is nothing to confine to, so the saved cwd is refused"
+        );
+
+        // What happens now.
+        let relaunched = Workspace::new();
+        relaunched.restore_root(store.clone());
+        assert_eq!(relaunched.spawn_dir(Some(&saved_cwd)), root.join("inner"));
+
+        let _ = fs::remove_dir_all(store.parent().unwrap());
         let _ = fs::remove_dir_all(&root);
     }
 
