@@ -58,7 +58,10 @@ Expand-Archive "$dir\NexTerm-windows-x64-portable.zip" -DestinationPath "$dir\ap
 ```
 
 **Do not delete `%APPDATA%\com.nexterm.ide\.window-state.json`.** Read it and
-keep a copy of what it said. Whether the app is correct *with that file still
+keep a copy of what it said. Nor can you sidestep it by redirecting
+`%APPDATA%`: Tauri resolves the config directory through the Win32
+known-folder API, which does not read the environment variable. Backing up the
+real file and putting it back afterwards is the only way. Whether the app is correct *with that file still
 in place* is the whole point of V1 — the fix was to stop reading the value,
 precisely so that nobody has to find and delete a file. Clearing it first
 turns a real check into a vacuous one.
@@ -114,20 +117,28 @@ function Get-NexTermWindow {
 }
 ```
 
-A console window opened by a child process brings a `conhost.exe` with it, so
-counting them catches a flash too short to see:
+A console window opened by a child process is too brief to see, so it has to
+be watched for rather than looked for. **Counting `conhost.exe` does not work**
+— that was tried first and it is a trap twice over:
+
+- NexTerm's own ConPTY terminals each run a *headless* conhost, so the
+  baseline is already around thirty and moves on its own as tabs open.
+- When the default terminal is Windows Terminal, a console popup is not a
+  `ConsoleWindowClass` window at all; it arrives as **a new Windows Terminal
+  window**, so watching for that class misses it entirely.
+
+Watch instead for any newly *visible top-level window*, whatever its class,
+and keep a **positive control** beside it — proof that `git` really ran during
+the window being sampled. Without the control, a run where the watcher was
+simply looking at nothing is indistinguishable from a pass.
 
 ```powershell
-function Watch-Conhost($seconds = 15) {
-  $peak = 0
-  $end = (Get-Date).AddSeconds($seconds)
-  while ((Get-Date) -lt $end) {
-    $n = @(Get-Process conhost -ErrorAction SilentlyContinue).Count
-    if ($n -gt $peak) { $peak = $n }
-    Start-Sleep -Milliseconds 100
-  }
-  $peak
-}
+# Sketch: snapshot the visible top-level windows, do the thing, diff.
+# The control is the point — sample Get-Process git as well, and report it.
+$before = (Get-Process | Where-Object MainWindowHandle -ne 0).MainWindowHandle
+# ... trigger the work, sampling both sets on a short interval ...
+# PASS = no window handle appeared that was not in $before, AND git was seen
+#        running in at least some samples.
 ```
 
 **Optional, and only possible here.** Tauri uses WebView2 on Windows, and
@@ -240,6 +251,31 @@ Not bug reports. These have simply never been exercised on Windows.
   dragging a tab, switching groups.
 - **V12** The ☰ menu, Open Recent, and shortcut hints reading `Ctrl+…` rather
   than `⌘`.
+
+## What the first run found
+
+Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
+10.0.19045, WebView2 153.0.4234.48. Ten of twelve passed; the two that did not
+are the reason this list is worth keeping.
+
+- **V8 failed.** `Workspace::root` lived only in memory, so every launch began
+  with no folder open. `spawn_dir` then refused every saved terminal directory
+  and started them all at home — and the write-behind saved *that* over the
+  real one, so the session degraded a little more each time it was opened.
+- **V11 partially failed.** The off-macOS menu advertised "Split Right —
+  Ctrl+D", and pressing it with a terminal focused sent EOF and killed the
+  shell. Not a deviation from the design: the design simply had no off-macOS
+  spelling for that chord.
+- **V7 passed, with a caveat worth repeating.** A screenshot is a discrete
+  sample of a continuous thing; seven clean frames is evidence that flicker is
+  gone, not proof. Say which it is.
+
+`Ctrl+D` was found by reading the menu, not by using the app — the remaining
+`Ctrl+S` (XOFF, which freezes the terminal with no indication of why),
+`Ctrl+W`, `Ctrl+P` and `Ctrl+K` are the same class and are still advertised.
+None of them *ends* anything, which is why they were left, but a check that
+walks the menu asking "what does this chord mean to a shell?" would have found
+all five at once.
 
 ## Reporting
 
