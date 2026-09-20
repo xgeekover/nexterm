@@ -334,6 +334,35 @@ hand-written string. Without the fixture those cases report as `SKIPPED`
 rather than passing, so a run that checked nothing cannot look like a run that
 checked everything.
 
+## Verify on Windows
+
+NexTerm is built on a Mac and used on Windows, and the suites cannot close
+that gap on their own. Three consecutive releases fixed bugs that appear
+**only on Windows**, and each shipped with every test on every platform
+green — a title bar drawn twice, a folder dialog holding the event-loop
+thread, a default shell that never reported its directory, a console window
+flashing on every save. None of them returns an error; they are appearances,
+and the code is correct on the machine that wrote it.
+
+So a release is checked by hand on Windows, against a written list, with
+evidence. [**WINDOWS_VERIFICATION.md**](WINDOWS_VERIFICATION.md) has the
+procedure: the twelve checks, what each one is pinning and why it was not
+caught, and the PowerShell helpers that make them evidence rather than
+impressions — a screen capture (which works there and does not on the build
+machine), the window's frame read as style bits rather than pixels, and a
+`conhost.exe` count that catches a console flash too brief to see.
+
+Two rules from it are worth repeating here, because both turn a real check
+into a vacuous one:
+
+- **Do not clear `%APPDATA%\com.nexterm.ide\.window-state.json` first.**
+  Whether the app is right *with that file still in place* is exactly what is
+  being checked; the fix was to stop reading the value so that nobody has to
+  delete anything.
+- **"Could not check" is a result.** The failure this guards against is a
+  green report that nobody looked at, so a check that was not made is never
+  written down as one that passed.
+
 ## How it fits together
 
 ```
