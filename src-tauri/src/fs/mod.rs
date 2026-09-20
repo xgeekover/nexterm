@@ -355,15 +355,46 @@ impl Workspace {
         confine_to(&root, path_str)
     }
 
-    /// Where a new terminal starts: the requested directory when it lies
-    /// inside the open folder, else the folder itself, else — no folder open —
-    /// the home directory, which is where VS Code starts one too.
+    /// Where a new terminal starts: the requested directory when it is one,
+    /// else the open folder, else — no folder open — the home directory, which
+    /// is where VS Code starts one too.
     pub fn spawn_dir(&self, requested: Option<&str>) -> PathBuf {
         requested
-            .and_then(|path| self.confine(path).ok())
-            .filter(|path| path.is_dir())
+            .and_then(|path| self.start_dir(path))
             .or_else(|| self.root())
             .unwrap_or_else(home_dir)
+    }
+
+    /// The requested directory, if a terminal can start there.
+    ///
+    /// This is the one path into the backend that is NOT confined to the open
+    /// folder, and deliberately so. Confinement stops the webview reading and
+    /// writing files outside the folder the user chose — that boundary is real
+    /// and every `fs_*` command still goes through `confine`. A shell is not
+    /// that: the moment one exists the user can `cd` anywhere and run anything,
+    /// so refusing its STARTING directory defends nothing.
+    ///
+    /// What it did do is lose people's sessions. A terminal saved in
+    /// `C:\Windows\System32` came back at the workspace root, because the saved
+    /// directory was outside the folder and got refused; the tab then took the
+    /// directory it actually got, and the write-behind saved that over the
+    /// real one. Restoring a session is the common case for a directory
+    /// outside the open folder, not an exotic one.
+    ///
+    /// A relative path still means "inside the open folder" — that is the only
+    /// thing it can mean — so it keeps going through `confine`.
+    fn start_dir(&self, requested: &str) -> Option<PathBuf> {
+        let trimmed = requested.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let path = Path::new(trimmed);
+        let resolved = if path.is_absolute() {
+            path.canonical().ok()?
+        } else {
+            self.confine(trimmed).ok()?
+        };
+        resolved.is_dir().then_some(resolved)
     }
 }
 
@@ -517,13 +548,18 @@ mod confine_tests {
     }
 
     #[test]
-    fn terminals_start_in_the_requested_folder_else_the_open_folder_else_home() {
+    fn terminals_start_in_the_requested_directory_else_the_open_folder_else_home() {
         let workspace = Workspace::new();
-        assert_eq!(workspace.spawn_dir(None), home_dir(), "no folder open: home");
+        assert_eq!(workspace.spawn_dir(None), home_dir(), "nothing asked for, no folder open");
+
+        // With no folder open at all, a directory that was asked for is still
+        // honoured — restoring a session is exactly that case.
+        let temp = std::env::temp_dir().canonical().unwrap();
+        assert_eq!(workspace.spawn_dir(Some(&temp.to_string_lossy())), temp);
         assert_eq!(
-            workspace.spawn_dir(Some(&std::env::temp_dir().to_string_lossy())),
+            workspace.spawn_dir(Some(&temp.join("nexterm-not-a-real-dir").to_string_lossy())),
             home_dir(),
-            "no folder open: no directory is inside it"
+            "a directory that is not there falls back"
         );
 
         let root = workspace.set_root(&temp_root("spawn")).unwrap();
@@ -535,11 +571,34 @@ mod confine_tests {
             "a file is not somewhere to start"
         );
         assert_eq!(
-            workspace.spawn_dir(Some(&home_dir().to_string_lossy())),
-            root,
-            "outside the open folder"
+            workspace.spawn_dir(Some(&temp.to_string_lossy())),
+            temp,
+            "outside the open folder is still somewhere a terminal may start"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Loosening where a TERMINAL may start must not loosen what the webview
+    /// can read and write. `fs_*` still goes through `confine`.
+    #[test]
+    fn a_terminal_may_start_outside_the_folder_but_files_there_stay_out_of_reach() {
+        let root = temp_root("outside-root");
+        let elsewhere = temp_root("outside-elsewhere");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        assert_eq!(
+            workspace.spawn_dir(Some(&elsewhere.to_string_lossy())),
+            elsewhere,
+            "a terminal saved outside the folder comes back where it was"
+        );
+        assert!(
+            workspace.confine(&elsewhere.to_string_lossy()).is_err(),
+            "but the files there are still refused"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
     }
 
     fn temp_store(tag: &str) -> PathBuf {
@@ -587,12 +646,12 @@ mod confine_tests {
         let _ = fs::remove_dir_all(store.parent().unwrap());
     }
 
-    /// The regression this store exists for. Restoring a session hands every
-    /// saved terminal's directory to `spawn_dir`; with no root, `confine`
-    /// refused all of them and every terminal started at home, which then
-    /// overwrote the saved directories with the home one.
+    /// What the remembered folder is still for once `spawn_dir` honours a
+    /// directory on its own: a terminal that has no saved directory — a new
+    /// one, or one whose folder has gone — falls back to the open folder, and
+    /// that has to be the folder from last time rather than nothing.
     #[test]
-    fn a_restored_root_lets_saved_terminals_start_where_they_were() {
+    fn a_restored_root_is_what_a_terminal_without_one_falls_back_to() {
         let root = temp_root("restored-spawn");
         let store = temp_store("restored-spawn");
         let saved_cwd = root.join("inner").to_string_lossy().to_string();
@@ -601,17 +660,15 @@ mod confine_tests {
         opener.restore_root(store.clone());
         opener.set_root(&root).unwrap();
 
-        // What used to happen on every relaunch.
+        // What used to happen on every relaunch: no root, so nothing to fall
+        // back to but the home directory.
         let forgetful = Workspace::new();
-        assert_eq!(
-            forgetful.spawn_dir(Some(&saved_cwd)),
-            home_dir(),
-            "without the root there is nothing to confine to, so the saved cwd is refused"
-        );
+        assert_eq!(forgetful.spawn_dir(None), home_dir());
 
         // What happens now.
         let relaunched = Workspace::new();
         relaunched.restore_root(store.clone());
+        assert_eq!(relaunched.spawn_dir(None), root);
         assert_eq!(relaunched.spawn_dir(Some(&saved_cwd)), root.join("inner"));
 
         let _ = fs::remove_dir_all(store.parent().unwrap());
