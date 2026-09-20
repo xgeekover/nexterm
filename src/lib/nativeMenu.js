@@ -127,8 +127,11 @@ export function acceleratorFor(key, { isMac = false } = {}) {
  * whatever was sent last time. Commands with no menu entry (`menuId: null` —
  * the reload guard, Escape, the pane-focus pair) are not in here at all.
  *
- * A command bound to several chords shows the first, as the OS gives a menu
- * item one key equivalent.
+ * A command bound to several chords shows the first the machine can press, as
+ * the OS gives a menu item one key equivalent. A chord spelled with `cmd`
+ * needs a ⌘ key, so off macOS it is not a candidate at all — `split-right` is
+ * ⌘D there and Ctrl+Alt+D here, and sending "Cmd+D" to a Windows menu would
+ * name a key the keyboard does not have.
  */
 export function acceleratorOverrides(bindings = DEFAULT_RESOLVED, { isMac = false } = {}) {
   const overrides = {};
@@ -141,7 +144,9 @@ export function acceleratorOverrides(bindings = DEFAULT_RESOLVED, { isMac = fals
     const menuId = menuIdOf(binding.command);
     if (!menuId || !(menuId in overrides)) continue;
     if (overrides[menuId] !== null) continue; // an earlier chord already won
-    overrides[menuId] = acceleratorFor(binding.chord ?? binding.key, { isMac });
+    const chord = binding.chord ?? parseChord(binding.key);
+    if (!isMac && chord?.cmd) continue; // needs a ⌘ this machine has not got
+    overrides[menuId] = acceleratorFor(chord ?? binding.key, { isMac });
   }
   return overrides;
 }

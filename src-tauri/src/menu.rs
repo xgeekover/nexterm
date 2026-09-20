@@ -88,6 +88,28 @@ fn custom(id: &'static str, label: &'static str, accelerator: &str) -> Item {
 /// the accelerator is registered normally. Elsewhere the item is menu-only and
 /// `useKeybindings.js` provides the shortcut — a webview-level listener, which
 /// xterm's own capture handler correctly beats whenever a terminal has focus.
+/// A menu item whose accelerator is spelled differently per platform, because
+/// the chord that is safe over a terminal is.
+///
+/// `terminal_safe` drops the accelerator off macOS and leaves the shortcut to
+/// the webview. That is right for the items whose chord has no safe spelling
+/// — Save is ⌘S or nothing — but not for one that does: Split Right is ⌘D on
+/// macOS, where ⌘ never reaches the pty, and Ctrl+Alt+D elsewhere, where a
+/// bare Ctrl+D is EOF. Both are registered, because neither takes a control
+/// byte from the shell.
+fn per_platform(id: &'static str, label: &'static str, mac: &str, other: &str) -> Item {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = other;
+        Item::Custom { id, label, accelerator: Some(mac.to_string()) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mac;
+        Item::Custom { id, label, accelerator: Some(other.to_string()) }
+    }
+}
+
 fn terminal_safe(id: &'static str, label: &'static str, mac_accelerator: &str) -> Item {
     #[cfg(target_os = "macos")]
     {
@@ -203,7 +225,7 @@ pub fn spec() -> Vec<Submenu> {
     submenus.push(Submenu {
         title: "Terminal",
         items: vec![
-            terminal_safe("split-right", "Split Right", "CmdOrCtrl+D"),
+            per_platform("split-right", "Split Right", "Cmd+D", "Ctrl+Alt+D"),
             custom("split-down", "Split Down", "CmdOrCtrl+Shift+D"),
             terminal_safe("close-pane", "Close Pane", "CmdOrCtrl+W"),
             Sep,
@@ -431,7 +453,11 @@ mod tests {
             "command-palette",
             "quick-open",
             "toggle-sidebar",
-            "split-right",
+            // `split-right` is deliberately NOT here. The others have no
+            // spelling that is safe off macOS — Save is ⌘S or nothing — but
+            // Split Right has one: Ctrl+Alt+D takes no control byte, so the
+            // item carries a real accelerator here rather than advertising
+            // the Ctrl+D that ends the shell.
             "close-pane",
             // Ctrl+F is readline's forward-char. The item stays menu-only
             // here and `useKeybindings.js` claims the chord in the webview,
