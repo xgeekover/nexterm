@@ -18,7 +18,7 @@ const ACTIONS_JS = readFileSync(fileURLToPath(new URL('../../src/lib/menuActions
 
 /** Ids the Rust menu declares, from `custom(...)` / `terminal_safe(...)`. */
 const rustIds = new Set(
-  [...MENU_RS.matchAll(/(?:custom|terminal_safe)\("([a-z-]+)"/g)].map((m) => m[1])
+  [...MENU_RS.matchAll(/(?:custom|terminal_safe|per_platform)\("([a-z-]+)"/g)].map((m) => m[1])
 );
 
 /** Ids `runMenuAction` actually answers. */

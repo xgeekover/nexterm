@@ -32,7 +32,9 @@ import { chordMatches, displayChord, parseChord } from './chords.js';
  *                  window chrome; KB-08 and KB-12 keep ^C, ^D, ^L and the rest
  *                  out of it.
  * - `passThrough`  matched, but the key belongs to whatever has focus: stop
- *                  looking and do NOT preventDefault.
+ *                  looking and do NOT preventDefault. Receives the binding as
+ *                  well as the context, because a command bound to more than
+ *                  one chord may need to yield only one of them.
  * - `preventDefault: false` for commands that must not swallow the key.
  * - `configurable: false` for the two that are not shortcuts anyone chooses.
  */
@@ -76,8 +78,16 @@ export const COMMANDS = {
   },
   'split-right': {
     title: 'Split Pane Right',
-    // Monaco binds this to "add selection to next find match" — don't fight it.
-    passThrough: (ctx) => ctx.isInMonacoEditor,
+    // Monaco binds ⌘D to "add selection to next find match" — don't fight it.
+    // Only that spelling, though: Ctrl+Alt+D means nothing to Monaco, so
+    // stepping aside for it would leave the shortcut dead in the editor on the
+    // very platforms it exists for.
+    passThrough: (ctx, binding) => ctx.isInMonacoEditor && Boolean(binding?.chord?.cmd),
+    // Splitting a terminal pane while a terminal has focus is the whole point
+    // of the command, and neither spelling costs the shell a control byte —
+    // ⌘ never reaches the pty, and Ctrl+Alt+D is not a bare Ctrl+letter. Left
+    // unclaimed, xterm would turn Alt+D into the `ESC d` that deletes a word.
+    overTerminal: true,
     run: (ctx) => ctx.splitActivePane?.('horizontal'),
   },
   'close-window': {
@@ -233,7 +243,18 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'preferences', key: 'mod+comma' },
   { command: 'save', key: 'mod+s' },
   { command: 'split-down', key: 'mod+shift+d' },
-  { command: 'split-right', key: 'mod+d' },
+  // Two spellings, because ⌘D is fine and Ctrl+D is not. ⌘ collides with
+  // nothing in a pty, and on macOS the native menu owns the key anyway (see
+  // `terminal_safe` in menu.rs), so it stays. Off macOS `mod` IS Ctrl, and
+  // Ctrl+D is EOF: the menu advertised it, and pressing it with a terminal
+  // focused — the ordinary state in a terminal app — ended the shell instead
+  // of splitting the pane. Ctrl+Alt+D is the choice `open-recent` already
+  // made one line up: nothing in a shell wants it.
+  //
+  // macOS first, and `shortcutLabel` skips the ⌘ spelling off macOS, so each
+  // platform prints the chord it can actually press.
+  { command: 'split-right', key: 'cmd+d' },
+  { command: 'split-right', key: 'ctrl+alt+d' },
   { command: 'close-window', key: 'mod+shift+w' },
   { command: 'close-pane', key: 'mod+w' },
   { command: 'focus-next-pane', key: 'mod+alt+right' },
@@ -369,7 +390,7 @@ export function dispatchKeydown(e, ctx) {
   const binding = findBinding(e, ctx);
   if (!binding) return null;
   const { spec } = binding;
-  if (spec.passThrough?.(ctx)) return `pass:${binding.command}`;
+  if (spec.passThrough?.(ctx, binding)) return `pass:${binding.command}`;
   if (spec.preventDefault !== false) e.preventDefault();
   spec.run(ctx);
   return binding.command;
@@ -413,11 +434,19 @@ export function keysFor(command, bindings = DEFAULT_RESOLVED) {
  * How a command's shortcut should be written where it is advertised — a menu
  * row, a palette entry — or '' when the user has unbound it.
  *
- * The first chord, because there is one place to print it and an OS menu item
- * carries one key equivalent. `isMac` is an argument rather than read from
- * `navigator` so this file stays testable on both platforms at once.
+ * The first chord the reader can actually press, because there is one place to
+ * print it and an OS menu item carries one key equivalent. A chord spelled
+ * with `cmd` needs a ⌘ key, so off macOS it is skipped rather than printed:
+ * `split-right` is ⌘D on macOS and Ctrl+Alt+D elsewhere, and a Windows menu
+ * reading "Cmd+D" names a key that machine does not have.
+ *
+ * `isMac` is an argument rather than read from `navigator` so this file stays
+ * testable on both platforms at once.
  */
 export function shortcutLabel(command, bindings = DEFAULT_RESOLVED, { isMac = false } = {}) {
-  const key = keysFor(command, bindings)[0];
+  const usable = keysFor(command, bindings).filter(
+    (key) => isMac || !parseChord(key)?.cmd
+  );
+  const key = usable[0];
   return key ? displayChord(key, { isMac }) : '';
 }

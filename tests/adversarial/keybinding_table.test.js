@@ -25,6 +25,7 @@ import {
   dispatchKeydown,
   dispatchKeydownOverTerminal,
   menuIdOf,
+  shortcutLabel,
 } from '../../src/lib/keybindings.js';
 
 /** Every menu entry that advertises a shortcut. */
@@ -216,7 +217,9 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     for (const platform of PLATFORMS) {
       const pairs = [
         ['mod+shift+d', 'split-down'],
-        ['mod+d', 'split-right'],
+        // Split Right is spelled per platform — ⌘D on macOS, Ctrl+Alt+D off
+        // it, where `mod+d` would be the shell's EOF. KB-14 holds that.
+        [platform === 'macos' ? 'cmd+d' : 'ctrl+alt+d', 'split-right'],
         ['mod+shift+w', 'close-window'],
         ['mod+w', 'close-pane'],
         ['mod+alt+b', 'toggle-secondary'],
@@ -328,6 +331,11 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // ⇧⌘F. The terminal has no use for it, and shifted it is not a bare
       // Ctrl+letter, so nothing is taken from the shell.
       'search-in-files',
+      // ⌘D, and Ctrl+Alt+D off macOS. Splitting the pane a terminal is in is
+      // what the command is FOR, so leaving it to xterm would be leaving it
+      // broken — and neither spelling is a bare Ctrl+letter, so the shell
+      // gives up nothing. KB-15 holds the spelling.
+      'split-right',
       'toggle-secondary',
       'toggle-sidebar',
       // Punctuation and a digit — no control byte is given up for these.
@@ -440,5 +448,44 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       null,
       'a plain Ctrl+R is reverse-i-search and does not reload — it must be left alone'
     );
+  });
+
+  test('KB-15: Split Right is never advertised as Ctrl+D, and never as a key the machine lacks', () => {
+    // The defect: off macOS `mod` is Ctrl, so Split Right was bound to — and
+    // the menu printed — Ctrl+D. In a terminal that is EOF. Pressing the
+    // shortcut the app advertised, in the state a terminal app is normally
+    // in, ended the shell instead of splitting the pane. menu.rs already
+    // refused to register it (`no_accelerator_claims_a_bare_ctrl_letter`);
+    // nothing said the webview's own table could not.
+    assert.equal(shortcutLabel('split-right', DEFAULT_RESOLVED, { isMac: false }), 'Ctrl+Alt+D');
+    assert.equal(shortcutLabel('split-right', DEFAULT_RESOLVED, { isMac: true }), '⌘D');
+
+    // Ctrl+D must reach the shell, not the pane splitter.
+    const ctrlD = {
+      ctrlKey: true, metaKey: false, shiftKey: false, altKey: false, key: 'd', code: 'KeyD',
+      preventDefault: () => assert.ok(false, 'Ctrl+D must not be swallowed'),
+      stopPropagation: () => assert.ok(false, 'Ctrl+D must reach xterm'),
+    };
+    assert.equal(findBinding(ctrlD, ctxFor(ctrlD, 'windows'))?.id, undefined, 'Ctrl+D is the shell’s');
+    assert.equal(dispatchKeydownOverTerminal(ctrlD, ctxFor(ctrlD, 'windows')), null);
+
+    // And the replacement does split, with a terminal focused, on both.
+    for (const platform of PLATFORMS) {
+      const key = platform === 'macos' ? 'cmd+d' : 'ctrl+alt+d';
+      const e = { ...eventFor(key, platform), preventDefault: () => {}, stopPropagation: () => {} };
+      assert.equal(
+        dispatchKeydownOverTerminal(e, ctxFor(e, platform)),
+        'split-right',
+        `${platform}: ${key} must split over a terminal`
+      );
+    }
+
+    // No command may advertise a chord this machine cannot press: a Windows
+    // menu reading "Cmd+D" names a key that keyboard has not got. This is the
+    // general rule the per-platform spelling needs to be safe.
+    for (const id of Object.keys(COMMANDS)) {
+      const label = shortcutLabel(id, DEFAULT_RESOLVED, { isMac: false });
+      assert.ok(!/Cmd/.test(label), `${id} advertises ${label} off macOS`);
+    }
   });
 });
