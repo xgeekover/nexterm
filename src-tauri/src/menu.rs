@@ -76,18 +76,6 @@ fn custom(id: &'static str, label: &'static str, accelerator: &str) -> Item {
     Item::Custom { id, label, accelerator: Some(accelerator.to_string()) }
 }
 
-/// A menu item whose accelerator would be a bare `Ctrl`+letter off macOS.
-///
-/// Those belong to the terminal, not to us. Windows resolves the window's
-/// accelerator table before the webview gets the key, and GTK runs its accel
-/// group before the focused widget, so registering `CmdOrCtrl+D` here takes
-/// EOF away from every shell in the app — likewise Ctrl+K (kill line), Ctrl+W
-/// (delete word), Ctrl+P (history), Ctrl+B (backward char) and Ctrl+S (XOFF).
-///
-/// On macOS the app modifier is ⌘, which collides with nothing in the pty, so
-/// the accelerator is registered normally. Elsewhere the item is menu-only and
-/// `useKeybindings.js` provides the shortcut — a webview-level listener, which
-/// xterm's own capture handler correctly beats whenever a terminal has focus.
 /// A menu item whose accelerator is spelled differently per platform, because
 /// the chord that is safe over a terminal is.
 ///
@@ -110,6 +98,18 @@ fn per_platform(id: &'static str, label: &'static str, mac: &str, other: &str) -
     }
 }
 
+/// A menu item whose accelerator would be a bare `Ctrl`+letter off macOS.
+///
+/// Those belong to the terminal, not to us. Windows resolves the window's
+/// accelerator table before the webview gets the key, and GTK runs its accel
+/// group before the focused widget, so registering `CmdOrCtrl+D` here takes
+/// EOF away from every shell in the app — likewise Ctrl+K (kill line), Ctrl+W
+/// (delete word), Ctrl+P (history), Ctrl+B (backward char) and Ctrl+S (XOFF).
+///
+/// On macOS the app modifier is ⌘, which collides with nothing in the pty, so
+/// the accelerator is registered normally. Elsewhere the item is menu-only and
+/// `useKeybindings.js` provides the shortcut — a webview-level listener, which
+/// xterm's own capture handler correctly beats whenever a terminal has focus.
 fn terminal_safe(id: &'static str, label: &'static str, mac_accelerator: &str) -> Item {
     #[cfg(target_os = "macos")]
     {
