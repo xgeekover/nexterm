@@ -72,9 +72,27 @@ fn main() {
         )
         .manage(state)
         .setup(|app| {
-            // No folder is open at launch; `fs_pick_root` starts watching the
-            // one the user opens.
             let app_state = app.state::<AppState>();
+
+            // Reopen the folder from last time, before the webview loads and
+            // starts asking where things are. See `Workspace::restore_root`:
+            // the terminal restore reads the root to decide where each saved
+            // terminal may start, so a root that arrives late is a root that
+            // arrives after every shell has already been spawned somewhere
+            // else.
+            match app.path().app_config_dir() {
+                Ok(dir) => {
+                    app_state
+                        .workspace
+                        .restore_root(dir.join(fs::OPEN_FOLDER_FILE));
+                }
+                Err(e) => {
+                    eprintln!("[NexTerm] No config directory, so the open folder cannot be remembered: {e}");
+                }
+            }
+
+            // Whatever came back is watched the same way `fs_pick_root` watches
+            // a folder the user opens by hand.
             if let Some(root) = app_state.workspace.root() {
                 let _ = app_state
                     .fs_watcher
