@@ -769,10 +769,27 @@ mod writer_thread_tests {
         );
         assert_eq!(finished.load(AtomicOrdering::SeqCst), 0, "write completed synchronously");
 
-        // and the bytes really do get written, in the background
-        thread::sleep(Duration::from_millis(1500));
-        assert_eq!(writes.load(AtomicOrdering::SeqCst), 3);
-        assert_eq!(finished.load(AtomicOrdering::SeqCst), 3);
+        // and the bytes really do get written, in the background.
+        //
+        // Waited for, not slept through. Three 400ms writes run one after the
+        // other, so a fixed 1500ms sleep left 300ms of margin for everything
+        // else on the machine — and a loaded CI runner ate it (2 of 3 writes
+        // done, macOS, 2026-09-20). Polling is also faster when nothing is
+        // wrong, which is nearly always.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while finished.load(AtomicOrdering::SeqCst) < 3 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            writes.load(AtomicOrdering::SeqCst),
+            3,
+            "the writer thread never picked up all three"
+        );
+        assert_eq!(
+            finished.load(AtomicOrdering::SeqCst),
+            3,
+            "three queued writes did not all complete within 20s"
+        );
     }
 
     /// The unit tests above use a fake writer; this one drives a real shell
