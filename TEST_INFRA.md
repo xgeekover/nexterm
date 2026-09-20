@@ -72,6 +72,17 @@ emitted `pty-exit` after every command where the backend emits
 `pty-command-done`. **If you change the mock, check it against
 `src-tauri/src/` first.**
 
+**And there is a third thing neither suite can see: what the app looks like.**
+A window drawn twice, a thread that is busy rather than wrong, a console that
+opens for a hundredth of a second — none of these returns an error, and all
+three shipped on Windows with every job on every platform green. Two partial
+answers live in the source: tests that read the dispatch back out of
+`commands/fs.rs` and scan the backend for a `Command::new` without
+`CREATE_NO_WINDOW`, because those properties are decided by one word in an
+attribute that no runtime assertion can reach. The rest is checked by hand,
+against a written list — see
+[WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md).
+
 ## The fixtures
 
 `cargo test` writes `tests/fixtures/backend-tree.json`: what `fs_read_dir`
