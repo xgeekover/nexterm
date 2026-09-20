@@ -21,6 +21,8 @@
 // because there the import IS used.
 use std::path::Path;
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 
@@ -64,8 +66,26 @@ pub struct GitStatus {
 /// A missing `git`, a folder that is not a repository, and a git that returned
 /// an error are all the same answer here: nothing to say. None of them is
 /// worth an error dialog over a status bar decoration.
+/// `CREATE_NO_WINDOW`. Windows gives a console-subsystem child its own console
+/// window unless told not to, and `git` is one — so every call flashed a black
+/// window over the app. `git_status` runs when a folder is opened AND again,
+/// debounced, on every burst of changes the watcher reports, so it was not one
+/// flash: it was one every time the user saved a file.
+///
+/// The app's own binary is already spared this by `windows_subsystem` in
+/// main.rs, but that attribute says nothing about what it spawns.
+///
+/// `std` does not re-export the constant and `windows-sys` would be a whole
+/// dependency for one number.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir).args(args);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -398,6 +418,113 @@ mod tests {
                 // git may genuinely be absent on a build machine; that is the
                 // "nothing to say" answer and not a failure.
                 eprintln!("git unavailable or not a repository; skipping");
+            }
+        }
+    }
+}
+
+
+/// No process this backend spawns may open a console window on Windows.
+///
+/// A console-subsystem child gets its own console window unless it is given
+/// `CREATE_NO_WINDOW`, and `git` is one. `git_status` runs when a folder is
+/// opened and again, debounced, on every burst of changes the watcher
+/// reports — so it was not one flash on opening a folder, it was one every
+/// time a file was saved.
+///
+/// Nothing on this machine can catch that. The branch is `#[cfg(windows)]`,
+/// so it does not exist in a macOS build at all and `cargo test` here cannot
+/// reach it; CI's Windows job only proves it compiles, never that the flag is
+/// set. So this reads the source — and reads ALL of it, not just this file,
+/// because what is worth pinning is that no spawn anywhere is missing the
+/// flag, not that this one has it.
+///
+/// Test code is exempt: it already runs in a console. A file's first
+/// `#[cfg(test)]` starts its trailing test module, which is true of every
+/// file here and is asserted below rather than assumed.
+#[cfg(test)]
+mod no_console_window_tests {
+    use std::path::Path;
+
+    /// How far after a `Command::new` the flag may appear — enough for the
+    /// builder calls in between, not enough to belong to something else.
+    const WINDOW: usize = 10;
+
+    fn backend_sources() -> Vec<std::path::PathBuf> {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        walkdir::WalkDir::new(src)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    }
+
+    #[test]
+    fn no_spawn_outside_tests_can_flash_a_console() {
+        let mut spawns = 0;
+
+        for path in backend_sources() {
+            let body = std::fs::read_to_string(&path).expect("a source file is readable");
+            let lines: Vec<&str> = body.lines().collect();
+            // Everything from the first `#[cfg(test)]` on is test code.
+            let production = lines
+                .iter()
+                .position(|l| l.trim() == "#[cfg(test)]")
+                .unwrap_or(lines.len());
+
+            for (i, line) in lines[..production].iter().enumerate() {
+                if !line.contains("Command::new(") {
+                    continue;
+                }
+                spawns += 1;
+                let nearby = lines[i..(i + WINDOW).min(production)].join("\n");
+                assert!(
+                    nearby.contains("creation_flags"),
+                    "{}:{} spawns a process without CREATE_NO_WINDOW — on Windows it \
+                     will flash a console window over the app:\n{line}",
+                    path.display(),
+                    i + 1
+                );
+            }
+        }
+
+        assert!(
+            spawns > 0,
+            "found no process spawns at all — the scan is broken, not the code"
+        );
+    }
+
+    /// The exemption above is only sound while nothing but tests follows a
+    /// file's first `#[cfg(test)]`.
+    ///
+    /// A file may hold several test modules — `manager.rs` has three — and
+    /// that is fine; what would break the scan is production code AFTER the
+    /// first marker. Every production item in this crate sits at column 0 and
+    /// everything inside a module is indented, so that is what this looks for.
+    #[test]
+    fn nothing_but_tests_follows_the_first_cfg_test() {
+        const TOP_LEVEL: &[&str] = &[
+            "pub fn ", "fn ", "pub struct ", "struct ", "pub enum ", "enum ",
+            "impl ", "pub const ", "const ", "pub static ", "static ",
+        ];
+
+        for path in backend_sources() {
+            let body = std::fs::read_to_string(&path).expect("a source file is readable");
+            let lines: Vec<&str> = body.lines().collect();
+            let Some(first) = lines.iter().position(|l| l.trim() == "#[cfg(test)]") else {
+                continue;
+            };
+            for (offset, line) in lines[first..].iter().enumerate() {
+                if TOP_LEVEL.iter().any(|kw| line.starts_with(kw)) {
+                    panic!(
+                        "{}:{} is production code sitting after the file's first \
+                         `#[cfg(test)]`, so the spawn scan would wrongly exempt \
+                         anything below it: {line}",
+                        path.display(),
+                        first + offset + 1
+                    );
+                }
             }
         }
     }
