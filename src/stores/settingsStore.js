@@ -32,6 +32,20 @@ export const SETTINGS_DEFAULTS = {
   terminalStickyHeader: true,
   terminalDefaultShell: 'default',
   /**
+   * Where a NEW terminal starts, when nothing has asked for a directory.
+   *
+   * `workspace` is what the app has always done and stays the default. The
+   * value is a keyword rather than a path so that `workspace` and `home`
+   * follow the machine rather than being frozen the day they were chosen;
+   * `custom` reads `terminalDefaultCwdPath`.
+   *
+   * This never overrules a directory that WAS asked for — restoring a session
+   * hands each terminal its saved cwd, and that has to win. See `spawnTab`.
+   */
+  terminalDefaultCwd: 'workspace',
+  /** The directory `terminalDefaultCwd: 'custom'` means. `~` is expanded. */
+  terminalDefaultCwdPath: '',
+  /**
    * Tell me when a command finishes in a terminal I am not looking at, once it
    * has run at least this long. 0 turns it off.
    *

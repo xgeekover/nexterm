@@ -5,6 +5,8 @@ import { useSystemStore } from '../../stores/systemStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
 import { isWindows } from '../../lib/platform.js';
+import { expandHome } from '../../lib/paths.js';
+import { invoke } from '../../lib/ipc.js';
 
 /**
  * VS Code's Settings editor reads the live `--font-mono` token so the text
@@ -27,7 +29,7 @@ const SECTIONS = [
 ];
 
 /** Every row the Settings window can render, grouped by section. */
-function buildItems(monoPlaceholder, detectedShells) {
+function buildItems(monoPlaceholder, detectedShells, homeDir) {
   return [
     // ---- Text Editor ----
     {
@@ -183,6 +185,49 @@ function buildItems(monoPlaceholder, detectedShells) {
       ],
     },
     {
+      id: 'terminalDefaultCwd',
+      section: 'terminal',
+      key: 'terminalDefaultCwd',
+      settingKey: 'terminal.integrated.cwd',
+      title: 'Default Directory',
+      description:
+        'Where a new terminal starts when nothing else has asked for a directory. A terminal restored with a session still opens where it was saved — this only decides the ones that have no answer of their own.',
+      control: 'select',
+      // Keywords rather than a path, so "workspace" and "home" follow the
+      // machine instead of being frozen the day they were picked.
+      options: [
+        { value: 'workspace', label: 'Workspace root' },
+        { value: 'home', label: 'Home directory' },
+        { value: 'active', label: 'Same as the active terminal' },
+        { value: 'custom', label: 'Custom path…' },
+      ],
+    },
+    {
+      id: 'terminalDefaultCwdPath',
+      section: 'terminal',
+      key: 'terminalDefaultCwdPath',
+      settingKey: 'terminal.integrated.cwdPath',
+      title: 'Custom Directory',
+      description: 'The directory "Custom path…" means. `~` is your home directory.',
+      control: 'text',
+      placeholder: '~/work',
+      // Only worth showing when it is the one being used; an input that does
+      // nothing is worse than no input.
+      visibleWhen: (v) => v.terminalDefaultCwd === 'custom',
+      // Checked against the real filesystem — a path that is not there would
+      // otherwise fall back silently and read as "the setting did not save".
+      validate: async (value) => {
+        const wanted = String(value ?? '').trim();
+        if (!wanted) return 'Type a directory, or choose another option above.';
+        try {
+          const ok = await invoke('fs_dir_exists', { path: expandHome(wanted, homeDir) });
+          return ok ? null : 'No directory there. New terminals will fall back to the workspace root.';
+        } catch {
+          return null; // cannot check right now; do not cry wolf
+        }
+      },
+    },
+    {
       id: 'terminalNotifyAfterSeconds',
       section: 'terminal',
       key: 'terminalNotifyAfterSeconds',
@@ -263,7 +308,7 @@ function TextLikeControl({ item, value, onCommit }) {
   );
 }
 
-function SettingRow({ item, value, isDefault, onChange, onReset }) {
+function SettingRow({ item, value, isDefault, onChange, onReset, note }) {
   return (
     <div className="py-3 px-1 border-b border-vsc-border last:border-b-0 group">
       <div className="flex items-start justify-between gap-3">
@@ -316,6 +361,11 @@ function SettingRow({ item, value, isDefault, onChange, onReset }) {
         {(item.control === 'number' || item.control === 'text') && (
           <TextLikeControl item={item} value={value} onCommit={onChange} />
         )}
+
+        {/* What the backend said about this value — a path that is not there,
+            typically. Said here rather than left to be discovered when a
+            terminal quietly opens somewhere else. */}
+        {note && <p className="mt-1.5 text-ui-sm text-vsc-error">{note}</p>}
       </div>
     </div>
   );
@@ -339,6 +389,8 @@ export function SettingsWindow() {
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
+  const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
+  const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
@@ -357,6 +409,8 @@ export function SettingsWindow() {
     terminalStickyHeader,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
+    terminalDefaultCwd,
+    terminalDefaultCwdPath,
     editorFontSize,
     editorTabSize,
     editorWordWrap,
@@ -366,6 +420,9 @@ export function SettingsWindow() {
 
   const [query, setQuery] = useState('');
   const [activeSection, setActiveSection] = useState('editor');
+  // Per-item validation messages, keyed by item id. Async because the only
+  // honest answer to "is that a directory?" comes from the backend.
+  const [notes, setNotes] = useState({});
 
   const dialogRef = useRef(null);
   const searchRef = useRef(null);
@@ -375,10 +432,38 @@ export function SettingsWindow() {
 
   const monoPlaceholder = useMemo(() => readInheritedMonoStack(), [isOpen]);
   const detectedShells = useSystemStore((s) => s.shells);
+  const homeDir = useSystemStore((s) => s.homeDir);
   const ITEMS = useMemo(
-    () => buildItems(monoPlaceholder, detectedShells),
-    [monoPlaceholder, detectedShells]
+    () => buildItems(monoPlaceholder, detectedShells, homeDir),
+    [monoPlaceholder, detectedShells, homeDir]
   );
+
+  const validatedSignature = ITEMS.filter((i) => i.validate)
+    .map((i) => `${i.id}=${values[i.key]}`)
+    .join('\u0000');
+
+  // Check the values that can be wrong about the world. Async, so the result
+  // arrives after the render that asked for it; `cancelled` keeps a stale
+  // answer from overwriting a newer one when the value changes while a check
+  // is still in flight.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    let cancelled = false;
+    const validated = ITEMS.filter((item) => item.validate);
+    if (validated.length === 0) return undefined;
+    Promise.all(
+      validated.map(async (item) => [item.id, await item.validate(values[item.key])])
+    ).then((pairs) => {
+      if (!cancelled) setNotes(Object.fromEntries(pairs));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // `values` is rebuilt every render, so depend on the validated values
+    // themselves — as one string, since a spread would change the dep array's
+    // LENGTH between renders and React refuses to compare those.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, ITEMS, validatedSignature]);
 
   // Reset transient UI state (search, scroll spy) every time the window opens.
   useEffect(() => {
@@ -456,7 +541,9 @@ export function SettingsWindow() {
 
   const q = query.trim();
   const filteredItems = ITEMS.filter(
-    (item) => fuzzyMatch(q, item.title) || fuzzyMatch(q, item.description) || fuzzyMatch(q, item.settingKey)
+    (item) =>
+      item.visibleWhen?.(values) !== false
+      && (fuzzyMatch(q, item.title) || fuzzyMatch(q, item.description) || fuzzyMatch(q, item.settingKey))
   );
 
   const visibleSections = SECTIONS.filter((section) =>
@@ -578,6 +665,7 @@ export function SettingsWindow() {
                     return (
                       <SettingRow
                         key={item.id}
+                        note={notes[item.id]}
                         item={item}
                         value={value}
                         isDefault={isDefault}

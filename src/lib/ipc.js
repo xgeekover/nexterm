@@ -361,6 +361,18 @@ class BrowserMockBridge {
       case 'fs_pick_root': {
         return null; // no native dialog in the browser mock
       }
+      // Unconfined in the real backend too: it answers "can a terminal start
+      // here?" about a path the user typed, and that path is allowed to sit
+      // outside the open folder. The mock has one virtual root, so anything
+      // under it is a directory and nothing else is.
+      case 'fs_dir_exists': {
+        const target = normalizePath(args?.path ?? '');
+        if (!target) return false;
+        return (
+          this.directories.has(target)
+          || [...this.files.keys()].some((f) => f.startsWith(target + '/'))
+        );
+      }
 
       // 6. fs_read_dir
       // The real one validates through `Workspace::set_root` and refuses a
