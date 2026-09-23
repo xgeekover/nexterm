@@ -27,9 +27,12 @@ import {
   Copy,
   Files,
   LayoutGrid,
+  Sparkles,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
+import { AgentResumeBanner } from './AgentResumeBanner.jsx';
+import { AGENT_IDS, agentLabel } from '../../lib/agents.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
 import { ActivityDot } from './ActivityDot.jsx';
@@ -268,6 +271,9 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
   const duplicateTab = useTerminalStore((s) => s.duplicateTab);
   const renameTab = useTerminalStore((s) => s.renameTab);
   const closeTab = useTerminalStore((s) => s.closeTab);
+  const startAgent = useTerminalStore((s) => s.startAgent);
+  const resumeAgent = useTerminalStore((s) => s.resumeAgent);
+  const dismissAgentResume = useTerminalStore((s) => s.dismissAgentResume);
 
   const { drag, beginDrag, cancelActiveDrag } = useContext(DragContext);
 
@@ -548,6 +554,20 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
         y={paneMenu?.y ?? 0}
         onClose={() => setPaneMenu(null)}
         items={[
+          // A terminal opened here and told to run an agent, so NexTerm knows
+          // which conversation it is and can offer it back after a restart.
+          // Typing `claude` yourself still works and always did — it just
+          // cannot be picked up again, because nothing recorded the id.
+          ...AGENT_IDS.map((kind) => ({
+            key: `new-${kind}`,
+            label: `New ${agentLabel(kind)} Terminal`,
+            icon: Sparkles,
+            onSelect: async () => {
+              const created = await createTab(null, { paneId, groupId });
+              if (created?.id) startAgent(created.id, kind);
+            },
+          })),
+          { type: 'separator', key: 'agents-sep' },
           {
             key: 'rename-group',
             label: 'Rename Group…',
@@ -560,7 +580,14 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
       {/* Live terminal surface — also the drop target */}
       <div data-pane-body={paneId} className="relative flex-1 overflow-hidden">
         {boundTab ? (
-          <TerminalView tabId={boundTab.id} active={isActivePane} />
+          <>
+            <TerminalView tabId={boundTab.id} active={isActivePane} />
+            <AgentResumeBanner
+              tab={boundTab}
+              onResume={() => resumeAgent(boundTab.id)}
+              onDismiss={() => dismissAgentResume(boundTab.id)}
+            />
+          </>
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none">
             <p className="m-0">No terminal in this pane</p>

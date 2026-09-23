@@ -40,6 +40,7 @@ import './explorer_filter.test.js';
 import './terminal_links.test.js';
 import './tab_activity.test.js';
 import './find_and_zoom.test.js';
+import './agents.test.js';
 
 async function run() {
   console.log('====================================================');
