@@ -7,8 +7,10 @@ import { notifyTerminal } from '../lib/terminalNotice.js';
 // version branch; writes still use `saveState` (always the current version).
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
 import { useSettingsStore } from './settingsStore.js';
+import { useSystemStore } from './systemStore.js';
 import { notificationFor } from '../lib/tabActivity.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
+import { resolveStartDir } from '../lib/terminalCwd.js';
 
 /**
  * How long a terminal's size has to hold still before the shell is told about
@@ -873,10 +875,24 @@ export const useTerminalStore = create((set, get) => {
    */
   const spawnTab = async (title = null, cwd = null, shell = null) => {
     try {
+      // Nothing asked for a directory -> the `terminal.integrated.cwd`
+      // setting decides, and `null` hands it back to the backend's own
+      // fallback (open folder, then home). A directory that WAS asked for —
+      // which is what restoring a session does for every terminal — wins over
+      // both. See `resolveStartDir`.
+      const settings = useSettingsStore.getState();
+      const startDir = resolveStartDir({
+        requested: cwd,
+        mode: settings.terminalDefaultCwd,
+        customPath: settings.terminalDefaultCwdPath,
+        homeDir: useSystemStore.getState().homeDir,
+        activeCwd: get().getActiveTab()?.cwd ?? null,
+      });
+
       const ptySession = await invoke('pty_spawn', {
         cols: 80,
         rows: 24,
-        cwd: cwd || get().cwd || '/workspace',
+        cwd: startDir,
         // A profile picked for THIS terminal wins over the default setting.
         // `resolve_shell` takes a name or a path, so a profile is just a spec.
         shell: shell || useSettingsStore.getState().terminalDefaultShell,
