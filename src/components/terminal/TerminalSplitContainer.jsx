@@ -267,6 +267,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
   const createTab = useTerminalStore((s) => s.createTab);
   const duplicateTab = useTerminalStore((s) => s.duplicateTab);
   const renameTab = useTerminalStore((s) => s.renameTab);
+  const closeTab = useTerminalStore((s) => s.closeTab);
 
   const { drag, beginDrag, cancelActiveDrag } = useContext(DragContext);
 
@@ -366,6 +367,14 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   if (e.button !== 0) return;
                   beginDrag(tab, e);
                 }}
+                onMouseDown={(e) => {
+                  // Middle-click closes the tab, as it does on an editor tab.
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeTab(tab.id);
+                  }
+                }}
                 onClick={() => {
                   if (Date.now() - lastDragEndAt < 200) return;
                   bindPaneToTab(paneId, tab.id, groupId);
@@ -393,7 +402,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   }
                 }}
                 className={cn(
-                  'flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
+                  'group flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
                   'cursor-grab active:cursor-grabbing touch-none transition-colors',
                   isActive
                     ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
@@ -411,6 +420,37 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   )}
                 >
                   {tab.title}
+                </span>
+
+                {/* Same slot, size and reveal as an editor tab's: a fixed box
+                    so the chip does not change width on hover, hidden until
+                    the pointer is over the chip, and always there on the
+                    active one. Shown on the last tab too — closing it closes
+                    the pane, which is what Close Pane does anyway. */}
+                <span className="relative flex items-center justify-center w-3.5 h-3.5 shrink-0 ml-1.5">
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    // The chip starts a drag on pointerdown; without this,
+                    // pressing the button arms one and the click that would
+                    // have closed the tab drags it instead.
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(tab.id);
+                    }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    title="Close Terminal"
+                    aria-label={`Close ${tab.title}`}
+                    className={cn(
+                      'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover hover:text-vsc-error',
+                      'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+                      isActive && 'opacity-100'
+                    )}
+                  >
+                    <X size={14} />
+                  </button>
                 </span>
               </div>
             );
