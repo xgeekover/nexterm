@@ -8,6 +8,7 @@
  */
 import { describe, test, beforeEach, assert, afterEach} from '../e2e/harness/testFramework.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
+import { resolveStartDir } from '../../src/lib/terminalCwd.js';
 
 const S = useSettingsStore;
 
@@ -27,6 +28,8 @@ const SETTINGS_KEYS = [
   'terminalSuggestions',
   'terminalStickyHeader',
   'terminalDefaultShell',
+  'terminalDefaultCwd',
+  'terminalDefaultCwdPath',
   'terminalNotifyAfterSeconds',
   'editorFontSize',
   'editorTabSize',
@@ -194,5 +197,62 @@ describe('Settings survive a restart', () => {
     assert.equal(store.terminalFontSize, 12, 'a string font size must not be trusted');
     assert.equal(store.terminalTheme, 'nord', 'but a well-typed value still loads');
     assert.equal('nonsense' in store, false);
+  });
+});
+
+describe('Where a new terminal starts', () => {
+  const HOME = '/Users/dev';
+
+  test('SET-10: a directory that was asked for beats the setting, always', () => {
+    // This is session restore. Every saved terminal hands its own directory
+    // to spawnTab, and v0.5.3 and v0.5.5 exist because those directories used
+    // to be thrown away. A setting that overruled them would undo both.
+    for (const mode of ['workspace', 'home', 'active', 'custom']) {
+      assert.equal(
+        resolveStartDir({
+          requested: '/saved/where/it/was',
+          mode,
+          customPath: '/somewhere/else',
+          homeDir: HOME,
+          activeCwd: '/another/place',
+        }),
+        '/saved/where/it/was',
+        `mode "${mode}" overruled a directory that was asked for`
+      );
+    }
+  });
+
+  test('SET-11: with nothing asked for, the setting decides', () => {
+    const base = { homeDir: HOME, activeCwd: '/live/here', customPath: '~/work' };
+
+    // null means "backend, you decide" — it owns the open-folder fallback and
+    // is the only side that knows the canonical root.
+    assert.equal(resolveStartDir({ ...base, mode: 'workspace' }), null);
+    assert.equal(resolveStartDir({ ...base, mode: 'home' }), HOME);
+    assert.equal(resolveStartDir({ ...base, mode: 'active' }), '/live/here');
+    assert.equal(resolveStartDir({ ...base, mode: 'custom' }), '/Users/dev/work');
+  });
+
+  test('SET-12: a setting with no answer falls back rather than guessing', () => {
+    // The first terminal of a session has no sibling to copy, a custom path
+    // may be empty, and the home directory is unknown until the backend has
+    // answered. None of those is a reason to invent a directory.
+    assert.equal(resolveStartDir({ mode: 'active', activeCwd: null }), null);
+    assert.equal(resolveStartDir({ mode: 'active', activeCwd: '   ' }), null);
+    assert.equal(resolveStartDir({ mode: 'custom', customPath: '' }), null);
+    assert.equal(resolveStartDir({ mode: 'home', homeDir: null }), null);
+    assert.equal(resolveStartDir({}), null, 'no input at all is still safe');
+    assert.equal(resolveStartDir({ mode: 'nonsense-from-an-old-config' }), null);
+  });
+
+  test('SET-13: a Windows custom path survives, separators and all', () => {
+    assert.equal(
+      resolveStartDir({ mode: 'custom', customPath: 'C:\\work\\proj', homeDir: 'C:\\Users\\dev' }),
+      'C:\\work\\proj'
+    );
+    assert.equal(
+      resolveStartDir({ mode: 'custom', customPath: '~\\proj', homeDir: 'C:\\Users\\dev' }),
+      'C:\\Users\\dev\\proj'
+    );
   });
 });

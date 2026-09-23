@@ -111,6 +111,19 @@ export function depthOf(path) {
 }
 
 /**
+ * `~` at the front becomes the home directory. Anything else is returned
+ * unchanged, including a `~` that is part of a real name (`~backup/x`).
+ */
+export function expandHome(path, home) {
+  if (typeof path !== 'string' || !home) return path ?? '';
+  if (path === '~') return home;
+  if (path.startsWith('~/') || path.startsWith('~\\')) {
+    return join(home, path.slice(2));
+  }
+  return path;
+}
+
+/**
  * A path shortened for display: the home directory becomes `~`, and a long
  * path keeps its last `keep` segments behind an ellipsis.
  */

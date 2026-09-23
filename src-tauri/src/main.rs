@@ -126,6 +126,7 @@ fn main() {
             commands::pty::pty_retain_only,
             commands::pty::pty_list_sessions,
             commands::fs::fs_get_root,
+            commands::fs::fs_dir_exists,
             commands::fs::fs_pick_root,
             commands::fs::fs_read_dir,
             commands::fs::fs_read_file,

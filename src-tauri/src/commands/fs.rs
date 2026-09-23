@@ -68,6 +68,24 @@ pub fn fs_search(
     )
 }
 
+/// Whether `path` names a directory that exists.
+///
+/// **Deliberately not confined**, and the only command here that is not. It
+/// answers one question about a path the user has just typed into Settings —
+/// "will a terminal be able to start there?" — and a directory the terminal
+/// may start in is by design allowed to sit outside the open folder (see
+/// `Workspace::start_dir`). Confining this would refuse exactly the paths it
+/// exists to check.
+///
+/// It reveals whether a directory exists and nothing about its contents; the
+/// webview can already ask `pty_spawn` to run any executable, so this is not
+/// a boundary that was holding anything.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn fs_dir_exists(path: String) -> bool {
+    let trimmed = path.trim();
+    !trimmed.is_empty() && std::path::Path::new(trimmed).is_dir()
+}
+
 /// The open folder, or `null` until one has been opened.
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {
