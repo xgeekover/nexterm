@@ -9,6 +9,7 @@ import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistenc
 import { useSettingsStore } from './settingsStore.js';
 import { notificationFor } from '../lib/tabActivity.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
+import { resumeCommand, serializeAgent, startCommand } from '../lib/agents.js';
 
 /**
  * How long a terminal's size has to hold still before the shell is told about
@@ -500,7 +501,15 @@ function buildPersistedPayload(state) {
     workspaceName: state.workspaceName,
     groups: state.groups.map(serializeGroupForPersist),
     activeGroupId: state.activeGroupId,
-    tabs: state.tabs.map((t) => ({ id: t.id, title: t.title, cwd: t.cwd })),
+    // `agent` rides along so a restored terminal can offer to pick the
+    // conversation back up. `serializeAgent` drops anything unrecognised, so
+    // a payload from another build cannot put a command on a shell.
+    tabs: state.tabs.map((t) => ({
+      id: t.id,
+      title: t.title,
+      cwd: t.cwd,
+      agent: serializeAgent(t.agent),
+    })),
   };
 }
 
@@ -900,6 +909,8 @@ export const useTerminalStore = create((set, get) => {
         cwd: ptySession.cwd || get().cwd,
         blocks: [],
         activePrompt: '',
+        agent: null,
+        agentResumeOffered: false,
         // What the backend actually ran, not what was asked for. The status
         // bar names the active terminal's shell, and once terminals can differ
         // a bar reading the global SETTING would be wrong for every terminal
@@ -1084,6 +1095,12 @@ export const useTerminalStore = create((set, get) => {
         cwd: ptySession.cwd || wantedCwd,
         blocks: [],
         activePrompt: '',
+        // What was running here, and the fact that it is NOT running now.
+        // The shell comes back empty and the conversation is offered rather
+        // than taken: starting an agent costs tokens and hits an API, so it
+        // waits for the user to ask. `resumeAgent` clears the flag.
+        agent: serializeAgent(savedTab.agent),
+        agentResumeOffered: Boolean(serializeAgent(savedTab.agent)),
       });
     }
 
@@ -2444,6 +2461,69 @@ export const useTerminalStore = create((set, get) => {
     },
 
     // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
+    /**
+     * Run an agent in a terminal, and remember which conversation it is.
+     *
+     * The command is TYPED into the shell rather than spawned in place of
+     * one. That is how a person starts an agent, it leaves a working shell
+     * when the agent exits, and it makes a terminal NexTerm started and a
+     * terminal someone typed in the same kind of thing.
+     */
+    startAgent: async (tabId, kind) => {
+      const targetId = tabId || get().activeTabId;
+      const tab = get().tabs.find((t) => t.id === targetId);
+      if (!tab) return null;
+
+      let started;
+      try {
+        started = startCommand(kind);
+      } catch (err) {
+        console.error('[TerminalStore] Unknown agent:', err);
+        return null;
+      }
+
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === targetId ? { ...t, agent: started.agent, agentResumeOffered: false } : t
+        ),
+      }));
+      await get().writeRaw(targetId, `${started.command}\r`);
+      return started.agent;
+    },
+
+    /**
+     * Pick the conversation back up in a terminal that was restored.
+     *
+     * Only ever the RESUME form: `claude` refuses `--session-id` for an id it
+     * already has ("Session ID … is already in use"), so re-running the start
+     * command would kill the terminal on every relaunch.
+     */
+    resumeAgent: async (tabId) => {
+      const targetId = tabId || get().activeTabId;
+      const tab = get().tabs.find((t) => t.id === targetId);
+      if (!tab) return false;
+
+      const command = resumeCommand(tab.agent);
+      // The offer goes away either way: an agent we no longer recognise is
+      // not something to keep asking about.
+      set((state) => ({
+        tabs: state.tabs.map((t) => (t.id === targetId ? { ...t, agentResumeOffered: false } : t)),
+      }));
+      if (!command) return false;
+      await get().writeRaw(targetId, `${command}\r`);
+      return true;
+    },
+
+    /** Leave the terminal as a plain shell, and stop offering. */
+    dismissAgentResume: (tabId) => {
+      const targetId = tabId || get().activeTabId;
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === targetId ? { ...t, agentResumeOffered: false, agent: null } : t
+        ),
+      }));
+    },
+
     writeRaw: async (tabId, data) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
