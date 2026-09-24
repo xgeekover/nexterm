@@ -923,15 +923,24 @@ export const useTerminalStore = create((set, get) => {
       // which is what restoring a session does for every terminal — wins over
       // both. See `startDirFor`.
       const startDir = await startDirFor(cwd);
+      // A profile picked for THIS terminal wins over the default setting.
+      // `resolve_shell` takes a name or a path, so a profile is just a spec.
+      const shellSpec = shell || useSettingsStore.getState().terminalDefaultShell;
+      const spawnAt = (dir) => invoke('pty_spawn', { cols: 80, rows: 24, cwd: dir, shell: shellSpec });
 
-      const ptySession = await invoke('pty_spawn', {
-        cols: 80,
-        rows: 24,
-        cwd: startDir,
-        // A profile picked for THIS terminal wins over the default setting.
-        // `resolve_shell` takes a name or a path, so a profile is just a spec.
-        shell: shell || useSettingsStore.getState().terminalDefaultShell,
-      });
+      let ptySession;
+      try {
+        ptySession = await spawnAt(startDir);
+      } catch (err) {
+        // A directory can exist and still refuse the shell — no permission to
+        // enter it, a path too long for Windows. The backend only checks that
+        // it IS a directory, so the spawn is where that surfaces. A missing
+        // directory already falls back; an unusable one does the same, rather
+        // than a setting pointing there costing every new terminal.
+        if (startDir === null) throw err;
+        console.warn(`[TerminalStore] Could not start a terminal in "${startDir}" — using the default directory:`, err);
+        ptySession = await spawnAt(null);
+      }
 
       // A caller may ask for a title: `materializeGroup` and `loadSavedGroup`
       // pass the one the terminal had when it was saved. When that title is a
@@ -2234,12 +2243,26 @@ export const useTerminalStore = create((set, get) => {
         // for every other new terminal. Where it has no answer this still asks
         // for `rootPath`, as it always did — the open folder, or null with
         // none open, which is where the backend's own fallback lands anyway.
-        const ptySession = await invoke('pty_spawn', {
-          cols: 80,
-          rows: 24,
-          cwd: (await startDirFor(null)) ?? rootPath,
-          shell: useSettingsStore.getState().terminalDefaultShell,
-        });
+        const firstDir = (await startDirFor(null)) ?? rootPath;
+        const spawnFirst = (dir) =>
+          invoke('pty_spawn', {
+            cols: 80,
+            rows: 24,
+            cwd: dir,
+            shell: useSettingsStore.getState().terminalDefaultShell,
+          });
+        let ptySession;
+        try {
+          ptySession = await spawnFirst(firstDir);
+        } catch (err) {
+          // The one terminal a fresh start has. A setting that names a
+          // directory the shell cannot enter must not leave the app with
+          // none, so it gets the open folder instead — which is all this ever
+          // asked for before the setting existed.
+          if (firstDir === rootPath) throw err;
+          console.warn(`[TerminalStore] Could not start the first terminal in "${firstDir}" — using the open folder:`, err);
+          ptySession = await spawnFirst(rootPath);
+        }
 
         const defaultTitle = nextDefaultTitle(get().tabs);
         const initialTab = {

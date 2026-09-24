@@ -180,7 +180,12 @@ class BrowserMockBridge {
     switch (command) {
       // 1. pty_spawn
       case 'pty_spawn': {
-        const { cols = 80, rows = 24, cwd = '/workspace', shell = '/bin/zsh' } = args;
+        const { cols = 80, rows = 24, shell = '/bin/zsh' } = args;
+        // `null` is how the store says "backend, you decide" — the real one
+        // then uses the open folder. A default parameter only covers
+        // `undefined`, so a null used to become the session's cwd, and the
+        // first `ls` or `cd` in that terminal threw on it.
+        const cwd = args.cwd ?? this.root ?? '/workspace';
         const sessionId = `pty-${this.sessionCounter++}`;
         const sessionInfo = {
           session_id: sessionId,
@@ -375,6 +380,9 @@ class BrowserMockBridge {
         if (!wanted.startsWith('/') && target !== root && !target.startsWith(`${root}/`)) {
           return false; // `..` out of the open folder, which `confine` refuses
         }
+        // Outside the virtual tree the mock knows two directories that every
+        // machine has: the filesystem root, and the home it reports.
+        if (target === '/' || target === this.systemInfo.home_dir) return true;
         return (
           this.directories.has(target)
           || [...this.files.keys()].some((f) => f.startsWith(target + '/'))

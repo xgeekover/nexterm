@@ -409,7 +409,71 @@ describe('Every new terminal follows the setting, however it is made', () => {
     });
   });
 
-  test('SET-20: teardown — leave the terminals disposed and nothing persisted', () => {
+  /**
+   * A mock backend whose shell cannot enter `locked` — a directory that exists,
+   * so `start_dir` accepts it, and that the spawn itself then refuses, as a
+   * real one does for a folder without execute permission.
+   */
+  async function withLockedDirectory(locked, fn) {
+    const original = mockBridge.invoke;
+    mockBridge.invoke = function (command, args, ...rest) {
+      if (command === 'pty_spawn' && args?.cwd === locked) {
+        return Promise.reject(new Error('Permission denied (os error 13)'));
+      }
+      return original.call(this, command, args, ...rest);
+    };
+    try {
+      await fn();
+    } finally {
+      mockBridge.invoke = original;
+    }
+  }
+
+  test('SET-21: a setting naming a directory the shell cannot enter still gives a terminal', async () => {
+    await freshStart();
+    await withSetting({ mode: 'custom', path: '/workspace/locked' }, async () => {
+      await withLockedDirectory('/workspace/locked', async () => {
+        const before = T.getState().tabs.length;
+        let created = null;
+        const { asked } = await spawnsDuring(async () => {
+          created = await T.getState().createTab();
+        });
+        assert.deepEqual(asked, ['/workspace/locked', null], 'tried the setting, then the default');
+        assert.ok(created, 'New Terminal gave nothing at all');
+        assert.equal(T.getState().tabs.length, before + 1);
+      });
+    });
+  });
+
+  test('SET-22: and a fresh start with that setting is not left without a terminal', async () => {
+    // Before the setting existed the first terminal always asked for the
+    // open folder, and could not fail this way.
+    await withSetting({ mode: 'custom', path: '/workspace/locked' }, async () => {
+      await withLockedDirectory('/workspace/locked', async () => {
+        const { asked } = await spawnsDuring(freshStart);
+        assert.deepEqual(asked, ['/workspace/locked', '/workspace']);
+        assert.equal(T.getState().tabs.length, 1, 'the app started with no terminal');
+        assert.equal(T.getState().isInitialized, true);
+      });
+    });
+  });
+
+  test('SET-23: the mock starts a terminal with no directory where the backend would', async () => {
+    // `null` is "backend, you decide". The mock took it as the directory
+    // itself, and the first `ls` in that terminal threw on it.
+    const session = await mockBridge.invoke('pty_spawn', { cols: 80, rows: 24, cwd: null });
+    assert.equal(session.cwd, '/workspace');
+    await mockBridge.invoke('pty_kill', { session_id: session.session_id });
+  });
+
+  test('SET-24: the mock and the backend agree on the directories every machine has', async () => {
+    for (const path of ['/', '/workspace/..', mockBridge.systemInfo.home_dir]) {
+      assert.equal(await mockBridge.invoke('fs_dir_exists', { path }), true, `${path} is a directory`);
+    }
+    assert.equal(await mockBridge.invoke('fs_dir_exists', { path: '/nowhere/at/all' }), false);
+  });
+
+  test('SET-25: teardown — leave the terminals disposed and nothing persisted', () => {
     T.getState().dispose();
     localStorage.removeItem(PERSIST_KEY);
   });
