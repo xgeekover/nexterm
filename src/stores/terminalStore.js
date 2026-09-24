@@ -876,6 +876,37 @@ const NOTIFICATION_LIMIT = 50;
 
 export const useTerminalStore = create((set, get) => {
   /**
+   * Where a new terminal starts, for EVERY way of making one: the directory
+   * asked for, else the `terminal.integrated.cwd` setting, else `null` for
+   * the backend's own fallback — see `resolveStartDir`. New Group and the
+   * first terminal of a fresh start used to decide for themselves, and never
+   * saw the setting.
+   *
+   * The home directory comes from the backend, which the status bar asks at
+   * startup in a race with the first terminal — a race the terminal can win.
+   * `resolveStartDir` then falls back rather than guess, and a `home` or
+   * `~/…` setting quietly opened somewhere else. So when the answer depends on
+   * the home directory and it has not arrived yet, it is asked for first.
+   * Whether it depends is put to `resolveStartDir` itself — does a different
+   * home give a different answer? — rather than restated here, and nothing
+   * else waits: the default `workspace` setting never costs a round trip.
+   */
+  const startDirFor = async (requested) => {
+    const settings = useSettingsStore.getState();
+    const input = {
+      requested,
+      mode: settings.terminalDefaultCwd,
+      customPath: settings.terminalDefaultCwdPath,
+      activeCwd: get().getActiveTab()?.cwd ?? null,
+    };
+    const resolveWith = (homeDir) => resolveStartDir({ ...input, homeDir });
+    if (!useSystemStore.getState().homeDir && resolveWith('/a') !== resolveWith('/b')) {
+      await useSystemStore.getState().init();
+    }
+    return resolveWith(useSystemStore.getState().homeDir);
+  };
+
+  /**
    * Spawn a PTY-backed tab and register it in `tabs`, WITHOUT placing it
    * anywhere in any group — callers decide where it goes. Keeping placement
    * out of tab creation is what makes two-level placement easy: `splitPane`
@@ -889,15 +920,8 @@ export const useTerminalStore = create((set, get) => {
       // setting decides, and `null` hands it back to the backend's own
       // fallback (open folder, then home). A directory that WAS asked for —
       // which is what restoring a session does for every terminal — wins over
-      // both. See `resolveStartDir`.
-      const settings = useSettingsStore.getState();
-      const startDir = resolveStartDir({
-        requested: cwd,
-        mode: settings.terminalDefaultCwd,
-        customPath: settings.terminalDefaultCwdPath,
-        homeDir: useSystemStore.getState().homeDir,
-        activeCwd: get().getActiveTab()?.cwd ?? null,
-      });
+      // both. See `startDirFor`.
+      const startDir = await startDirFor(cwd);
 
       const ptySession = await invoke('pty_spawn', {
         cols: 80,
@@ -1356,9 +1380,15 @@ export const useTerminalStore = create((set, get) => {
     /**
      * Create a new group with one terminal in it and switch to it.
      * Returns the new group (or null if the PTY could not be spawned).
+     *
+     * Without a `cwd` the terminal starts where the setting says, as New
+     * Terminal and Split do. It used to be handed the store's `cwd` — the
+     * active terminal's directory — as though that had been asked for, and an
+     * asked-for directory beats the setting, so New Group never saw it.
+     * Starting beside the active terminal is what the `active` setting is for.
      */
     createGroup: async ({ name = null, cwd = null } = {}) => {
-      const tab = await spawnTab(null, cwd || get().cwd);
+      const tab = await spawnTab(null, cwd);
       if (!tab) return null;
       const group = makeGroup({
         name: (typeof name === 'string' && name.trim()) || `Group ${get().groups.length + 1}`,
@@ -2199,10 +2229,14 @@ export const useTerminalStore = create((set, get) => {
           return;
         }
 
+        // Nothing asked for a directory, so the setting decides, as it does
+        // for every other new terminal. Where it has no answer this still asks
+        // for `rootPath`, as it always did — the open folder, or null with
+        // none open, which is where the backend's own fallback lands anyway.
         const ptySession = await invoke('pty_spawn', {
           cols: 80,
           rows: 24,
-          cwd: rootPath,
+          cwd: (await startDirFor(null)) ?? rootPath,
           shell: useSettingsStore.getState().terminalDefaultShell,
         });
 
