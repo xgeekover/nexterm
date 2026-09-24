@@ -84,15 +84,51 @@ const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { default: App } = await import('../../src/App.jsx');
 
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore];
+
+/**
+ * Every store as the app created it, taken before any case touches it.
+ *
+ * `reset` puts these back wholesale. It used to set a handful of keys and
+ * leave the rest to whichever case ran last, which went unnoticed only while
+ * no arranged state reached the render (see `renderArranged`): RN-11 hides
+ * every panel, and every case after it then rendered with no terminal at all.
+ */
+const PRISTINE = STORES.map((s) => ({ ...s.getState() }));
+
 const results = [];
 let failed = 0;
 
-/** Put the stores in a state, render the whole app, and expect no throw. */
-function scenario(id, description, arrange) {
+/**
+ * Render the app from the state a case arranged — which is not what a server
+ * render does on its own.
+ *
+ * zustand answers `renderToString` from the state each store was CREATED
+ * with (its `getServerSnapshot` is `getInitialState()`), never from what
+ * `setState` put there since. So every case here used to draw the empty
+ * startup state, whatever it arranged, and pass: the resume-offer cases found
+ * it by coming out with no offer on screen. Nothing in the app reads
+ * `getInitialState`, so pointing it at the arranged state changes what is
+ * drawn and nothing else.
+ */
+function renderArranged() {
+  for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+  return renderToString(React.createElement(App));
+}
+
+/**
+ * Put the stores in a state, render the whole app, and expect no throw.
+ *
+ * `check`, where a case has one, is handed the markup and throws when what
+ * the user should be reading is not in it. Not throwing only proves the tree
+ * drew; a banner can draw perfectly well and still say the wrong thing.
+ */
+function scenario(id, description, arrange, check) {
   const started = Date.now();
   try {
     arrange();
-    renderToString(React.createElement(App));
+    const html = renderArranged();
+    check?.(html);
     results.push({ id, description, ok: true, ms: Date.now() - started });
   } catch (err) {
     failed += 1;
@@ -125,6 +161,7 @@ const baseGroups = (tabIds) => [
 
 /** Back to a plain one-terminal workspace before each case. */
 function reset() {
+  STORES.forEach((s, i) => s.setState({ ...PRISTINE[i] }, true));
   useGitStore.setState({ status: null, isLoaded: false });
   useSettingsStore.getState().resetSettings();
   useSettingsStore.setState({ isCommandPaletteOpen: false, isSettingsModalOpen: false });
@@ -262,6 +299,129 @@ scenario('RN-12', 'a file open in the editor', () => {
     editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: ['e1'], activeTabId: 'e1' },
   });
 });
+
+// ---- Reading the markup back -----------------------------------------------
+
+/**
+ * The words a reader would see: tags out, entities back.
+ *
+ * `renderToString` puts `<!-- -->` between adjacent text nodes, so
+ * `Resume {label}?` comes out as `Resume <!-- -->Claude Code<!-- -->?`, and a
+ * plain `includes` on the markup misses text that is on the screen. `&amp;`
+ * goes last so an escaped entity is not decoded twice.
+ */
+function visibleText(html) {
+  return html
+    .replace(/<!-- -->/g, '')
+    .replace(/<[^>]*>/g, '\n')
+    .replace(/&#x27;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+/** Every `<button>` in the markup — enough to ask whether one is disabled and what its tooltip says. */
+function buttonsIn(html) {
+  return [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].map(([, attrs, inner]) => ({
+    text: visibleText(inner).trim(),
+    disabled: /\sdisabled=""/.test(attrs),
+    title: visibleText(/\stitle="([^"]*)"/.exec(attrs)?.[1] ?? ''),
+    label: /\saria-label="([^"]*)"/.exec(attrs)?.[1] ?? null,
+  }));
+}
+
+/** A failed expectation, worded as what went wrong on screen. */
+function expectThat(ok, wrong) {
+  if (!ok) throw new Error(wrong);
+}
+
+function expectText(html, words) {
+  expectThat(visibleText(html).includes(words), `rendered without ${JSON.stringify(words)}`);
+}
+
+/** The class list of the resume offer's own box, or null when it is not drawn. */
+function resumeBannerClass(html) {
+  return /<div\b[^>]*\sdata-agent-resume=""[^>]*\sclass="([^"]*)"/.exec(html)?.[1] ?? null;
+}
+
+/** A terminal restored from a workspace in which it was running an agent. */
+const offering = (agent, extra = {}) =>
+  tab('t1', { agent: { startedAt: Date.now() - 3 * 3600e3, ...agent }, agentResumeOffered: true, ...extra });
+
+const CLAUDE = { kind: 'claude', sessionId: 'd4bef4d0-c043-40ef-b157-640fb31ac0ea' };
+
+// ---- The offer to resume an agent -------------------------------------------
+
+scenario(
+  'RN-17',
+  'a restored terminal offers its Claude Code conversation back',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering(CLAUDE)] });
+  },
+  (html) => {
+    expectText(html, 'Resume Claude Code?');
+    // `startedAt` is when the agent was started; resuming never moves it, so
+    // "last used" was a claim nothing recorded.
+    expectText(html, 'Picks up the conversation this terminal had, started 3h ago.');
+    expectText(html, 'The terminal’s own scrollback is not restored.');
+    expectThat(!visibleText(html).includes('last used'), 'still says "last used"');
+    // Laid over the terminal it hid the prompt; it is a row above it now.
+    const cls = resumeBannerClass(html);
+    expectThat(cls !== null, 'the offer is not drawn');
+    expectThat(!/\babsolute\b/.test(cls), `the offer is positioned over the terminal again: "${cls}"`);
+    const resume = buttonsIn(html).find((b) => b.text === 'Resume');
+    expectThat(resume, 'no Resume button');
+    expectThat(!resume.disabled, 'Resume is disabled with nothing running');
+  }
+);
+
+scenario(
+  'RN-18',
+  'opencode is offered as the most recent conversation here, not as this one',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering({ kind: 'opencode', sessionId: null })] });
+  },
+  (html) => {
+    expectText(html, 'Resume opencode?');
+    // The time belongs to this terminal: the most recent conversation in the
+    // folder may be another terminal's.
+    expectText(
+      html,
+      'Picks up the most recent opencode conversation in this folder; opencode was started in this terminal 3h ago.'
+    );
+    expectThat(
+      !visibleText(html).includes('the conversation this terminal had'),
+      'promises opencode the exact conversation, which it cannot choose'
+    );
+  }
+);
+
+scenario(
+  'RN-19',
+  'the offer while a program is in the foreground — Resume waits, Dismiss does not',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering(CLAUDE, { running: true })] });
+  },
+  (html) => {
+    // Still offered: hiding it would look like the offer was gone for good.
+    expectText(html, 'Resume Claude Code?');
+    const buttons = buttonsIn(html);
+    const resume = buttons.find((b) => b.text === 'Resume');
+    expectThat(resume, 'Resume is hidden while running — it should be there, disabled');
+    expectThat(resume.disabled, 'Resume can be clicked while a program is running, and would type into it');
+    expectThat(
+      resume.title.includes('still running in this terminal') && resume.title.includes('Resume would type into it'),
+      `Resume's tooltip does not say why: ${JSON.stringify(resume.title)}`
+    );
+    const dismiss = buttons.find((b) => b.label === 'Dismiss');
+    expectThat(dismiss, 'no Dismiss button');
+    expectThat(!dismiss.disabled, 'Dismiss is disabled while running');
+  }
+);
 
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
