@@ -80,6 +80,29 @@ export function newSessionId() {
 }
 
 /**
+ * Exactly what `newSessionId` makes: a lowercase v4 UUID.
+ *
+ * This is the line between a saved workspace and a command line. The id is
+ * typed into a shell by `resumeCommand`, and it comes from a JSON file that
+ * anything can have written — a hand edit, another build, a sync tool.
+ * `serializeAgent` used to keep any string, so `x; curl … | sh` came back as
+ * `claude --resume x; curl … | sh`. Nothing but hex digits and dashes passes
+ * this, and nothing that could read as a flag.
+ *
+ * Uppercase is refused, though most parsers read it as the same UUID. This
+ * build never writes one, so it did not come from here, and the conversation
+ * is a file named after the id: whether the other case finds it depends on
+ * the CLI and the filesystem, which is not something an `exact` resume can
+ * promise. Refusing costs little — with no id the resume is `--continue`,
+ * and the banner says that is the most recent conversation, not this one.
+ */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function isSessionId(value) {
+  return typeof value === 'string' && SESSION_ID.test(value);
+}
+
+/**
  * The command that STARTS a conversation, and the agent record to remember.
  *
  * @returns {{ command: string, agent: { kind: string, sessionId: string|null, startedAt: number } }}
@@ -100,12 +123,16 @@ export function startCommand(kind) {
  *
  * Never `--session-id`: that flag creates, and creating an id that exists is
  * an error the CLI refuses.
+ *
+ * The id is checked here as well as in `serializeAgent`. This is exported,
+ * and a record handed to it without passing through there must not reach a
+ * shell either.
  */
 export function resumeCommand(agent) {
   if (!agent || !isKnownAgent(agent.kind)) return null;
   const { command, tracksSessionId } = AGENTS[agent.kind];
   if (tracksSessionId) {
-    return agent.sessionId ? `${command} --resume ${agent.sessionId}` : `${command} --continue`;
+    return isSessionId(agent.sessionId) ? `${command} --resume ${agent.sessionId}` : `${command} --continue`;
   }
   return `${command} --continue`;
 }
@@ -120,7 +147,9 @@ export function resumeCommand(agent) {
  */
 export function resumeCertainty(agent) {
   if (!agent || !isKnownAgent(agent.kind)) return null;
-  return AGENTS[agent.kind].tracksSessionId && agent.sessionId ? 'exact' : 'latest';
+  // The same test `resumeCommand` applies: an id it will not type is not a
+  // conversation this can promise to find.
+  return AGENTS[agent.kind].tracksSessionId && isSessionId(agent.sessionId) ? 'exact' : 'latest';
 }
 
 /** What to call the agent in the interface. */
@@ -133,13 +162,14 @@ export function agentLabel(kind) {
  *
  * Deliberately narrow: an old workspace has no `agent` at all and a future
  * one may have more, so anything unrecognised is dropped rather than carried
- * into a spawn.
+ * into a spawn. That includes a session id this build could not have made —
+ * see `isSessionId` — which becomes null and resumes with `--continue`.
  */
 export function serializeAgent(agent) {
   if (!agent || !isKnownAgent(agent.kind)) return null;
   return {
     kind: agent.kind,
-    sessionId: typeof agent.sessionId === 'string' ? agent.sessionId : null,
+    sessionId: isSessionId(agent.sessionId) ? agent.sessionId : null,
     startedAt: Number.isFinite(agent.startedAt) ? agent.startedAt : null,
   };
 }

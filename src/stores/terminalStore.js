@@ -505,8 +505,9 @@ function buildPersistedPayload(state) {
     groups: state.groups.map(serializeGroupForPersist),
     activeGroupId: state.activeGroupId,
     // `agent` rides along so a restored terminal can offer to pick the
-    // conversation back up. `serializeAgent` drops anything unrecognised, so
-    // a payload from another build cannot put a command on a shell.
+    // conversation back up. `serializeAgent` drops anything unrecognised — an
+    // unknown agent, a session id that is not a UUID — so a payload from
+    // another build cannot put a command on a shell.
     tabs: state.tabs.map((t) => ({
       id: t.id,
       title: t.title,
@@ -2548,11 +2549,17 @@ export const useTerminalStore = create((set, get) => {
      * Only ever the RESUME form: `claude` refuses `--session-id` for an id it
      * already has ("Session ID … is already in use"), so re-running the start
      * command would kill the terminal on every relaunch.
+     *
+     * Refused, with the offer kept, while a command is running. The text is
+     * typed, so it goes to whatever holds the terminal — quite possibly the
+     * agent itself, started by hand while the offer was still up — and not to
+     * a shell. `running` comes from shell integration (OSC 133); a shell
+     * without it never reports one and is typed into as before.
      */
     resumeAgent: async (tabId) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
-      if (!tab) return false;
+      if (!tab || tab.running) return false;
 
       const command = resumeCommand(tab.agent);
       // The offer goes away either way: an agent we no longer recognise is
