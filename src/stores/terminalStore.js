@@ -450,8 +450,9 @@ function settle(state, patch = {}) {
 // We persist only what can be meaningfully restored: every group (id, name,
 // creation time, its split tree's shape — pane ids, tab order, each pane's
 // active tab, each split's direction and `sizes`) plus each tab's
-// `title`/`cwd`. PTY sessions and scrollback are process state and cannot
-// survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
+// `title`/`cwd` and the agent it was running. PTY sessions and scrollback are
+// process state and cannot survive a relaunch — `init()` spawns a *fresh* PTY
+// per saved tab.
 export const PERSIST_KEY = 'nexterm.terminal.workspace';
 /** The pre-upgrade payload, kept once so a failed migration is recoverable. */
 export const PERSIST_BACKUP_KEY = 'nexterm.terminal.workspace.v1.bak';
@@ -2624,16 +2625,31 @@ export const useTerminalStore = create((set, get) => {
 // `groups` is compared BY REFERENCE, and every group write rebuilds that array
 // (see `updateGroup` / `settle`) — a mutation deep inside a group, including
 // one in a group that is NOT on screen, therefore still schedules a save.
+// That reference check is only a shortcut past the key below, so it has to
+// name every slice of state `buildPersistedPayload` reads.
 /**
- * What the persisted payload is actually made of. Comparing `state.tabs` by
- * reference used to schedule a save on every `pty-output` chunk — the array is
- * rebuilt per chunk, but none of the persisted FIELDS change — which is what
- * kept the debounce permanently reset.
+ * The payload itself, as text: whether anything worth saving changed is asked
+ * of exactly what would be saved.
+ *
+ * Comparing `state.tabs` by reference used to schedule a save on every
+ * `pty-output` chunk — the array is rebuilt per chunk, but none of the
+ * persisted FIELDS change — which is what kept the debounce permanently reset.
+ * The cure for that was a fingerprint kept by hand beside the payload, and
+ * the two drifted apart: `agent` went into the payload and never into the
+ * fingerprint, so starting an agent or dismissing the offer to resume one
+ * scheduled no save at all, and the record the resume offer is built from
+ * never reached disk. A field added to the payload is now compared here
+ * without anyone having to remember it.
+ *
+ * It runs on every change to `tabs` or `groups` — once per output chunk while
+ * a palette command is running, once per command start and finish, once per
+ * settled resize. For 16 terminals in 4 groups that is under 4 KB of JSON and
+ * about 5µs, measured; the fingerprint it replaces already stringified every
+ * group's tree and took about 3µs. Scrollback is not in the payload, so a
+ * busy terminal does not make it any dearer.
  */
 function persistKeyOf(state) {
-  return `${state.workspaceName}|${state.activeGroupId}|${state.groups
-    .map((g) => `${g.id}:${g.name}:${JSON.stringify(serializeTreeForPersist(g.tree))}:${g.activePaneId}`)
-    .join(';')}|${state.tabs.map((t) => `${t.id}:${t.title}:${t.cwd}`).join(';')}`;
+  return JSON.stringify(buildPersistedPayload(state));
 }
 
 let lastPersistKey = null;
