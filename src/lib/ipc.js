@@ -361,13 +361,20 @@ class BrowserMockBridge {
       case 'fs_pick_root': {
         return null; // no native dialog in the browser mock
       }
-      // Unconfined in the real backend too: it answers "can a terminal start
-      // here?" about a path the user typed, and that path is allowed to sit
-      // outside the open folder. The mock has one virtual root, so anything
-      // under it is a directory and nothing else is.
+      // The real command asks `Workspace::start_dir` — the question a new
+      // terminal asks — so it reads a path the way the spawn will: an absolute
+      // one as it stands, even outside the open folder, and a relative one
+      // inside the open folder and nowhere else. The mock's open folder is the
+      // one `fs_set_root` last opened, else the virtual root `fs_get_root`
+      // reports.
       case 'fs_dir_exists': {
-        const target = normalizePath(args?.path ?? '');
-        if (!target) return false;
+        const wanted = String(args?.path ?? '').trim();
+        if (!wanted) return false;
+        const root = this.root ?? '/workspace';
+        const target = resolvePath(root, wanted);
+        if (!wanted.startsWith('/') && target !== root && !target.startsWith(`${root}/`)) {
+          return false; // `..` out of the open folder, which `confine` refuses
+        }
         return (
           this.directories.has(target)
           || [...this.files.keys()].some((f) => f.startsWith(target + '/'))

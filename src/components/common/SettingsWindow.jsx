@@ -221,7 +221,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         if (!wanted) return 'Type a directory, or choose another option above.';
         try {
           const ok = await invoke('fs_dir_exists', { path: expandHome(wanted, homeDir) });
-          return ok ? null : 'No directory there. New terminals will fall back to the workspace root.';
+          return ok ? null : 'No directory there. New terminals will fall back to the workspace root, or your home directory if no folder is open.';
         } catch {
           return null; // cannot check right now; do not cry wolf
         }

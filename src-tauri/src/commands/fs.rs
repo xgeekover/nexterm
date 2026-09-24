@@ -68,22 +68,31 @@ pub fn fs_search(
     )
 }
 
-/// Whether `path` names a directory that exists.
+/// Whether a terminal asked to start in `path` would start there — the one
+/// question the Settings field for a custom directory needs answered. It goes
+/// through `Workspace::can_start_in`, which asks `start_dir`: the same
+/// function `spawn_dir` asks for every new terminal, so the check and the
+/// spawn cannot disagree.
 ///
-/// **Deliberately not confined**, and the only command here that is not. It
-/// answers one question about a path the user has just typed into Settings —
-/// "will a terminal be able to start there?" — and a directory the terminal
-/// may start in is by design allowed to sit outside the open folder (see
-/// `Workspace::start_dir`). Confining this would refuse exactly the paths it
-/// exists to check.
+/// They did in v0.6.0, when this called `Path::is_dir` on its own. That reads
+/// a relative path against the process's working directory — `/` when the
+/// Finder starts the app, the program folder on Windows — while the spawn
+/// reads it inside the open folder. `src` was reported missing although a
+/// terminal would have opened in `<open folder>/src`, and `Users` passed
+/// although the terminal would have fallen back.
+///
+/// So it is exactly as confined as `spawn_dir`. An absolute path is not
+/// confined at all: a shell can `cd` anywhere the moment it exists, so its
+/// starting directory guards nothing, and refusing one here would refuse the
+/// very paths this exists to check. A relative path means inside the open
+/// folder, and with no folder open it means nothing, so the answer is `false`.
 ///
 /// It reveals whether a directory exists and nothing about its contents; the
 /// webview can already ask `pty_spawn` to run any executable, so this is not
 /// a boundary that was holding anything.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn fs_dir_exists(path: String) -> bool {
-    let trimmed = path.trim();
-    !trimmed.is_empty() && std::path::Path::new(trimmed).is_dir()
+pub fn fs_dir_exists(state: State<AppState>, path: String) -> bool {
+    state.workspace.can_start_in(&path)
 }
 
 /// The open folder, or `null` until one has been opened.
@@ -223,6 +232,7 @@ mod dispatch_tests {
         "fs_delete_path",
         "fs_set_root",
         "fs_pick_root",
+        "fs_dir_exists",
     ];
 
     fn source() -> String {

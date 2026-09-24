@@ -365,6 +365,16 @@ impl Workspace {
             .unwrap_or_else(home_dir)
     }
 
+    /// Whether a terminal asked to start in `requested` would start there
+    /// rather than fall back — what the Settings check (`fs_dir_exists`)
+    /// reports about a path the user has typed.
+    ///
+    /// It is `start_dir` and nothing more, so the check cannot drift from the
+    /// spawn; `fs_dir_exists` tells how it did while it had logic of its own.
+    pub fn can_start_in(&self, requested: &str) -> bool {
+        self.start_dir(requested).is_some()
+    }
+
     /// The requested directory, if a terminal can start there.
     ///
     /// This is the one path into the backend that is NOT confined to the open
@@ -599,6 +609,106 @@ mod confine_tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    // The Settings check for a custom directory (`fs_dir_exists`) asks
+    // `can_start_in`, and a new terminal asks `spawn_dir`. Each case below
+    // puts the check's answer next to where a terminal really starts, for
+    // every kind of path the field can be given.
+
+    #[test]
+    fn a_relative_path_means_inside_the_open_folder() {
+        let root = temp_root("check-relative");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        // `inner` is under the open folder and not beside the tests, so
+        // reading it against the working directory would have said no.
+        assert!(!Path::new("inner").exists(), "premise: no ./inner where the tests run");
+        assert!(workspace.can_start_in("inner"), "the check says yes");
+        assert_eq!(workspace.spawn_dir(Some("inner")), root.join("inner"), "and a terminal starts there");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_relative_path_never_means_the_process_working_directory() {
+        // cargo runs a crate's tests from the crate root, where `src` is. The
+        // app runs from wherever it was launched; neither is the open folder.
+        assert!(Path::new("src").is_dir(), "premise: the tests run from the crate root");
+        let root = temp_root("check-cwd");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        assert!(!workspace.can_start_in("src"), "src is beside the tests, not in the open folder");
+        assert_eq!(workspace.spawn_dir(Some("src")), root, "and a terminal would fall back");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_absolute_directory_outside_the_open_folder_is_somewhere_to_start() {
+        let root = temp_root("check-absolute-root");
+        let elsewhere = temp_root("check-absolute-elsewhere");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        let path = elsewhere.to_string_lossy();
+        assert!(workspace.can_start_in(&path), "outside the folder is not refused");
+        assert_eq!(workspace.spawn_dir(Some(&path)), elsewhere, "and a terminal starts there");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    /// `confine` reads a blank path as the open folder itself. `start_dir`
+    /// does not, and neither may the check.
+    #[test]
+    fn a_blank_path_is_nowhere_to_start_even_with_a_folder_open() {
+        let root = temp_root("check-blank");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        for blank in ["", " ", "\t", " \n "] {
+            assert!(!workspace.can_start_in(blank), "{blank:?} passed the check");
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_is_nowhere_to_start() {
+        let root = temp_root("check-file");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        let file = root.join("inner").join("file.txt");
+        assert!(file.is_file(), "premise: the file is there");
+        let path = file.to_string_lossy();
+        assert!(!workspace.can_start_in(&path), "an absolute path to a file");
+        assert_eq!(workspace.spawn_dir(Some(&path)), root, "a terminal falls back");
+        assert!(!workspace.can_start_in("inner/file.txt"), "nor a relative one");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// With no folder open a relative path has nothing to be relative to, so
+    /// a terminal asked for one starts at home — and the check has to say so
+    /// rather than find the path beside the process.
+    #[test]
+    fn with_no_folder_open_a_relative_path_is_nowhere_to_start() {
+        assert!(Path::new("src").is_dir(), "premise: the tests run from the crate root");
+        let workspace = Workspace::new();
+
+        for relative in ["src", "."] {
+            assert!(!workspace.can_start_in(relative), "{relative:?} passed with no folder open");
+            assert_eq!(workspace.spawn_dir(Some(relative)), home_dir(), "{relative:?} falls back home");
+        }
+
+        // An absolute path still passes: restoring a session with no folder
+        // open is exactly that case.
+        let temp = std::env::temp_dir().canonical().unwrap();
+        assert!(workspace.can_start_in(&temp.to_string_lossy()));
     }
 
     fn temp_store(tag: &str) -> PathBuf {
