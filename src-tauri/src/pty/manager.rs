@@ -314,7 +314,7 @@ impl PtyManager {
         let sessions_map_clone = self.sessions.clone();
         let session_weak = Arc::downgrade(&session);
 
-        thread::Builder::new()
+        let reader_thread = thread::Builder::new()
             .name(format!("pty-reader-{session_id}"))
             .spawn(move || {
                 let mut buf = [0u8; 4096];
@@ -432,8 +432,16 @@ impl PtyManager {
                 let _ = app_handle_clone.emit("pty-exit", &exit_payload);
 
                 sessions_map_clone.lock().remove(&session_id_clone);
-            })
-            .map_err(|e| format!("Failed to spawn PTY reader thread: {e}"))?;
+            });
+        if let Err(e) = reader_thread {
+            // The session is already in the map, and without a reader it is a
+            // live shell nothing can see and nothing will reap until the next
+            // reload. The caller gets an error and may well try again — the
+            // frontend retries a failed spawn once, at the default directory
+            // — so leaving it here would leak one shell per attempt.
+            let _ = self.kill(&session_id);
+            return Err(format!("Failed to spawn PTY reader thread: {e}"));
+        }
 
         Ok(PtySessionInfo {
             id: session_id.clone(),
