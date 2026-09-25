@@ -8,7 +8,8 @@ import { notifyTerminal } from '../lib/terminalNotice.js';
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
 import { useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
-import { notificationFor } from '../lib/tabActivity.js';
+import { notificationFor, submitsLine } from '../lib/tabActivity.js';
+import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir } from '../lib/terminalCwd.js';
 import { resumeCommand, serializeAgent, startCommand } from '../lib/agents.js';
@@ -799,6 +800,30 @@ function regeneratePaneIds(node, idMap = new Map()) {
 
 let unlisteners = [];
 let listening = false;
+
+/**
+ * How long a submitted line may go unanswered before it counts as a running
+ * command, where that inference is made at all (see `noteSubmittedLine`).
+ *
+ * Long enough that a line the shell answers at once — an empty Enter, a
+ * builtin — is answered first and never flickers as running; short enough
+ * that nobody reaches the Resume button inside it.
+ */
+export const SUBMIT_GRACE_MS = 300;
+
+/**
+ * Whether a submitted line is taken as a running command before OSC 133 "C"
+ * says so. Only on Windows, where ConPTY can hold the C back; see
+ * `noteSubmittedLine`.
+ */
+let submitInfersRunning = isWindows;
+
+/** Test hook: scope `noteSubmittedLine` to a platform. Returns what it replaced. */
+export function __setSubmitInfersRunning(on) {
+  const previous = submitInfersRunning;
+  submitInfersRunning = Boolean(on);
+  return previous;
+}
 
 /**
  * True for the auto-generated `Terminal N` names.
@@ -2050,7 +2075,17 @@ export const useTerminalStore = create((set, get) => {
               (useSettingsStore.getState().terminalNotifyAfterSeconds ?? 0) * 1000
             );
             if (note) raised.push(note);
-            tab = { ...tab, lastExitCode: code, running: false, runStartedAt: null };
+            tab = {
+              ...tab,
+              lastExitCode: code,
+              running: false,
+              runStartedAt: null,
+              // That this shell reports ends at all, and how many it has —
+              // what `noteSubmittedLine` needs before guessing that a line
+              // it has not answered is still running.
+              commandEndSession: session_id,
+              commandEnds: (tab.commandEnds ?? 0) + 1,
+            };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
@@ -2576,8 +2611,10 @@ export const useTerminalStore = create((set, get) => {
      * Refused, with the offer kept, while a command is running. The text is
      * typed, so it goes to whatever holds the terminal — quite possibly the
      * agent itself, started by hand while the offer was still up — and not to
-     * a shell. `running` comes from shell integration (OSC 133); a shell
-     * without it never reports one and is typed into as before.
+     * a shell. `running` comes from shell integration (OSC 133), or on Windows
+     * from a submitted line the shell has not answered (`noteSubmittedLine`);
+     * a shell without integration never reports one and is typed into as
+     * before.
      */
     resumeAgent: async (tabId) => {
       const targetId = tabId || get().activeTabId;
@@ -2609,8 +2646,12 @@ export const useTerminalStore = create((set, get) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      // Both taken before the write: the shell's answer can arrive before
+      // `invoke` resolves, and it must still count as an answer to this line.
+      const submitted = { at: Date.now(), endsBefore: tab.commandEnds ?? 0 };
       try {
         await invoke('pty_write', { session_id: tab.sessionId, data });
+        if (submitsLine(data)) get().noteSubmittedLine(targetId, submitted);
       } catch (err) {
         // The backend refuses input the tty would silently discard — a paste
         // longer than one canonical-mode line, which the kernel drops whole.
@@ -2621,6 +2662,52 @@ export const useTerminalStore = create((set, get) => {
           console.error('[TerminalStore] Raw write failed:', err);
         }
       }
+    },
+
+    /**
+     * A line was just sent to the shell. On Windows, count it as a running
+     * command unless the shell answers first.
+     *
+     * `running` comes from OSC 133 "C". ConPTY (seen on Windows 10 19045)
+     * forwards an escape sequence that changes nothing on screen only with the
+     * next frame that does, and C is such a sequence. For the first command of
+     * a PowerShell session it is written after the frame carrying the Enter has
+     * already gone, so it arrived with the next prompt, beside D: the terminal
+     * read as idle for the whole run, and Resume typed into whatever was
+     * running. That is the very case the guard is for — a restored terminal
+     * where something is started before the offer is taken.
+     *
+     * So a line the shell has not answered within SUBMIT_GRACE_MS counts as a
+     * command that started when it was submitted. A C arriving later changes
+     * nothing (`running` is already set) and D ends it as usual. Only:
+     *
+     * - for a session that has sent D at least once. cmd, fish and sh send
+     *   none, and nothing would ever clear a `running` guessed for them.
+     * - on Windows. Elsewhere C arrives on time, and a continuation line
+     *   (`for …` + Enter) that the shell is still waiting on would read as busy.
+     */
+    noteSubmittedLine: (tabId, { at = Date.now(), endsBefore } = {}) => {
+      if (!submitInfersRunning) return;
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab || tab.running || tab.exited || tab.commandEndSession !== tab.sessionId) return;
+      const sessionId = tab.sessionId;
+      const ends = endsBefore ?? tab.commandEnds ?? 0;
+      setTimeout(() => {
+        set((state) => {
+          let changed = false;
+          const tabs = state.tabs.map((t) => {
+            if (t.id !== tabId || t.sessionId !== sessionId || t.running || t.exited) return t;
+            // A D since the line went out: the shell answered it, so it was
+            // a prompt (or a command already over), not one still running.
+            // Counted rather than timed — a clock cannot order two events
+            // in the same millisecond.
+            if ((t.commandEnds ?? 0) !== ends) return t;
+            changed = true;
+            return { ...t, running: true, runStartedAt: at, lastExitCode: null };
+          });
+          return changed ? { tabs } : state;
+        });
+      }, SUBMIT_GRACE_MS);
     },
 
     // Keep the backend PTY's window size in step with the pane (debounced by the caller).

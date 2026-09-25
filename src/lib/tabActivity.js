@@ -117,6 +117,20 @@ export function notificationFor(tab, exitCode, activeTabId, afterMs, now = Date.
   };
 }
 
+/**
+ * Whether `data`, written to a terminal, asks the shell to run a line.
+ *
+ * The Enter key and a command the app types (`startAgent`, `resumeAgent`) both
+ * end in "\r". Two things that also contain one run nothing: a bracketed paste,
+ * which the shell holds until the user presses Enter, and Alt+Enter ("\x1b\r"),
+ * which PSReadLine takes as a newline inside the line being edited. Neither the
+ * Enter key nor anything the app types contains an escape, so any input that
+ * does is not a submitted line.
+ */
+export function submitsLine(data) {
+  return typeof data === 'string' && data.endsWith('\r') && !data.includes('\x1b');
+}
+
 /** "4m 12s", "38s" — a duration as a person would say it. */
 export function durationLabel(ms) {
   const seconds = Math.max(0, Math.round((ms || 0) / 1000));
@@ -128,4 +142,4 @@ export function durationLabel(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export default { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, durationLabel };
+export default { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, submitsLine, durationLabel };
