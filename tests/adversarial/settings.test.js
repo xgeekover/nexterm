@@ -8,7 +8,20 @@
  */
 import { describe, test, beforeEach, assert, afterEach} from '../e2e/harness/testFramework.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
+import { useSystemStore } from '../../src/stores/systemStore.js';
+import { useTerminalStore as T, PERSIST_KEY } from '../../src/stores/terminalStore.js';
+import { mockBridge } from '../../src/lib/ipc.js';
 import { resolveStartDir } from '../../src/lib/terminalCwd.js';
+
+if (!globalThis.localStorage) {
+  const backing = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => backing.set(k, String(v)),
+    removeItem: (k) => backing.delete(k),
+    clear: () => backing.clear(),
+  };
+}
 
 const S = useSettingsStore;
 
@@ -254,5 +267,214 @@ describe('Where a new terminal starts', () => {
       resolveStartDir({ mode: 'custom', customPath: '~\\proj', homeDir: 'C:\\Users\\dev' }),
       'C:\\Users\\dev\\proj'
     );
+  });
+});
+
+describe('Every new terminal follows the setting, however it is made', () => {
+  // SET-10..13 hold the rule; these hold the store to it. v0.6.0 applied the
+  // setting inside `spawnTab`, and two ways of making a terminal went around
+  // it: New Group handed `spawnTab` the active terminal's directory as though
+  // it had been asked for — and an asked-for directory wins — and the first
+  // terminal of a fresh start was spawned at the workspace root directly.
+  // With a custom directory set, New Terminal and Split opened there and New
+  // Group did not.
+  const HOME = '/Users/dev';
+  const settings = () => useSettingsStore.getState();
+
+  /** Run `fn` with the setting in place, and put everything back afterwards. */
+  async function withSetting({ mode, path = '', homeDir = HOME }, fn) {
+    const before = {
+      mode: settings().terminalDefaultCwd,
+      path: settings().terminalDefaultCwdPath,
+      system: useSystemStore.getState(),
+    };
+    settings().setSetting('terminalDefaultCwd', mode);
+    settings().setSetting('terminalDefaultCwdPath', path);
+    // `homeDir: null` is a backend that has not answered yet.
+    useSystemStore.setState({ homeDir, isLoaded: homeDir !== null });
+    try {
+      await fn();
+    } finally {
+      settings().setSetting('terminalDefaultCwd', before.mode);
+      settings().setSetting('terminalDefaultCwdPath', before.path);
+      useSystemStore.setState(before.system, true);
+    }
+  }
+
+  /** The directory each new shell asked for while `fn` ran, and every command sent. */
+  async function spawnsDuring(fn) {
+    const original = mockBridge.invoke;
+    const sent = [];
+    mockBridge.invoke = function (command, args, ...rest) {
+      sent.push({ command, args });
+      return original.call(this, command, args, ...rest);
+    };
+    try {
+      await fn();
+    } finally {
+      mockBridge.invoke = original;
+    }
+    return {
+      asked: sent.filter((c) => c.command === 'pty_spawn').map((c) => c.args?.cwd ?? null),
+      commands: sent.map((c) => c.command),
+    };
+  }
+
+  /** A launch with nothing saved, so the bootstrap spawns the first terminal itself. */
+  async function freshStart() {
+    T.getState().dispose();
+    localStorage.removeItem(PERSIST_KEY);
+    T.setState({ tabs: [], activeTabId: null, isInitialized: false });
+    await T.getState().init();
+  }
+
+  /** Move the active terminal where no setting points, so copying it would show. */
+  async function wanderOff() {
+    const tab = T.getState().getActiveTab();
+    await mockBridge.emit('pty-cwd', { session_id: tab.sessionId, cwd: '/workspace/tests' });
+  }
+
+  test('SET-14: New Group starts at home when the setting says home', async () => {
+    await freshStart();
+    await wanderOff();
+    await withSetting({ mode: 'home' }, async () => {
+      const { asked } = await spawnsDuring(() => T.getState().createGroup({ name: 'Home' }));
+      assert.deepEqual(asked, [HOME], "New Group started in the active terminal's directory instead");
+      assert.equal(T.getState().getActiveTab().cwd, HOME);
+    });
+  });
+
+  test('SET-15: a directory handed to New Group still beats the setting', async () => {
+    await freshStart();
+    for (const mode of ['workspace', 'home', 'active', 'custom']) {
+      await withSetting({ mode, path: '/workspace/tests' }, async () => {
+        const { asked } = await spawnsDuring(() => T.getState().createGroup({ cwd: '/workspace/src' }));
+        assert.deepEqual(asked, ['/workspace/src'], `mode "${mode}" overruled a directory that was asked for`);
+      });
+    }
+  });
+
+  test('SET-16: under the default setting New Group starts where New Terminal does, not beside the active terminal', async () => {
+    // A change, and a deliberate one: New Group used to open in the active
+    // terminal's directory under every setting.
+    await freshStart();
+    await wanderOff();
+    await withSetting({ mode: 'workspace' }, async () => {
+      const { asked } = await spawnsDuring(async () => {
+        await T.getState().createTab();
+        await T.getState().createGroup();
+      });
+      // null is "backend, you decide" — the open folder, then home.
+      assert.deepEqual(asked, [null, null], 'New Terminal and New Group disagree about where to start');
+    });
+
+    // Starting beside the active terminal is still there, as its own setting.
+    await wanderOff();
+    await withSetting({ mode: 'active' }, async () => {
+      const { asked } = await spawnsDuring(() => T.getState().createGroup());
+      assert.deepEqual(asked, ['/workspace/tests']);
+    });
+  });
+
+  test('SET-17: the first terminal of a fresh start opens where the setting says', async () => {
+    await withSetting({ mode: 'custom', path: '/workspace/src' }, async () => {
+      const { asked } = await spawnsDuring(freshStart);
+      assert.deepEqual(asked, ['/workspace/src'], 'the first terminal ignored the setting');
+      assert.equal(T.getState().tabs[0].cwd, '/workspace/src');
+    });
+  });
+
+  test('SET-18: under the default setting a fresh start asks for exactly what it always did', async () => {
+    // Nothing more, either: with the home directory not known yet, the
+    // default setting must not wait on a round trip it has no use for.
+    await withSetting({ mode: 'workspace', homeDir: null }, async () => {
+      const { asked, commands } = await spawnsDuring(freshStart);
+      assert.deepEqual(asked, ['/workspace'], 'the workspace root, as the bootstrap always asked');
+      assert.equal(commands.includes('system_get_info'), false, 'waited on the home directory for nothing');
+    });
+  });
+
+  test('SET-19: a fresh start that needs the home directory waits for it instead of falling back', async () => {
+    // The status bar asks for the home directory at startup, racing the first
+    // terminal. Losing that race used to put a `home` terminal in the
+    // workspace root, with nothing to say why.
+    const home = mockBridge.systemInfo.home_dir;
+    await withSetting({ mode: 'home', homeDir: null }, async () => {
+      const { asked } = await spawnsDuring(freshStart);
+      assert.deepEqual(asked, [home]);
+    });
+    await withSetting({ mode: 'custom', path: '~/projects', homeDir: null }, async () => {
+      const { asked } = await spawnsDuring(freshStart);
+      assert.deepEqual(asked, [`${home}/projects`]);
+    });
+  });
+
+  /**
+   * A mock backend whose shell cannot enter `locked` — a directory that exists,
+   * so `start_dir` accepts it, and that the spawn itself then refuses, as a
+   * real one does for a folder without execute permission.
+   */
+  async function withLockedDirectory(locked, fn) {
+    const original = mockBridge.invoke;
+    mockBridge.invoke = function (command, args, ...rest) {
+      if (command === 'pty_spawn' && args?.cwd === locked) {
+        return Promise.reject(new Error('Permission denied (os error 13)'));
+      }
+      return original.call(this, command, args, ...rest);
+    };
+    try {
+      await fn();
+    } finally {
+      mockBridge.invoke = original;
+    }
+  }
+
+  test('SET-21: a setting naming a directory the shell cannot enter still gives a terminal', async () => {
+    await freshStart();
+    await withSetting({ mode: 'custom', path: '/workspace/locked' }, async () => {
+      await withLockedDirectory('/workspace/locked', async () => {
+        const before = T.getState().tabs.length;
+        let created = null;
+        const { asked } = await spawnsDuring(async () => {
+          created = await T.getState().createTab();
+        });
+        assert.deepEqual(asked, ['/workspace/locked', null], 'tried the setting, then the default');
+        assert.ok(created, 'New Terminal gave nothing at all');
+        assert.equal(T.getState().tabs.length, before + 1);
+      });
+    });
+  });
+
+  test('SET-22: and a fresh start with that setting is not left without a terminal', async () => {
+    // Before the setting existed the first terminal always asked for the
+    // open folder, and could not fail this way.
+    await withSetting({ mode: 'custom', path: '/workspace/locked' }, async () => {
+      await withLockedDirectory('/workspace/locked', async () => {
+        const { asked } = await spawnsDuring(freshStart);
+        assert.deepEqual(asked, ['/workspace/locked', '/workspace']);
+        assert.equal(T.getState().tabs.length, 1, 'the app started with no terminal');
+        assert.equal(T.getState().isInitialized, true);
+      });
+    });
+  });
+
+  test('SET-23: the mock starts a terminal with no directory where the backend would', async () => {
+    // `null` is "backend, you decide". The mock took it as the directory
+    // itself, and the first `ls` in that terminal threw on it.
+    const session = await mockBridge.invoke('pty_spawn', { cols: 80, rows: 24, cwd: null });
+    assert.equal(session.cwd, '/workspace');
+    await mockBridge.invoke('pty_kill', { session_id: session.session_id });
+  });
+
+  test('SET-24: the mock and the backend agree on the directories every machine has', async () => {
+    for (const path of ['/', '/workspace/..', mockBridge.systemInfo.home_dir]) {
+      assert.equal(await mockBridge.invoke('fs_dir_exists', { path }), true, `${path} is a directory`);
+    }
+    assert.equal(await mockBridge.invoke('fs_dir_exists', { path: '/nowhere/at/all' }), false);
+  });
+
+  test('SET-25: teardown — leave the terminals disposed and nothing persisted', () => {
+    T.getState().dispose();
+    localStorage.removeItem(PERSIST_KEY);
   });
 });

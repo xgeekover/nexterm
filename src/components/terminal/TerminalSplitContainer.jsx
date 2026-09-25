@@ -580,14 +580,22 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
       {/* Live terminal surface — also the drop target */}
       <div data-pane-body={paneId} className="relative flex-1 overflow-hidden">
         {boundTab ? (
-          <>
-            <TerminalView tabId={boundTab.id} active={isActivePane} />
+          // The resume offer is a row of its own ABOVE the terminal. Laid over
+          // it, it hid the first three rows — exactly where a freshly restored
+          // shell prints its prompt. The terminal gets the rest; TerminalView's
+          // ResizeObserver refits the xterm (and tells the shell) when the
+          // offer appears and when it goes. `data-pane-body` stays on the
+          // outer box, so the banner still counts as part of the drop target.
+          <div className="flex flex-col h-full">
             <AgentResumeBanner
               tab={boundTab}
               onResume={() => resumeAgent(boundTab.id)}
               onDismiss={() => dismissAgentResume(boundTab.id)}
             />
-          </>
+            <div className="relative flex-1 min-h-0">
+              <TerminalView tabId={boundTab.id} active={isActivePane} />
+            </div>
+          </div>
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none">
             <p className="m-0">No terminal in this pane</p>

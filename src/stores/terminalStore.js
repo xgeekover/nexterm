@@ -8,7 +8,8 @@ import { notifyTerminal } from '../lib/terminalNotice.js';
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
 import { useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
-import { notificationFor } from '../lib/tabActivity.js';
+import { notificationFor, submitsLine } from '../lib/tabActivity.js';
+import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir } from '../lib/terminalCwd.js';
 import { resumeCommand, serializeAgent, startCommand } from '../lib/agents.js';
@@ -450,8 +451,9 @@ function settle(state, patch = {}) {
 // We persist only what can be meaningfully restored: every group (id, name,
 // creation time, its split tree's shape — pane ids, tab order, each pane's
 // active tab, each split's direction and `sizes`) plus each tab's
-// `title`/`cwd`. PTY sessions and scrollback are process state and cannot
-// survive a relaunch — `init()` spawns a *fresh* PTY per saved tab.
+// `title`/`cwd` and the agent it was running. PTY sessions and scrollback are
+// process state and cannot survive a relaunch — `init()` spawns a *fresh* PTY
+// per saved tab.
 export const PERSIST_KEY = 'nexterm.terminal.workspace';
 /** The pre-upgrade payload, kept once so a failed migration is recoverable. */
 export const PERSIST_BACKUP_KEY = 'nexterm.terminal.workspace.v1.bak';
@@ -504,8 +506,9 @@ function buildPersistedPayload(state) {
     groups: state.groups.map(serializeGroupForPersist),
     activeGroupId: state.activeGroupId,
     // `agent` rides along so a restored terminal can offer to pick the
-    // conversation back up. `serializeAgent` drops anything unrecognised, so
-    // a payload from another build cannot put a command on a shell.
+    // conversation back up. `serializeAgent` drops anything unrecognised — an
+    // unknown agent, a session id that is not a UUID — so a payload from
+    // another build cannot put a command on a shell.
     tabs: state.tabs.map((t) => ({
       id: t.id,
       title: t.title,
@@ -799,6 +802,30 @@ let unlisteners = [];
 let listening = false;
 
 /**
+ * How long a submitted line may go unanswered before it counts as a running
+ * command, where that inference is made at all (see `noteSubmittedLine`).
+ *
+ * Long enough that a line the shell answers at once — an empty Enter, a
+ * builtin — is answered first and never flickers as running; short enough
+ * that nobody reaches the Resume button inside it.
+ */
+export const SUBMIT_GRACE_MS = 300;
+
+/**
+ * Whether a submitted line is taken as a running command before OSC 133 "C"
+ * says so. Only on Windows, where ConPTY can hold the C back; see
+ * `noteSubmittedLine`.
+ */
+let submitInfersRunning = isWindows;
+
+/** Test hook: scope `noteSubmittedLine` to a platform. Returns what it replaced. */
+export function __setSubmitInfersRunning(on) {
+  const previous = submitInfersRunning;
+  submitInfersRunning = Boolean(on);
+  return previous;
+}
+
+/**
  * True for the auto-generated `Terminal N` names.
  *
  * The distinction matters wherever a title is handed in rather than chosen: a
@@ -875,6 +902,37 @@ const NOTIFICATION_LIMIT = 50;
 
 export const useTerminalStore = create((set, get) => {
   /**
+   * Where a new terminal starts, for EVERY way of making one: the directory
+   * asked for, else the `terminal.integrated.cwd` setting, else `null` for
+   * the backend's own fallback — see `resolveStartDir`. New Group and the
+   * first terminal of a fresh start used to decide for themselves, and never
+   * saw the setting.
+   *
+   * The home directory comes from the backend, which the status bar asks at
+   * startup in a race with the first terminal — a race the terminal can win.
+   * `resolveStartDir` then falls back rather than guess, and a `home` or
+   * `~/…` setting quietly opened somewhere else. So when the answer depends on
+   * the home directory and it has not arrived yet, it is asked for first.
+   * Whether it depends is put to `resolveStartDir` itself — does a different
+   * home give a different answer? — rather than restated here, and nothing
+   * else waits: the default `workspace` setting never costs a round trip.
+   */
+  const startDirFor = async (requested) => {
+    const settings = useSettingsStore.getState();
+    const input = {
+      requested,
+      mode: settings.terminalDefaultCwd,
+      customPath: settings.terminalDefaultCwdPath,
+      activeCwd: get().getActiveTab()?.cwd ?? null,
+    };
+    const resolveWith = (homeDir) => resolveStartDir({ ...input, homeDir });
+    if (!useSystemStore.getState().homeDir && resolveWith('/a') !== resolveWith('/b')) {
+      await useSystemStore.getState().init();
+    }
+    return resolveWith(useSystemStore.getState().homeDir);
+  };
+
+  /**
    * Spawn a PTY-backed tab and register it in `tabs`, WITHOUT placing it
    * anywhere in any group — callers decide where it goes. Keeping placement
    * out of tab creation is what makes two-level placement easy: `splitPane`
@@ -888,24 +946,26 @@ export const useTerminalStore = create((set, get) => {
       // setting decides, and `null` hands it back to the backend's own
       // fallback (open folder, then home). A directory that WAS asked for —
       // which is what restoring a session does for every terminal — wins over
-      // both. See `resolveStartDir`.
-      const settings = useSettingsStore.getState();
-      const startDir = resolveStartDir({
-        requested: cwd,
-        mode: settings.terminalDefaultCwd,
-        customPath: settings.terminalDefaultCwdPath,
-        homeDir: useSystemStore.getState().homeDir,
-        activeCwd: get().getActiveTab()?.cwd ?? null,
-      });
+      // both. See `startDirFor`.
+      const startDir = await startDirFor(cwd);
+      // A profile picked for THIS terminal wins over the default setting.
+      // `resolve_shell` takes a name or a path, so a profile is just a spec.
+      const shellSpec = shell || useSettingsStore.getState().terminalDefaultShell;
+      const spawnAt = (dir) => invoke('pty_spawn', { cols: 80, rows: 24, cwd: dir, shell: shellSpec });
 
-      const ptySession = await invoke('pty_spawn', {
-        cols: 80,
-        rows: 24,
-        cwd: startDir,
-        // A profile picked for THIS terminal wins over the default setting.
-        // `resolve_shell` takes a name or a path, so a profile is just a spec.
-        shell: shell || useSettingsStore.getState().terminalDefaultShell,
-      });
+      let ptySession;
+      try {
+        ptySession = await spawnAt(startDir);
+      } catch (err) {
+        // A directory can exist and still refuse the shell — no permission to
+        // enter it, a path too long for Windows. The backend only checks that
+        // it IS a directory, so the spawn is where that surfaces. A missing
+        // directory already falls back; an unusable one does the same, rather
+        // than a setting pointing there costing every new terminal.
+        if (startDir === null) throw err;
+        console.warn(`[TerminalStore] Could not start a terminal in "${startDir}" — using the default directory:`, err);
+        ptySession = await spawnAt(null);
+      }
 
       // A caller may ask for a title: `materializeGroup` and `loadSavedGroup`
       // pass the one the terminal had when it was saved. When that title is a
@@ -1355,9 +1415,15 @@ export const useTerminalStore = create((set, get) => {
     /**
      * Create a new group with one terminal in it and switch to it.
      * Returns the new group (or null if the PTY could not be spawned).
+     *
+     * Without a `cwd` the terminal starts where the setting says, as New
+     * Terminal and Split do. It used to be handed the store's `cwd` — the
+     * active terminal's directory — as though that had been asked for, and an
+     * asked-for directory beats the setting, so New Group never saw it.
+     * Starting beside the active terminal is what the `active` setting is for.
      */
     createGroup: async ({ name = null, cwd = null } = {}) => {
-      const tab = await spawnTab(null, cwd || get().cwd);
+      const tab = await spawnTab(null, cwd);
       if (!tab) return null;
       const group = makeGroup({
         name: (typeof name === 'string' && name.trim()) || `Group ${get().groups.length + 1}`,
@@ -2009,7 +2075,17 @@ export const useTerminalStore = create((set, get) => {
               (useSettingsStore.getState().terminalNotifyAfterSeconds ?? 0) * 1000
             );
             if (note) raised.push(note);
-            tab = { ...tab, lastExitCode: code, running: false, runStartedAt: null };
+            tab = {
+              ...tab,
+              lastExitCode: code,
+              running: false,
+              runStartedAt: null,
+              // That this shell reports ends at all, and how many it has —
+              // what `noteSubmittedLine` needs before guessing that a line
+              // it has not answered is still running.
+              commandEndSession: session_id,
+              commandEnds: (tab.commandEnds ?? 0) + 1,
+            };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
@@ -2198,12 +2274,30 @@ export const useTerminalStore = create((set, get) => {
           return;
         }
 
-        const ptySession = await invoke('pty_spawn', {
-          cols: 80,
-          rows: 24,
-          cwd: rootPath,
-          shell: useSettingsStore.getState().terminalDefaultShell,
-        });
+        // Nothing asked for a directory, so the setting decides, as it does
+        // for every other new terminal. Where it has no answer this still asks
+        // for `rootPath`, as it always did — the open folder, or null with
+        // none open, which is where the backend's own fallback lands anyway.
+        const firstDir = (await startDirFor(null)) ?? rootPath;
+        const spawnFirst = (dir) =>
+          invoke('pty_spawn', {
+            cols: 80,
+            rows: 24,
+            cwd: dir,
+            shell: useSettingsStore.getState().terminalDefaultShell,
+          });
+        let ptySession;
+        try {
+          ptySession = await spawnFirst(firstDir);
+        } catch (err) {
+          // The one terminal a fresh start has. A setting that names a
+          // directory the shell cannot enter must not leave the app with
+          // none, so it gets the open folder instead — which is all this ever
+          // asked for before the setting existed.
+          if (firstDir === rootPath) throw err;
+          console.warn(`[TerminalStore] Could not start the first terminal in "${firstDir}" — using the open folder:`, err);
+          ptySession = await spawnFirst(rootPath);
+        }
 
         const defaultTitle = nextDefaultTitle(get().tabs);
         const initialTab = {
@@ -2513,11 +2607,19 @@ export const useTerminalStore = create((set, get) => {
      * Only ever the RESUME form: `claude` refuses `--session-id` for an id it
      * already has ("Session ID … is already in use"), so re-running the start
      * command would kill the terminal on every relaunch.
+     *
+     * Refused, with the offer kept, while a command is running. The text is
+     * typed, so it goes to whatever holds the terminal — quite possibly the
+     * agent itself, started by hand while the offer was still up — and not to
+     * a shell. `running` comes from shell integration (OSC 133), or on Windows
+     * from a submitted line the shell has not answered (`noteSubmittedLine`);
+     * a shell without integration never reports one and is typed into as
+     * before.
      */
     resumeAgent: async (tabId) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
-      if (!tab) return false;
+      if (!tab || tab.running) return false;
 
       const command = resumeCommand(tab.agent);
       // The offer goes away either way: an agent we no longer recognise is
@@ -2544,8 +2646,12 @@ export const useTerminalStore = create((set, get) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      // Both taken before the write: the shell's answer can arrive before
+      // `invoke` resolves, and it must still count as an answer to this line.
+      const submitted = { at: Date.now(), endsBefore: tab.commandEnds ?? 0 };
       try {
         await invoke('pty_write', { session_id: tab.sessionId, data });
+        if (submitsLine(data)) get().noteSubmittedLine(targetId, submitted);
       } catch (err) {
         // The backend refuses input the tty would silently discard — a paste
         // longer than one canonical-mode line, which the kernel drops whole.
@@ -2556,6 +2662,52 @@ export const useTerminalStore = create((set, get) => {
           console.error('[TerminalStore] Raw write failed:', err);
         }
       }
+    },
+
+    /**
+     * A line was just sent to the shell. On Windows, count it as a running
+     * command unless the shell answers first.
+     *
+     * `running` comes from OSC 133 "C". ConPTY (seen on Windows 10 19045)
+     * forwards an escape sequence that changes nothing on screen only with the
+     * next frame that does, and C is such a sequence. For the first command of
+     * a PowerShell session it is written after the frame carrying the Enter has
+     * already gone, so it arrived with the next prompt, beside D: the terminal
+     * read as idle for the whole run, and Resume typed into whatever was
+     * running. That is the very case the guard is for — a restored terminal
+     * where something is started before the offer is taken.
+     *
+     * So a line the shell has not answered within SUBMIT_GRACE_MS counts as a
+     * command that started when it was submitted. A C arriving later changes
+     * nothing (`running` is already set) and D ends it as usual. Only:
+     *
+     * - for a session that has sent D at least once. cmd, fish and sh send
+     *   none, and nothing would ever clear a `running` guessed for them.
+     * - on Windows. Elsewhere C arrives on time, and a continuation line
+     *   (`for …` + Enter) that the shell is still waiting on would read as busy.
+     */
+    noteSubmittedLine: (tabId, { at = Date.now(), endsBefore } = {}) => {
+      if (!submitInfersRunning) return;
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab || tab.running || tab.exited || tab.commandEndSession !== tab.sessionId) return;
+      const sessionId = tab.sessionId;
+      const ends = endsBefore ?? tab.commandEnds ?? 0;
+      setTimeout(() => {
+        set((state) => {
+          let changed = false;
+          const tabs = state.tabs.map((t) => {
+            if (t.id !== tabId || t.sessionId !== sessionId || t.running || t.exited) return t;
+            // A D since the line went out: the shell answered it, so it was
+            // a prompt (or a command already over), not one still running.
+            // Counted rather than timed — a clock cannot order two events
+            // in the same millisecond.
+            if ((t.commandEnds ?? 0) !== ends) return t;
+            changed = true;
+            return { ...t, running: true, runStartedAt: at, lastExitCode: null };
+          });
+          return changed ? { tabs } : state;
+        });
+      }, SUBMIT_GRACE_MS);
     },
 
     // Keep the backend PTY's window size in step with the pane (debounced by the caller).
@@ -2624,16 +2776,31 @@ export const useTerminalStore = create((set, get) => {
 // `groups` is compared BY REFERENCE, and every group write rebuilds that array
 // (see `updateGroup` / `settle`) — a mutation deep inside a group, including
 // one in a group that is NOT on screen, therefore still schedules a save.
+// That reference check is only a shortcut past the key below, so it has to
+// name every slice of state `buildPersistedPayload` reads.
 /**
- * What the persisted payload is actually made of. Comparing `state.tabs` by
- * reference used to schedule a save on every `pty-output` chunk — the array is
- * rebuilt per chunk, but none of the persisted FIELDS change — which is what
- * kept the debounce permanently reset.
+ * The payload itself, as text: whether anything worth saving changed is asked
+ * of exactly what would be saved.
+ *
+ * Comparing `state.tabs` by reference used to schedule a save on every
+ * `pty-output` chunk — the array is rebuilt per chunk, but none of the
+ * persisted FIELDS change — which is what kept the debounce permanently reset.
+ * The cure for that was a fingerprint kept by hand beside the payload, and
+ * the two drifted apart: `agent` went into the payload and never into the
+ * fingerprint, so starting an agent or dismissing the offer to resume one
+ * scheduled no save at all, and the record the resume offer is built from
+ * never reached disk. A field added to the payload is now compared here
+ * without anyone having to remember it.
+ *
+ * It runs on every change to `tabs` or `groups` — once per output chunk while
+ * a palette command is running, once per command start and finish, once per
+ * settled resize. For 16 terminals in 4 groups that is under 4 KB of JSON and
+ * about 5µs, measured; the fingerprint it replaces already stringified every
+ * group's tree and took about 3µs. Scrollback is not in the payload, so a
+ * busy terminal does not make it any dearer.
  */
 function persistKeyOf(state) {
-  return `${state.workspaceName}|${state.activeGroupId}|${state.groups
-    .map((g) => `${g.id}:${g.name}:${JSON.stringify(serializeTreeForPersist(g.tree))}:${g.activePaneId}`)
-    .join(';')}|${state.tabs.map((t) => `${t.id}:${t.title}:${t.cwd}`).join(';')}`;
+  return JSON.stringify(buildPersistedPayload(state));
 }
 
 let lastPersistKey = null;

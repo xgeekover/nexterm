@@ -93,6 +93,10 @@ export function TerminalView({ tabId, active = false }) {
   // — in a split it has to be obvious which pane is being searched.
   const findOpen = useTerminalStore((s) => s.find.open && s.find.tabId === tabId);
   const closeFind = useTerminalStore((s) => s.closeFind);
+  // Only read so the focus effect below reruns when the resume offer closes.
+  const resumeOffered = useTerminalStore(
+    (s) => s.tabs.find((t) => t.id === tabId)?.agentResumeOffered === true
+  );
 
   // Suggestion UI state lives in a ref (not React state) because it's
   // written from long-lived xterm event-handler closures (onData / the
@@ -457,9 +461,15 @@ export function TerminalView({ tabId, active = false }) {
   // Sole focus owner in the terminal area: focus the xterm when its pane
   // becomes the active one. Not while the find bar is up — it owns the caret
   // until it closes, and stealing it back would make the field untypeable.
+  //
+  // Also when the resume offer closes. Chromium (WebView2, so Windows) focuses
+  // a button on click, and Resume / Dismiss unmount the offer they sit in, so
+  // focus fell to <body>: the agent had started and the keyboard reached
+  // nothing until the terminal was clicked. WebKit never focuses the button,
+  // which is why it only shows on Windows.
   useEffect(() => {
     if (active && !findOpen) termRef.current?.focus();
-  }, [active, tabId, findOpen]);
+  }, [active, tabId, findOpen, resumeOffered]);
 
   // `updateSticky` only runs on scroll, so without this the bar would sit there
   // until the next one — a setting you can watch not take effect is worse than

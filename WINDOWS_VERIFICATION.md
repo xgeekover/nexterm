@@ -5,7 +5,7 @@ this document is what the project does about it.
 
 ## Why this exists
 
-Three consecutive releases fixed bugs that **only appear on Windows**, and
+Release after release has fixed bugs that **only appear on Windows**, and
 every one of them shipped green: `cargo test`, three platform test jobs, three
 platform builds, all passing, for months in one case.
 
@@ -16,6 +16,7 @@ platform builds, all passing, for months in one case.
 | v0.5.3 | A terminal's directory never followed `cd` | cmd is the Windows default shell and had no shell integration at all, so no OSC 7 was ever emitted. |
 | v0.5.3 | Restored sessions lost every directory | OSC 7 reports `/C:/Users/dev`; nothing turned it back into a path Windows can open, so respawning hit the fallback silently. |
 | v0.5.4 | A console window flashed whenever git ran | `git` is a console program, and a child gets its own console unless given `CREATE_NO_WINDOW`. |
+| v0.6.1 | *Resume* typed into the first command of every PowerShell session | ConPTY holds an escape sequence that paints nothing until the next frame, so that command's OSC 133 "C" arrived with its "D", when it ended. Every suite drives a mock, where C arrives on time. |
 
 Read the "why nothing caught it" column as one sentence: **these are not
 failures, they are appearances.** Nothing returns an error. The code is
@@ -56,6 +57,27 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 gh release download --repo xgeekover/nexterm --pattern "NexTerm-windows-x64-portable.zip" --dir $dir --clobber
 Expand-Archive "$dir\NexTerm-windows-x64-portable.zip" -DestinationPath "$dir\app" -Force
 ```
+
+To check a pull request before it is released, take the same zip from that
+PR's CI run instead:
+
+```powershell
+gh run download <run-id> -R xgeekover/nexterm -n nexterm-windows-latest -D $dir
+```
+
+**Close every NexTerm first, and back up what it saved.** The portable build
+has the same identifier (`com.nexterm.ide`) as an installed one, so the two
+share a WebView2 data folder: with one already running, the debugging port
+below never opens and both write the same saved state. With the app closed,
+copy `%APPDATA%\com.nexterm.ide` and `%LOCALAPPDATA%\com.nexterm.ide` aside,
+and put them back when you are done — the checks change the saved workspace,
+the settings and the command history.
+
+**Do not launch it from inside a Claude Code session.** The app inherits
+`CLAUDECODE=1` and `CLAUDE_CODE_CHILD_SESSION=1`, so a `claude` started in one
+of its terminals says "Transcript saving is off – inherited…" and writes no
+`.jsonl` — and every check that resumes a conversation then tests nothing.
+Remove those variables from the process that starts it.
 
 **Do not delete `%APPDATA%\com.nexterm.ide\.window-state.json`.** Read it and
 keep a copy of what it said. Nor can you sidestep it by redirecting
@@ -152,8 +174,41 @@ Start-Sleep 5
 (Invoke-RestMethod http://127.0.0.1:9222/json) | Select-Object title, type, webSocketDebuggerUrl
 ```
 
-Note that a release build has **no** `window.__nexterm` handle — that is gated
-on a dev build or `?debug` — so this gives you the DOM and nothing else.
+A release build has **no** `window.__nexterm` handle — that is gated on a dev
+build or `?debug` — but it is not only the DOM either:
+
+- **`localStorage`** is where the saved workspace, the settings and the
+  history live (`nexterm.terminal.workspace`, `nexterm.settings`,
+  `nexterm.commandHistory`), so whether something was saved can be read rather
+  than inferred from the screen. Changes are written within about two seconds.
+- **`window.__TAURI_INTERNALS__`** is there. `invoke('plugin:event|listen', …)`
+  subscribes the page to the backend's own events — `pty-command-started`,
+  `pty-command-done`, `pty-cwd` — so you can timestamp what the backend
+  actually parsed. `pty-output` arrives with the OSC markers already stripped.
+
+Driving it over CDP:
+
+- The terminal is drawn with WebGL: there is no `.xterm-rows` and no terminal
+  text in the DOM. Read it from screenshots (`Page.captureScreenshot` works).
+- Adding `--disable-webgl` to `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` puts xterm
+  on its DOM renderer, where the text is readable from `.xterm-rows` and the
+  inline suggestions appear (under WebGL they never do, #35). That is not the
+  shipped configuration — say so whenever you use it.
+- Click with `Input.dispatchMouseEvent` — pressed, then released — never with
+  `element.click()`: a bug in where focus goes only shows under a real press.
+  `Input.insertText` reaches the shell exactly like typing.
+- A native `<select>` changes by focusing it and sending `ArrowDown` /
+  `ArrowUp` key events.
+- Tab chips overflow under the pane's buttons with no scrollbar, so the centre
+  of a chip's rect can be clipped and land on *Split Right*. Check
+  `document.elementFromPoint` before any click by coordinates.
+
+**ConPTY holds output that paints nothing.** An escape sequence that changes
+nothing on screen — OSC 7, OSC 133's markers — reaches NexTerm only with the
+next frame that does paint something. So for anything those markers drive,
+record *when* the event arrives, not only *whether* it does, and test the first
+command of a fresh shell on its own: on 19045 its "C" arrived together with
+its "D", when the command was already over.
 
 ## The checks
 
@@ -252,6 +307,50 @@ Not bug reports. These have simply never been exercised on Windows.
 - **V12** The ☰ menu, Open Recent, and shortcut hints reading `Ctrl+…` rather
   than `⌘`.
 
+### V13 — an agent terminal comes back, and Resume hands over the keyboard
+
+Needs a `claude` that is logged in, and spends a few tokens — keep the
+conversation to one short message. Right-click the empty part of a pane's tab
+strip → *New Claude Code Terminal*. The `claude --session-id <uuid>` it types
+must arrive whole. Send one message, then check `localStorage`: that tab's
+`agent` is `{kind: 'claude', sessionId: <lowercase v4 UUID>, …}`.
+
+Close the window with claude still running and relaunch. The tab offers
+"Resume Claude Code?" in a row **above** the terminal, not over its first
+lines (the banner's bottom equals `.xterm-screen`'s top). Press *Resume*: focus
+must land in `.xterm-helper-textarea`, text typed without clicking the
+terminal must reach claude, the process must be `claude --resume` with the same
+id (`Win32_Process` shows it when claude has cleared the screen), and it must
+remember what was said. Relaunch once more and press *Dismiss*: `agent` goes to
+`null` on disk, and the next launch offers nothing.
+
+### V14 — Resume waits while something runs
+
+With PowerShell as the default shell, give a restored offer a long **first**
+command (`Start-Sleep 20`): *Resume* is disabled with a reason for the whole
+run and enabled again after it. Repeat on Windows PowerShell 5.1 and on
+PowerShell 7 — the first command is the one ConPTY delays, see below. Three
+empty Enters must not flicker it. On cmd it is never disabled, by design (cmd
+reports no command boundaries); note what it does and check that nothing is
+left marked as running.
+
+### V15 — the Default Directory setting reaches every new terminal
+
+Settings → Terminal → Default Directory → *Custom path…*. A relative `src` (in
+a folder that has one) shows no warning, `nope` does, and New Terminal, Split
+and New Group all start in `<open folder>\src`. A `~\Documents` path opens in
+the home's Documents. A folder that exists but cannot be entered (a path past
+`MAX_PATH`) must not cost a terminal: New Terminal falls back to the open
+folder, and a launch with no saved layout still starts with one terminal.
+
+### V16 — a poisoned history entry runs nothing
+
+Put `{c: "echo SAFE\recho INJECTED", n: 9}` into `nexterm.commandHistory`
+through CDP, with a clean `echo SAFECONTROL` beside it as the control, and
+relaunch. In the History palette and with Tab after `echo S` (Tab needs
+`--disable-webgl` until #35 is fixed), only the control is offered, and
+`INJECTED` is never printed.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
@@ -276,6 +375,30 @@ are the reason this list is worth keeping.
 None of them *ends* anything, which is why they were left, but a check that
 walks the menu asking "what does this chord mean to a shell?" would have found
 all five at once.
+
+## What the PR #34 run found
+
+Run on 2026-09-25/26 against PR #34's CI builds (`97d531f`, then `2922413`),
+Windows 10 Pro 22H2 19045.5371, WebView2 153.0.4234.48, `claude` 2.1.282–283.
+V13, V15 and V16 passed; V14 did not, and why is the reason for the ConPTY
+paragraph above. Reported in full on #34.
+
+- **V14 failed on the first build.** On PowerShell the guard missed the first
+  command of every session and caught every later one. The backend was not
+  missing the "C" marker — it received it *late*: for `Start-Sleep 8`, at
+  +9.13 s, 17 ms before "D". A hand-written C as the first command was just as
+  late. And an OSC 7 written half a second into a command arrived only with
+  the next prompt, at +7.7 s, where the same sequence followed by one visible
+  character arrived at +1.6 s. The fix does not try to hurry ConPTY: on
+  Windows, a line sent to a shell that reports "D" counts as running if the
+  shell has not answered it within 300 ms.
+- **Inline suggestions have never worked under WebGL** (#35), which is how the
+  app ships; nobody had noticed because nothing looks broken. With the DOM
+  renderer they appear, drawn a few cells too far left (#36).
+- **A resume check can pass while testing nothing.** Launched from a Claude
+  Code session, the app hands `CLAUDECODE` down to its terminals, and a
+  `claude` started there saves no transcript — so there is nothing to resume.
+  That is why *Before you start* now says where not to launch it from.
 
 ## Reporting
 

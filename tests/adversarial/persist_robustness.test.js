@@ -1,7 +1,8 @@
 /**
- * Three ways the workspace used to be lost. All were found by verifying the
- * group refactor rather than by using the app, and none of them announce
- * themselves — the running app looks perfectly healthy in every case.
+ * Four ways the workspace used to be lost. None of them announce themselves —
+ * the running app looks perfectly healthy in every case. The first three were
+ * found by verifying the group refactor rather than by using the app; the
+ * fourth by a review, and confirmed only by saving, reloading and looking.
  *
  *   1. The debounced save was starvable. `pty-output` rebuilds `state.tabs` on
  *      every chunk, so a shell printing more often than the debounce (a dev
@@ -9,6 +10,12 @@
  *   2. A failed restore replaced the payload it failed to read. On the upgrade
  *      launch that payload is irreplaceable.
  *   3. Quitting dropped whatever was still pending.
+ *   4. Starting an agent was never saved. Whether to save was decided by a
+ *      fingerprint of the payload kept by hand, and `agent` went into the
+ *      payload but not into the fingerprint — so the record the resume offer
+ *      is built from stayed in memory, and so did dismissing that offer.
+ *      Handing a restored tab an `agent` directly cannot see this — it skips
+ *      the one step that was broken — so these go through the disk.
  */
 
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
@@ -39,6 +46,8 @@ const { useTerminalStore: S, PERSIST_KEY, PERSIST_BACKUP_KEY } = await import(
   '../../src/stores/terminalStore.js'
 );
 const { mockBridge } = await import('../../src/lib/ipc.js');
+const { SCHEMA_VERSION } = await import('../../src/lib/persistence.js');
+const { resumeCommand, startCommand } = await import('../../src/lib/agents.js');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const onDisk = () => {
@@ -63,10 +72,28 @@ const V1_PAYLOAD = {
   activePaneId: 'pane-root', groupViewMode: 'split', focusedPaneId: null,
 };
 
-async function relaunch({ seedV1 = false, failSpawns = [] } = {}) {
+/** A workspace as this build writes it: one terminal, which was running `agent`. */
+const workspaceRunning = (agent) => ({
+  workspaceName: 'Default',
+  activeGroupId: 'group-agent',
+  groups: [
+    {
+      id: 'group-agent', name: 'Agents', createdAt: 1, activePaneId: 'pane-agent',
+      tree: { type: 'leaf', id: 'pane-agent', tabIds: ['tab-agent'], activeTabId: 'tab-agent' },
+    },
+  ],
+  tabs: [{ id: 'tab-agent', title: 'Terminal 1', cwd: '/workspace', agent }],
+});
+
+/**
+ * Quit and start again. The disk is wiped first unless `keepDisk` — which is
+ * what makes it a relaunch of the SAME installation rather than a fresh one.
+ */
+async function relaunch({ seedV1 = false, seed = null, keepDisk = false, failSpawns = [] } = {}) {
   S.getState().dispose();
-  backing.clear();
+  if (!keepDisk) backing.clear();
   if (seedV1) backing.set(PERSIST_KEY, JSON.stringify({ version: 1, data: V1_PAYLOAD }));
+  if (seed) backing.set(PERSIST_KEY, JSON.stringify({ version: SCHEMA_VERSION, data: seed }));
   S.setState({ tabs: [], activeTabId: null, isInitialized: false });
 
   const real = mockBridge.invoke.bind(mockBridge);
@@ -181,6 +208,65 @@ describe('Upgrading from v0.1.1 cannot lose the workspace', () => {
   });
 
   test('PR-06: teardown — leave the store disposed for the next suite', () => {
+    S.getState().dispose();
+    assert.ok(true);
+  });
+});
+
+describe('A terminal running an agent is remembered across a restart', () => {
+  beforeEach(useOwnStorage);
+  afterEach(returnStorage);
+
+  test('PR-07: starting an agent is saved on its own, with nothing else changing', async () => {
+    await relaunch();
+    await wait(400); // the launch's own save has landed
+    const tabId = S.getState().tabs[0].id;
+
+    const agent = await S.getState().startAgent(tabId, 'claude');
+    await wait(400);
+
+    assert.deepEqual(
+      onDisk().tabs.find((t) => t.id === tabId).agent,
+      agent,
+      'the agent this terminal is running never reached disk'
+    );
+  });
+
+  test('PR-08: the next launch offers to pick that same conversation back up', async () => {
+    await relaunch();
+    const tabId = S.getState().tabs[0].id;
+    const agent = await S.getState().startAgent(tabId, 'claude');
+    await wait(400);
+
+    await relaunch({ keepDisk: true });
+    const tab = S.getState().tabs.find((t) => t.id === tabId);
+    assert.ok(tab, 'the terminal itself did not come back');
+    assert.deepEqual(tab.agent, agent, 'it came back without the agent it was running');
+    assert.equal(tab.agentResumeOffered, true, 'nothing offered to pick the conversation up');
+    assert.equal(resumeCommand(tab.agent), `claude --resume ${agent.sessionId}`);
+  });
+
+  test('PR-09: dismissing the offer is saved too, so it is not made again', async () => {
+    const { agent } = startCommand('claude');
+    await relaunch({ seed: workspaceRunning(agent) });
+    const tabId = S.getState().tabs[0].id;
+    assert.equal(S.getState().tabs[0].agentResumeOffered, true, 'setup: the saved agent is offered');
+
+    S.getState().dismissAgentResume(tabId);
+    await wait(400);
+    assert.equal(
+      onDisk().tabs.find((t) => t.id === tabId).agent,
+      null,
+      'the dismissal never reached disk'
+    );
+
+    await relaunch({ keepDisk: true });
+    const tab = S.getState().tabs.find((t) => t.id === tabId);
+    assert.equal(tab.agent, null);
+    assert.equal(tab.agentResumeOffered, false, 'a dismissed offer came back on the next launch');
+  });
+
+  test('PR-10: teardown — leave the store disposed for the next suite', () => {
     S.getState().dispose();
     assert.ok(true);
   });
