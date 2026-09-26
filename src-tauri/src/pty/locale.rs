@@ -590,7 +590,17 @@ mod tests {
         }
     }
 
-    /// Read without running `defaults`, but it has to be the same value.
+    /// Read without running `defaults`, but it has to be the same value where
+    /// `defaults` has one.
+    ///
+    /// Not the same question everywhere: `defaults read -g` reads only the
+    /// user's own global domain, while CFPreferences with
+    /// `kCFPreferencesAnyApplication` also falls back to the machine-wide one
+    /// in /Library/Preferences. A Mac whose region is set only there — a fresh
+    /// or managed one, possibly a CI image — has `defaults` fail where the
+    /// read here rightly finds a value. So the two are compared when the user
+    /// has one, and otherwise the value found must at least look like a
+    /// locale identifier.
     #[cfg(target_os = "macos")]
     #[test]
     fn apple_locale_is_what_defaults_reads() {
@@ -598,11 +608,15 @@ mod tests {
             .args(["read", "-g", "AppleLocale"])
             .output()
             .expect("run defaults");
-        let expected = out
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string());
-        assert_eq!(apple_locale(), expected);
+        if out.status.success() {
+            let expected = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(apple_locale(), Some(expected));
+        } else if let Some(found) = apple_locale() {
+            assert!(
+                !found.is_empty() && !found.chars().any(char::is_whitespace),
+                "not a locale identifier: {found:?}"
+            );
+        }
     }
 
     /// The table, checked against the Mac rather than trusted: every entry is
