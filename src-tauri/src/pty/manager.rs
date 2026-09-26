@@ -119,6 +119,32 @@ fn leading_line_len(data: &[u8]) -> usize {
     data.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(data.len())
 }
 
+/// What NexTerm adds to the environment a shell inherits from the app.
+///
+/// A function of its own so that a test can start a real shell with exactly
+/// this environment, which it cannot do through `spawn`: that needs an
+/// `AppHandle`.
+fn set_session_env(cmd: &mut CommandBuilder) {
+    // ConPTY (Windows) ignores TERM/COLORTERM; harmless to set anyway.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("NEXTERM", "1");
+
+    // Opened from the Finder, the app inherits launchd's environment, which
+    // names no locale, and a shell without one runs in C — where bash's
+    // readline takes every byte of a Hangul syllable for a Meta key. A UTF-8
+    // LANG is added only when the shell would inherit no locale at all, so a
+    // user's own always wins. `cmd` already holds the environment the shell
+    // will get, so that is where to look. See locale.rs.
+    #[cfg(unix)]
+    {
+        let inherited = |key: &str| cmd.get_env(key).map(std::ffi::OsStr::to_os_string);
+        if let Some(lang) = super::locale::lang_for(inherited) {
+            cmd.env("LANG", lang);
+        }
+    }
+}
+
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<String, Arc<PtySession>>>>,
     counter: AtomicU64,
@@ -247,10 +273,7 @@ impl PtyManager {
                 cmd.cwd(dir);
             }
         }
-        // ConPTY (Windows) ignores TERM/COLORTERM; harmless to set anyway.
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("NEXTERM", "1");
+        set_session_env(&mut cmd);
         let integration = shell_integration::for_shell(&shell_path);
         for (key, value) in integration.env {
             cmd.env(key, value);
@@ -1166,5 +1189,173 @@ mod canonical_limit_tests {
         let child = pair.slave.spawn_command(cmd).expect("spawn");
         drop(pair.slave);
         child
+    }
+}
+
+/// The locale a shell starts with, set up by the same code `spawn` uses.
+///
+/// An app opened from the Finder inherits launchd's environment, which names
+/// no locale at all. These reproduce that by taking every locale variable out
+/// of the test's own environment first — which on a developer's machine is
+/// anything but empty.
+#[cfg(all(test, unix))]
+mod locale_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// `program`, with no locale variable in its environment.
+    fn without_a_locale(program: &str) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new(program);
+        for (key, _) in locale_vars(&cmd) {
+            cmd.env_remove(key);
+        }
+        cmd
+    }
+
+    /// Every locale variable `cmd` would start the program with.
+    fn locale_vars(cmd: &CommandBuilder) -> Vec<(String, String)> {
+        cmd.iter_full_env_as_str()
+            .filter(|(key, _)| *key == "LANG" || key.starts_with("LC_"))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_shell_that_inherits_no_locale_is_given_lang_and_nothing_else() {
+        let mut cmd = without_a_locale("/bin/sh");
+        set_session_env(&mut cmd);
+        let vars = locale_vars(&cmd);
+        // LANG is the weakest of the three, so a locale set by the user's own
+        // rc files still wins over it.
+        assert_eq!(vars.len(), 1, "expected LANG alone, got {vars:?}");
+        let (key, value) = &vars[0];
+        assert_eq!(key, "LANG");
+        assert!(value.ends_with(".UTF-8"), "LANG={value}");
+    }
+
+    #[test]
+    fn a_locale_the_shell_inherits_is_left_exactly_as_it_is() {
+        for (key, value) in [
+            ("LANG", "C"),
+            ("LANG", "en_KR.UTF-8"),
+            ("LC_CTYPE", "UTF-8"),
+            ("LC_ALL", "ko_KR.UTF-8"),
+        ] {
+            let mut cmd = without_a_locale("/bin/sh");
+            cmd.env(key, value);
+            set_session_env(&mut cmd);
+            assert_eq!(
+                locale_vars(&cmd),
+                vec![(key.to_string(), value.to_string())],
+                "{key}={value} did not survive"
+            );
+        }
+    }
+
+    /// Output from the pty until `done` is satisfied; false if the deadline
+    /// passes or the shell goes away first.
+    fn read_until(
+        output: &mpsc::Receiver<Vec<u8>>,
+        seen: &mut String,
+        deadline: Instant,
+        done: impl Fn(&str) -> bool,
+    ) -> bool {
+        while !done(seen) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match output.recv_timeout(left) {
+                Ok(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
+    /// One line for bash to run. Each answer comes out as `name=value`, which
+    /// the echoed command line never contains, so the echo cannot be read as
+    /// an answer. `\355\225\234` is 한 in UTF-8: one character in a UTF-8
+    /// locale, three in C.
+    const PROBE: &str = r#"printf '%s=%s\n' meta "$(bind -v | grep convert-meta)" chars "$(x=$(printf '\355\225\234'); echo ${#x})" ctype "$(locale | grep LC_CTYPE)" lang "$LANG""#;
+
+    /// The defect itself, in a real bash on a real pty. Started without a
+    /// locale, readline took every byte above 0x7f for a Meta key, so Hangul
+    /// typed at the prompt, or brought back from history, ran key bindings
+    /// instead of appearing.
+    #[test]
+    fn bash_started_without_a_locale_reads_non_ascii_as_text() {
+        let Some(bash) = ["/bin/bash", "/usr/bin/bash"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+        else {
+            eprintln!("bash not installed; skipping");
+            return;
+        };
+
+        let mut cmd = without_a_locale(bash);
+        // No rc files: the user's own could set a locale, and what is on
+        // trial is the one the shell is started with.
+        cmd.args(["--norc", "--noprofile", "-i"]);
+        // readline's own configuration can turn convert-meta off by itself —
+        // Debian's /etc/inputrc does — which would pass this for the wrong
+        // reason.
+        cmd.env("INPUTRC", "/dev/null");
+        cmd.env("PS1", "nexterm-ready> ");
+        // macOS's bash 3.2 otherwise opens with a paragraph about zsh.
+        cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
+        set_session_env(&mut cmd);
+        let lang = cmd.get_env("LANG").map(|v| v.to_string_lossy().into_owned());
+
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 500, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn bash");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let mut writer = pair.master.take_writer().expect("writer");
+        let (tx, output) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let prompts = |seen: &str| seen.matches("nexterm-ready> ").count();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = String::new();
+        // A line typed before readline is listening can be lost, so the probe
+        // waits for the first prompt, and the answers for the second.
+        let ready = read_until(&output, &mut seen, deadline, |s| prompts(s) >= 1);
+        if ready {
+            writer.write_all(format!("{PROBE}\n").as_bytes()).expect("type the probe");
+            read_until(&output, &mut seen, deadline, |s| prompts(s) >= 2);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(ready, "bash never showed a prompt; it printed {seen:?}");
+        let answer = |name: &str| -> Option<String> {
+            let rest = &seen[seen.find(name)? + name.len()..];
+            Some(rest[..rest.find(['\r', '\n']).unwrap_or(rest.len())].to_string())
+        };
+        let (meta, chars, ctype) = (answer("meta="), answer("chars="), answer("ctype="));
+        let report = format!(
+            "LANG given: {lang:?}; bash said meta={meta:?} chars={chars:?} ctype={ctype:?}"
+        );
+        assert_eq!(
+            meta.as_deref(),
+            Some("set convert-meta off"),
+            "readline still turns bytes above 0x7f into Meta keys — {report}"
+        );
+        assert_eq!(chars.as_deref(), Some("1"), "bash is not reading UTF-8 — {report}");
+        assert!(
+            ctype.as_deref().is_some_and(|c| c.contains("UTF-8") || c.contains("utf8")),
+            "LC_CTYPE is not UTF-8 — {report}"
+        );
+        assert!(lang.is_some(), "the shell was given no LANG — {report}");
+        assert_eq!(answer("lang="), lang, "the shell's LANG is not the one it was given — {report}");
     }
 }
