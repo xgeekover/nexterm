@@ -5,6 +5,7 @@ import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch
 import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
+import { locateSuggestion } from '../../lib/suggestGeometry.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 import { addCommandMark, stickyCommandFor } from '../../lib/stickyCommand.js';
@@ -14,6 +15,10 @@ import { addCommandMark, stickyCommandFor } from '../../lib/stickyCommand.js';
 // dynamic import at that call site).
 export { disposeTerminal } from './terminalRegistry.js';
 
+// `items` is ranked when a key is typed; `visible` waits for the shell to echo
+// it (see `placeSuggestions`). So clearing means this whole object, never just
+// `visible: false`: a ranking left waiting would be drawn when its echo came
+// back, even after an Enter, an Esc or a key with nothing to suggest.
 const EMPTY_SUGGEST_STATE = {
   visible: false,
   ghost: '', // remaining characters of the top candidate, past what's typed
@@ -24,42 +29,6 @@ const EMPTY_SUGGEST_STATE = {
   cellWidth: 0,
   cellHeight: 0,
 };
-
-/**
- * Measures one xterm cell in real pixels from the rendered `.xterm-rows`
- * element (a DOM measurement, per the task — an alternative is
- * `term._core._renderService.dimensions`, a private API, which this
- * deliberately avoids). Returns null rather than a guess when the terminal
- * isn't laid out yet — callers must treat that as "show nothing".
- */
-function measureCell(term) {
-  const rowsEl = term.element?.querySelector('.xterm-rows');
-  if (!rowsEl) return null;
-  const rect = rowsEl.getBoundingClientRect();
-  if (!rect.width || !rect.height || !term.cols || !term.rows) return null;
-  return { rect, cellWidth: rect.width / term.cols, cellHeight: rect.height / term.rows };
-}
-
-/**
- * Pixel position of the live cursor, relative to `wrapper` (the element the
- * overlay is absolutely positioned inside of) — from `term.buffer.active`,
- * per the task. Returns null on any uncertainty (not laid out, buffer not
- * ready) so the caller can prefer showing nothing over a wrong position.
- */
-function computeCursorPixelPos(term, wrapper) {
-  if (!wrapper) return null;
-  const cell = measureCell(term);
-  if (!cell) return null;
-  const buffer = term.buffer?.active;
-  if (!buffer || buffer.cursorX == null || buffer.cursorY == null) return null;
-  const wrapperRect = wrapper.getBoundingClientRect();
-  return {
-    left: cell.rect.left - wrapperRect.left + buffer.cursorX * cell.cellWidth,
-    top: cell.rect.top - wrapperRect.top + buffer.cursorY * cell.cellHeight,
-    cellWidth: cell.cellWidth,
-    cellHeight: cell.cellHeight,
-  };
-}
 
 /**
  * A single terminal pane's live surface — one persistent @xterm/xterm
@@ -163,7 +132,7 @@ export function TerminalView({ tabId, active = false }) {
       if (!fitted) return;
       // A resize invalidates any cached cursor pixel position — clear
       // rather than risk drawing the overlay in a stale spot.
-      setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+      setSuggestState(EMPTY_SUGGEST_STATE);
     };
     doFit();
 
@@ -194,42 +163,71 @@ export function TerminalView({ tabId, active = false }) {
 
     const suggestionsEnabled = () => useSettingsStore.getState().terminalSuggestions ?? true;
 
+    /**
+     * Draw the ranked suggestion at the cursor, once the terminal shows what
+     * was typed — and not before.
+     *
+     * A key is sent before the shell echoes it, and until the echo lands the
+     * cursor is still where it was before the key. Placing the ghost when the
+     * key was sent put it one cell left for every key in flight, over the text
+     * just typed. So ranking happens on the keystroke, and this runs again
+     * whenever the screen changes: `locateSuggestion` answers nothing until the
+     * typed text is on screen, and the suggestion stays hidden until it is.
+     * Hiding costs the echo's latency; drawing ahead of the echo would mean
+     * predicting where the shell will put the keys, and a wrong prediction is
+     * the same bug again. Conservative either way: nothing rather than a
+     * suggestion in the wrong place.
+     */
+    const placeSuggestions = () => {
+      const s = suggestStateRef.current;
+      if (s.items.length === 0) return;
+      const pos = locateSuggestion(entry.term, wrapper, bufferRef.current);
+      if (!pos) {
+        if (s.visible) setSuggestState({ ...s, visible: false });
+        return;
+      }
+      if (
+        s.visible &&
+        s.left === pos.left &&
+        s.top === pos.top &&
+        s.cellWidth === pos.cellWidth &&
+        s.cellHeight === pos.cellHeight
+      ) {
+        return;
+      }
+      setSuggestState({ ...s, visible: true, ...pos });
+    };
+
+    // The echo moves the cursor, which makes that the moment a suggestion
+    // ranked on a keystroke can be drawn — xterm moves its own IME textarea on
+    // the same event. A scroll, a font change or a switch of renderer moves the
+    // cursor's cell on screen without moving the cursor, and each of those
+    // ends in a render.
+    const cursorMoveDisposable = entry.term.onCursorMove(placeSuggestions);
+    const renderDisposable = entry.term.onRender(placeSuggestions);
+
     const updateSuggestions = () => {
       if (!suggestionsEnabled()) {
-        setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+        setSuggestState(EMPTY_SUGGEST_STATE);
         return;
       }
       const buf = bufferRef.current;
       if (!buf) {
-        setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+        setSuggestState(EMPTY_SUGGEST_STATE);
         return;
       }
       const candidates = suggest(buf);
       if (candidates.length === 0) {
-        setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
-        return;
-      }
-      const pos = computeCursorPixelPos(entry.term, wrapper);
-      if (!pos) {
-        // Conservative: if we can't trust the cursor position, show nothing
-        // rather than draw a suggestion in the wrong place.
-        setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+        setSuggestState(EMPTY_SUGGEST_STATE);
         return;
       }
       const top = candidates[0];
       const ghost = top.length > buf.length && top.toLowerCase().startsWith(buf.toLowerCase())
         ? top.slice(buf.length)
         : '';
-      setSuggestState({
-        visible: true,
-        ghost,
-        items: candidates,
-        selectedIndex: 0,
-        left: pos.left,
-        top: pos.top,
-        cellWidth: pos.cellWidth,
-        cellHeight: pos.cellHeight,
-      });
+      // Hidden until the key just typed is on screen — see `placeSuggestions`.
+      setSuggestState({ ...EMPTY_SUGGEST_STATE, ghost, items: candidates });
+      placeSuggestions();
     };
 
     // Second, independent `onData` subscription purely for tracking the
@@ -248,7 +246,7 @@ export function TerminalView({ tabId, active = false }) {
         // risking a wrong suggestion (see "Known-imperfect cases").
         if (/[\r\n\x03\x1b\x7f]/.test(data)) {
           bufferRef.current = '';
-          setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+          setSuggestState(EMPTY_SUGGEST_STATE);
         } else {
           bufferRef.current += data;
           updateSuggestions();
@@ -273,7 +271,7 @@ export function TerminalView({ tabId, active = false }) {
             lastSubmittedRef.current = cmd;
           }
           bufferRef.current = '';
-          setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+          setSuggestState(EMPTY_SUGGEST_STATE);
           return;
         }
         case '\x7f':
@@ -283,14 +281,14 @@ export function TerminalView({ tabId, active = false }) {
           return;
         case '\x03': // Ctrl-C
           bufferRef.current = '';
-          setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+          setSuggestState(EMPTY_SUGGEST_STATE);
           return;
         default:
           if (data === '\x1b' || data.charCodeAt(0) < 0x20) {
             // Bare Esc or another control byte (arrow keys arrive as their
             // own multi-char escape sequences and are handled by the key
             // handler below, not here) — clear defensively.
-            setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+            setSuggestState(EMPTY_SUGGEST_STATE);
             return;
           }
           bufferRef.current += data;
@@ -435,7 +433,7 @@ export function TerminalView({ tabId, active = false }) {
       }
       lastSubmittedRef.current = '';
       bufferRef.current = '';
-      setSuggestState((s) => (s.visible ? EMPTY_SUGGEST_STATE : s));
+      setSuggestState(EMPTY_SUGGEST_STATE);
     }).then((off) => {
       if (promptCancelled) off();
       else promptUnlisten = off;
@@ -448,6 +446,8 @@ export function TerminalView({ tabId, active = false }) {
       startedCancelled = true;
       startedUnlisten?.();
       suggestDataDisposable.dispose();
+      cursorMoveDisposable.dispose();
+      renderDisposable.dispose();
       entry.term.attachCustomKeyEventHandler(null);
       promptCancelled = true;
       promptUnlisten?.();
