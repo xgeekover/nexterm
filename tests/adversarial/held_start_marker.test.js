@@ -333,6 +333,35 @@ describe('A start marker that arrives late', () => {
     });
   });
 
+  test('HM-12: a first prompt that beats its terminal into the store still counts', async () => {
+    // A light zsh draws its first prompt within tens of milliseconds of being
+    // spawned, and cmd sooner — before `createTab` has put the terminal in
+    // the store. That D used to be dropped, so the shell looked like one that
+    // never reports an end, and its first command never read as running.
+    await onWindows(true, async () => {
+      await T.getState().init();
+      const original = mockBridge.invoke;
+      mockBridge.invoke = async function (command, args, ...rest) {
+        const result = await original.call(this, command, args, ...rest);
+        if (command === 'pty_spawn') await cmdPrompt({ sessionId: result.session_id });
+        return result;
+      };
+      let tab;
+      try {
+        tab = await T.getState().createTab();
+      } finally {
+        mockBridge.invoke = original;
+      }
+      try {
+        await T.getState().writeRaw(tab.id, '\r');
+        await sleep(GRACE_MS + 150);
+        assert.equal(tabById(tab.id).running, true, 'the first prompt was lost, and a running command read as idle');
+      } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+
   test('HM-07: teardown — no guessed run is left behind for the next suite', async () => {
     // Every case above closed its own terminals and put the platform back
     // (`onWindows` restores it in a finally). What remains is to make sure no
