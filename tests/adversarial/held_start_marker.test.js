@@ -26,6 +26,7 @@
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import * as activity from '../../src/lib/tabActivity.js';
+import { buildStatusItems } from '../../src/lib/statusInfo.js';
 import { startCommand } from '../../src/lib/agents.js';
 import * as terminalStore from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
@@ -131,8 +132,9 @@ describe('A start marker that arrives late', () => {
   });
 
   test('HM-03: a shell that never reports an end is left alone', async () => {
-    // cmd, fish and sh send OSC 7 and nothing else. Nothing would ever clear
-    // `running` for them, so it must never be set by guesswork.
+    // fish and sh send no D at all (nor did cmd, until its PROMPT started
+    // reporting one — see HM-09). Nothing would ever clear `running` for
+    // them, so it must never be set by guesswork.
     await onWindows(true, async () => {
       await T.getState().init();
       const tab = await T.getState().createTab();
@@ -212,6 +214,120 @@ describe('A start marker that arrives late', () => {
         assert.equal(tabById(tab.id).running, false, 'a finished command was marked running after the fact');
         assert.equal(tabById(tab.id).lastExitCode, 0);
       } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+
+  // cmd reports an end at every prompt — the D is at the front of its PROMPT —
+  // and nothing else: no C, because nothing in cmd runs when a command starts,
+  // and no exit code, because PROMPT cannot expand %ERRORLEVEL%. So the only
+  // way a cmd terminal reads as running is the inference above, and every end
+  // it reports says THAT a command finished, never how.
+  const cmdPrompt = (tab) => mockBridge.emit('pty-command-done', { session_id: tab.sessionId, exit_code: null });
+
+  test('HM-09: cmd — a line its next prompt has not answered is running, and that prompt ends it without a verdict', async () => {
+    await onWindows(true, async () => {
+      await T.getState().init();
+      const tab = await T.getState().createTab();
+      try {
+        await cmdPrompt(tab); // the first prompt
+        assert.equal(tabById(tab.id).lastExitCode, null, 'cmd said nothing about any command, and the tab says one succeeded');
+
+        // Enter on `ping -n 5 localhost`.
+        await T.getState().writeRaw(tab.id, '\r');
+        await sleep(GRACE_MS + 150);
+        assert.equal(tabById(tab.id).running, true, 'a running cmd command read as idle, and Resume would type into it');
+
+        await cmdPrompt(tab);
+        const done = tabById(tab.id);
+        assert.equal(done.running, false, 'the next prompt did not end it');
+        assert.equal(done.lastExitCode, null, 'an exit code nobody reported');
+        assert.equal(activity.tabActivity(done), 'idle');
+      } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+
+  test('HM-10: cmd — an empty Enter never flickers', async () => {
+    await onWindows(true, async () => {
+      await T.getState().init();
+      const tab = await T.getState().createTab();
+      const seen = [];
+      const stop = T.subscribe((s) => seen.push(s.tabs.find((t) => t.id === tab.id)?.running));
+      try {
+        await cmdPrompt(tab);
+        // cmd answers with the next prompt, whose D arrives with the prompt's
+        // own text — so ConPTY does not hold it back as it holds PowerShell's C.
+        for (let i = 0; i < 3; i += 1) {
+          await T.getState().writeRaw(tab.id, '\r');
+          await cmdPrompt(tab);
+        }
+        await sleep(GRACE_MS + 150);
+        assert.equal(seen.includes(true), false, 'an answered Enter was drawn as a running command');
+      } finally {
+        stop();
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+
+  test('HM-11: an end with no exit code is not a verdict — no red dot, no status, and the notification only says it finished', async () => {
+    await onWindows(false, async () => {
+      await T.getState().init();
+      const tab = await T.getState().createTab();
+      const watching = await T.getState().createTab(); // on screen; `tab` is not
+      try {
+        await cmdPrompt(tab);
+        // A long build, started a minute ago from the palette, in the background.
+        const original = mockBridge.invoke;
+        mockBridge.invoke = function (command, args, ...rest) {
+          if (command === 'pty_write') return Promise.resolve(null);
+          return original.call(this, command, args, ...rest);
+        };
+        try {
+          await T.getState().executeCommand('build.cmd', tab.id);
+        } finally {
+          mockBridge.invoke = original;
+        }
+        T.setState((s) => ({
+          tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, running: true, runStartedAt: Date.now() - 60_000 } : t)),
+        }));
+        assert.equal(T.getState().activeTabId, watching.id, 'setup: another terminal is on screen');
+
+        await cmdPrompt(tab);
+        const done = tabById(tab.id);
+        assert.equal(done.lastExitCode, null, 'claimed an exit code cmd never reported');
+        assert.equal(activity.tabActivity(done), 'idle');
+        assert.equal(activity.hasActivityDot(done), false);
+        assert.equal(activity.activityLabel(done), '');
+        assert.equal(
+          buildStatusItems({ os: 'windows', cwd: done.cwd, lastExitCode: done.lastExitCode }).left.some(
+            (item) => item.id === 'exit-code'
+          ),
+          false,
+          'the status bar reported an exit code'
+        );
+
+        const block = done.blocks[done.blocks.length - 1];
+        assert.equal(block.status, 'completed', 'the block did not close');
+        assert.equal(block.exitCode, null, 'the block was given an exit code nobody reported');
+
+        const note = T.getState().notifications.find((n) => n.tabId === tab.id);
+        assert.ok(note, 'a long command in a background terminal finished and nobody was told');
+        assert.equal(note.exitCode, null, 'the notification claimed a result: neither success nor failure is known');
+
+        // The pure half, for every shape of "no code".
+        const ran = { id: 'x', title: 'build', runStartedAt: 1 };
+        for (const unknown of [null, undefined]) {
+          assert.equal(activity.notificationFor(ran, unknown, 'y', 1000, 60_001).exitCode, null);
+        }
+        assert.equal(activity.notificationFor(ran, 0, 'y', 1000, 60_001).exitCode, 0);
+        assert.equal(activity.notificationFor(ran, 2, 'y', 1000, 60_001).exitCode, 2);
+      } finally {
+        T.getState().clearNotifications();
+        await T.getState().closeTab(watching.id);
         await T.getState().closeTab(tab.id);
       }
     });

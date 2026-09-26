@@ -2153,7 +2153,13 @@ export const useTerminalStore = create((set, get, api) => {
             // command: typing straight into the terminal never creates one,
             // which is the normal case, so anything reading it off `blocks`
             // only ever saw commands run from the palette.
-            const code = exit_code ?? 0;
+            //
+            // An end with no code — cmd's, whose PROMPT has no way to say —
+            // is a command that FINISHED, not one that succeeded. It stays
+            // null, and null is no verdict anywhere it is read: no red dot,
+            // nothing on the status bar, a notification that only says it
+            // finished. `exit_code ?? 0` would call every one a success.
+            const code = typeof exit_code === 'number' ? exit_code : null;
             const note = notificationFor(
               tab,
               code,
@@ -2185,14 +2191,15 @@ export const useTerminalStore = create((set, get, api) => {
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
             const running = blocks[idx];
-            const ok = exit_code === null || exit_code === undefined || exit_code === 0;
             blocks[idx] = {
               ...running,
               // zsh pads the last line to the terminal width before the prompt;
               // drop that trailing whitespace so blocks end cleanly.
               output: running.output.replace(/[ \t]+\r?$/, ''),
-              status: ok ? 'completed' : 'failed',
-              exitCode: exit_code ?? 0,
+              // Only a code the shell gave can make it a failure; with none
+              // it is simply finished.
+              status: code === null || code === 0 ? 'completed' : 'failed',
+              exitCode: code,
               durationMs: Date.now() - (running.startTime || Date.now()),
             };
             return { ...tab, blocks };
@@ -2794,10 +2801,16 @@ export const useTerminalStore = create((set, get, api) => {
      * command that started when it was submitted. A C arriving later changes
      * nothing (`running` is already set) and D ends it as usual. Only:
      *
-     * - for a session that has sent D at least once. cmd, fish and sh send
-     *   none, and nothing would ever clear a `running` guessed for them.
+     * - for a session that has sent D at least once. fish and sh send none,
+     *   and nothing would ever clear a `running` guessed for them.
      * - on Windows. Elsewhere C arrives on time, and a continuation line
      *   (`for …` + Enter) that the shell is still waiting on would read as busy.
+     *
+     * cmd reports a D with every prompt and never a C, so for cmd this is
+     * the ONLY way a command reads as running. Its continuation prompt
+     * (`More?`, after an open bracket or a `^`) is not its PROMPT and sends
+     * no D, so a line left open there reads as running until it is finished
+     * — as PowerShell's `>>` already does.
      */
     noteSubmittedLine: (tabId, { at = Date.now(), endsBefore } = {}) => {
       if (!submitInfersRunning) return;

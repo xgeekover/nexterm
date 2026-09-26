@@ -27,9 +27,11 @@
 //! escape and `$P` is the current directory, so cmd CAN report where it is —
 //! and since cmd is the Windows default, without this the headline behaviour
 //! on Windows was a working directory frozen at whatever it was when the tab
-//! opened. What it still cannot report is where a command starts, ends or what
-//! it exited with, so command blocks, the sticky header and completion
-//! notifications stay off there. That is a limit of the shell.
+//! opened. A prompt being drawn also means the command before it has ended, so
+//! cmd reports that too, as an OSC 133 "D" with no exit code. What it still
+//! cannot report is where a command starts or what it exited with, so the
+//! sticky header stays off there and a finished command is reported without a
+//! verdict. That is a limit of the shell.
 //!
 //! Every other shell falls back to plain spawning (no markers, blocks only
 //! close when the shell exits, and the tab's cwd never updates after spawn).
@@ -372,21 +374,34 @@ if (Get-Module -Name PSReadLine) {
 // cmd.exe
 // ---------------------------------------------------------------------
 
-/// cmd.exe: the live working directory, and nothing else.
+/// cmd.exe: that the last command has ended, and the live working directory.
 ///
 /// The only hook cmd offers is `PROMPT`, re-expanded before every prompt.
 /// `$E` is an escape and `$P` is the current directory, which is exactly
-/// enough for OSC 7 and not enough for anything else.
+/// enough for OSC 7. And since a prompt is drawn when the command before it
+/// has ended, an OSC 133 "D" in the same `PROMPT` reports that end — the same
+/// "D" the other shells send from their prompt hooks, minus the exit code:
+/// `PROMPT` is read as written and never expands `%ERRORLEVEL%`, so there is
+/// no code to give, and a constant one would be a lie about every command.
+/// The frontend reads a D with no code as "finished", never as a success.
+/// Nothing in cmd runs when a command STARTS, so there is no "C".
 ///
-/// Two details that are not obvious:
+/// Details that are not obvious:
 ///
 /// - The terminator is ST (`$E\`), not BEL. `PROMPT` has no escape for a
 ///   BEL byte at all, and `osc.rs` accepts both.
 /// - A `file://` URI path is absolute, so the drive letter gets a `/` in
 ///   front of it (`file:///C:\Users\dev`). `osc.rs::as_native_path` takes it
 ///   back off. `$P` already uses backslashes and needs no other translation.
+/// - The markers go in FRONT of the visible prompt. ConPTY forwards a
+///   sequence that paints nothing only with the next frame that paints
+///   something; in front, that is the prompt's own text, so the end arrives
+///   when the prompt does rather than whenever the user next types.
+/// - A batch file run with echo on draws this prompt before each line it
+///   echoes, and each of those reports an end. Most scripts begin with
+///   `@echo off` — npm's shims for `claude` and `opencode` do.
 ///
-/// The user's own `PROMPT` is kept and drawn after the marker, so their
+/// The user's own `PROMPT` is kept and drawn after the markers, so their
 /// prompt still looks like theirs. `$P$G` — `C:\dir>` — is cmd's default and
 /// the fallback when they have not set one.
 fn cmd_integration() -> ShellIntegration {
@@ -398,7 +413,7 @@ fn cmd_integration() -> ShellIntegration {
 fn cmd_integration_with_prompt(user: &str) -> ShellIntegration {
     let visible = if user.trim().is_empty() { "$P$G" } else { user };
     ShellIntegration {
-        env: vec![("PROMPT".to_string(), format!("$E]7;file:///$P$E\\{visible}"))],
+        env: vec![("PROMPT".to_string(), format!("$E]133;D$E\\$E]7;file:///$P$E\\{visible}"))],
         args: Vec::new(),
     }
 }
@@ -478,27 +493,67 @@ mod tests {
 
             assert_eq!(
                 filtered.markers,
-                vec![Marker::WorkingDirectory("C:\\Users\\dev\\project".to_string())],
-                "{name}: no usable cwd came out of its prompt"
+                vec![
+                    Marker::CommandFinished(None),
+                    Marker::WorkingDirectory("C:\\Users\\dev\\project".to_string()),
+                ],
+                "{name}: no end marker and usable cwd came out of its prompt"
             );
             assert_eq!(
                 filtered.output, "C:\\Users\\dev\\project>",
-                "{name}: the marker must be invisible and the prompt untouched"
+                "{name}: the markers must be invisible and the prompt untouched"
             );
         }
     }
 
-    /// The marker is added to the user's prompt, not put in place of it.
+    /// The markers are added to the user's prompt, not put in place of it —
+    /// and they go in FRONT of it. ConPTY forwards a sequence that paints
+    /// nothing only with the next frame that does paint something. In front,
+    /// that frame is the prompt's own text, drawn at the same moment; after
+    /// it, the end of a command would be reported only once the user typed.
     #[test]
     fn cmd_keeps_a_prompt_the_user_set() {
         let integration = cmd_integration_with_prompt("[mine]$P$G");
         let (_, prompt) = integration.env.iter().find(|(k, _)| k == "PROMPT").unwrap();
-        assert!(prompt.ends_with("[mine]$P$G"), "the user's prompt is gone: {prompt}");
-        assert!(prompt.starts_with("$E]7;file:///$P"), "no cwd marker: {prompt}");
+        assert!(prompt.ends_with("[mine]$P$G"), "the user's prompt is gone, or not last: {prompt}");
+        assert!(prompt.starts_with("$E]133;D$E\\"), "no end marker in front: {prompt}");
+        assert!(prompt.contains("$E]7;file:///$P$E\\"), "no cwd marker: {prompt}");
 
         // Nothing set: cmd's own default is drawn, so the prompt looks normal.
         let (_, default) = cmd_integration_with_prompt("   ").env.into_iter().next().unwrap();
         assert!(default.ends_with("$P$G"), "{default}");
+    }
+
+    /// Every prompt cmd draws reports that the command before it has ended:
+    /// the one boundary cmd can report, since `PROMPT` is its only hook. With
+    /// no code — `PROMPT` is read as written and never expands `%ERRORLEVEL%`,
+    /// so a number there would be the same number after every command, a
+    /// verdict no command gave. And nothing marks where a command starts.
+    #[test]
+    fn cmd_reports_an_end_at_every_prompt_and_never_a_code() {
+        use crate::pty::osc::{Marker, OscFilter};
+
+        let integration = cmd_integration_with_prompt("");
+        let (_, prompt) = integration.env.iter().find(|(k, _)| k == "PROMPT").unwrap();
+        assert!(!prompt.contains("133;D;"), "an exit code cmd cannot know: {prompt}");
+
+        let draw = |dir: &str| prompt.replace("$E", "\x1b").replace("$P", dir).replace("$G", ">");
+        // The first prompt, `dir` and what it printed, then the next prompt.
+        let session = format!("{}dir\r\n file.txt\r\n\r\n{}", draw("C:\\work"), draw("C:\\work"));
+
+        let mut filter = OscFilter::new();
+        let filtered = filter.feed(session.as_bytes());
+        assert_eq!(
+            filtered.markers,
+            vec![
+                Marker::CommandFinished(None),
+                Marker::WorkingDirectory("C:\\work".to_string()),
+                Marker::CommandFinished(None),
+                Marker::WorkingDirectory("C:\\work".to_string()),
+            ],
+            "one end, and no code, per prompt"
+        );
+        assert_eq!(filtered.output, "C:\\work>dir\r\n file.txt\r\n\r\nC:\\work>");
     }
 
     /// A shell we have nothing for must be left completely alone.
