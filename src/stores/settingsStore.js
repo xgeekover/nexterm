@@ -10,6 +10,11 @@ export const SETTINGS_KEY = 'nexterm.settings';
  * This is the single list: the store spreads it for its initial state, reads
  * the saved values over it, and `resetSettings` puts it back. Adding a setting
  * here is all that is needed for it to be persisted.
+ *
+ * Changing a default here reaches everyone who has not changed that setting
+ * themselves, because storage holds only what differs from this list.
+ * `persistSettings` says what that means for a payload saved by v0.6.x or
+ * earlier, which holds every key.
  */
 export const SETTINGS_DEFAULTS = {
   terminalFontFamily: '',
@@ -80,7 +85,12 @@ export const FONT_SIZE_RANGE = { min: 8, max: 32 };
 const clampFontSize = (size) =>
   Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, Math.round(size)));
 
-/** Saved values, ignoring anything that is not a setting we know about. */
+/**
+ * Saved values, ignoring anything that is not a setting we know about.
+ *
+ * Most keys are absent — storage holds only what the user changed — and an
+ * absent key keeps the default the store starts from.
+ */
 function loadSettings() {
   const saved = loadState(SETTINGS_KEY, null);
   if (!saved || typeof saved !== 'object') return {};
@@ -102,9 +112,53 @@ function loadSettings() {
   return out;
 }
 
+/**
+ * Whether two setting values are the same, for deciding what counts as a change.
+ *
+ * Primitives compare with `Object.is`, the test the Settings window uses to
+ * decide whether a row offers Reset — so a row that offers Reset is exactly a
+ * setting that is saved. Objects and arrays compare by content, in any key
+ * order. `keybindings` is the one object among the defaults, and the Keyboard
+ * Shortcuts section builds a new map on every edit, so a map emptied one reset
+ * at a time is `{}` like the default without ever being the default's own
+ * object.
+ */
+function sameSetting(a, b) {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  return (
+    keys.length === Object.keys(b).length &&
+    keys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && sameSetting(a[key], b[key]))
+  );
+}
+
+/**
+ * Save the settings that differ from their defaults, and only those.
+ *
+ * This used to write every key. A saved key wins over the default at the next
+ * launch, so the first change anyone made to any setting froze every default
+ * of that day into their storage, and a default changed by a later release
+ * never reached them. Now a setting nobody changed is absent and follows the
+ * release that is running, as in VS Code's settings.json, and one put back to
+ * its default — by its row's Reset, by Reset All, by ⌘0 — leaves storage.
+ *
+ * A payload written by v0.6.x or earlier holds every key. It loads exactly as
+ * it did and is left as written until the next save, which drops the values
+ * equal to today's defaults. A value equal to an OLDER default but not today's
+ * stays: nothing in the payload says whether the user chose it or never
+ * touched it, and guessing wrong would take away a setting someone picked.
+ *
+ * The payload is built from the store rather than merged into what was saved,
+ * so a key this build does not know, or one of the wrong type, is not carried
+ * forward — the next save drops it, as it always has.
+ */
 function persistSettings(state) {
   const payload = {};
-  for (const key of Object.keys(SETTINGS_DEFAULTS)) payload[key] = state[key];
+  for (const key of Object.keys(SETTINGS_DEFAULTS)) {
+    if (!sameSetting(state[key], SETTINGS_DEFAULTS[key])) payload[key] = state[key];
+  }
   saveState(SETTINGS_KEY, payload);
 }
 
@@ -264,7 +318,11 @@ export const useSettingsStore = create((set, get) => ({
     persistSettings(get());
   },
 
-  /** Restore every setting to its default, and remember that too. */
+  /**
+   * Restore every setting to its default, and remember that too — by saving
+   * nothing at all, so from then on every setting follows the defaults of
+   * whichever release is running.
+   */
   resetSettings: () => {
     set({ ...SETTINGS_DEFAULTS });
     persistSettings(get());

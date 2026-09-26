@@ -478,3 +478,263 @@ describe('Every new terminal follows the setting, however it is made', () => {
     localStorage.removeItem(PERSIST_KEY);
   });
 });
+
+describe('Only what the user changed is saved', () => {
+  // Every save used to write every key of SETTINGS_DEFAULTS, and a saved key
+  // wins over the default when the app starts. So the first change anyone
+  // made to any setting froze every default of that day into their storage,
+  // and a default changed by a later release never reached them — had v0.6.0's
+  // `terminalDefaultCwd: 'workspace'` ever needed to change, everyone who had
+  // touched Settings would have kept the old one. Storage now holds what
+  // differs from the defaults, as VS Code's settings.json does.
+  const KEY = 'nexterm.settings';
+  const backing = new Map();
+  const ownStorage = {
+    getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+    setItem: (k, v) => backing.set(k, String(v)),
+    removeItem: (k) => backing.delete(k),
+    clear: () => backing.clear(),
+  };
+
+  /**
+   * Run `fn` against storage of its own, handed back in `finally` rather than
+   * in an `afterEach`: the harness runs `afterEach` only after a case passes,
+   * so a failing case would leave every later suite writing into this Map.
+   */
+  const withOwnStorage = (fn) => async () => {
+    const borrowed = globalThis.localStorage;
+    globalThis.localStorage = ownStorage;
+    backing.clear();
+    try {
+      await fn();
+    } finally {
+      globalThis.localStorage = borrowed;
+    }
+  };
+
+  /** Start the app: a fresh module instance, which reads storage as it is created. */
+  const launch = () => import(`../../src/stores/settingsStore.js?relaunch=${Math.random()}`);
+
+  /** The settings in storage right now — what the next launch reads over its defaults. */
+  const saved = () => {
+    const raw = backing.get(KEY);
+    return raw == null ? {} : JSON.parse(raw).data;
+  };
+
+  /** A payload as v0.6.x wrote it. 2 is the version it stamped, and it has to keep loading. */
+  const writtenByAnOlderRelease = (data) => backing.set(KEY, JSON.stringify({ version: 2, data }));
+
+  test(
+    'SET-26: changing a setting saves that setting and nothing else',
+    withOwnStorage(async () => {
+      const store = (await launch()).useSettingsStore;
+      const defaults = store.getState().settingsDefaults;
+
+      store.getState().setSetting('terminalTheme', 'dracula');
+      assert.deepEqual(saved(), { terminalTheme: 'dracula' }, 'settings nobody touched were saved with it');
+
+      store.getState().setSetting('terminalFontSize', 16);
+      assert.deepEqual(saved(), { terminalTheme: 'dracula', terminalFontSize: 16 });
+
+      // ⌘+ changes two settings, and saves those two.
+      store.getState().zoomFont(1);
+      assert.deepEqual(saved(), {
+        terminalTheme: 'dracula',
+        terminalFontSize: 17,
+        editorFontSize: defaults.editorFontSize + 1,
+      });
+    })
+  );
+
+  test(
+    'SET-27: a setting put back to its default leaves storage, shortcut overrides included',
+    withOwnStorage(async () => {
+      const store = (await launch()).useSettingsStore;
+      const { setSetting, settingsDefaults } = store.getState();
+
+      setSetting('terminalFontSize', 16);
+      setSetting('terminalCursorStyle', 'block');
+      // Typing the default back in, and the row's Reset — SettingsWindow's
+      // `handleReset` — are both this call.
+      setSetting('terminalFontSize', settingsDefaults.terminalFontSize);
+      assert.deepEqual(saved(), { terminalCursorStyle: 'block' }, 'a default value stayed in storage');
+      setSetting('terminalCursorStyle', settingsDefaults.terminalCursorStyle);
+      assert.deepEqual(saved(), {});
+
+      // The shortcut overrides are one object, and the Keyboard Shortcuts
+      // section hands over a NEW one on every edit. An override is saved whole —
+      // an unbinding (`null`) and a chord pair included...
+      const overrides = { 'toggle-sidebar': null, 'split-right': ['mod+k', 'mod+\\'] };
+      setSetting('keybindings', overrides);
+      assert.deepEqual(saved(), { keybindings: overrides });
+
+      // ...and resetting them one command at a time, as KeybindingSettings'
+      // `reset` does, ends at `{}`: the default in content, never in identity.
+      for (const commandId of Object.keys(overrides)) {
+        const next = { ...store.getState().keybindings };
+        delete next[commandId];
+        setSetting('keybindings', next);
+      }
+      assert.deepEqual(store.getState().keybindings, {});
+      assert.deepEqual(saved(), {}, 'an emptied override map was saved as though it were a change');
+    })
+  );
+
+  test(
+    'SET-28: Reset All and ⌘0 leave nothing saved for what they reset',
+    withOwnStorage(async () => {
+      const store = (await launch()).useSettingsStore;
+      const s = store.getState();
+      const defaults = s.settingsDefaults;
+
+      s.setSetting('terminalTheme', 'nord');
+      s.setSetting('editorWordWrap', true);
+      s.zoomFont(2);
+      assert.deepEqual(saved(), {
+        terminalTheme: 'nord',
+        editorWordWrap: true,
+        terminalFontSize: defaults.terminalFontSize + 2,
+        editorFontSize: defaults.editorFontSize + 2,
+      });
+
+      s.resetZoom();
+      assert.deepEqual(saved(), { terminalTheme: 'nord', editorWordWrap: true }, '⌘0 left the font sizes saved');
+
+      s.setSetting('keybindings', { 'new-terminal': 'mod+alt+t' });
+      s.resetSettings();
+      assert.deepEqual(saved(), {}, 'Reset All left settings in storage');
+
+      // So the next launch is every default of the release it is.
+      const next = (await launch()).useSettingsStore.getState();
+      for (const key of Object.keys(next.settingsDefaults)) {
+        assert.deepEqual(next[key], next.settingsDefaults[key], `${key} did not come back as the default`);
+      }
+    })
+  );
+
+  test(
+    'SET-29: a default changed by a later release reaches everyone who never changed that setting',
+    withOwnStorage(async () => {
+      // Two module instances stand in for two releases. The older one shipped
+      // a different scrollback default: editing its defaults before anything
+      // is saved is exactly the difference between the two builds.
+      const older = await launch();
+      older.SETTINGS_DEFAULTS.terminalScrollback = 1000;
+      older.useSettingsStore.setState({ terminalScrollback: 1000 });
+      // The user changes something else entirely, which is a save.
+      older.useSettingsStore.getState().setSetting('terminalTheme', 'nord');
+
+      const newer = (await launch()).useSettingsStore.getState();
+      assert.notEqual(newer.settingsDefaults.terminalScrollback, 1000, 'the two releases must disagree');
+      assert.equal(
+        newer.terminalScrollback,
+        newer.settingsDefaults.terminalScrollback,
+        "the older release's default was frozen into storage and outlived the release"
+      );
+      assert.equal(newer.terminalTheme, 'nord', 'what the user did change must still come back');
+    })
+  );
+
+  test(
+    'SET-30: a payload written by an older release loads as it always did, and the next save keeps only the changes',
+    withOwnStorage(async () => {
+      // Every key, as v0.6.x wrote it: three the user chose, and the rest
+      // whatever the defaults were that day — which are today's.
+      const defaults = S.getState().settingsDefaults;
+      const chosen = {
+        terminalTheme: 'nord',
+        editorTabSize: 4,
+        keybindings: { 'toggle-sidebar': 'mod+shift+e' },
+      };
+      const full = { ...defaults, ...chosen };
+      writtenByAnOlderRelease(full);
+
+      const store = (await launch()).useSettingsStore;
+      for (const [key, value] of Object.entries(full)) {
+        assert.deepEqual(store.getState()[key], value, `${key} did not load as it used to`);
+      }
+
+      store.getState().setSetting('reducedMotion', true);
+      assert.deepEqual(
+        saved(),
+        { ...chosen, reducedMotion: true },
+        "the next save kept the older release's copy of the defaults"
+      );
+    })
+  );
+
+  test(
+    "SET-31: a saved value that is not today's default is kept, even if an older release had it as its default",
+    withOwnStorage(async () => {
+      // Say scrollback defaulted to 1000 when this payload was written. Nothing
+      // in it says whether the user chose 1000 or never touched the setting, so
+      // it stays: dropping it would be a guess, and a wrong guess costs someone
+      // a setting they picked.
+      const defaults = S.getState().settingsDefaults;
+      assert.notEqual(defaults.terminalScrollback, 1000);
+      writtenByAnOlderRelease({ ...defaults, terminalScrollback: 1000 });
+
+      const store = (await launch()).useSettingsStore;
+      assert.equal(store.getState().terminalScrollback, 1000);
+
+      store.getState().setSetting('terminalTheme', 'nord');
+      assert.deepEqual(saved(), { terminalScrollback: 1000, terminalTheme: 'nord' });
+
+      assert.equal((await launch()).useSettingsStore.getState().terminalScrollback, 1000);
+    })
+  );
+
+  test(
+    'SET-32: unknown keys and wrong types are still ignored, and the next save does not write them back',
+    withOwnStorage(async () => {
+      writtenByAnOlderRelease({
+        terminalFontSize: 'huge',
+        editorWordWrap: 'yes',
+        keybindings: ['not', 'a', 'map'],
+        nonsense: 1,
+        terminalTheme: 'nord',
+      });
+
+      const store = (await launch()).useSettingsStore;
+      const state = store.getState();
+      assert.equal(state.terminalFontSize, state.settingsDefaults.terminalFontSize);
+      assert.equal(state.editorWordWrap, state.settingsDefaults.editorWordWrap);
+      assert.deepEqual(state.keybindings, {});
+      assert.equal('nonsense' in state, false);
+      assert.equal(state.terminalTheme, 'nord');
+
+      state.setSetting('reducedMotion', true);
+      assert.deepEqual(saved(), { terminalTheme: 'nord', reducedMotion: true }, 'garbage was carried forward');
+    })
+  );
+
+  test(
+    'SET-33: an object setting is compared by content, whichever way round',
+    withOwnStorage(async () => {
+      // `keybindings` is the only object setting today, and its default is
+      // empty, which lets a one-sided comparison pass. A later object setting
+      // with something in its default must count an emptied or shortened value
+      // as a change, and the same entries in another order as none — or that
+      // setting freezes into storage exactly as every default used to.
+      const app = await launch();
+      const LATER_DEFAULT = { a: ['x', 'y'], b: null };
+      app.SETTINGS_DEFAULTS.laterObjectSetting = LATER_DEFAULT;
+      const { setSetting } = app.useSettingsStore.getState();
+
+      setSetting('laterObjectSetting', { b: null, a: ['x', 'y'] });
+      assert.deepEqual(saved(), {}, 'the default, in another order, was saved as a change');
+
+      const changes = [
+        {},
+        { a: ['x', 'y'] },
+        { a: ['x'], b: null },
+        { a: { 0: 'x', 1: 'y' }, b: null },
+        { a: ['x', 'y'], b: {} },
+      ];
+      for (const changed of changes) {
+        setSetting('laterObjectSetting', changed);
+        assert.deepEqual(saved(), { laterObjectSetting: changed }, `${JSON.stringify(changed)} was not saved`);
+      }
+    })
+  );
+});
