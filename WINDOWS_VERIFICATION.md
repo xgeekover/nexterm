@@ -181,6 +181,8 @@ build or `?debug` — but it is not only the DOM either:
   history live (`nexterm.terminal.workspace`, `nexterm.settings`,
   `nexterm.commandHistory`), so whether something was saved can be read rather
   than inferred from the screen. Changes are written within about two seconds.
+  Since 0.7.0 `nexterm.settings` holds only what differs from the defaults: a
+  setting at its default is simply absent.
 - **`window.__TAURI_INTERNALS__`** is there. `invoke('plugin:event|listen', …)`
   subscribes the page to the backend's own events — `pty-command-started`,
   `pty-command-done`, `pty-cwd` — so you can timestamp what the backend
@@ -191,9 +193,9 @@ Driving it over CDP:
 - The terminal is drawn with WebGL: there is no `.xterm-rows` and no terminal
   text in the DOM. Read it from screenshots (`Page.captureScreenshot` works).
 - Adding `--disable-webgl` to `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` puts xterm
-  on its DOM renderer, where the text is readable from `.xterm-rows` and the
-  inline suggestions appear (under WebGL they never do, #35). That is not the
-  shipped configuration — say so whenever you use it.
+  on its DOM renderer, where the text is readable from `.xterm-rows`. That is
+  not the shipped configuration — say so whenever you use it. (Before 0.7.0 it
+  was also the only way to see inline suggestions, #35.)
 - Click with `Input.dispatchMouseEvent` — pressed, then released — never with
   `element.click()`: a bug in where focus goes only shows under a real press.
   `Input.insertText` reaches the shell exactly like typing.
@@ -269,10 +271,16 @@ panel, `cd C:\Windows\System32`, and watch it follow.
 The prompt itself must look untouched (`C:\...>`) — visible escape characters
 are a failure. `echo %PROMPT%` should show the marker spliced in front of it.
 
-Command blocks, the sticky header and completion notifications still do not
-work on cmd, by design: it can report a directory and nothing else. Switching
-the default shell to PowerShell should bring those back, which is worth
-checking at the same time.
+Since 0.7.0 cmd also reports that a command **ended** — `echo %PROMPT%` shows
+`$E]133;D$E\` in front of the directory marker — but never how: its prompt
+cannot expand `%ERRORLEVEL%`. So after `ping -n 10 localhost` the tab reads as
+running from about 300 ms after Enter until the next prompt, a long command
+that finishes while you are elsewhere raises a notification with no ✓ and no
+✗, and the command stays in the history. Three empty Enters must not flicker
+the tab. Command blocks and the sticky header still need a "started" marker
+cmd cannot send; switching the default shell to PowerShell brings those back.
+Worth noting as well: a batch file run with `echo on` draws the prompt before
+each line it echoes, and a `(` block's `More?` prompt sends no end.
 
 ### V6 — a path shows its end
 
@@ -324,15 +332,23 @@ id (`Win32_Process` shows it when claude has cleared the screen), and it must
 remember what was said. Relaunch once more and press *Dismiss*: `agent` goes to
 `null` on disk, and the next launch offers nothing.
 
+Since 0.7.0 the record also ends when the agent does. Quit claude (`/exit`)
+and `agent` goes to `null` within a couple of seconds; the next launch offers
+nothing. A conversation that never got a message cannot be resumed — Resume
+prints "No conversation found" — and that also clears it (#37). And the start
+command waits for the shell's first prompt (up to 3 s), so it is echoed once,
+after the prompt. Check all three on cmd, PowerShell 5.1 and PowerShell 7, and
+note how long PowerShell with a profile takes to draw its first prompt.
+
 ### V14 — Resume waits while something runs
 
 With PowerShell as the default shell, give a restored offer a long **first**
 command (`Start-Sleep 20`): *Resume* is disabled with a reason for the whole
 run and enabled again after it. Repeat on Windows PowerShell 5.1 and on
 PowerShell 7 — the first command is the one ConPTY delays, see below. Three
-empty Enters must not flicker it. On cmd it is never disabled, by design (cmd
-reports no command boundaries); note what it does and check that nothing is
-left marked as running.
+empty Enters must not flicker it. On cmd (since 0.7.0) it is disabled too, from
+about 300 ms after Enter until the next prompt — check that with `ping -n 10
+localhost`, and that nothing is left marked as running afterwards.
 
 ### V15 — the Default Directory setting reaches every new terminal
 
@@ -347,9 +363,18 @@ folder, and a launch with no saved layout still starts with one terminal.
 
 Put `{c: "echo SAFE\recho INJECTED", n: 9}` into `nexterm.commandHistory`
 through CDP, with a clean `echo SAFECONTROL` beside it as the control, and
-relaunch. In the History palette and with Tab after `echo S` (Tab needs
-`--disable-webgl` until #35 is fixed), only the control is offered, and
-`INJECTED` is never printed.
+relaunch. In the History palette and with Tab after `echo S`, only the control
+is offered, and `INJECTED` is never printed.
+
+### V17 — inline suggestions draw under WebGL, at the cursor
+
+With the shipped WebGL renderer (no `--disable-webgl`), type `git s` in a
+terminal whose history has `git status`: the ghost text and the popup appear,
+and the ghost starts right **after** the typed text, never over it (#35, #36).
+The ghost is drawn only once the shell has echoed the keys, so type along a
+suggestion one key at a time and watch whether it reads steady or blinks —
+ConPTY echoes later than a unix pty, and that has not been measured. Tab and →
+accept, Esc dismisses.
 
 ## What the first run found
 
