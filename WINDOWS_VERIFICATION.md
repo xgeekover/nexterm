@@ -280,7 +280,10 @@ that finishes while you are elsewhere raises a notification with no ✓ and no
 the tab. Command blocks and the sticky header still need a "started" marker
 cmd cannot send; switching the default shell to PowerShell brings those back.
 Worth noting as well: a batch file run with `echo on` draws the prompt before
-each line it echoes, and a `(` block's `More?` prompt sends no end.
+each line it echoes, and a `(` block's `More?` prompt sends no end. And the
+markers live in `PROMPT`: running `prompt` (which resets it) or `echo off` at
+the prompt removes them, and from the next Enter that terminal reads as
+running until it is reopened — a known limit, not a bug to chase.
 
 ### V6 — a path shows its end
 
