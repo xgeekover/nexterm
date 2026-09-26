@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Bell, Check, Circle, X, XCircle } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { durationLabel } from '../../lib/tabActivity.js';
+import { durationLabel, isFailure } from '../../lib/tabActivity.js';
 import { cn } from '../../lib/utils.js';
 
 /**
@@ -57,7 +57,7 @@ export function NotificationCenter() {
   // A failure is a code the shell gave that is not 0. cmd gives none — its
   // prompt can say a command ended but not how — and that is a command that
   // finished, not one that failed.
-  const failed = (n) => typeof n.exitCode === 'number' && n.exitCode !== 0;
+  const failed = (n) => isFailure(n.exitCode);
   const failures = notifications.filter(failed).length;
 
   return (

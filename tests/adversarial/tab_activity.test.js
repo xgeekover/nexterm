@@ -12,7 +12,7 @@
  * frontend half; `src-tauri` pins the marker itself.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, durationLabel } from '../../src/lib/tabActivity.js';
+import { isFailure, tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, durationLabel } from '../../src/lib/tabActivity.js';
 
 const { useTerminalStore: S } = await import('../../src/stores/terminalStore.js');
 
@@ -229,5 +229,19 @@ describe('The notification list', () => {
     assert.deepEqual(S.getState().notifications.map((n) => n.id), ['n2'], 'an unknown id changes nothing');
     S.getState().clearNotifications();
     assert.deepEqual(S.getState().notifications, []);
+  });
+});
+
+describe('What counts as a failure', () => {
+  test('TA-21: only a code the shell gave, and not 0 — cmd gives none, and that is not a failure', () => {
+    // cmd reports every command end without a code. Three readers used to
+    // ask `!== 0`, which is true of null: the notification badge went red,
+    // and the history forgot every command typed into cmd.
+    for (const code of [1, 2, 127, 130, -1]) assert.equal(isFailure(code), true, `${code} is a failure`);
+    for (const code of [0, null, undefined, '1']) {
+      assert.equal(isFailure(code), false, `${JSON.stringify(code)} is not a failure`);
+    }
+    assert.equal(tabActivity({ lastExitCode: null }), 'idle', 'no verdict on the tab');
+    assert.equal(tabActivity({ lastExitCode: 3 }), 'failed');
   });
 });

@@ -6,6 +6,7 @@ import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
 import { locateSuggestion } from '../../lib/suggestGeometry.js';
+import { isFailure } from '../../lib/tabActivity.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 import { addCommandMark, stickyCommandFor } from '../../lib/stickyCommand.js';
@@ -428,7 +429,10 @@ export function TerminalView({ tabId, active = false }) {
     let promptCancelled = false;
     listen('pty-command-done', (payload) => {
       if (payload?.session_id !== sessionId) return;
-      if (payload.exit_code !== 0 && lastSubmittedRef.current) {
+      // Only a failure the shell reported takes the line back out of the
+      // history. cmd reports every end without a code; `!== 0` read that as a
+      // failure and forgot every command typed into cmd.
+      if (isFailure(payload.exit_code) && lastSubmittedRef.current) {
         forgetCommand(lastSubmittedRef.current);
       }
       lastSubmittedRef.current = '';

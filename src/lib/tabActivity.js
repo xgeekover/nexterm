@@ -31,11 +31,21 @@
  * a new command outranks the last one's verdict — starting something is
  * exactly when the old red dot should go.
  */
+/**
+ * Whether an exit code says the command FAILED: a code the shell gave, and not
+ * 0. Null is not a failure — cmd reports that a command ended but cannot say
+ * how — and neither is a missing one. Every reader asks this, not `!== 0`,
+ * which is true of null and called every cmd command a failure.
+ */
+export function isFailure(exitCode) {
+  return typeof exitCode === 'number' && exitCode !== 0;
+}
+
 export function tabActivity(tab) {
   if (!tab) return 'idle';
   if (tab.exited) return 'exited';
   if (tab.running) return 'running';
-  if (typeof tab.lastExitCode === 'number' && tab.lastExitCode !== 0) return 'failed';
+  if (isFailure(tab.lastExitCode)) return 'failed';
   return 'idle';
 }
 
@@ -149,4 +159,4 @@ export function durationLabel(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export default { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, submitsLine, durationLabel };
+export default { isFailure, tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, submitsLine, durationLabel };
