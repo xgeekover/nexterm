@@ -25,10 +25,13 @@ pub struct PtyCommandStartedPayload {
 }
 
 /// Emitted when the shell reports (via OSC 133) that a command finished.
+///
+/// `exit_code` is signed (PowerShell reports NTSTATUS exits as negative) and
+/// `None` when the shell gave none, as cmd never does.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PtyCommandDonePayload {
     pub session_id: String,
-    pub exit_code: Option<u32>,
+    pub exit_code: Option<i32>,
 }
 
 /// Emitted when the shell reports (via OSC 7) its live working directory —

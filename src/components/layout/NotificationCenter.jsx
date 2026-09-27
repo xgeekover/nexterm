@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bell, Check, X, XCircle } from 'lucide-react';
+import { Bell, Check, Circle, X, XCircle } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { durationLabel } from '../../lib/tabActivity.js';
+import { durationLabel, isFailure } from '../../lib/tabActivity.js';
 import { cn } from '../../lib/utils.js';
 
 /**
@@ -54,7 +54,11 @@ export function NotificationCenter() {
   // Nothing to say, nothing on screen.
   if (notifications.length === 0) return null;
 
-  const failures = notifications.filter((n) => n.exitCode !== 0).length;
+  // A failure is a code the shell gave that is not 0. cmd gives none — its
+  // prompt can say a command ended but not how — and that is a command that
+  // finished, not one that failed.
+  const failed = (n) => isFailure(n.exitCode);
+  const failures = notifications.filter(failed).length;
 
   return (
     <div ref={rootRef} className="relative h-full shrink-0">
@@ -117,14 +121,16 @@ export function NotificationCenter() {
                   className="flex-1 min-w-0 flex items-center gap-2 text-left"
                   title={`Go to ${note.title}`}
                 >
-                  {note.exitCode === 0 ? (
+                  {failed(note) ? (
+                    <XCircle size={13} className="shrink-0 text-vsc-error" />
+                  ) : note.exitCode === 0 ? (
                     <Check size={13} className="shrink-0 text-vsc-ok" />
                   ) : (
-                    <XCircle size={13} className="shrink-0 text-vsc-error" />
+                    <Circle size={13} className="shrink-0 text-vsc-muted" />
                   )}
                   <span className="truncate text-ui text-vsc-fg">{note.title}</span>
                   <span className="ml-auto shrink-0 text-ui-sm text-vsc-muted tabular-nums">
-                    {note.exitCode === 0 ? durationLabel(note.durationMs) : `exit ${note.exitCode}`}
+                    {failed(note) ? `exit ${note.exitCode}` : durationLabel(note.durationMs)}
                   </span>
                 </button>
                 <button

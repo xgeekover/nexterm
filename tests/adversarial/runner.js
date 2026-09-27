@@ -42,6 +42,8 @@ import './tab_activity.test.js';
 import './find_and_zoom.test.js';
 import './agents.test.js';
 import './held_start_marker.test.js';
+import './agent_lifecycle.test.js';
+import './suggest_geometry.test.js';
 
 async function run() {
   console.log('====================================================');

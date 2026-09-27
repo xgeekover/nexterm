@@ -802,6 +802,23 @@ let unlisteners = [];
 let listening = false;
 
 /**
+ * session id -> how many command ends (OSC 133 "D") that shell has reported.
+ *
+ * Kept per SESSION, outside the tabs, because a shell can report its first
+ * one before any tab holds it. A light zsh draws its first prompt within tens
+ * of milliseconds of being spawned and cmd sooner: while `createTab` is still
+ * waiting for `pty_spawn` to return, or while a restore spawns the next
+ * terminal. Counted on the tab, that D had nowhere to go, and the shell then
+ * looked like one that never reports an end — no inference for its commands
+ * (`noteSubmittedLine`), and an agent typed into it only after the whole
+ * wait, and never watched (`untilPromptReady`). Dropped when the shell exits.
+ */
+const commandEndsBySession = new Map();
+
+/** How many command ends `sessionId` has reported so far. */
+const endsOf = (sessionId) => commandEndsBySession.get(sessionId) ?? 0;
+
+/**
  * How long a submitted line may go unanswered before it counts as a running
  * command, where that inference is made at all (see `noteSubmittedLine`).
  *
@@ -822,6 +839,28 @@ let submitInfersRunning = isWindows;
 export function __setSubmitInfersRunning(on) {
   const previous = submitInfersRunning;
   submitInfersRunning = Boolean(on);
+  return previous;
+}
+
+/**
+ * How long a new shell has to draw its first prompt before an agent is typed
+ * into it anyway (see `startAgent`).
+ *
+ * The prompt is recognised by its OSC 133 "D": every shell NexTerm integrates
+ * sends one with every prompt, the first included. One with no integration —
+ * fish, sh — never will, and is typed into once this is up, as it always was.
+ * Counted from when the shell started, so it is only ever waited out on a
+ * terminal that has just opened. Long enough for most shells to load their rc
+ * files and a PowerShell its profile; one slower than that is typed into
+ * early, which is how every agent was typed before there was a wait.
+ */
+export const AGENT_PROMPT_WAIT_MS = 3000;
+let agentPromptWaitMs = AGENT_PROMPT_WAIT_MS;
+
+/** Test hook: how long an agent waits for a first prompt. Returns what it replaced. */
+export function __setAgentPromptWaitMs(ms) {
+  const previous = agentPromptWaitMs;
+  agentPromptWaitMs = Number.isFinite(ms) && ms >= 0 ? ms : AGENT_PROMPT_WAIT_MS;
   return previous;
 }
 
@@ -900,7 +939,7 @@ async function disposeTerminalView(tabId) {
 /** A machine left running overnight must not grow this without bound. */
 const NOTIFICATION_LIMIT = 50;
 
-export const useTerminalStore = create((set, get) => {
+export const useTerminalStore = create((set, get, api) => {
   /**
    * Where a new terminal starts, for EVERY way of making one: the directory
    * asked for, else the `terminal.integrated.cwd` setting, else `null` for
@@ -996,6 +1035,9 @@ export const useTerminalStore = create((set, get) => {
         // restored tab gets a NEW shell, so neither may survive a respawn.
         running: false,
         lastExitCode: null,
+        // When this shell started: how long an agent waits for its first
+        // prompt is counted from here (see `untilPromptReady`).
+        spawnedAt: Date.now(),
       };
 
       set((state) => ({ tabs: [...state.tabs, newTab] }));
@@ -1005,6 +1047,63 @@ export const useTerminalStore = create((set, get) => {
       return null;
     }
   };
+
+  /**
+   * Wait until `tabId`'s shell has drawn its first prompt, which it says with
+   * the first OSC 133 "D" its session reports. Resolves with:
+   *
+   *   'ready'   it has, now or earlier
+   *   'timeout' it has not, AGENT_PROMPT_WAIT_MS after the shell started —
+   *             for fish or sh, which send no D, that is every time
+   *   'gone'    the tab closed, or its shell exited or was replaced, first
+   */
+  const untilPromptReady = (tabId) =>
+    new Promise((resolve) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      const sessionId = tab?.sessionId;
+      const readiness = (state) => {
+        const now = state.tabs.find((t) => t.id === tabId);
+        if (!now || now.sessionId !== sessionId || now.exited) return 'gone';
+        return endsOf(sessionId) > 0 ? 'ready' : null;
+      };
+      const already = readiness(get());
+      const left = (tab?.spawnedAt ?? 0) + agentPromptWaitMs - Date.now();
+      if (already || left <= 0) {
+        resolve(already || 'timeout');
+        return;
+      }
+      const finish = (result) => {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(result);
+      };
+      const timer = setTimeout(() => finish('timeout'), left);
+      const unsubscribe = api.subscribe((state) => {
+        const result = readiness(state);
+        if (result) finish(result);
+      });
+    });
+
+  /**
+   * Remember that `agent` is being typed into `tabId`, right before it is.
+   *
+   * With `atPrompt` — the shell has drawn a prompt, so the line runs as soon
+   * as it arrives — the agent is watched: the first D after this write that
+   * arrives while the terminal is running something is the agent exiting,
+   * and ends the record (see `pty-command-done`). The watch goes on HERE,
+   * right before the write and with nothing that can come between them, so
+   * every D it sees is one that came after the write. Without a prompt to go
+   * by, nothing says where the typed line stands, so nothing is watched and
+   * the record stays, as it always did.
+   */
+  const recordAgent = (tabId, agent, atPrompt) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId
+          ? { ...t, agent, agentResumeOffered: false, agentTyped: atPrompt ? { sessionId: t.sessionId } : null }
+          : t
+      ),
+    }));
 
   /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   /**
@@ -1177,6 +1276,7 @@ export const useTerminalStore = create((set, get) => {
         // waits for the user to ask. `resumeAgent` clears the flag.
         agent: serializeAgent(savedTab.agent),
         agentResumeOffered: Boolean(serializeAgent(savedTab.agent)),
+        spawnedAt: Date.now(),
       });
     }
 
@@ -2056,6 +2156,9 @@ export const useTerminalStore = create((set, get) => {
       unlisteners.push(await listen('pty-command-done', (payload) => {
         const { session_id, exit_code } = payload || {};
         if (!session_id) return;
+        // Counted first, and whether or not a tab holds this session yet —
+        // see `commandEndsBySession`.
+        commandEndsBySession.set(session_id, endsOf(session_id) + 1);
         set((state) => {
           // Built inside the same update as the tabs it describes: a second
           // `set` from within an updater is how two writes to one store end up
@@ -2067,7 +2170,13 @@ export const useTerminalStore = create((set, get) => {
             // command: typing straight into the terminal never creates one,
             // which is the normal case, so anything reading it off `blocks`
             // only ever saw commands run from the palette.
-            const code = exit_code ?? 0;
+            //
+            // An end with no code — cmd's, whose PROMPT has no way to say —
+            // is a command that FINISHED, not one that succeeded. It stays
+            // null, and null is no verdict anywhere it is read: no red dot,
+            // nothing on the status bar, a notification that only says it
+            // finished. `exit_code ?? 0` would call every one a success.
+            const code = typeof exit_code === 'number' ? exit_code : null;
             const note = notificationFor(
               tab,
               code,
@@ -2075,29 +2184,45 @@ export const useTerminalStore = create((set, get) => {
               (useSettingsStore.getState().terminalNotifyAfterSeconds ?? 0) * 1000
             );
             if (note) raised.push(note);
+            // The agent typed into this shell (see `recordAgent`) has exited
+            // at the first end after it was typed that arrives while
+            // something is RUNNING: a C came first, or on Windows its line
+            // went unanswered long enough to count as running. `running` is
+            // read here, before this D clears it. A D at a prompt is not a
+            // command ending — a second integration in the user's rc prints
+            // its own D beside NexTerm's, so does a D the user put in cmd's
+            // PROMPT, and a transient prompt redrawn on Enter sends one
+            // before the command's C — and none of those may end the record.
+            //
+            // Nothing is left running to pick back up, so the record goes,
+            // and with it the offer to resume on the next launch — which for
+            // a conversation that was never sent a message could only ever
+            // fail. The user can still `claude --resume` by hand. Two ends
+            // this cannot tell apart: Ctrl+Z suspending the agent counts as
+            // it exiting, and on cmd, which sends no C, an agent gone within
+            // SUBMIT_GRACE_MS — a resume that fails at once — is not counted,
+            // so its record stays for one more offer.
+            const agentExited = tab.running && tab.agentTyped?.sessionId === session_id;
             tab = {
               ...tab,
               lastExitCode: code,
               running: false,
               runStartedAt: null,
-              // That this shell reports ends at all, and how many it has —
-              // what `noteSubmittedLine` needs before guessing that a line
-              // it has not answered is still running.
-              commandEndSession: session_id,
-              commandEnds: (tab.commandEnds ?? 0) + 1,
+              ...(agentExited ? { agent: null, agentResumeOffered: false, agentTyped: null } : {}),
             };
             const idx = tab.blocks.findIndex((b) => b.status === 'running');
             if (idx === -1) return tab;
             const blocks = [...tab.blocks];
             const running = blocks[idx];
-            const ok = exit_code === null || exit_code === undefined || exit_code === 0;
             blocks[idx] = {
               ...running,
               // zsh pads the last line to the terminal width before the prompt;
               // drop that trailing whitespace so blocks end cleanly.
               output: running.output.replace(/[ \t]+\r?$/, ''),
-              status: ok ? 'completed' : 'failed',
-              exitCode: exit_code ?? 0,
+              // Only a code the shell gave can make it a failure; with none
+              // it is simply finished.
+              status: code === null || code === 0 ? 'completed' : 'failed',
+              exitCode: code,
               durationMs: Date.now() - (running.startTime || Date.now()),
             };
             return { ...tab, blocks };
@@ -2113,6 +2238,8 @@ export const useTerminalStore = create((set, get) => {
       unlisteners.push(await listen('pty-exit', (payload) => {
         const { session_id, exit_code } = payload || {};
         if (!session_id) return;
+        // Nothing more will come from this shell to count.
+        commandEndsBySession.delete(session_id);
 
         set((state) => ({
           tabs: state.tabs.map((tab) => {
@@ -2206,6 +2333,15 @@ export const useTerminalStore = create((set, get) => {
       }
 
       try {
+        // Listening before anything is spawned. A shell draws its first
+        // prompt within tens of milliseconds of the spawn — sooner than the
+        // restore below takes to spawn the rest and put them in the store —
+        // and Tauri keeps no event for a listener that arrives after it. The
+        // listeners used to go up last, and every restored shell's first D
+        // was lost. Each handler already ignores a session no tab holds, and
+        // command ends are counted per session for exactly that case.
+        await get().attachListeners();
+
         // null while no folder is open: the backend then starts terminals in
         // the home directory and says where in `ptySession.cwd`.
         let rootPath = null;
@@ -2270,7 +2406,6 @@ export const useTerminalStore = create((set, get) => {
             groups: restored.groups,
             activeGroupId: restored.activeGroupId,
           });
-          await get().attachListeners();
           return;
         }
 
@@ -2308,6 +2443,7 @@ export const useTerminalStore = create((set, get) => {
           cwd: ptySession.cwd || rootPath,
           blocks: [],
           activePrompt: '',
+          spawnedAt: Date.now(),
         };
         const group = makeGroup({ name: 'Group 1', tabIds: [initialTab.id] });
 
@@ -2319,8 +2455,6 @@ export const useTerminalStore = create((set, get) => {
           groups: [group],
           activeGroupId: group.id,
         });
-
-        await get().attachListeners();
       } catch (err) {
         console.error('[TerminalStore] Failed to initialize terminal session:', err);
       }
@@ -2578,11 +2712,18 @@ export const useTerminalStore = create((set, get) => {
      * one. That is how a person starts an agent, it leaves a working shell
      * when the agent exits, and it makes a terminal NexTerm started and a
      * terminal someone typed in the same kind of thing.
+     *
+     * Typed once the shell has drawn its first prompt, not the moment the
+     * terminal exists — which is when New Claude Code Terminal calls this.
+     * Typed earlier, the command was typeahead, echoed once by the tty and
+     * again by the line editor. Typed at a prompt, the agent is watched, and
+     * its exit ends the record (see `recordAgent`). A shell that never sends
+     * a D gets the command once the wait is up and keeps the record, as
+     * every shell did before.
      */
     startAgent: async (tabId, kind) => {
       const targetId = tabId || get().activeTabId;
-      const tab = get().tabs.find((t) => t.id === targetId);
-      if (!tab) return null;
+      if (!get().tabs.some((t) => t.id === targetId)) return null;
 
       let started;
       try {
@@ -2592,11 +2733,9 @@ export const useTerminalStore = create((set, get) => {
         return null;
       }
 
-      set((state) => ({
-        tabs: state.tabs.map((t) =>
-          t.id === targetId ? { ...t, agent: started.agent, agentResumeOffered: false } : t
-        ),
-      }));
+      const readiness = await untilPromptReady(targetId);
+      if (readiness === 'gone') return null;
+      recordAgent(targetId, started.agent, readiness === 'ready');
       await get().writeRaw(targetId, `${started.command}\r`);
       return started.agent;
     },
@@ -2615,6 +2754,12 @@ export const useTerminalStore = create((set, get) => {
      * from a submitted line the shell has not answered (`noteSubmittedLine`);
      * a shell without integration never reports one and is typed into as
      * before.
+     *
+     * Pressed before a restored shell has drawn its first prompt, it waits
+     * for that prompt, for the same reasons `startAgent` does. And the agent
+     * it types ends its record the same way, when it exits — including a
+     * resume that fails at once, like `claude --resume` for a conversation
+     * that was never sent a message and so was never saved (#37).
      */
     resumeAgent: async (tabId) => {
       const targetId = tabId || get().activeTabId;
@@ -2623,11 +2768,16 @@ export const useTerminalStore = create((set, get) => {
 
       const command = resumeCommand(tab.agent);
       // The offer goes away either way: an agent we no longer recognise is
-      // not something to keep asking about.
+      // not something to keep asking about. And it goes before any wait for
+      // a prompt, so it cannot be taken twice while that wait lasts.
       set((state) => ({
         tabs: state.tabs.map((t) => (t.id === targetId ? { ...t, agentResumeOffered: false } : t)),
       }));
       if (!command) return false;
+
+      const readiness = await untilPromptReady(targetId);
+      if (readiness === 'gone') return false;
+      recordAgent(targetId, tab.agent, readiness === 'ready');
       await get().writeRaw(targetId, `${command}\r`);
       return true;
     },
@@ -2648,7 +2798,7 @@ export const useTerminalStore = create((set, get) => {
       if (!tab || !data) return;
       // Both taken before the write: the shell's answer can arrive before
       // `invoke` resolves, and it must still count as an answer to this line.
-      const submitted = { at: Date.now(), endsBefore: tab.commandEnds ?? 0 };
+      const submitted = { at: Date.now(), endsBefore: endsOf(tab.sessionId) };
       try {
         await invoke('pty_write', { session_id: tab.sessionId, data });
         if (submitsLine(data)) get().noteSubmittedLine(targetId, submitted);
@@ -2681,17 +2831,23 @@ export const useTerminalStore = create((set, get) => {
      * command that started when it was submitted. A C arriving later changes
      * nothing (`running` is already set) and D ends it as usual. Only:
      *
-     * - for a session that has sent D at least once. cmd, fish and sh send
-     *   none, and nothing would ever clear a `running` guessed for them.
+     * - for a session that has sent D at least once. fish and sh send none,
+     *   and nothing would ever clear a `running` guessed for them.
      * - on Windows. Elsewhere C arrives on time, and a continuation line
      *   (`for …` + Enter) that the shell is still waiting on would read as busy.
+     *
+     * cmd reports a D with every prompt and never a C, so for cmd this is
+     * the ONLY way a command reads as running. Its continuation prompt
+     * (`More?`, after an open bracket or a `^`) is not its PROMPT and sends
+     * no D, so a line left open there reads as running until it is finished
+     * — as PowerShell's `>>` already does.
      */
     noteSubmittedLine: (tabId, { at = Date.now(), endsBefore } = {}) => {
       if (!submitInfersRunning) return;
       const tab = get().tabs.find((t) => t.id === tabId);
-      if (!tab || tab.running || tab.exited || tab.commandEndSession !== tab.sessionId) return;
+      if (!tab || tab.running || tab.exited || endsOf(tab.sessionId) === 0) return;
       const sessionId = tab.sessionId;
-      const ends = endsBefore ?? tab.commandEnds ?? 0;
+      const ends = endsBefore ?? endsOf(sessionId);
       setTimeout(() => {
         set((state) => {
           let changed = false;
@@ -2701,7 +2857,7 @@ export const useTerminalStore = create((set, get) => {
             // a prompt (or a command already over), not one still running.
             // Counted rather than timed — a clock cannot order two events
             // in the same millisecond.
-            if ((t.commandEnds ?? 0) !== ends) return t;
+            if (endsOf(sessionId) !== ends) return t;
             changed = true;
             return { ...t, running: true, runStartedAt: at, lastExitCode: null };
           });

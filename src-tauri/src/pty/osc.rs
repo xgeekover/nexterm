@@ -39,7 +39,10 @@ pub enum Marker {
     PromptStart,
     CommandStart,
     CommandExecuted,
-    CommandFinished(Option<u32>),
+    /// The exit code as the shell gave it: negative for PowerShell's NTSTATUS
+    /// codes (a Ctrl+C'd native program is -1073741510), `None` when the
+    /// marker carried none — cmd's never does.
+    CommandFinished(Option<i32>),
     /// OSC 7: the shell's live working directory, percent-decoded, host
     /// component (if any) stripped.
     WorkingDirectory(String),
@@ -183,6 +186,23 @@ impl OscFilter {
     }
 }
 
+/// The exit code in a "D" marker's argument.
+///
+/// Only the first field is the code: shells that follow the FinalTerm spec more
+/// fully add key=value parameters after it (`133;D;0;aid=1` from iTerm2's zsh
+/// integration), and reading the whole argument lost the code for all of them.
+/// Signed, because PowerShell reports an NTSTATUS exit as a negative
+/// `$LASTEXITCODE`; and a shell that prints the same status unsigned
+/// (3221225786) wraps to the same number (-1073741510), so one failure is
+/// never two different codes.
+fn exit_code(arg: &str) -> Option<i32> {
+    let field = arg.split(';').next()?.trim();
+    let value = field.parse::<i64>().ok()?;
+    (i64::from(i32::MIN)..=i64::from(u32::MAX))
+        .contains(&value)
+        .then_some(value as i32)
+}
+
 fn parse_marker(payload: &[u8]) -> Option<Marker> {
     let text = std::str::from_utf8(payload).ok()?;
 
@@ -194,7 +214,7 @@ fn parse_marker(payload: &[u8]) -> Option<Marker> {
             "A" => Some(Marker::PromptStart),
             "B" => Some(Marker::CommandStart),
             "C" => Some(Marker::CommandExecuted),
-            "D" => Some(Marker::CommandFinished(arg.and_then(|a| a.trim().parse::<u32>().ok()))),
+            "D" => Some(Marker::CommandFinished(arg.and_then(exit_code))),
             _ => None,
         };
     }
@@ -380,6 +400,36 @@ mod tests {
         let mut f = OscFilter::new();
         let r = feed_str(&mut f, "\x1b]133;D\x07");
         assert_eq!(r.markers, vec![Marker::CommandFinished(None)]);
+    }
+
+    #[test]
+    fn a_negative_exit_code_is_kept() {
+        // PowerShell's `$LASTEXITCODE` for a native program stopped with Ctrl+C.
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]133;D;-1073741510\x07");
+        assert_eq!(r.markers, vec![Marker::CommandFinished(Some(-1_073_741_510))]);
+    }
+
+    #[test]
+    fn an_unsigned_status_reads_as_the_same_code() {
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]133;D;3221225786\x07");
+        assert_eq!(r.markers, vec![Marker::CommandFinished(Some(-1_073_741_510))]);
+    }
+
+    #[test]
+    fn parameters_after_the_code_do_not_lose_it() {
+        // iTerm2's zsh integration, and anything else that follows FinalTerm.
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]133;D;0;aid=1\x07\x1b]133;D;2;aid=7\x07");
+        assert_eq!(r.markers, vec![Marker::CommandFinished(Some(0)), Marker::CommandFinished(Some(2))]);
+    }
+
+    #[test]
+    fn a_code_that_is_not_a_number_is_none() {
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]133;D;oops\x07\x1b]133;D;99999999999\x07");
+        assert_eq!(r.markers, vec![Marker::CommandFinished(None), Marker::CommandFinished(None)]);
     }
 
     #[test]

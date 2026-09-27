@@ -13,6 +13,10 @@
  * never that one was still running — and the whole point of an indicator is
  * the terminals you are not looking at.
  *
+ * cmd reports the "D" and nothing else, without a code: its prompt can say
+ * that a command ended but not how. So an exit code may be null, and null is
+ * never a verdict here — not a failure, and not a success either.
+ *
  * Pure: no React, no stores.
  */
 
@@ -27,11 +31,21 @@
  * a new command outranks the last one's verdict — starting something is
  * exactly when the old red dot should go.
  */
+/**
+ * Whether an exit code says the command FAILED: a code the shell gave, and not
+ * 0. Null is not a failure — cmd reports that a command ended but cannot say
+ * how — and neither is a missing one. Every reader asks this, not `!== 0`,
+ * which is true of null and called every cmd command a failure.
+ */
+export function isFailure(exitCode) {
+  return typeof exitCode === 'number' && exitCode !== 0;
+}
+
 export function tabActivity(tab) {
   if (!tab) return 'idle';
   if (tab.exited) return 'exited';
   if (tab.running) return 'running';
-  if (typeof tab.lastExitCode === 'number' && tab.lastExitCode !== 0) return 'failed';
+  if (isFailure(tab.lastExitCode)) return 'failed';
   return 'idle';
 }
 
@@ -100,6 +114,9 @@ export function hasActivityDot(tab) {
  * here rather than at the call site so there is one place that decides.
  *
  * Returns null when there is nothing to say, or the notification to raise.
+ * Its `exitCode` is the shell's number, or null when the shell gave none
+ * (cmd): the command finished, and that is all the notification may say. A
+ * 0 there would announce every cmd command as a success.
  */
 export function notificationFor(tab, exitCode, activeTabId, afterMs, now = Date.now()) {
   if (!tab || !afterMs || afterMs <= 0) return null;
@@ -111,7 +128,7 @@ export function notificationFor(tab, exitCode, activeTabId, afterMs, now = Date.
     id: `note-${tab.id}-${now}`,
     tabId: tab.id,
     title: tab.title || tab.defaultTitle || 'Terminal',
-    exitCode: typeof exitCode === 'number' ? exitCode : 0,
+    exitCode: typeof exitCode === 'number' ? exitCode : null,
     durationMs,
     at: now,
   };
@@ -142,4 +159,4 @@ export function durationLabel(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export default { tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, submitsLine, durationLabel };
+export default { isFailure, tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, submitsLine, durationLabel };

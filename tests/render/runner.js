@@ -423,6 +423,36 @@ scenario(
   }
 );
 
+// ---- A command that finished without a code --------------------------------
+
+/** The class list of the status bar's notification badge, or null when it is not drawn. */
+function notificationBadgeClass(html) {
+  // React writes a bare `data-*` attribute out as `="true"`.
+  return /<span\b[^>]*\sdata-notification-count="[^"]*"[^>]*\sclass="([^"]*)"/.exec(html)?.[1] ?? null;
+}
+
+scenario(
+  'RN-20',
+  'cmd commands that finished while you were elsewhere are not called failures',
+  () => {
+    reset();
+    // cmd's prompt can say a command ended but not how, so its notifications
+    // carry no code at all.
+    useTerminalStore.setState({
+      notifications: [
+        { id: 'n1', tabId: 't1', title: 'ping -n 15 localhost', exitCode: null, durationMs: 14000, at: 1 },
+        { id: 'n2', tabId: 't1', title: 'build.cmd', exitCode: null, durationMs: 61000, at: 2 },
+      ],
+    });
+  },
+  (html) => {
+    const cls = notificationBadgeClass(html);
+    expectThat(cls !== null, 'the notification badge is not drawn');
+    expectThat(!/\bbg-vsc-error\b/.test(cls), `two finished commands are counted as failures: "${cls}"`);
+    expectText(html, '2');
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');
