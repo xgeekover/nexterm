@@ -110,3 +110,33 @@ export function fitAndReport({ tabId, term, fitAddon, resizePty, fittable = true
   resizePty?.(tabId, term.cols, term.rows);
   return { cols: term.cols, rows: term.rows };
 }
+
+/**
+ * Measure characters the way the programs inside the terminal do.
+ *
+ * xterm 5.5 defaults to Unicode 6 widths, in which every emoji is ONE cell,
+ * while Claude Code (`Bun.stringWidth`), Ink and most modern command-line
+ * tools count it as two. A program that redraws by moving the cursor relative
+ * to what it believes is on screen then lands one column off for every emoji
+ * to the left: a status line `✅ 통과 13개` repainted as `✅ 통과 123`, and the
+ * WebGL renderer squeezed each emoji into one cell over its neighbour.
+ *
+ * The Unicode 11 tables agree on single emoji (✅ ❌ 🚀 …). They still
+ * disagree on an emoji made wide by VS16 (⚠️ ✔️ ❤️: 1 here, 2 in Claude Code)
+ * and give ZWJ and skin-tone sequences 4 where Claude Code counts 2; matching
+ * those needs xterm 6 and its grapheme-aware width provider.
+ *
+ * `Unicode11Addon` is passed in so this stays free of xterm and can be checked
+ * in Node. Returns whether Unicode 11 is active; never throws — a terminal
+ * measuring with the old tables is still a working terminal.
+ */
+export function activateUnicode11(term, Unicode11Addon) {
+  try {
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = '11';
+    return term.unicode.activeVersion === '11';
+  } catch (err) {
+    console.warn('[Terminal] Unicode 11 widths unavailable, measuring with xterm defaults:', err);
+    return false;
+  }
+}
