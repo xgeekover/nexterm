@@ -8,6 +8,7 @@ import './shell_integration.test.js';
 import './terminal_groups.test.js';
 import './terminal_layout.test.js';
 import './tab_reorder.test.js';
+import './tab_reorder_ui.test.js';
 import './layout_gaps.test.js';
 import './windows_paths.test.js';
 import './status_bar.test.js';

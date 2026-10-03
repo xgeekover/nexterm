@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { Panel, Group, Separator, useGroupRef } from 'react-resizable-panels';
 import {
   sizesOf,
@@ -67,6 +67,22 @@ const DRAG_THRESHOLD_PX = 4;
 /** How deep into a pane counts as an edge (split) rather than the centre (move). */
 const EDGE_FRACTION = 0.25;
 
+/** Width of the insertion marker, which sits in the 2px gap beside a chip. */
+const MARKER_PX = 2;
+/** How near an edge of a row of chips a drag starts scrolling it. */
+const AUTO_SCROLL_EDGE_PX = 28;
+/** Scroll per frame with the pointer right on that edge; less short of it, more past it… */
+const AUTO_SCROLL_STEP_PX = 8;
+/** …up to this many times as much, however far past the edge the pointer goes. */
+const AUTO_SCROLL_MAX_FACTOR = 3;
+/**
+ * How far a drag must have travelled from its press before it may scroll a
+ * row at all. A click that jitters past DRAG_THRESHOLD_PX on a chip near an
+ * edge would otherwise scroll the row out from under a pointer that never
+ * meant to go anywhere, and land as a reorder.
+ */
+const AUTO_SCROLL_ARM_PX = 16;
+
 /**
  * Dragging is done with pointer events rather than HTML5 drag & drop.
  * WKWebView (what Tauri uses on macOS) refuses to start a native drag on an
@@ -89,41 +105,112 @@ function zoneFromPoint(rect, clientX, clientY) {
   return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
 }
 
+// ---------------------------------------------------------------------------
+// Where a dragged chip lands along a ROW of chips — a pane's tab strip, or the
+// group switcher. Both rows scroll sideways once they hold more chips than
+// fit, so a chip can be partly or wholly out of view, and both sit in a bar
+// that also holds buttons (a pane's split/close buttons, the region chrome
+// beside the switcher) which still count as "over the row".
+//
+// The arithmetic is kept apart from the DOM — rects in, numbers out — so it
+// can be tested without a browser (tests/adversarial/tab_reorder_ui.test.js);
+// `readChipRow` is the one place a row's geometry is read off the page.
+// ---------------------------------------------------------------------------
+
 /**
- * Where along a row of chips a drop at `clientX` would land, as a SLOT: how
- * many of the chips have their middle to the left of the pointer. 0 is before
- * the first chip and `chips.length` after the last — the numbering
- * `moveTabInStrip` and `reorderGroup` take. The dragged chip is still in its
- * row, faded, and is counted like any other, which is what they expect.
+ * Where along a row of chips a drop at `x` would land, as a SLOT: how many of
+ * the chips have their middle to the left of the pointer. 0 is before the
+ * first chip and `chips.length` after the last — the numbering
+ * `moveTabInStrip` and `reorderGroup` take. Every chip in the row is counted,
+ * the dragged one included: it is still in its row, faded, which is what they
+ * expect (one place right is two slots on).
+ *
+ * `chips` are the chips' rects (`{ left, right }`) in row order, scrolled-out
+ * ones included; `visible` is the rect of the scrolling row they sit in — the
+ * part of it on screen. With it:
+ *
+ *  - The pointer is clamped into `visible` first. Over a button beside the
+ *    row it counts as the row's edge, never as a place among the chips
+ *    scrolled out of view behind that button.
+ *  - The slot is kept to the gaps that are on screen, so the marker drawn
+ *    there can always be seen. Clamping alone does not do that: a chip cut
+ *    off by the edge can have its middle on screen and its far side not, and
+ *    "after it" would be drawn where nobody can see it.
+ *
+ * Getting to a chip that is out of view is auto-scroll's job, not this one's
+ * (see `autoScrollStep`): the slot always says what the user can see.
  */
-function slotAtX(chips, clientX) {
+export function slotAtX(chips, x, visible = null) {
+  const n = chips.length;
+  const lo = visible ? visible.left : -Infinity;
+  const hi = visible ? visible.right : Infinity;
+  const px = Math.min(Math.max(x, lo), hi);
+
   let slot = 0;
   for (const chip of chips) {
-    const rect = chip.getBoundingClientRect();
-    if (clientX > rect.left + rect.width / 2) slot += 1;
+    if (px > (chip.left + chip.right) / 2) slot += 1;
   }
-  return slot;
+  if (!visible || n === 0) return slot;
+
+  // The marker for slot i fills the gap just before chip i; for slot n, the
+  // one just after the last chip (see InsertionMarker). Half a pixel of slack
+  // for fractional layout.
+  const onScreen = (i) => {
+    const start = i < n ? chips[i].left - MARKER_PX : chips[n - 1].right;
+    return start >= lo - 0.5 && start + MARKER_PX <= hi + 0.5;
+  };
+  let first = 0;
+  while (first <= n && !onScreen(first)) first += 1;
+  let last = n;
+  while (last >= first && !onScreen(last)) last -= 1;
+  // No gap on screen at all (one chip wider than the row): nothing better to offer.
+  if (first > last) return slot;
+  return Math.min(Math.max(slot, first), last);
 }
 
-/** Resolve the pane body under the pointer, if any. */
 /**
- * What a drop at this point would do.
+ * A row's geometry, read off the page: the rect of the scrolling row (what is
+ * on screen of it) and every chip in it, in row order. Every chip — the one
+ * being dragged is still there, faded, and `slotAtX` counts it.
+ */
+export function readChipRow(row, chipSelector) {
+  if (!row) return { chips: [], visible: null };
+  const box = row.getBoundingClientRect();
+  return {
+    visible: { left: box.left, right: box.right },
+    chips: [...row.querySelectorAll(chipSelector)].map((chip) => {
+      const r = chip.getBoundingClientRect();
+      return { left: r.left, right: r.right };
+    }),
+  };
+}
+
+/**
+ * What a TAB dropped at this point would do — plus `row`, the row of chips the
+ * pointer is over, for auto-scroll (never part of the drag's state).
  *
  * The terminal surface splits by quarter; the TAB STRIP means "put it in this
  * pane as a tab", which is how a split is merged back. The strip used not to
  * be a target at all, so dragging a tab onto the one place it visibly belongs
  * did nothing at all. Where along the strip matters too: the tab goes in at
  * the slot under the pointer, so the same gesture reorders a pane's own tabs.
+ *
+ * The whole strip is the target, its buttons included — so the row is found
+ * through the strip, not under the pointer: over Split Down the pointer is
+ * beside the row, and counts as its right edge (see `slotAtX`).
  */
-function dropTargetAtPoint(clientX, clientY) {
-  const el = document.elementFromPoint(clientX, clientY);
+export function dropTargetAtPoint(clientX, clientY, doc = document) {
+  const el = doc.elementFromPoint(clientX, clientY);
 
   const strip = el?.closest?.('[data-tab-strip]');
   if (strip) {
+    const row = strip.querySelector('[data-chip-row]');
+    const { chips, visible } = readChipRow(row, '[data-tab-chip]');
     return {
       paneId: strip.getAttribute('data-tab-strip'),
       zone: 'tabs',
-      slot: slotAtX(strip.querySelectorAll('[data-tab-chip]'), clientX),
+      slot: slotAtX(chips, clientX, visible),
+      row,
     };
   }
 
@@ -133,27 +220,36 @@ function dropTargetAtPoint(clientX, clientY) {
   return {
     paneId: body.getAttribute('data-pane-body'),
     zone: zoneFromPoint(rect, clientX, clientY),
+    row: null,
   };
 }
 
-/** Resolve the group-switcher chip under the pointer, if any. */
-function groupChipAtPoint(clientX, clientY) {
-  const el = document.elementFromPoint(clientX, clientY);
-  const chip = el?.closest?.('[data-group-chip]');
-  if (!chip) return null;
-  return { groupId: chip.getAttribute('data-group-chip') };
+/**
+ * The group switcher under the pointer, if any: its scrolling row of chips,
+ * and the group whose chip is right under the pointer (null between chips,
+ * over "+", or over the region chrome beside the row).
+ */
+export function switcherAtPoint(clientX, clientY, doc = document) {
+  const el = doc.elementFromPoint(clientX, clientY);
+  const bar = el?.closest?.('[data-group-switcher]');
+  if (!bar) return null;
+  return {
+    row: bar.querySelector('[data-chip-row]'),
+    groupId: el.closest('[data-group-chip]')?.getAttribute('data-group-chip') ?? null,
+  };
 }
 
 /**
- * Where along the switcher a dragged GROUP chip would land, as a slot, or
- * null while the pointer is off the switcher. The whole bar counts, not just
- * the chips: past the last one (the "+" button, the empty space) is the end.
+ * Where along the switcher a dragged GROUP chip would land, as a slot (null
+ * while the pointer is off the switcher), plus the row for auto-scroll. The
+ * whole bar counts, not just the chips: past the last one (the "+" button, the
+ * empty space, the region chrome) is as far as the row goes on screen.
  */
-function groupSlotAtPoint(clientX, clientY) {
-  const el = document.elementFromPoint(clientX, clientY);
-  const bar = el?.closest?.('[data-group-switcher]');
-  if (!bar) return null;
-  return slotAtX(bar.querySelectorAll('[data-group-chip]'), clientX);
+export function groupSlotAtPoint(clientX, clientY, doc = document) {
+  const switcher = switcherAtPoint(clientX, clientY, doc);
+  if (!switcher) return { slot: null, row: null };
+  const { chips, visible } = readChipRow(switcher.row, '[data-group-chip]');
+  return { slot: slotAtX(chips, clientX, visible), row: switcher.row };
 }
 
 /**
@@ -163,11 +259,107 @@ function groupSlotAtPoint(clientX, clientY) {
  * is, so they draw nothing: a marker always means the drop will move
  * something, and the faded chip already shows where it is now.
  */
-function markerSlot(slot, ids, draggedId) {
+export function markerSlot(slot, ids, draggedId) {
   if (typeof slot !== 'number') return null;
   const from = ids.indexOf(draggedId);
   if (from !== -1 && (slot === from || slot === from + 1)) return null;
   return slot;
+}
+
+/**
+ * What a group chip let go at `slot` does: `{ type: 'reorder' }` to move it
+ * there, `{ type: 'switch' }` to bring it on screen, or null for nothing.
+ *
+ * Dropped where it already is (either slot beside its own position) it is
+ * treated as the click it almost was — as a tab chip dropped in place is
+ * shown. A click whose pointer slips past the drag threshold is a drag that
+ * goes nowhere, and the click that follows any drag is swallowed, so without
+ * this a slightly shaky click on a group no longer switched to it. The group
+ * already on screen, or a drop off the switcher, does nothing at all.
+ */
+export function groupDropAction(ids, groupId, slot, activeGroupId) {
+  if (typeof slot !== 'number') return null;
+  const from = ids.indexOf(groupId);
+  if (from === -1) return null;
+  if (slot === from || slot === from + 1) {
+    return groupId === activeGroupId ? null : { type: 'switch' };
+  }
+  return { type: 'reorder' };
+}
+
+/**
+ * How far to scroll a row this frame (px, negative to the left) with a drag's
+ * pointer at `x`: nothing until the pointer is within AUTO_SCROLL_EDGE_PX of an
+ * edge of the row on screen, then faster the closer it gets, and faster still
+ * past the edge — over a pane's buttons, or the region chrome — up to a cap.
+ */
+export function autoScrollStep(x, visible) {
+  if (!visible || !(visible.right > visible.left)) return 0;
+  const toRight = x >= (visible.left + visible.right) / 2;
+  const depth = toRight
+    ? x - (visible.right - AUTO_SCROLL_EDGE_PX)
+    : visible.left + AUTO_SCROLL_EDGE_PX - x;
+  if (depth <= 0) return 0;
+  const factor = Math.min(depth / AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_FACTOR);
+  const step = Math.max(1, Math.round(factor * AUTO_SCROLL_STEP_PX));
+  return toRight ? step : -step;
+}
+
+/**
+ * Scrolls a row of chips, one step per frame, while a drag holds the pointer
+ * near or past one of its edges — and calls `onScroll` after every step, so
+ * the caller can measure the slot again under a pointer that has not moved.
+ * It stops by itself once that end of the row is showing; `stop()` ends it
+ * outright (drop, cancel, unmount).
+ *
+ * `follow(row, x)` says which row the pointer is over now (null for none) and
+ * where; `frame`/`cancelFrame` are requestAnimationFrame and its cancel.
+ */
+export function createAutoScroller({ onScroll, frame, cancelFrame }) {
+  let row = null;
+  let x = 0;
+  let pending = null;
+
+  const tick = () => {
+    pending = null;
+    if (!row || row.isConnected === false) return;
+    const box = row.getBoundingClientRect();
+    const step = autoScrollStep(x, { left: box.left, right: box.right });
+    if (!step) return;
+    const before = row.scrollLeft;
+    row.scrollLeft = before + step;
+    if (row.scrollLeft === before) return; // that end of the row is showing
+    pending = frame(tick); // before `onScroll`, which calls `follow` again
+    onScroll();
+  };
+
+  return {
+    follow(nextRow, nextX) {
+      row = nextRow;
+      x = nextX;
+      if (row && pending === null) pending = frame(tick);
+    },
+    stop() {
+      if (pending !== null) cancelFrame(pending);
+      pending = null;
+      row = null;
+    },
+  };
+}
+
+/**
+ * Commit a tab or group rename left open when a drag starts, as a mouse press
+ * would have: pressing a chip with a mouse moves focus to it, the editor's
+ * blur commits the rename, and the editor is a chip again before the drag
+ * arms. A touch drag moves no focus, so the editor stayed open — and with
+ * one of its row's chips replaced by an input, every slot after it was
+ * counted one short. Flushed, so the row is whole before it is measured.
+ */
+export function commitOpenRename(doc = document, flush = flushSync) {
+  const el = doc.activeElement;
+  if (!el?.matches?.('[data-rename-input]')) return false;
+  flush(() => el.blur());
+  return true;
 }
 
 /** Collects every pane of one group's tree, in DOM order. Mirrors
@@ -349,6 +541,9 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
   // Inline "rename a tab" editor state — which tab (if any) is being edited.
   const [renamingTabId, setRenamingTabId] = useState(null);
   const [tabDraft, setTabDraft] = useState('');
+  // The same, for `commitRenameTab`: a stray second blur (the input unmounting
+  // right after Enter committed) must find the editor already closed.
+  const renamingTabRef = useRef(null);
   // Right-click menus: a tab chip's "Rename", and the strip's empty area.
   const [chipMenu, setChipMenu] = useState(null); // { x, y, tabId }
   const [paneMenu, setPaneMenu] = useState(null); // { x, y }
@@ -365,16 +560,25 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
     dropZone === 'tabs' ? markerSlot(drag.slot, paneTabs.map((t) => t.id), drag.tabId) : null;
 
   const beginRenameTab = (tab) => {
+    renamingTabRef.current = tab.id;
     setRenamingTabId(tab.id);
     setTabDraft(tab.title);
   };
+  // The store is written here, never from inside a state updater: React runs
+  // an updater during render whenever it cannot run it on the spot, and a
+  // store write from there updates other components mid-render. A rename
+  // committed by a touch drag's first move (see `commitOpenRename`) did that.
   const commitRenameTab = () => {
-    setRenamingTabId((id) => {
-      if (id) renameTab(id, tabDraft);
-      return null;
-    });
+    const id = renamingTabRef.current;
+    if (!id) return;
+    renamingTabRef.current = null;
+    renameTab(id, tabDraft);
+    setRenamingTabId(null);
   };
-  const cancelRenameTab = () => setRenamingTabId(null);
+  const cancelRenameTab = () => {
+    renamingTabRef.current = null;
+    setRenamingTabId(null);
+  };
 
   return (
     <div
@@ -400,7 +604,9 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
           setPaneMenu({ x: e.clientX, y: e.clientY });
         }}
       >
-        <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
+        {/* The row of chips: it scrolls once they do not fit, and a drag near
+            either end of it scrolls it (see `createAutoScroller`). */}
+        <div data-chip-row="" className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
           {paneTabs.map((tab, i) => {
             const isActive = tab.id === boundTab?.id;
             const isBeingDragged = drag?.active && drag.tabId === tab.id;
@@ -410,6 +616,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                 <div key={tab.id} className="flex items-center h-[22px]">
                   <input
                     autoFocus
+                    data-rename-input=""
                     value={tabDraft}
                     onFocus={(e) => e.target.select()}
                     onChange={(e) => setTabDraft(e.target.value)}
@@ -870,13 +1077,23 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renamingGroupId]);
 
+  // Which group's editor is open as of the latest render, for `commitRename`:
+  // a stray second blur (the input unmounting right after Enter already
+  // committed) must find it closed and not re-apply the rename. A ref, not a
+  // functional update: the store is written outside any state updater, which
+  // React may run mid-render (see `commitRenameTab`).
+  const renamingRef = useRef(renamingGroupId);
+  renamingRef.current = renamingGroupId;
+
   const commitRename = (groupId) => {
-    // Functional update so a stray second blur (the input unmounting right
-    // after Enter already committed) cannot re-apply the same rename.
-    setRenamingGroupId((was) => {
-      if (was === groupId) renameGroup(groupId, draft);
-      return null;
-    });
+    if (renamingRef.current !== groupId) return;
+    renamingRef.current = null;
+    renameGroup(groupId, draft);
+    setRenamingGroupId(null);
+  };
+  const cancelRename = () => {
+    renamingRef.current = null;
+    setRenamingGroupId(null);
   };
 
   const handleCreate = async () => {
@@ -899,7 +1116,12 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
       <LayoutGrid size={12} className="shrink-0 ml-0.5 text-vsc-muted" />
       {/* `pl-0.5` is room for the insertion marker before the first chip: the
           row scrolls, so it clips whatever is drawn outside its own box. */}
-      <div role="tablist" aria-label="Terminal groups" className="flex-1 flex items-center gap-0.5 pl-0.5 overflow-x-auto no-scrollbar">
+      <div
+        role="tablist"
+        aria-label="Terminal groups"
+        data-chip-row=""
+        className="flex-1 flex items-center gap-0.5 pl-0.5 overflow-x-auto no-scrollbar"
+      >
         {groups.map((group, i) => {
           const isActive = group.id === activeGroupId;
           const isDropTarget = Boolean(drag?.active) && drag.targetGroupId === group.id;
@@ -914,6 +1136,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               <input
                 key={group.id}
                 autoFocus
+                data-rename-input=""
                 value={draft}
                 onFocus={(e) => e.target.select()}
                 onChange={(e) => setDraft(e.target.value)}
@@ -922,7 +1145,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                 onKeyDown={(e) => {
                   e.stopPropagation();
                   if (e.key === 'Enter') commitRename(group.id);
-                  else if (e.key === 'Escape') setRenamingGroupId(null);
+                  else if (e.key === 'Escape') cancelRename();
                 }}
                 onBlur={() => commitRename(group.id)}
                 placeholder="Group name"
@@ -1082,6 +1305,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const moveTabInStrip = useTerminalStore((s) => s.moveTabInStrip);
   const moveTabToGroup = useTerminalStore((s) => s.moveTabToGroup);
   const reorderGroup = useTerminalStore((s) => s.reorderGroup);
+  const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
@@ -1110,6 +1334,13 @@ export function TerminalSplitContainer({ headerSlot = null }) {
    * `drop(drag)` acts on the last of it on release. A press that never
    * travelled that far is a click, and drops nothing.
    *
+   * `targetAt` may also name the `row` of chips under the pointer, which is
+   * kept out of the state and handed to the auto-scroller: held near either
+   * end of a row that overflows, the row scrolls, and the target is measured
+   * again after every step — the pointer has not moved, the chips have. The
+   * same goes for a row scrolled any other way mid-drag (a wheel, a
+   * trackpad): every scroll re-measures, so the marker and the drop follow.
+   *
    * Listeners are attached synchronously here rather than from an effect: a
    * quick flick delivers pointermove/up before React has committed the state
    * change, so an effect-bound listener would miss the whole gesture.
@@ -1120,30 +1351,56 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     // second set of listeners that would act on this drag's state.
     cleanupRef.current?.();
 
+    let pointer = null; // where the pointer last was, once the drag is active
+    let scrollArmed = false; // see AUTO_SCROLL_ARM_PX
+
+    const aim = () => {
+      const cur = dragRef.current;
+      if (!cur || !pointer) return;
+      const { row = null, ...hit } = targetAt(pointer.x, pointer.y) ?? {};
+      const next = { ...cur, active: true, x: pointer.x, y: pointer.y, ...hit };
+      // Re-measured after a scroll that moved nothing across a slot, the
+      // drag is what it was: no new state, no render.
+      const changed = Object.keys(next).some((k) => next[k] !== cur[k]);
+      if (changed) {
+        dragRef.current = next;
+        setDrag(next);
+      }
+      scroller.follow(scrollArmed ? row : null, pointer.x);
+    };
+
+    const scroller = createAutoScroller({
+      onScroll: aim,
+      frame: (cb) => window.requestAnimationFrame(cb),
+      cancelFrame: (id) => window.cancelAnimationFrame(id),
+    });
+
+    // Scroll events do not bubble, so this listens in the capture phase.
+    const onScroll = () => {
+      if (dragRef.current?.active) aim();
+    };
+
     const detach = () => {
+      scroller.stop();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('scroll', onScroll, true);
       cleanupRef.current = null;
     };
 
     const onMove = (ev) => {
       const cur = dragRef.current;
       if (!cur) return;
-      const movedEnough =
-        cur.active ||
-        Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
-      if (!movedEnough) return;
+      const travelled = Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY);
+      if (!cur.active && travelled <= DRAG_THRESHOLD_PX) return;
 
-      const next = {
-        ...cur,
-        active: true,
-        x: ev.clientX,
-        y: ev.clientY,
-        ...targetAt(ev.clientX, ev.clientY),
-      };
-      dragRef.current = next;
-      setDrag(next);
+      // Becoming a drag: a rename still open in a row would be measured as a
+      // chip short (see `commitOpenRename`).
+      if (!cur.active) commitOpenRename();
+      if (travelled >= AUTO_SCROLL_ARM_PX) scrollArmed = true;
+      pointer = { x: ev.clientX, y: ev.clientY };
+      aim();
     };
 
     const onUp = () => {
@@ -1168,6 +1425,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('scroll', onScroll, true);
     cleanupRef.current = detach;
   }, []);
 
@@ -1192,8 +1450,11 @@ export function TerminalSplitContainer({ headerSlot = null }) {
       const targetAt = (x, y) => {
         const hit = dropTargetAtPoint(x, y);
         // A group chip is only considered when the pointer isn't over a pane —
-        // the switcher sits above the panes, never on top of one.
-        const chip = hit ? null : groupChipAtPoint(x, y);
+        // the switcher sits above the panes, never on top of one. Its row
+        // scrolls under a tab too, so a group whose chip is out of view can
+        // still be reached.
+        const switcher = hit ? null : switcherAtPoint(x, y);
+        const groupId = switcher?.groupId ?? null;
         return {
           targetPaneId: hit?.paneId ?? null,
           zone: hit?.zone ?? null,
@@ -1201,8 +1462,8 @@ export function TerminalSplitContainer({ headerSlot = null }) {
           // Dropping on the chip of the group the tab already lives in (the
           // active one — only its tabs are on screen) is a no-op, so it is
           // never highlighted as a target.
-          targetGroupId:
-            chip && chip.groupId !== activeGroupIdRef.current ? chip.groupId : null,
+          targetGroupId: groupId && groupId !== activeGroupIdRef.current ? groupId : null,
+          row: hit ? hit.row : switcher?.row ?? null,
         };
       };
 
@@ -1226,7 +1487,9 @@ export function TerminalSplitContainer({ headerSlot = null }) {
 
   /**
    * A group's chip, along the switcher. Anywhere else it has nowhere to go:
-   * let go off the switcher and nothing moves.
+   * let go off the switcher and nothing moves. Let go where it already is,
+   * and it switches to that group, as the click it nearly was would have
+   * (see `groupDropAction`).
    */
   const beginGroupDrag = useCallback(
     (group, e) => {
@@ -1243,13 +1506,21 @@ export function TerminalSplitContainer({ headerSlot = null }) {
       };
       trackGesture(
         started,
-        (x, y) => ({ slot: groupSlotAtPoint(x, y) }),
+        (x, y) => groupSlotAtPoint(x, y),
         (cur) => {
-          if (cur.slot !== null) reorderGroup(cur.groupId, cur.slot);
+          const st = useTerminalStore.getState();
+          const action = groupDropAction(
+            st.groups.map((g) => g.id),
+            cur.groupId,
+            cur.slot,
+            st.activeGroupId
+          );
+          if (action?.type === 'reorder') reorderGroup(cur.groupId, cur.slot);
+          else if (action?.type === 'switch') setActiveGroup(cur.groupId);
         }
       );
     },
-    [trackGesture, reorderGroup]
+    [trackGesture, reorderGroup, setActiveGroup]
   );
 
   // Never leave listeners behind if the terminal unmounts mid-gesture.
