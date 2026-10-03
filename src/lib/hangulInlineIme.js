@@ -267,8 +267,27 @@ export function createHangulInlineIme({ send = () => {}, onPreview = () => {} } 
       return PASS;
     },
 
-    /** A click in the terminal finishes the syllable, as it does in a text field. */
-    mouseDown() {
+    /**
+     * A click in the terminal — finishes the syllable only when the program
+     * is watching the mouse.
+     *
+     * xterm's SelectionService calls `preventDefault()` on mousedown, so the
+     * textarea keeps focus and the IME keeps composing right through the
+     * click: nothing here actually ended the syllable, so flushing anyway
+     * made the IME's own next rewrite land on text this had already sent —
+     * read by `replaceText` as the IME re-editing something final, and taken
+     * back with a DEL that removes one byte for good under a C locale (HI-42:
+     * `한`, click, `ㅏ` sent `한` + DEL + `하` + `나`, not `한` then `하`).
+     *
+     * `mouseTracking` is true only when the terminal is passing clicks to the
+     * PROGRAM (`term.modes.mouseTrackingMode !== 'none'`) — there, the click
+     * really does have to go out in order, ahead of whatever is still being
+     * composed, the same as any other key composing cannot absorb. Otherwise
+     * the pending syllable, and its preview, are left exactly as they were; a
+     * real focus change away from the terminal is already `blur`'s job.
+     */
+    mouseDown(e) {
+      if (!e?.mouseTracking) return PASS;
       const flushed = flush();
       report(flushed);
       return PASS;
@@ -381,7 +400,10 @@ class HangulInlineImeAddon {
       if (fromTextarea(e)) machine.blur();
     });
     on('mousedown', () => {
-      machine.mouseDown();
+      // Whether THIS click goes to the program, in order, ahead of the
+      // syllable — see the doc comment on `mouseDown` for why that is the
+      // only time flushing here is safe.
+      machine.mouseDown({ mouseTracking: Boolean(term.modes && term.modes.mouseTrackingMode !== 'none') });
     });
   }
 

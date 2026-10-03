@@ -98,6 +98,9 @@ class FakeTerm {
     this.options = {};
     this.buffer = { active: { viewportY: 0, baseY: 0 } };
     this.scrolledToBottom = 0;
+    // A fresh terminal has sent no CSI ?1000h (or similar): the program is
+    // not watching the mouse until something turns it on.
+    this.modes = { mouseTrackingMode: 'none' };
   }
   loadAddon(addon) {
     this.addons.push(addon);
@@ -297,10 +300,11 @@ function eventFor(row, textarea) {
  * row says the next one is dispatched in the same task — which is what decides
  * when xterm's one-tick textarea diff runs.
  */
-function replay(rows, { binding: withBinding = true, mac = true } = {}) {
+function replay(rows, { binding: withBinding = true, mac = true, mouseTracking = false } = {}) {
   const textarea = new FakeTextarea();
   const container = new FakeContainer();
   const term = new FakeTerm(textarea);
+  term.modes.mouseTrackingMode = mouseTracking ? 'any' : 'none';
   const bytes = [];
   const today = [];
   const previews = [];
@@ -544,7 +548,7 @@ describe('Korean inline IME: rules the recordings do not reach', () => {
     ['ku', ' ', 32, 'Space'],
   ];
 
-  test('HI-42: a click sends the syllable; if the IME then splits it, the sent 한 is taken back with one DEL', () => {
+  test('HI-42: with no mouse tracking, a click leaves the syllable pending — the IME rewriting it is not a DEL (see HI-49 for mouse tracking on)', () => {
     const rows = [
       ...HAN_THEN_CLICK,
       // ㅏ: the IME moves ㄴ into a new syllable — 한 becomes 하 + 나.
@@ -558,8 +562,14 @@ describe('Korean inline IME: rules the recordings do not reach', () => {
       ['in', 'IRT', '나', '하나', 2, 2],
       ...SPACE('하나', 2),
     ];
-    assert.deepEqual(replay(HAN_THEN_CLICK).bytes, ['한'], 'the click sends it');
-    assert.deepEqual(replay(rows).bytes, ['한', '\x7f', '하', '나', ' ']);
+    // SelectionService calls preventDefault() on mousedown, so the textarea
+    // keeps focus and the IME keeps composing right through the click — with
+    // the program not watching the mouse, nothing here should either: the
+    // click changes nothing, and 한 is still mid-syllable after it.
+    assert.deepEqual(replay(HAN_THEN_CLICK).bytes, [], 'the click sends nothing — the syllable is still pending');
+    // So the rest plays out exactly as if the click had never happened: 한
+    // rewritten to 하 + 나, with no DEL anywhere.
+    assert.deepEqual(replay(rows).bytes, ['하', '나', ' ']);
   });
 
   test('HI-43: …and when the IME merely re-affirms the sent syllable, nothing is taken back', () => {
@@ -647,6 +657,34 @@ describe('Korean inline IME: rules the recordings do not reach', () => {
     for (const ch of ['a', ' ', '1', '.', 'あ', '中', '한글', '', null]) {
       assert.equal(isHangulCharacter(ch), false, JSON.stringify(ch));
     }
+  });
+
+  test('HI-49: with mouse tracking ON, a click DOES send the syllable — the program needs it in order', () => {
+    // Same click as HI-42, but the program has asked for mouse events (CSI
+    // ?1000h or similar): the click is about to reach it, so the syllable
+    // has to go out ahead of it, same as any other key composing cannot
+    // absorb.
+    assert.deepEqual(
+      replay(HAN_THEN_CLICK, { mouseTracking: true }).bytes,
+      ['한'],
+      'the click sends it'
+    );
+    // The IME itself does not know anything was flushed early and carries on
+    // composing regardless — unchanged from before this terminal cared about
+    // mouse tracking at all: the DEL correction is this file's HI-42 of old.
+    const rows = [
+      ...HAN_THEN_CLICK,
+      ['bi', 'IRT', '하', '한', 0, 1],
+      ['in', 'IRT', '하', '하', 1, 1],
+      ['bi', 'IT', '나', '하', 1, 1],
+      ['in', 'IT', '나', '하나', 2, 2],
+      ['kd', 'ㅏ', 229, 'KeyK'],
+      ['ku', 'ㅏ', 75, 'KeyK'],
+      ['bi', 'IRT', '나', '하나', 1, 2],
+      ['in', 'IRT', '나', '하나', 2, 2],
+      ...SPACE('하나', 2),
+    ];
+    assert.deepEqual(replay(rows, { mouseTracking: true }).bytes, ['한', '\x7f', '하', '나', ' ']);
   });
 });
 
