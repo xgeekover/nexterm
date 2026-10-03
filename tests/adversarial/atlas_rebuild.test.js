@@ -22,6 +22,7 @@ import {
   ATLAS_PAGE_SIZE,
   ATLAS_REBUILD_MIN_INTERVAL_MS,
   isAtlasMergePage,
+  claimAtlasMergePage,
   atlasRebuildDelay,
   planGpuReconcile,
 } from '../../src/lib/webglLifecycle.js';
@@ -74,12 +75,38 @@ describe('Atlas page merges: the renderers are remade on a fresh atlas', () => {
     assert.equal(atlasRebuildDelay(5000, 9000), 0);
   });
 
-  test('AR-06: the registry listens for merged pages and remakes EVERY live renderer', () => {
+  test('AR-06: the registry listens for merged pages, deduplicated, and remakes EVERY live renderer', () => {
     const src = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
     const create = src.slice(src.indexOf('function createGpu('), src.indexOf('function refitOnScreen('));
-    assert.match(create, /addon\.onAddTextureAtlasCanvas\(\(canvas\) => \{\s*if \(isAtlasMergePage\(canvas\)\) requestAtlasRebuild\(\);/);
+    assert.match(
+      create,
+      /addon\.onAddTextureAtlasCanvas\(\(canvas\) => \{\s*if \(claimAtlasMergePage\(canvas, handledAtlasMergeCanvases\)\) requestAtlasRebuild\(\);/,
+      'each renderer\'s own forwarded copy of one merge is deduplicated before asking for a rebuild'
+    );
     const request = src.slice(src.indexOf('function requestAtlasRebuild('), src.indexOf('function reconcileGpus('));
     assert.match(request, /for \(const entry of instances\.values\(\)\) \{\s*if \(entry\.gpu\) entry\.gpuRebuild = true;/,
       'the atlas is shared: remaking one renderer leaves the others bound to the stale texture');
+  });
+
+  test('AR-07: a merge canvas forwarded through N renderers claims a rebuild exactly once', () => {
+    // addon-webgl gives every live WebglRenderer its own emitter, and the one
+    // shared atlas forwards the SAME merge canvas through each of them —
+    // simulated here as N separate calls (one "renderer" apiece) against the
+    // one WeakSet the registry keeps module-wide.
+    const handled = new WeakSet();
+    const mergeCanvas = { width: 1024 };
+    const rendererSawIt = () => claimAtlasMergePage(mergeCanvas, handled);
+
+    assert.equal(rendererSawIt(), true, 'the first renderer to report this merge claims it');
+    assert.equal(rendererSawIt(), false, 'a second renderer reporting the SAME merge must not claim it again');
+    assert.equal(rendererSawIt(), false, 'nor a third — this is what used to arm a second, later rebuild');
+
+    // A later, distinct merge (its own, bigger canvas) is its own event and
+    // is claimed again.
+    const nextMerge = { width: 2048 };
+    assert.equal(claimAtlasMergePage(nextMerge, handled), true);
+
+    // An ordinary new page (not a merge) never claims anything, for anyone.
+    assert.equal(claimAtlasMergePage({ width: ATLAS_PAGE_SIZE }, handled), false);
   });
 });

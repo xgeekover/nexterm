@@ -151,6 +151,28 @@ export function isAtlasMergePage(canvas) {
 }
 
 /**
+ * Whether THIS call is the one that gets to ask for a rebuild over `canvas`.
+ *
+ * The atlas is shared, but `onAddTextureAtlasCanvas` is not: addon-webgl
+ * gives every live `WebglRenderer` its own emitter, and forwards the ONE
+ * shared atlas's merge to each of them in turn — so N renderers watching the
+ * same atlas report the exact same merge canvas N times. Answering the
+ * question with the canvas's OWN identity (never seen before, for this
+ * `handled` set) rather than with time (a renderer counted) is what makes
+ * this exact, however many renderers are attached. `handled` is a WeakSet so
+ * a canvas the atlas has since discarded costs nothing to keep track of.
+ *
+ * Only a merge page claims anything; an ordinary new page is never owed a
+ * rebuild and never occupies the set.
+ */
+export function claimAtlasMergePage(canvas, handled) {
+  if (!isAtlasMergePage(canvas)) return false;
+  if (handled.has(canvas)) return false;
+  handled.add(canvas);
+  return true;
+}
+
+/**
  * How long to hold a requested atlas rebuild back: 0 means now.
  *
  * A rebuild starts the atlas afresh, so the next merge is a whole atlas of new

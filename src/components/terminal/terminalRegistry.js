@@ -27,9 +27,9 @@ import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalTh
 import { activateUnicode11, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
 import {
   atlasRebuildDelay,
+  claimAtlasMergePage,
   drawWebglNow,
   gpuFailure,
-  isAtlasMergePage,
   planGpuAttach,
   planGpuReconcile,
   releaseWebglAddon,
@@ -87,6 +87,11 @@ let gpuRetryTimer = 0;
 let gpuRetryTimerAt = Infinity;
 let lastAtlasRebuildAt = null;
 let atlasRebuildTimer = 0;
+// Every live renderer forwards the ONE shared atlas's merge to its own addon
+// (see `claimAtlasMergePage`), so the same canvas is reported once per
+// renderer. Tracked by identity, module-wide, so N reports of one merge ask
+// for exactly one rebuild — a WeakSet costs nothing once the atlas moves on.
+const handledAtlasMergeCanvases = new WeakSet();
 
 const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -138,8 +143,13 @@ function createGpu(entry) {
   try {
     addon = new WebglAddon();
     addon.onContextLoss(() => handleGpuLoss(entry, addon));
+    // The atlas is shared, but this callback is not: every live renderer
+    // forwards the SAME merge canvas here, once each. `claimAtlasMergePage`
+    // lets only the first of those through, so N renderers ask for one
+    // rebuild instead of N (the second used to land just past the 1 s floor
+    // below and arm a timer that rebuilt everything again a second time).
     addon.onAddTextureAtlasCanvas((canvas) => {
-      if (isAtlasMergePage(canvas)) requestAtlasRebuild();
+      if (claimAtlasMergePage(canvas, handledAtlasMergeCanvases)) requestAtlasRebuild();
     });
     entry.term.loadAddon(addon);
   } catch (err) {
