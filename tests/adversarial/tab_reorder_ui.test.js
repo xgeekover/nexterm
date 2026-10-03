@@ -25,6 +25,10 @@
  *
  * Node cannot parse JSX either; the render suite's loader can, and is
  * borrowed here for the one module that needs it.
+ *
+ * One store rule rides along, because reordering is what exposed it: the
+ * name a group gets when its name is cleared (`renameGroup`), which used to
+ * be read off where the group sits.
  */
 import { register } from 'node:module';
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
@@ -234,6 +238,9 @@ const leavesOf = (node, acc = []) => {
   else node.children.forEach((c) => leavesOf(c, acc));
   return acc;
 };
+const groupIds = () => S.getState().groups.map((g) => g.id);
+const nameOf = (id) => S.getState().groups.find((g) => g.id === id)?.name;
+const names = () => S.getState().groups.map((g) => g.name);
 
 // =========================================================================
 describe('Tab reorder UI: the slot under the pointer', () => {
@@ -601,6 +608,58 @@ describe('Tab reorder UI: a rename left open when a drag starts', () => {
     assert.equal(UI.commitOpenRename(chip.doc, chip.flush), false);
     assert.deepEqual(chip.log, [], 'a focused chip is not blurred');
     assert.equal(UI.commitOpenRename({ activeElement: null }, (fn) => fn()), false, 'nothing focused');
+  });
+});
+
+// =========================================================================
+describe('Tab reorder UI: a group name cleared after a reorder', () => {
+  beforeEach(async () => {
+    await launch();
+  });
+
+  afterEach(teardown);
+
+  /** Groups named Group 1..3 by the app, then Group 3 dragged to the front. */
+  async function reordered() {
+    const g1 = S.getState().activeGroupId;
+    const g2 = (await S.getState().createGroup()).id;
+    const g3 = (await S.getState().createGroup()).id;
+    assert.deepEqual(names(), ['Group 1', 'Group 2', 'Group 3'], 'sanity: the app numbered them');
+    S.getState().reorderGroup(g3, 0);
+    assert.deepEqual(groupIds(), [g3, g1, g2]);
+    return { g1, g2, g3 };
+  }
+
+  test('UI-21: a cleared name becomes a "Group N" no other group has — not one read off where the group now sits', async () => {
+    const { g1 } = await reordered();
+    S.getState().renameGroup(g1, 'Work');
+    S.getState().renameGroup(g1, '   ');
+    assert.equal(nameOf(g1), 'Group 1', 'second in the row, but "Group 2" is taken — c5231e5 gave it "Group 2"');
+    assert.equal(new Set(names()).size, names().length, `no two groups share a name: ${names()}`);
+  });
+
+  test('UI-22: clearing a default name keeps it when nothing else uses it — wherever the group sits', async () => {
+    const { g1, g3 } = await reordered();
+    S.getState().renameGroup(g3, '');
+    assert.equal(nameOf(g3), 'Group 3', 'first in the row, still "Group 3" — c5231e5 renamed it "Group 1", a duplicate');
+    assert.deepEqual(names(), ['Group 3', 'Group 1', 'Group 2']);
+
+    // With a lower number free, clearing a name that is already a default
+    // still changes nothing: it is not renumbered to the lowest free one.
+    S.getState().renameGroup(g1, 'Work');
+    S.getState().renameGroup(g3, '   ');
+    assert.equal(nameOf(g3), 'Group 3', '"Group 1" is free now, and "Group 3" stays "Group 3"');
+  });
+
+  test('UI-23: a number another group holds is never handed out again; the lowest free one is', async () => {
+    const { g1, g2, g3 } = await reordered();
+    S.getState().renameGroup(g2, 'Group 1'); // typed by the user: theirs to keep, duplicate or not
+    S.getState().renameGroup(g1, '');
+    assert.equal(nameOf(g1), 'Group 2', 'its own 1 is taken now, and 2 is the lowest free');
+    S.getState().renameGroup(g3, 'Logs');
+    S.getState().renameGroup(g2, '');
+    assert.equal(nameOf(g2), 'Group 1', 'a group already called "Group 1" keeps it when it is the only one');
+    assert.deepEqual(names(), ['Logs', 'Group 2', 'Group 1']);
   });
 });
 

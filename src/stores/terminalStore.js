@@ -945,6 +945,38 @@ function nextDefaultTitle(tabs, preferred = null) {
   return `Terminal ${n}`;
 }
 
+/**
+ * The default name for group `groupId` when its name is cleared: a "Group N"
+ * no OTHER group is called, the way `nextDefaultTitle` numbers terminals.
+ *
+ * It used to be `Group ${position + 1}`, which reads its number off where the
+ * group sits now — and groups move. Drag "Group 3" to the front, clear the
+ * name of the group now second, and there were two "Group 2"s.
+ *
+ * A group already called "Group N" keeps N when nothing else uses it, so
+ * clearing a default name leaves it as it was; otherwise it gets the lowest
+ * number nobody uses.
+ */
+function nextDefaultGroupName(groups, groupId) {
+  const numberIn = (name) => {
+    const match = /^Group (\d+)$/.exec(name || '');
+    return match ? Number(match[1]) : null;
+  };
+
+  const taken = new Set();
+  let own = null;
+  for (const group of groups || []) {
+    const n = numberIn(group?.name);
+    if (group?.id === groupId) own = n;
+    else if (n !== null) taken.add(n);
+  }
+
+  if (own !== null && !taken.has(own)) return `Group ${own}`;
+  let n = 1;
+  while (taken.has(n)) n += 1;
+  return `Group ${n}`;
+}
+
 // The bootstrap still running, shared by every init() until it settles — see init.
 let initInFlight = null;
 
@@ -1598,7 +1630,8 @@ export const useTerminalStore = create((set, get, api) => {
 
     /**
      * Name (or rename) a group — reachable from a right-click on the group
-     * switcher. A blank name resets it to the positional default.
+     * switcher. A blank name resets it to a default "Group N" that no other
+     * group is called (see `nextDefaultGroupName`).
      */
     renameGroup: (groupId, name) =>
       set((state) => {
@@ -1606,7 +1639,10 @@ export const useTerminalStore = create((set, get, api) => {
         if (idx === -1) return {};
         const trimmed = typeof name === 'string' ? name.trim() : '';
         return {
-          groups: updateGroup(state, groupId, (g) => ({ ...g, name: trimmed || `Group ${idx + 1}` })),
+          groups: updateGroup(state, groupId, (g) => ({
+            ...g,
+            name: trimmed || nextDefaultGroupName(state.groups, groupId),
+          })),
         };
       }),
 
