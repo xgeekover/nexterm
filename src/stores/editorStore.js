@@ -97,6 +97,24 @@ function pruneTree(node) {
   return { ...node, children };
 }
 
+/**
+ * `pruneTree` for one leaf only: drop `leafId` if it holds no tabs, and
+ * collapse the split that leaves with a single child.
+ *
+ * A tab moved out of a group can leave that group empty, and it goes the way
+ * an emptied group always goes. But a group the user has just split off and
+ * not filled yet is empty too, and moving a tab between two OTHER groups is
+ * not the user asking for that one to disappear.
+ */
+function pruneLeafIfEmpty(node, leafId) {
+  if (!node) return null;
+  if (node.type === 'leaf') return node.id === leafId && node.tabIds.length === 0 ? null : node;
+  const children = node.children.map((child) => pruneLeafIfEmpty(child, leafId)).filter(Boolean);
+  if (children.length === 0) return null;
+  if (children.length === 1) return children[0];
+  return { ...node, children };
+}
+
 /** Append a tab to a pane (falling back to the first leaf) and make it active there. */
 function addTabToPane(node, paneId, tabId) {
   let placed = false;
@@ -847,6 +865,65 @@ export const useEditorStore = create((set, get) => ({
     set({
       editorSplitTree: pruneTree(split) || emptyEditorTree(),
       activeEditorPaneId: newPaneId,
+      activeTabId: tabId,
+    });
+  },
+
+  /**
+   * Drag & drop a file tab onto a tab strip: reorder it within its own group,
+   * or insert it into another group where it was dropped — not at the end, as
+   * a drop on the group's body does.
+   *
+   * `index` is a GAP in the target strip as drawn when the drop happens, with
+   * the dragged tab still in it if it lives there: 0 is before the first chip,
+   * `tabIds.length` is after the last, and `i` is between chips `i - 1` and
+   * `i`. That is what the pointer is measured against — the dragged chip stays
+   * on screen, dimmed, for the whole gesture — so the caller passes it
+   * straight through and the translation happens here, where it is tested.
+   * Both gaps beside the tab's own chip leave it where it is, and every gap
+   * to the right of it is one past the slot it lands in, because by then the
+   * tab has left its old slot.
+   *
+   * A number outside the strip is clamped to the nearer end, and a fraction
+   * rounds down. A gap that is not a number, an unknown tab or an unknown
+   * group changes nothing.
+   *
+   * The tab becomes its group's visible tab and that group the active one,
+   * as a click on the chip would make them. A group the tab leaves empty is
+   * pruned; no other group is touched (see `pruneLeafIfEmpty`).
+   *
+   * A drop that asks for exactly what is already there changes no state at
+   * all — not even a new state object, which every subscriber would take as
+   * a change and re-render for.
+   */
+  moveEditorTabInStrip: (tabId, targetPaneId, index) => {
+    if (typeof index !== 'number' || Number.isNaN(index)) return;
+    const state = get();
+    const target = collectLeaves(state.editorSplitTree).find((l) => l.id === targetPaneId);
+    if (!target || !state.tabs.some((t) => t.id === tabId)) return;
+
+    let slot = Math.min(Math.max(Math.floor(index), 0), target.tabIds.length);
+    const from = target.tabIds.indexOf(tabId);
+    if (from !== -1 && slot > from) slot -= 1;
+    const tabIds = target.tabIds.filter((id) => id !== tabId);
+    tabIds.splice(slot, 0, tabId);
+
+    const source = leafHoldingTab(state.editorSplitTree, tabId);
+    const nothingChanges =
+      source?.id === targetPaneId &&
+      tabIds.every((id, i) => id === target.tabIds[i]) &&
+      target.activeTabId === tabId &&
+      state.activeEditorPaneId === targetPaneId &&
+      state.activeTabId === tabId;
+    if (nothingChanges) return;
+
+    const placed = mapTree(removeTabFromTree(state.editorSplitTree, tabId), (n) =>
+      n.type === 'leaf' && n.id === targetPaneId ? { ...n, tabIds, activeTabId: tabId } : n
+    );
+    const vacated = source && source.id !== targetPaneId ? source.id : null;
+    set({
+      editorSplitTree: (vacated ? pruneLeafIfEmpty(placed, vacated) : placed) || emptyEditorTree(),
+      activeEditorPaneId: targetPaneId,
       activeTabId: tabId,
     });
   },

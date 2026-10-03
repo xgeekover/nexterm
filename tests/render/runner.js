@@ -453,6 +453,104 @@ scenario(
   }
 );
 
+// ---- Dragging an editor tab over a tab strip ---------------------------------
+
+/**
+ * The editor is the one part of the app the whole-App render cannot reach:
+ * PanelLayout loads it lazily, and `renderToString` draws a lazy component's
+ * Suspense fallback instead. So these cases render the tab strip itself,
+ * inside the drag context EditorPanel provides, in the state a drag is in
+ * while the pointer is over a strip.
+ */
+const { EditorTabs, EditorDragContext } = await import('../../src/components/editor/EditorTabs.jsx');
+
+const editorTab = (id) => ({
+  id,
+  filePath: `/workspace/${id}.js`,
+  fileName: `${id}.js`,
+  content: '',
+  savedContent: '',
+  isDirty: false,
+  language: 'javascript',
+});
+
+/** A drag that has crossed the threshold, with the pointer over `targetPaneId`. */
+const draggingOver = (targetPaneId, zone, index) => ({
+  tabId: 'e1', title: 'e1.js', startX: 0, startY: 0, x: 100, y: 10,
+  active: true, targetPaneId, zone, index,
+});
+
+/** The root group's tab strip holding `tabIds`, drawn while `drag` is in progress. */
+function renderStrip(tabIds, drag) {
+  const node = { type: 'leaf', id: 'editor-pane-root', tabIds, activeTabId: tabIds[0] ?? null };
+  return renderToString(
+    React.createElement(
+      EditorDragContext.Provider,
+      { value: { drag, beginDrag() {} } },
+      React.createElement(EditorTabs, { node })
+    )
+  );
+}
+
+/** The strip read left to right: chip ids, with MARK where the drop marker is drawn. */
+const stripSequence = (html) =>
+  [...html.matchAll(/data-tab-chip="([^"]+)"|data-tab-drop-marker=""/g)].map((m) => m[1] ?? 'MARK');
+
+function stripCase(id, description, check) {
+  const started = Date.now();
+  try {
+    reset();
+    useEditorStore.setState({ tabs: ['e1', 'e2', 'e3', 'e4'].map(editorTab) });
+    for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+    check();
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+const ALL = ['e1', 'e2', 'e3', 'e4'];
+
+stripCase('RN-21', 'a tab dragged over its own strip draws one marker, in the gap the pointer is over', () => {
+  const seq = stripSequence(renderStrip(ALL, draggingOver('editor-pane-root', 'tabs', 2)));
+  expectThat(
+    JSON.stringify(seq) === JSON.stringify(['e1', 'e2', 'MARK', 'e3', 'e4']),
+    `gap 2 is between e2 and e3, but the strip reads ${JSON.stringify(seq)}`
+  );
+});
+
+stripCase('RN-22', 'the first and last gaps draw the marker at the ends of the strip', () => {
+  for (const [gap, expected] of [
+    [0, ['MARK', ...ALL]],
+    [ALL.length, [...ALL, 'MARK']],
+  ]) {
+    const seq = stripSequence(renderStrip(ALL, draggingOver('editor-pane-root', 'tabs', gap)));
+    expectThat(JSON.stringify(seq) === JSON.stringify(expected), `gap ${gap}: the strip reads ${JSON.stringify(seq)}`);
+  }
+});
+
+stripCase('RN-23', "an empty group's strip draws the marker, with a height of its own", () => {
+  const html = renderStrip([], draggingOver('editor-pane-root', 'tabs', 0));
+  const seq = stripSequence(html);
+  expectThat(JSON.stringify(seq) === '["MARK"]', `the empty strip reads ${JSON.stringify(seq)}`);
+  // Stretched to the chips' height instead, it was zero pixels tall in a
+  // strip with no chips — found by dragging into a freshly split group.
+  const cls = /<div\b[^>]*\sdata-tab-drop-marker=""[^>]*\sclass="([^"]*)"/.exec(html)?.[1] ?? '';
+  expectThat(/\bh-tab\b/.test(cls), `the marker takes its height from its neighbours again: "${cls}"`);
+});
+
+stripCase('RN-24', 'a strip the pointer is not over draws no marker', () => {
+  for (const [where, drag] of [
+    ["another group's strip", draggingOver('editor-pane-2', 'tabs', 1)],
+    ["this group's body", draggingOver('editor-pane-root', 'center', null)],
+    ['a press still under the drag threshold', { ...draggingOver('editor-pane-root', 'tabs', 1), active: false }],
+  ]) {
+    const seq = stripSequence(renderStrip(ALL, drag));
+    expectThat(!seq.includes('MARK'), `a marker is drawn with the pointer over ${where}: ${JSON.stringify(seq)}`);
+  }
+});
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

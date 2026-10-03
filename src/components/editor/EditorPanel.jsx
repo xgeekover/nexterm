@@ -80,12 +80,39 @@ function zoneFromPoint(rect, clientX, clientY) {
   return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
 }
 
-/** Resolve the editor pane body under the pointer, if any. */
-function paneAtPoint(clientX, clientY) {
+/**
+ * What a drop at this point would do.
+ *
+ * Over a pane's BODY, the centre moves the tab into that group and the edges
+ * split it. Over a TAB STRIP, the tab goes into that strip at the gap the
+ * pointer is over — which is how the order of the tabs is changed at all.
+ * The gap is the number of chips whose midpoint is left of the pointer: over
+ * a chip's left half it lands before that chip, over its right half after
+ * it, and anywhere past the last chip (the strip's own buttons included) at
+ * the end. The dragged chip is counted like any other, since it stays in its
+ * strip, dimmed, for the whole gesture; `moveEditorTabInStrip` takes the gap
+ * in exactly those terms.
+ */
+function dropTargetAtPoint(clientX, clientY) {
   const el = document.elementFromPoint(clientX, clientY);
+
+  const strip = el?.closest?.('[data-editor-tab-strip]');
+  if (strip) {
+    let index = 0;
+    for (const chip of strip.querySelectorAll('[data-tab-chip]')) {
+      const rect = chip.getBoundingClientRect();
+      if (clientX > rect.left + rect.width / 2) index += 1;
+    }
+    return { paneId: strip.getAttribute('data-editor-tab-strip'), zone: 'tabs', index };
+  }
+
   const body = el?.closest?.('[data-editor-pane-body]');
   if (!body) return null;
-  return { paneId: body.getAttribute('data-editor-pane-body'), rect: body.getBoundingClientRect() };
+  return {
+    paneId: body.getAttribute('data-editor-pane-body'),
+    zone: zoneFromPoint(body.getBoundingClientRect(), clientX, clientY),
+    index: null,
+  };
 }
 
 /** Translucent overlay showing where the dropped tab will land. */
@@ -145,7 +172,8 @@ function relativeSegments(filePath, rootPath) {
 /**
  * One editor group (leaf of the split tree): its own tab strip plus the
  * Monaco editor for whichever of *its* tabs is active. Tabs can be dragged
- * between groups, or onto a group's edge to split it.
+ * along a strip to reorder them, into another group (at a position in its
+ * strip, or onto its body), or onto a group's edge to split it.
  */
 function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const { shortcut } = useShortcuts();
@@ -165,7 +193,10 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const { drag } = useContext(EditorDragContext);
 
   const isActivePane = activeEditorPaneId === paneId;
-  const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
+  // Over this pane's tab strip the strip draws its own marker; the body's
+  // overlay is only for the move and split zones.
+  const dropZone =
+    drag?.active && drag.targetPaneId === paneId && drag.zone !== 'tabs' ? drag.zone : null;
 
   /**
    * Put the caret where a terminal link asked for, if that link meant the file
@@ -341,8 +372,11 @@ export function EditorPanel() {
   const confirmPendingOverwrite = useEditorStore((s) => s.confirmPendingOverwrite);
   const reloadFromDisk = useEditorStore((s) => s.reloadFromDisk);
   const dropEditorTabOnPane = useEditorStore((s) => s.dropEditorTabOnPane);
+  const moveEditorTabInStrip = useEditorStore((s) => s.moveEditorTabInStrip);
 
-  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
+  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone, index }.
+  // `zone` is 'tabs' over a tab strip, where `index` is the gap the pointer
+  // is over; over a pane body it is the move/split zone and `index` is null.
   const [drag, setDrag] = useState(null);
   const dragRef = useRef(null);
   const cleanupRef = useRef(null);
@@ -369,14 +403,15 @@ export function EditorPanel() {
           Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
         if (!movedEnough) return;
 
-        const hit = paneAtPoint(ev.clientX, ev.clientY);
+        const hit = dropTargetAtPoint(ev.clientX, ev.clientY);
         const next = {
           ...cur,
           active: true,
           x: ev.clientX,
           y: ev.clientY,
           targetPaneId: hit?.paneId ?? null,
-          zone: hit ? zoneFromPoint(hit.rect, ev.clientX, ev.clientY) : null,
+          zone: hit?.zone ?? null,
+          index: hit?.index ?? null,
         };
         dragRef.current = next;
         setDrag(next);
@@ -389,7 +424,11 @@ export function EditorPanel() {
         setDrag(null);
         if (cur?.active) markEditorDragEnded();
         if (!cur?.active || !cur.targetPaneId) return;
-        dropEditorTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+        if (cur.zone === 'tabs') {
+          moveEditorTabInStrip(cur.tabId, cur.targetPaneId, cur.index);
+        } else {
+          dropEditorTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+        }
       };
 
       const onCancel = () => {
@@ -408,6 +447,7 @@ export function EditorPanel() {
         active: false,
         targetPaneId: null,
         zone: null,
+        index: null,
       };
       dragRef.current = started;
       setDrag(started);
@@ -417,7 +457,7 @@ export function EditorPanel() {
       window.addEventListener('pointercancel', onCancel);
       cleanupRef.current = detach;
     },
-    [dropEditorTabOnPane]
+    [dropEditorTabOnPane, moveEditorTabInStrip]
   );
 
   // Never leave listeners behind if the editor unmounts mid-gesture.
