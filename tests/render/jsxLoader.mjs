@@ -45,6 +45,7 @@ export class FitAddon { activate() {} dispose() {} fit() {} proposeDimensions() 
 export class WebglAddon {
   activate() {} dispose() {}
   onContextLoss() { return { dispose() {} }; }
+  onAddTextureAtlasCanvas() { return { dispose() {} }; }
 }
 export class SearchAddon {
   activate() {} dispose() {}

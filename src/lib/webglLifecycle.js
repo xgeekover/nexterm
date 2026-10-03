@@ -33,6 +33,12 @@ export const GPU_RETRY_DELAYS_MS = [1000, 5000, 30000];
 /** A renderer that lived this long was healthy: its loss starts a fresh count. */
 export const GPU_STABLE_MS = 60000;
 
+/** Every page addon-webgl 0.18 adds to a glyph atlas starts at this size. */
+export const ATLAS_PAGE_SIZE = 512;
+
+/** Two atlas rebuilds are at least this far apart. */
+export const ATLAS_REBUILD_MIN_INTERVAL_MS = 1000;
+
 /**
  * What to do with every terminal's WebGL renderer, given where each one is.
  *
@@ -40,13 +46,16 @@ export const GPU_STABLE_MS = 60000;
  *   attached     it is in a pane on screen
  *   connected    its element is in the document (the renderer measures the font)
  *   hasGpu       it holds a WebGL renderer now
+ *   rebuild      its glyph atlas merged pages, so its renderer must be remade
  *   freshAttach  it was off screen at the last pass and is on screen now
  *   retryAt      when it may try again after a loss (see `gpuFailure`)
  *   attachedAt   when it was last put on screen
  *
- * Returns indexes into `terminals`. `release` is carried out before `create`,
- * so a context a hidden terminal gives back is the one a shown terminal gets.
- * Within the budget the most recently shown come first. `retryAt` is when the
+ * Returns indexes into `terminals`. `release` is carried out before `create`:
+ * a rebuild lets go of the shared atlas before anything acquires it again,
+ * and a context a hidden terminal gives back is the one a shown terminal
+ * gets. Within the budget, terminals being rebuilt come first (they had a
+ * context a moment ago), then the most recently shown. `retryAt` is when the
  * earliest pending retry falls due, or null when nothing is waiting on time.
  */
 export function planGpuReconcile(terminals, { now = 0, budget = GPU_CONTEXT_BUDGET } = {}) {
@@ -54,7 +63,7 @@ export function planGpuReconcile(terminals, { now = 0, budget = GPU_CONTEXT_BUDG
   let live = 0;
   terminals.forEach((t, i) => {
     if (!t.hasGpu) return;
-    if (!t.attached) release.push(i);
+    if (!t.attached || t.rebuild) release.push(i);
     else live += 1;
   });
 
@@ -62,15 +71,21 @@ export function planGpuReconcile(terminals, { now = 0, budget = GPU_CONTEXT_BUDG
   let retryAt = null;
   terminals.forEach((t, i) => {
     if (!t.attached || !t.connected) return;
-    if (t.hasGpu) return;
-    // Showing a terminal again is the user asking for it: no backoff.
-    if (t.freshAttach || now >= (t.retryAt ?? 0)) {
+    if (t.hasGpu && !t.rebuild) return;
+    // A rebuild is not a retry, and showing a terminal again is the user
+    // asking for it: neither waits out a backoff.
+    if (t.rebuild || t.freshAttach || now >= (t.retryAt ?? 0)) {
       ready.push(i);
     } else if (Number.isFinite(t.retryAt) && (retryAt === null || t.retryAt < retryAt)) {
       retryAt = t.retryAt;
     }
   });
-  ready.sort((a, b) => (terminals[b].attachedAt ?? 0) - (terminals[a].attachedAt ?? 0));
+  ready.sort((a, b) => {
+    const ta = terminals[a];
+    const tb = terminals[b];
+    if (Boolean(ta.rebuild) !== Boolean(tb.rebuild)) return ta.rebuild ? -1 : 1;
+    return (tb.attachedAt ?? 0) - (ta.attachedAt ?? 0);
+  });
 
   return { release, create: ready.slice(0, Math.max(0, budget - live)), retryAt };
 }
@@ -118,6 +133,34 @@ export function gpuFailure({ failures = 0, createdAt = null } = {}, now = 0) {
   const count = (healthy ? 0 : failures) + 1;
   const delay = GPU_RETRY_DELAYS_MS[count - 1];
   return { failures: count, retryAt: delay === undefined ? Infinity : now + delay };
+}
+
+/**
+ * Whether a page just added to a glyph atlas came out of a merge.
+ *
+ * addon-webgl 0.18 corrupts glyphs once its atlas has merged pages twice: the
+ * merged page lands on a texture unit whose recorded version equals the new
+ * page's, so the texture is never uploaded and every glyph on that page is
+ * drawn from the old one — fragments (xterm.js #5847; the fix, #5883, ships in
+ * addon-webgl 0.20, which needs xterm 6.1). A merge is the only thing that
+ * adds a page larger than the size every new page starts at, and the addon's
+ * public `onAddTextureAtlasCanvas` reports every page added.
+ */
+export function isAtlasMergePage(canvas) {
+  return Boolean(canvas) && Number(canvas.width) > ATLAS_PAGE_SIZE;
+}
+
+/**
+ * How long to hold a requested atlas rebuild back: 0 means now.
+ *
+ * A rebuild starts the atlas afresh, so the next merge is a whole atlas of new
+ * glyph colours away — hours of ordinary output. Only output made of nothing
+ * but new colours fills one in under a second, and the floor keeps that from
+ * becoming a rebuild every few frames.
+ */
+export function atlasRebuildDelay(lastRebuildAt, now) {
+  if (lastRebuildAt === null || lastRebuildAt === undefined) return 0;
+  return Math.max(0, lastRebuildAt + ATLAS_REBUILD_MIN_INTERVAL_MS - now);
 }
 
 /**

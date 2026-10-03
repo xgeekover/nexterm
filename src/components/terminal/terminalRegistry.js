@@ -25,8 +25,10 @@ import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
 import { fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
 import {
+  atlasRebuildDelay,
   drawWebglNow,
   gpuFailure,
+  isAtlasMergePage,
   planGpuAttach,
   planGpuReconcile,
   releaseWebglAddon,
@@ -59,6 +61,8 @@ const instances = new Map();
  *     `planGpuAttach`), and calls the function it returns when it stops; a
  *     terminal no pane shows gives its context back;
  *   - a lost context is retried, on a schedule that cannot become a loop;
+ *   - when the glyph atlas merges pages, every live renderer is remade on a
+ *     fresh atlas — addon-webgl 0.18 draws fragments after its second merge.
  *
  * Everything else is settled in one pass, `reconcileGpus`, queued as a
  * microtask: it runs after React has attached, detached and fitted every pane
@@ -73,10 +77,15 @@ const gpuStats = {
   released: 0,
   freedContexts: 0,
   lost: 0,
+  atlasRebuilds: 0,
+  lastRebuildMs: 0,
+  maxRebuildMs: 0,
 };
 let gpuReconcileQueued = false;
 let gpuRetryTimer = 0;
 let gpuRetryTimerAt = Infinity;
+let lastAtlasRebuildAt = null;
+let atlasRebuildTimer = 0;
 
 const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -104,6 +113,7 @@ function gpuStateOf(entry) {
     attached,
     connected: entry.container.isConnected,
     hasGpu: Boolean(entry.gpu),
+    rebuild: entry.gpuRebuild,
     // Off screen at the last pass and on screen now: the user is looking at
     // it again, and whatever gave up on its renderer gets another go.
     freshAttach: attached && !entry.wasAttached,
@@ -127,6 +137,9 @@ function createGpu(entry) {
   try {
     addon = new WebglAddon();
     addon.onContextLoss(() => handleGpuLoss(entry, addon));
+    addon.onAddTextureAtlasCanvas((canvas) => {
+      if (isAtlasMergePage(canvas)) requestAtlasRebuild();
+    });
     entry.term.loadAddon(addon);
   } catch (err) {
     console.warn('[Terminal] WebGL renderer unavailable, using the DOM renderer:', err);
@@ -175,6 +188,30 @@ function handleGpuLoss(entry, addon) {
   scheduleGpuReconcile();
 }
 
+/**
+ * The atlas is shared by every terminal with the same font and colours, so
+ * every live renderer is remade: released together, the atlas loses its last
+ * owner and the next renderer starts a fresh one (which also ends the full
+ * model rebuild on every frame that 0.18 gets stuck in after a merge).
+ * Called from inside a render, hence flags and a queued pass.
+ */
+function requestAtlasRebuild() {
+  if (atlasRebuildTimer) return;
+  const wait = atlasRebuildDelay(lastAtlasRebuildAt, clock());
+  if (wait > 0) {
+    atlasRebuildTimer = setTimeout(() => {
+      atlasRebuildTimer = 0;
+      requestAtlasRebuild();
+    }, wait);
+    return;
+  }
+  lastAtlasRebuildAt = clock();
+  for (const entry of instances.values()) {
+    if (entry.gpu) entry.gpuRebuild = true;
+  }
+  scheduleGpuReconcile();
+}
+
 function reconcileGpus() {
   gpuReconcileQueued = false;
   const startedAt = clock();
@@ -192,9 +229,15 @@ function reconcileGpus() {
   });
   const plan = planGpuReconcile(states, { now: startedAt });
 
-  for (const i of plan.release) releaseGpu(entries[i]);
+  let rebuilt = false;
+  for (const i of plan.release) {
+    rebuilt = rebuilt || entries[i].gpuRebuild;
+    entries[i].gpuRebuild = false;
+    releaseGpu(entries[i]);
+  }
   for (const i of plan.create) {
-    // Already on screen, and fitted with the DOM renderer's cells.
+    // Already on screen and fitted — with the DOM renderer's cells, unless
+    // this is a rebuild, where the refit finds nothing to change.
     if (createGpu(entries[i])) entries[i].refitPending = true;
   }
   entries.forEach((entry, i) => {
@@ -207,6 +250,12 @@ function reconcileGpus() {
       if (entry.gpu && entry.attachCount > 0) drawWebglNow(entry.gpu, entry.term);
     }
   });
+  if (rebuilt) {
+    const ms = clock() - startedAt;
+    gpuStats.atlasRebuilds += 1;
+    gpuStats.lastRebuildMs = ms;
+    gpuStats.maxRebuildMs = Math.max(gpuStats.maxRebuildMs, ms);
+  }
   scheduleGpuRetry(plan.retryAt);
 }
 
@@ -664,6 +713,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     attachCount: 0,
     attachedAt: 0,
     wasAttached: false,
+    gpuRebuild: false,
     gpuFailures: 0,
     gpuRetryAt: 0,
     gpuCreatedAt: null,
