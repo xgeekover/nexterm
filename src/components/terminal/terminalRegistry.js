@@ -24,6 +24,13 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
 import { fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
+import {
+  drawWebglNow,
+  gpuFailure,
+  planGpuAttach,
+  planGpuReconcile,
+  releaseWebglAddon,
+} from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
@@ -34,8 +41,7 @@ import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 const instances = new Map();
 
 /**
- * Draw a terminal with xterm's WebGL renderer, once its element is in the
- * document.
+ * Draw a terminal with xterm's WebGL renderer while it is on screen.
  *
  * The DOM renderer draws block and box-drawing characters with the font, and a
  * glyph only covers the font's height — so at the default line height of 1.5
@@ -43,23 +49,216 @@ const instances = new Map();
  * background (reproduced with the block and box characters opencode draws:
  * gaps at 1.5, solid at 1.0). The WebGL renderer draws those characters itself,
  * filling the whole cell at any line height. It measures the font from the live
- * DOM, hence "once attached". Without WebGL, or when the context is lost, the
- * addon is dropped and xterm carries on with its DOM renderer.
+ * DOM, hence "on screen". Without WebGL xterm carries on with its DOM renderer.
+ *
+ * A context is scarce (`lib/webglLifecycle.js` has the rules and the reasons),
+ * so it follows the terminal on and off the screen:
+ *
+ *   - a pane showing the terminal calls `ensureGpuRenderer`, which makes the
+ *     renderer at once (before the pane fits the terminal — see
+ *     `planGpuAttach`), and calls the function it returns when it stops; a
+ *     terminal no pane shows gives its context back;
+ *   - a lost context is retried, on a schedule that cannot become a loop;
+ *
+ * Everything else is settled in one pass, `reconcileGpus`, queued as a
+ * microtask: it runs after React has attached, detached and fitted every pane
+ * of a commit, and before the browser paints. A terminal moving between panes
+ * in one commit keeps its context, a context a hidden terminal gives back is
+ * free for one waiting on screen, and a terminal just shown is drawn at its
+ * fitted size for the very first frame.
  */
-export function ensureGpuRenderer(entry) {
-  if (entry.gpu !== undefined || !entry.container.isConnected) return;
+const gpuStats = {
+  created: 0,
+  failed: 0,
+  released: 0,
+  freedContexts: 0,
+  lost: 0,
+};
+let gpuReconcileQueued = false;
+let gpuRetryTimer = 0;
+let gpuRetryTimerAt = Infinity;
+
+const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+function scheduleGpuReconcile() {
+  if (gpuReconcileQueued) return;
+  gpuReconcileQueued = true;
+  queueMicrotask(reconcileGpus);
+}
+
+/** One timer, for the earliest retry due; the pass it starts sets the next. */
+function scheduleGpuRetry(at) {
+  if (at === null || at >= gpuRetryTimerAt) return;
+  clearTimeout(gpuRetryTimer);
+  gpuRetryTimerAt = at;
+  gpuRetryTimer = setTimeout(() => {
+    gpuRetryTimer = 0;
+    gpuRetryTimerAt = Infinity;
+    scheduleGpuReconcile();
+  }, Math.max(0, at - clock()));
+}
+
+function gpuStateOf(entry) {
+  const attached = entry.attachCount > 0;
+  return {
+    attached,
+    connected: entry.container.isConnected,
+    hasGpu: Boolean(entry.gpu),
+    // Off screen at the last pass and on screen now: the user is looking at
+    // it again, and whatever gave up on its renderer gets another go.
+    freshAttach: attached && !entry.wasAttached,
+    retryAt: entry.gpuRetryAt,
+    attachedAt: entry.attachedAt,
+  };
+}
+
+function releaseGpu(entry) {
+  const addon = entry.gpu;
+  if (!addon) return;
+  entry.gpu = null;
+  const { freedContext } = releaseWebglAddon(addon);
+  gpuStats.released += 1;
+  if (freedContext) gpuStats.freedContexts += 1;
+}
+
+/** @returns {boolean} whether the terminal now has a WebGL renderer */
+function createGpu(entry) {
+  let addon = null;
   try {
-    const addon = new WebglAddon();
-    addon.onContextLoss(() => {
-      addon.dispose();
-      entry.gpu = null;
-    });
+    addon = new WebglAddon();
+    addon.onContextLoss(() => handleGpuLoss(entry, addon));
     entry.term.loadAddon(addon);
-    entry.gpu = addon;
   } catch (err) {
     console.warn('[Terminal] WebGL renderer unavailable, using the DOM renderer:', err);
-    entry.gpu = null;
+    if (addon) releaseWebglAddon(addon);
+    gpuStats.failed += 1;
+    // Never made, so not a renderer that had been healthy: no fresh count.
+    const next = gpuFailure({ failures: entry.gpuFailures, createdAt: null }, clock());
+    entry.gpuFailures = next.failures;
+    entry.gpuRetryAt = next.retryAt;
+    return false;
   }
+  entry.gpu = addon;
+  entry.gpuCreatedAt = clock();
+  entry.drawPending = true;
+  gpuStats.created += 1;
+  return true;
+}
+
+/**
+ * Fit a terminal on screen to its pane again, and tell the shell: its renderer
+ * changed under it, and WebGL and DOM cells are not the same width.
+ */
+function refitOnScreen(tabId, entry) {
+  fitAndReport({
+    tabId,
+    term: entry.term,
+    fitAddon: entry.fitAddon,
+    resizePty: useTerminalStore.getState().resizePty,
+    fittable: isFittable(entry.container),
+  });
+}
+
+/**
+ * addon-webgl reports a loss only after waiting 3 s for the browser to restore
+ * the context itself, so by now it is gone for good.
+ */
+function handleGpuLoss(entry, addon) {
+  if (entry.gpu !== addon) return;
+  gpuStats.lost += 1;
+  const createdAt = entry.gpuCreatedAt;
+  releaseGpu(entry);
+  const next = gpuFailure({ failures: entry.gpuFailures, createdAt }, clock());
+  entry.gpuFailures = next.failures;
+  entry.gpuRetryAt = next.retryAt;
+  entry.refitPending = entry.attachCount > 0;
+  scheduleGpuReconcile();
+}
+
+function reconcileGpus() {
+  gpuReconcileQueued = false;
+  const startedAt = clock();
+  const tabIds = [...instances.keys()];
+  const entries = [...instances.values()];
+  const states = entries.map((entry) => {
+    const state = gpuStateOf(entry);
+    if (state.freshAttach) {
+      entry.gpuFailures = 0;
+      entry.gpuRetryAt = 0;
+      state.retryAt = 0;
+    }
+    entry.wasAttached = state.attached;
+    return state;
+  });
+  const plan = planGpuReconcile(states, { now: startedAt });
+
+  for (const i of plan.release) releaseGpu(entries[i]);
+  for (const i of plan.create) {
+    // Already on screen, and fitted with the DOM renderer's cells.
+    if (createGpu(entries[i])) entries[i].refitPending = true;
+  }
+  entries.forEach((entry, i) => {
+    if (entry.refitPending) {
+      entry.refitPending = false;
+      if (entry.attachCount > 0) refitOnScreen(tabIds[i], entry);
+    }
+    if (entry.drawPending) {
+      entry.drawPending = false;
+      if (entry.gpu && entry.attachCount > 0) drawWebglNow(entry.gpu, entry.term);
+    }
+  });
+  scheduleGpuRetry(plan.retryAt);
+}
+
+/**
+ * A pane is showing this terminal: give it a WebGL renderer, now if a context
+ * can be had, else as soon as one is free. Returns the function to call when
+ * the pane stops showing it, which gives the context back.
+ */
+export function ensureGpuRenderer(entry) {
+  if (!entry || entry.disposed) return () => {};
+  entry.attachCount += 1;
+  if (entry.attachCount === 1) {
+    entry.attachedAt = clock();
+    if (!entry.gpu) {
+      const entries = [...instances.values()];
+      if (entry.wasAttached === false) {
+        entry.gpuFailures = 0;
+        entry.gpuRetryAt = 0;
+      }
+      const decision = planGpuAttach(entries.map(gpuStateOf), entries.indexOf(entry), { now: entry.attachedAt });
+      entry.wasAttached = true;
+      if (decision.create) {
+        for (const i of decision.releaseFirst) releaseGpu(entries[i]);
+        createGpu(entry);
+      }
+    }
+  }
+  // Drawn by the queued pass, once the pane has fitted it.
+  entry.drawPending = true;
+  scheduleGpuReconcile();
+  let shown = true;
+  return function releaseGpuRenderer() {
+    if (!shown) return;
+    shown = false;
+    entry.attachCount = Math.max(0, entry.attachCount - 1);
+    scheduleGpuReconcile();
+  };
+}
+
+/** What the GPU renderers are doing — read by the lab and through the app's debug bridge. */
+export function getGpuStats() {
+  let live = 0;
+  let shown = 0;
+  let shownWithoutGpu = 0;
+  for (const entry of instances.values()) {
+    if (entry.gpu) live += 1;
+    if (entry.attachCount > 0) {
+      shown += 1;
+      if (!entry.gpu) shownWithoutGpu += 1;
+    }
+  }
+  return { live, shown, shownWithoutGpu, ...gpuStats };
 }
 
 /** Keys the Settings window exposes that should update every live terminal
@@ -460,6 +659,17 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     dataDisposable,
     exited: false,
     stopPtyListener: null,
+    // The WebGL renderer and its bookkeeping — see `ensureGpuRenderer`.
+    gpu: null,
+    attachCount: 0,
+    attachedAt: 0,
+    wasAttached: false,
+    gpuFailures: 0,
+    gpuRetryAt: 0,
+    gpuCreatedAt: null,
+    drawPending: false,
+    refitPending: false,
+    disposed: false,
   };
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
@@ -540,10 +750,18 @@ setTerminalNoticeSink(writeNotice);
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;
+  // Before `term.dispose()`, which would drop the WebGL addon without letting
+  // its context go — and a context nothing can reach still counts against the
+  // browser's 16 until it is collected, evicting terminals that are open.
+  entry.disposed = true;
+  entry.attachCount = 0;
+  releaseGpu(entry);
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.searchAddon?.dispose();
   entry.term.dispose();
   instances.delete(tabId);
+  // The context just freed may be the one a terminal on screen is waiting for.
+  scheduleGpuReconcile();
 }
