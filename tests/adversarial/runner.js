@@ -14,6 +14,7 @@ import './status_bar.test.js';
 import './persist_robustness.test.js';
 import './editor_layout.test.js';
 import './editor_tab_reorder.test.js';
+import './editor_tab_reorder_ui.test.js';
 import './explorer_actions.test.js';
 import './app_menu.test.js';
 import './settings.test.js';
