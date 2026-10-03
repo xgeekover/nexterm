@@ -1611,6 +1611,37 @@ export const useTerminalStore = create((set, get, api) => {
       }),
 
     /**
+     * Drop a group's chip along the switcher: put group `groupId` at slot
+     * `index` of `groups` — the order the switcher shows, and the order that
+     * is saved and comes back on relaunch.
+     *
+     * `index` is a slot counted the way `moveTabInStrip` counts one: among the
+     * groups AS THEY ARE BEFORE THE MOVE, the dragged one included, so slot i
+     * is "just before the group now at position i" and slot `groups.length`
+     * is "after the last" (see `moveToSlot`).
+     *
+     * Only the order changes. Reordering is not switching: the group on
+     * screen stays on screen wherever it now sits, so tidying the row never
+     * swaps the whole terminal area out from under the user, and every group
+     * keeps its panes, its focus and its name. A drop that leaves the order as
+     * it is changes no state at all. An unknown group, or an index that is not
+     * a number, is ignored.
+     */
+    reorderGroup: (groupId, index) =>
+      set((state) => {
+        const ids = state.groups.map((g) => g.id);
+        if (!ids.includes(groupId)) return state;
+        const order = moveToSlot(ids, groupId, index);
+        if (!order || sameOrder(order, ids)) return state;
+        // Not through `settle`: a new order cannot break anything it repairs —
+        // no tree, pane or focus changes — so the very same group objects are
+        // handed back, resequenced. The array is new, which is what schedules
+        // the save (see the persist subscription at the bottom of this file).
+        const byId = new Map(state.groups.map((g) => [g.id, g]));
+        return { groups: order.map((id) => byId.get(id)) };
+      }),
+
+    /**
      * Persist the pane sizes of one split (percentages, one per child) so a
      * group's proportions survive being switched away from and relaunched.
      *

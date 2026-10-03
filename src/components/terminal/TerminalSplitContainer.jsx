@@ -93,8 +93,8 @@ function zoneFromPoint(rect, clientX, clientY) {
  * Where along a row of chips a drop at `clientX` would land, as a SLOT: how
  * many of the chips have their middle to the left of the pointer. 0 is before
  * the first chip and `chips.length` after the last — the numbering
- * `moveTabInStrip` takes. The dragged chip is still in its row, faded, and is
- * counted like any other, which is what it expects.
+ * `moveTabInStrip` and `reorderGroup` take. The dragged chip is still in its
+ * row, faded, and is counted like any other, which is what they expect.
  */
 function slotAtX(chips, clientX) {
   let slot = 0;
@@ -142,6 +142,18 @@ function groupChipAtPoint(clientX, clientY) {
   const chip = el?.closest?.('[data-group-chip]');
   if (!chip) return null;
   return { groupId: chip.getAttribute('data-group-chip') };
+}
+
+/**
+ * Where along the switcher a dragged GROUP chip would land, as a slot, or
+ * null while the pointer is off the switcher. The whole bar counts, not just
+ * the chips: past the last one (the "+" button, the empty space) is the end.
+ */
+function groupSlotAtPoint(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  const bar = el?.closest?.('[data-group-switcher]');
+  if (!bar) return null;
+  return slotAtX(bar.querySelectorAll('[data-group-chip]'), clientX);
 }
 
 /**
@@ -303,7 +315,7 @@ function DragPreview({ drag }) {
                  bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
       style={{ left: drag.x + 12, top: drag.y + 12 }}
     >
-      <TerminalSquare size={12} />
+      {drag.kind === 'group' ? <LayoutGrid size={12} /> : <TerminalSquare size={12} />}
       <span className="truncate max-w-[140px]">{drag.title}</span>
     </div>,
     document.body
@@ -813,6 +825,11 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
  * group's chip moves the terminal into that group (`moveTabToGroup`), which
  * also switches to it. Hit-testing goes through `data-group-chip`, the same
  * `elementFromPoint` path the panes' `data-pane-body` uses.
+ *
+ * And each chip is a drag handle of its own: dragged along the switcher it
+ * reorders the groups (`reorderGroup`), with the same marker a tab strip
+ * shows. Same gesture as a tab chip's — a press only becomes a drag past the
+ * threshold, so a click still switches and a double-click still renames.
  */
 function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGroupId, headerSlot }) {
   // Its own subscription: this component is rendered outside the one that
@@ -826,11 +843,18 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
   const closeGroup = useTerminalStore((s) => s.closeGroup);
   const renameGroup = useTerminalStore((s) => s.renameGroup);
 
-  const { drag } = useContext(DragContext);
+  const { drag, beginGroupDrag, cancelActiveDrag } = useContext(DragContext);
 
   const [draft, setDraft] = useState('');
   const [menu, setMenu] = useState(null); // { x, y, groupId }
   const [creating, setCreating] = useState(false);
+
+  // Where a dragged group chip would go in, as a slot of `groups` (the chip it
+  // would land before, or `groups.length` for after the last) — or null.
+  const insertAt =
+    drag?.active && drag.kind === 'group'
+      ? markerSlot(drag.slot, groups.map((g) => g.id), drag.groupId)
+      : null;
 
   const beginRename = (group) => {
     setDraft(group.name || '');
@@ -873,10 +897,13 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
       className="h-7 shrink-0 flex items-center gap-1 px-1 bg-vsc-panel border-b border-vsc-border select-none"
     >
       <LayoutGrid size={12} className="shrink-0 ml-0.5 text-vsc-muted" />
-      <div role="tablist" aria-label="Terminal groups" className="flex-1 flex items-center gap-0.5 overflow-x-auto no-scrollbar">
-        {groups.map((group) => {
+      {/* `pl-0.5` is room for the insertion marker before the first chip: the
+          row scrolls, so it clips whatever is drawn outside its own box. */}
+      <div role="tablist" aria-label="Terminal groups" className="flex-1 flex items-center gap-0.5 pl-0.5 overflow-x-auto no-scrollbar">
+        {groups.map((group, i) => {
           const isActive = group.id === activeGroupId;
           const isDropTarget = Boolean(drag?.active) && drag.targetGroupId === group.id;
+          const isBeingDragged = Boolean(drag?.active) && drag.kind === 'group' && drag.groupId === group.id;
           const terminals = countTerminals(group.tree);
           // Switching groups replaces the whole arrangement, so a command
           // failing in one you are not looking at is invisible without this.
@@ -911,13 +938,18 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               role="tab"
               tabIndex={0}
               aria-selected={isActive}
+              aria-grabbed={isBeingDragged}
               title={`${group.name} — ${terminals} terminal${terminals === 1 ? '' : 's'}${
                 activity === 'running'
                   ? ', one of them running a command'
                   : activity === 'failed'
                     ? ', one of them ended on a failure'
                     : ''
-              }. Click to switch, drop a terminal here to move it, double-click to rename.`}
+              }. Click to switch, drag to reorder, drop a terminal here to move it, double-click to rename.`}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                beginGroupDrag(group, e);
+              }}
               onClick={() => {
                 if (Date.now() - lastDragEndAt < 200) return;
                 setActiveGroup(group.id);
@@ -925,6 +957,9 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               onDoubleClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                // As on a tab chip: neither press of a double-click travels
+                // far enough to arm a drag, and this makes sure of it.
+                cancelActiveDrag();
                 beginRename(group);
               }}
               onContextMenu={(e) => {
@@ -942,14 +977,18 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                 }
               }}
               className={cn(
-                'shrink-0 flex items-center gap-1 pl-2 pr-1 h-[20px] rounded-sm text-ui-sm cursor-pointer transition-colors',
+                'relative shrink-0 flex items-center gap-1 pl-2 pr-1 h-[20px] rounded-sm text-ui-sm',
+                'cursor-grab active:cursor-grabbing touch-none transition-colors',
                 isActive
                   ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
                   : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover',
                 isDropTarget &&
-                  'ring-1 ring-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]'
+                  'ring-1 ring-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]',
+                isBeingDragged && 'opacity-40'
               )}
             >
+              {insertAt === i && <InsertionMarker side="before" />}
+              {insertAt === groups.length && i === groups.length - 1 && <InsertionMarker side="after" />}
               <ActivityDot state={activity} />
               <span className="truncate max-w-[140px]">{group.name}</span>
               <span className="text-[10px] tabular-nums opacity-60">{terminals}</span>
@@ -1042,6 +1081,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
   const moveTabInStrip = useTerminalStore((s) => s.moveTabInStrip);
   const moveTabToGroup = useTerminalStore((s) => s.moveTabToGroup);
+  const reorderGroup = useTerminalStore((s) => s.reorderGroup);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
@@ -1051,8 +1091,11 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   // rather than duplicating one inside the pane.
   const [renamingGroupId, setRenamingGroupId] = useState(null);
 
-  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone, slot, targetGroupId }
-  // `slot` is where in a tab strip it would go in (see `slotAtX`).
+  // null while idle. A terminal tab being dragged:
+  //   { kind: 'tab', tabId, title, startX, startY, x, y, active, targetPaneId, zone, slot, targetGroupId }
+  // a group chip being dragged along the switcher:
+  //   { kind: 'group', groupId, title, startX, startY, x, y, active, slot }
+  // `slot` is where in a row of chips it would go in (see `slotAtX`).
   const [drag, setDrag] = useState(null);
   const dragRef = useRef(null);
   const cleanupRef = useRef(null);
@@ -1132,6 +1175,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const beginDrag = useCallback(
     (tab, e) => {
       const started = {
+        kind: 'tab',
         tabId: tab.id,
         title: tab.title,
         startX: e.clientX,
@@ -1180,6 +1224,34 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     [trackGesture, dropTabOnPane, moveTabInStrip, moveTabToGroup]
   );
 
+  /**
+   * A group's chip, along the switcher. Anywhere else it has nowhere to go:
+   * let go off the switcher and nothing moves.
+   */
+  const beginGroupDrag = useCallback(
+    (group, e) => {
+      const started = {
+        kind: 'group',
+        groupId: group.id,
+        title: group.name,
+        startX: e.clientX,
+        startY: e.clientY,
+        x: e.clientX,
+        y: e.clientY,
+        active: false,
+        slot: null,
+      };
+      trackGesture(
+        started,
+        (x, y) => ({ slot: groupSlotAtPoint(x, y) }),
+        (cur) => {
+          if (cur.slot !== null) reorderGroup(cur.groupId, cur.slot);
+        }
+      );
+    },
+    [trackGesture, reorderGroup]
+  );
+
   // Never leave listeners behind if the terminal unmounts mid-gesture.
   useEffect(() => () => cleanupRef.current?.(), []);
 
@@ -1211,8 +1283,8 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   );
 
   const dragValue = useMemo(
-    () => ({ drag, beginDrag, cancelActiveDrag }),
-    [drag, beginDrag, cancelActiveDrag]
+    () => ({ drag, beginDrag, beginGroupDrag, cancelActiveDrag }),
+    [drag, beginDrag, beginGroupDrag, cancelActiveDrag]
   );
 
   if (!activeGroup?.tree) return null;

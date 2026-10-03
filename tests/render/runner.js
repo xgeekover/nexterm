@@ -581,6 +581,36 @@ scenario(
   }
 );
 
+scenario(
+  'RN-26',
+  'the switcher draws the groups in the order they were dragged into, the one on screen included',
+  () => {
+    reset();
+    const group = (id, tabId) => ({
+      id,
+      name: id,
+      createdAt: Number(id.slice(-1)),
+      tree: { type: 'leaf', id: `pane-${id}`, tabIds: [tabId], activeTabId: tabId },
+      activePaneId: `pane-${id}`,
+    });
+    // Created 1, 2, 3; dragged into 3, 1, 2 — with the one on screen no
+    // longer first, so drawing it first would show as a reorder undone.
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2'), tab('t3')],
+      activeTabId: 't2',
+      groups: [group('group-3', 't3'), group('group-1', 't1'), group('group-2', 't2')],
+      activeGroupId: 'group-2',
+    });
+  },
+  (html) => {
+    const chips = attrOrder(html, 'data-group-chip');
+    expectThat(
+      JSON.stringify(chips) === JSON.stringify(['group-3', 'group-1', 'group-2']),
+      `the switcher draws ${JSON.stringify(chips)}, not the order the groups are in: ["group-3","group-1","group-2"]`
+    );
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

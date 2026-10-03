@@ -1,21 +1,23 @@
 /**
- * Changing the ORDER of terminal tabs by drag & drop.
+ * Changing the ORDER of terminal tabs and of groups by drag & drop.
  *
  * The gesture lives in TerminalSplitContainer.jsx and is pointer events from
- * press to release, which nothing in Node can drive. A drop on a tab strip
- * comes down to one store call, though, and that is what this file pins:
- * `moveTabInStrip(tabId, paneId, index)` — a tab chip dropped on a TAB STRIP,
- * its own (a reorder) or another pane's (a move that inserts where it was
- * dropped instead of appending, which is all a drop on a strip could do
- * before).
+ * press to release, which nothing in Node can drive. Every drop it makes comes
+ * down to one of two store calls, though, and those are what this file pins:
  *
- * It takes a SLOT, counted in the strip as it is BEFORE the move, the dragged
- * tab included: slot i is "just before whatever is at position i now", and
+ *   - `moveTabInStrip(tabId, paneId, index)`: a tab chip dropped on a TAB
+ *     STRIP — its own (a reorder) or another pane's (a move that inserts where
+ *     it was dropped instead of appending, which is all a drop on a strip
+ *     could do before);
+ *   - `reorderGroup(groupId, index)`: a group chip dropped along the switcher.
+ *
+ * Both take a SLOT, counted in the row as it is BEFORE the move, the dragged
+ * item included: slot i is "just before whatever is at position i now", and
  * slot `length` is "after the last". That is what the pointer gives, because
- * the dragged chip stays in its strip (faded) for the whole drag, so the
- * midpoints it is measured against are the strip as it stands. The
- * consequence worth a test of its own is that moving RIGHT by one place is two
- * slots on — the slot right after the tab is where it already is.
+ * the dragged chip stays in its row (faded) for the whole drag, so the
+ * midpoints it is measured against are the row as it stands. The consequence
+ * worth a test of its own is that moving RIGHT by one place is two slots on —
+ * the slot right after the item is where it already is.
  *
  * `terminal_layout.test.js` owns the drops on a pane's BODY (`dropTabOnPane`'s
  * zones); this file does not re-cover them.
@@ -126,6 +128,14 @@ async function paneBeside(paneId, extra = 0) {
   }
   assert.deepEqual(paneById(right).tabIds, ids, 'sanity: the new pane holds its own terminals, in order');
   return { right, ids };
+}
+
+/** Four groups, in switcher order; the last one created is on screen. */
+async function fourGroups() {
+  const ids = [activeGroup().id];
+  for (const name of ['Two', 'Three', 'Four']) ids.push((await S.getState().createGroup({ name })).id);
+  assert.deepEqual(groupIds(), ids, 'sanity: a new group is added at the end of the switcher');
+  return ids;
 }
 
 // =========================================================================
@@ -348,6 +358,109 @@ describe('Tab reorder: a terminal tab dropped on a tab strip', () => {
     assert.deepEqual(paneById(left).tabIds, [c, b], 'the reordered strip comes back in its new order');
     assert.deepEqual(paneById(right).tabIds, [a, x], 'and the tab moved across sits where it was dropped');
     assert.equal(paneById(right).activeTabId, a, 'still the one that pane shows');
+  });
+});
+
+// =========================================================================
+describe('Group reorder: a group chip dropped along the switcher', () => {
+  beforeEach(async () => {
+    await launch();
+  });
+
+  afterEach(teardown);
+
+  test('GR-01: dragged LEFT, a group lands at the slot it was dropped on', async () => {
+    const [g1, g2, g3, g4] = await fourGroups();
+    S.getState().reorderGroup(g4, 1); // "just before g2"
+    assert.deepEqual(groupIds(), [g1, g4, g2, g3]);
+  });
+
+  test('GR-02: dragged RIGHT, the slot still counts the dragged group — one place right is two slots on', async () => {
+    const [g1, g2, g3, g4] = await fourGroups();
+
+    S.getState().reorderGroup(g1, 3); // "just before g4"
+    assert.deepEqual(groupIds(), [g2, g3, g1, g4], 'slot 3 is BEFORE g4, counted with g1 still in the row');
+
+    S.getState().reorderGroup(g2, 2); // g2 is first; slot 2 is "just before g1"
+    assert.deepEqual(groupIds(), [g3, g2, g1, g4], 'one place to the right');
+  });
+
+  test('GR-03: slot 0 and slot `length` are the two ends, and anything outside the row is clamped into it', async () => {
+    const [g1, g2, g3, g4] = await fourGroups();
+
+    S.getState().reorderGroup(g3, 0);
+    assert.deepEqual(groupIds(), [g3, g1, g2, g4]);
+    S.getState().reorderGroup(g1, 4);
+    assert.deepEqual(groupIds(), [g3, g2, g4, g1]);
+    S.getState().reorderGroup(g4, -2);
+    assert.deepEqual(groupIds(), [g4, g3, g2, g1]);
+    S.getState().reorderGroup(g4, 50);
+    assert.deepEqual(groupIds(), [g3, g2, g1, g4]);
+  });
+
+  test('GR-04: reordering is not switching — the group on screen, its panes and the active terminal stay put', async () => {
+    const [g1, g2, g3, g4] = await fourGroups();
+    await S.getState().splitPane(groupById(g2).activePaneId, 'horizontal', g2);
+    S.getState().setActiveGroup(g2);
+    const st = S.getState();
+    const activeTabId = st.activeTabId;
+    const each = new Map(st.groups.map((g) => [g.id, structuredClone(g)]));
+
+    S.getState().reorderGroup(g2, 4); // the group on screen, to the end
+    S.getState().reorderGroup(g4, 0); // and another one past it
+
+    assert.deepEqual(groupIds(), [g4, g1, g3, g2]);
+    assert.equal(S.getState().activeGroupId, g2, 'the same group is on screen — wherever it now sits');
+    assert.equal(S.getState().activeTabId, activeTabId, 'showing the same terminal');
+    for (const g of groups()) {
+      assert.deepEqual(g, each.get(g.id), `${g.name}: same panes, same focus, same name`);
+    }
+    assert.equal(S.getState().tabs, st.tabs, 'no terminal was touched');
+  });
+
+  test('GR-05: a group dropped where it already is, an unknown group or a non-number slot change no state and save nothing', async () => {
+    const [, g2] = await fourGroups();
+    await persistLanded();
+    const saves = savesSoFar();
+    const before = S.getState();
+
+    S.getState().reorderGroup(g2, 1); // its own slot
+    S.getState().reorderGroup(g2, 2); // and the one just after it
+    S.getState().reorderGroup('group-does-not-exist', 0);
+    for (const index of [undefined, null, NaN, '0']) S.getState().reorderGroup(g2, index);
+
+    assert.equal(S.getState(), before, 'not even a new state object');
+    await persistLanded();
+    assert.equal(savesSoFar(), saves, 'and nothing was written');
+
+    S.getState().reorderGroup(g2, 0); // the control
+    await persistLanded();
+    assert.ok(savesSoFar() > saves, 'a real reorder is saved by itself');
+  });
+
+  test('GR-06: the switcher order is saved, and a relaunch brings it back with the same group on screen', async () => {
+    const [g1, g2, g3, g4] = await fourGroups();
+    S.getState().setActiveGroup(g3);
+    await persistLanded();
+    const saves = savesSoFar();
+
+    S.getState().reorderGroup(g4, 0);
+    S.getState().reorderGroup(g1, 3);
+    assert.deepEqual(groupIds(), [g4, g2, g1, g3]);
+    await persistLanded();
+
+    assert.ok(savesSoFar() > saves, 'the reorder was written by the store itself, before anything quit');
+    assert.deepEqual(
+      loadState(PERSIST_KEY, null).groups.map((g) => g.id),
+      [g4, g2, g1, g3],
+      'what is on disk is the new order'
+    );
+
+    await launch({ keepStorage: true });
+
+    assert.deepEqual(groupIds(), [g4, g2, g1, g3], 'the switcher comes back in the order it was left');
+    assert.deepEqual(groups().map((g) => g.name), ['Four', 'Two', 'Group 1', 'Three'], 'names travel with their groups');
+    assert.equal(S.getState().activeGroupId, g3, 'and the group that was on screen still is');
   });
 });
 
