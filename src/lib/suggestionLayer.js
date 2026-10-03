@@ -17,11 +17,15 @@
  *     `git stfixplease refactor the auth module` as a command. While a program
  *     runs (OSC 133 "C" until "D") or the alternate buffer is up, nothing is
  *     ranked, drawn or intercepted, and Enter records nothing.
- *   - A key the layer takes never reaches the program, so after it the guess
- *     can no longer be trusted: the line is dropped (see `lineAfterKey`).
- *   - A key the layer cannot follow — Tab completion, an arrow, Esc, ^U —
- *     changes the line in ways the bytes do not say. The line is dropped too,
- *     rather than recording `git che` + `main` as `git chemain`.
+ *   - A key the layer takes either leaves the guess alone or extends it with
+ *     exactly what just happened: Esc and a popup move (↑/↓) never reach the
+ *     program at all, so the guess is untouched; → accepts by writing the
+ *     rest of the candidate itself, with `writeRaw` — which bypasses the
+ *     normal input path, so the guess has to add it too (see `lineAfterKey`).
+ *   - A key the layer does NOT take but cannot follow once it reaches the
+ *     shell — Tab completion, an arrow, ^U — changes the line in ways the
+ *     bytes do not say. That line is dropped, rather than recording
+ *     `git che` + `main` as `git chemain`.
  *
  * A dropped line is untracked until the next one starts (Enter, ^C, or the
  * shell's own end-of-command marker): nothing is ranked or recorded for it.
@@ -178,11 +182,35 @@ export function suggestionKeyAction(state, event, { running = false, alternate =
 }
 
 /**
- * The input line after a key decision: a key the layer took never reached the
- * program, so the line it was guessing at is dropped.
+ * The input line after a key decision.
+ *
+ *   accept   never reaches the program as a keystroke — the chosen text goes
+ *            straight to the PTY with `writeRaw` (see TerminalView.jsx),
+ *            which `bufferHandler`'s `onData` listener never sees. The guess
+ *            has to add it itself, or an accepted suggestion would run the
+ *            right command and record nothing (or a stale line).
+ *   move     ↑/↓ only move the popup's highlight; nothing reaches the
+ *            program. The guess is exactly as it was.
+ *   dismiss  Esc only hides the suggestion; nothing reaches the program
+ *            either. The guess is exactly as it was, and stays tracked —
+ *            ranking resumes on the next key.
+ *
+ * Anything else that is still taken (none today; a safe default for a future
+ * one) reaches the program in a way the bytes alone do not explain, so the
+ * line is dropped — same as a key the layer never took but the shell could
+ * not simply echo (Tab completion, an arrow, ^U; see `trackInput`).
  */
 export function lineAfterKey(line, decision) {
-  return decision?.consume ? LOST_LINE : line;
+  if (!decision) return line;
+  switch (decision.action) {
+    case 'move':
+    case 'dismiss':
+      return line;
+    case 'accept':
+      return { buffer: line.buffer + (decision.text || ''), tracked: true };
+    default:
+      return decision.consume ? LOST_LINE : line;
+  }
 }
 
 export default {

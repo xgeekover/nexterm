@@ -194,17 +194,23 @@ describe('Suggestion layer: → accepts', () => {
   });
 });
 
-describe('Suggestion layer: a taken key drops the line', () => {
-  test('SL-30: every key the layer takes leaves the line empty and untracked', () => {
+describe('Suggestion layer: what a taken key does to the line', () => {
+  test('SL-30: → accept wires the chosen text into the line itself; ↓ and Esc leave it exactly as it was', () => {
     const line = { buffer: 'git st', tracked: true };
-    const decisions = [
-      suggestionKeyAction(state('git st', GIT_ST), keydown('ArrowRight')),
+    const accept = suggestionKeyAction(state('git st', GIT_ST), keydown('ArrowRight'));
+    assert.deepEqual(accept, { action: 'accept', text: 'atus', index: 0, consume: true });
+    assert.deepEqual(
+      lineAfterKey(line, accept),
+      { buffer: 'git status', tracked: true },
+      'writeRaw sent "atus" straight to the PTY — bufferHandler\'s onData never saw it, so the layer adds it here'
+    );
+
+    for (const decision of [
       suggestionKeyAction(state('git st', GIT_ST), keydown('ArrowDown')),
       suggestionKeyAction(state('git st', GIT_ST), keydown('Escape')),
-    ];
-    for (const decision of decisions) {
+    ]) {
       assert.equal(decision.consume, true, decision.action);
-      assert.deepEqual(lineAfterKey(line, decision), LOST_LINE, decision.action);
+      assert.equal(lineAfterKey(line, decision), line, `${decision.action} never reaches the program — nothing to follow`);
     }
   });
 
@@ -219,12 +225,58 @@ describe('Suggestion layer: a taken key drops the line', () => {
     }
   });
 
-  test('SL-32: after a taken key nothing more is ranked or recorded for that line; the next line is followed again', () => {
+  test('SL-32: a key the layer cannot follow once it reaches the shell loses the line; the next one is followed again', () => {
+    // Tab and an arrow go on to the shell as usual (`consume: false`, see
+    // SL-13 / SL-22) and change the line in a way the bytes alone do not
+    // say — `trackInput`'s own doing (SL-41), not `lineAfterKey`'s.
     const after = typeInto(LOST_LINE, [...'atus', '\x7f']);
     assert.deepEqual(after.line, LOST_LINE);
     assert.equal(trackInput(LOST_LINE, 'x').rank, false);
     const { recorded } = typeInto(LOST_LINE, [...'atus', '\r', ...'pwd', '\r']);
     assert.deepEqual(recorded, ['pwd'], 'not `atus` — the line it belonged to was lost');
+  });
+});
+
+describe('Suggestion layer: accepting or dismissing a suggestion still records the command', () => {
+  test('SL-33: → accepts the ghost, and Enter records the whole command', () => {
+    let line = { buffer: 'git st', tracked: true };
+    const accept = suggestionKeyAction(state('git st', GIT_ST), keydown('ArrowRight'));
+    line = lineAfterKey(line, accept);
+    assert.deepEqual(line, { buffer: 'git status', tracked: true });
+    const enter = trackInput(line, '\r');
+    assert.equal(enter.record, 'git status', 'TerminalView assigns this straight to lastSubmittedRef — the sticky label\'s text');
+  });
+
+  test('SL-34: Esc dismisses the ghost; typing the rest by hand still records the command', () => {
+    let line = { buffer: 'git st', tracked: true };
+    const dismiss = suggestionKeyAction(state('git st', GIT_ST), keydown('Escape'));
+    line = lineAfterKey(line, dismiss);
+    assert.deepEqual(line, { buffer: 'git st', tracked: true }, 'Esc never reached the program; nothing to lose');
+    const { recorded } = typeInto(line, [...'atus', '\r']);
+    assert.deepEqual(recorded, ['git status']);
+  });
+
+  test('SL-35: ↓ moves to a different candidate, → accepts THAT one, and Enter records it', () => {
+    let line = { buffer: 'git st', tracked: true };
+    const move = suggestionKeyAction(state('git st', GIT_ST), keydown('ArrowDown'));
+    line = lineAfterKey(line, move);
+    assert.deepEqual(line, { buffer: 'git st', tracked: true }, 'the popup moved; nothing reached the shell');
+
+    const moved = state('git st', GIT_ST, { selectedIndex: 1, moved: true });
+    const accept = suggestionKeyAction(moved, keydown('ArrowRight'));
+    assert.equal(accept.text, 'ash');
+    line = lineAfterKey(line, accept);
+    assert.deepEqual(line, { buffer: 'git stash', tracked: true });
+    assert.equal(trackInput(line, '\r').record, 'git stash');
+  });
+
+  test('SL-36: suggestions keep coming after Esc — the line stays tracked and ranks again', () => {
+    const line = { buffer: 'git st', tracked: true };
+    const dismiss = suggestionKeyAction(state('git st', GIT_ST), keydown('Escape'));
+    const after = lineAfterKey(line, dismiss);
+    const r = trackInput(after, 'a');
+    assert.equal(r.rank, true, 'ranking resumes — Esc did not lose the line');
+    assert.deepEqual(r.line, { buffer: 'git sta', tracked: true });
   });
 });
 
