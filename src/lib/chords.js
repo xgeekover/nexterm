@@ -68,6 +68,38 @@ const NAMED_KEYS = {
 const MODIFIERS = new Set(['mod', 'ctrl', 'control', 'shift', 'alt', 'option', 'cmd', 'meta', 'command']);
 
 /**
+ * The key a chord should read from `e`: `e.key`, unless the input source
+ * reported a character that is not ASCII for a letter or digit key.
+ *
+ * Under the Korean input source WebKit reports the C key as `e.key` 'ㅊ'
+ * (with `e.code` 'KeyC'), Russian as 'с', Greek as 'ψ' — so every letter
+ * shortcut matched in JS stopped working the moment one of them was active.
+ * `e.code` names the key's place on a US keyboard, and for a letter or a
+ * digit that IS the letter or digit the chord means. An ASCII `e.key` is left
+ * alone: on AZERTY or QWERTZ the letter printed on the key is the one the
+ * user bound, wherever the key sits.
+ *
+ * Nor is a character typed with Alt, ⌥ or AltGr: there the non-ASCII
+ * character is the point. Windows reports AltGr as Ctrl+Alt, so read as its
+ * key's letter, a Polish `ó` (AltGr+O) would have run `mod+alt+o` and a
+ * Hungarian `Đ` (AltGr+D) `ctrl+alt+d` — instead of being typed. Hangul is
+ * the exception: no Alt layer produces it, so a jamo is the input source
+ * naming the key, whatever modifiers are held.
+ */
+const HANGUL = /^[ᄀ-ᇿ㄰-㆏ꥠ-꥿가-힣ힰ-퟿]+$/u;
+
+function chordKeyOf(e) {
+  const key = e?.key;
+  if (typeof key !== 'string' || /^[\x00-\x7f]*$/.test(key)) return key;
+  const typedWithAlt =
+    e.altKey || (typeof e.getModifierState === 'function' && e.getModifierState('AltGraph'));
+  if (typedWithAlt && !HANGUL.test(key)) return key;
+  const match = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(typeof e.code === 'string' ? e.code : '');
+  if (!match) return key;
+  return match[1] ? match[1].toLowerCase() : match[2];
+}
+
+/**
  * Parse `mod+shift+o` into a chord, or null when it is not a chord at all.
  *
  * Returns null rather than throwing: a settings file is user input, and one
@@ -189,7 +221,7 @@ export function chordMatches(chord, e, isMod) {
 
   if (chord.code) return e.code === chord.code;
   if (typeof e.key !== 'string') return false;
-  return e.key.toLowerCase() === String(chord.key).toLowerCase();
+  return chordKeyOf(e).toLowerCase() === String(chord.key).toLowerCase();
 }
 
 /**
@@ -211,10 +243,13 @@ export function chordFromEvent(e, { isMod = false } = {}) {
     code: null,
   };
 
+  // What the matcher will read, so the chord recorded is the chord that fires
+  // — `mod+c`, not `mod+ㅊ`, when the Korean input source is active.
+  const name = chordKeyOf(e);
   const knownCode = Object.values(CODE_KEYS).includes(e.code);
   if (knownCode) chord.code = e.code;
-  else if (key.length === 1) chord.key = key.toLowerCase();
-  else chord.key = key;
+  else if (name.length === 1) chord.key = name.toLowerCase();
+  else chord.key = name;
   return chord;
 }
 

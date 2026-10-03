@@ -31,6 +31,7 @@ import './fit_reports_size.test.js';
 import './tab_names.test.js';
 import './backend_tree_contract.test.js';
 import './configurable_keybindings.test.js';
+import './chords_input_source.test.js';
 import './native_menu.test.js';
 import './git_status.test.js';
 import './sticky_command.test.js';
