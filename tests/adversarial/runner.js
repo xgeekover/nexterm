@@ -16,6 +16,7 @@ import './explorer_actions.test.js';
 import './app_menu.test.js';
 import './settings.test.js';
 import './terminal_intellisense.test.js';
+import './suggestion_layer.test.js';
 import './ipc_contract.test.js';
 import './editor_unsaved.test.js';
 import './keybindings_platform.test.js';

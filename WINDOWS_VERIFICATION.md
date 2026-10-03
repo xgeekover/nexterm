@@ -366,7 +366,7 @@ folder, and a launch with no saved layout still starts with one terminal.
 
 Put `{c: "echo SAFE\recho INJECTED", n: 9}` into `nexterm.commandHistory`
 through CDP, with a clean `echo SAFECONTROL` beside it as the control, and
-relaunch. In the History palette and with Tab after `echo S`, only the control
+relaunch. In the History palette and with → after `echo S`, only the control
 is offered, and `INJECTED` is never printed.
 
 ### V17 — inline suggestions draw under WebGL, at the cursor
@@ -376,8 +376,11 @@ terminal whose history has `git status`: the ghost text and the popup appear,
 and the ghost starts right **after** the typed text, never over it (#35, #36).
 The ghost is drawn only once the shell has echoed the keys, so type along a
 suggestion one key at a time and watch whether it reads steady or blinks —
-ConPTY echoes later than a unix pty, and that has not been measured. Tab and →
-accept, Esc dismisses.
+ConPTY echoes later than a unix pty, and that has not been measured. → accepts
+the ghost, or the popup item once ↑/↓ has moved the highlight; Esc dismisses.
+Tab always goes to the shell: PowerShell's own completion runs with a ghost on
+screen. Inside a running program — `python`, or an agent — nothing is drawn,
+and Tab, →, Esc, ↑ and ↓ all reach the program.
 
 ## What the first run found
 
