@@ -89,6 +89,22 @@ function zoneFromPoint(rect, clientX, clientY) {
   return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
 }
 
+/**
+ * Where along a row of chips a drop at `clientX` would land, as a SLOT: how
+ * many of the chips have their middle to the left of the pointer. 0 is before
+ * the first chip and `chips.length` after the last — the numbering
+ * `moveTabInStrip` takes. The dragged chip is still in its row, faded, and is
+ * counted like any other, which is what it expects.
+ */
+function slotAtX(chips, clientX) {
+  let slot = 0;
+  for (const chip of chips) {
+    const rect = chip.getBoundingClientRect();
+    if (clientX > rect.left + rect.width / 2) slot += 1;
+  }
+  return slot;
+}
+
 /** Resolve the pane body under the pointer, if any. */
 /**
  * What a drop at this point would do.
@@ -96,14 +112,19 @@ function zoneFromPoint(rect, clientX, clientY) {
  * The terminal surface splits by quarter; the TAB STRIP means "put it in this
  * pane as a tab", which is how a split is merged back. The strip used not to
  * be a target at all, so dragging a tab onto the one place it visibly belongs
- * did nothing at all.
+ * did nothing at all. Where along the strip matters too: the tab goes in at
+ * the slot under the pointer, so the same gesture reorders a pane's own tabs.
  */
 function dropTargetAtPoint(clientX, clientY) {
   const el = document.elementFromPoint(clientX, clientY);
 
   const strip = el?.closest?.('[data-tab-strip]');
   if (strip) {
-    return { paneId: strip.getAttribute('data-tab-strip'), zone: 'tabs' };
+    return {
+      paneId: strip.getAttribute('data-tab-strip'),
+      zone: 'tabs',
+      slot: slotAtX(strip.querySelectorAll('[data-tab-chip]'), clientX),
+    };
   }
 
   const body = el?.closest?.('[data-pane-body]');
@@ -121,6 +142,20 @@ function groupChipAtPoint(clientX, clientY) {
   const chip = el?.closest?.('[data-group-chip]');
   if (!chip) return null;
   return { groupId: chip.getAttribute('data-group-chip') };
+}
+
+/**
+ * Which slot of a row to draw the insertion marker at, or null for none.
+ *
+ * The slots either side of the dragged chip's own position leave it where it
+ * is, so they draw nothing: a marker always means the drop will move
+ * something, and the faded chip already shows where it is now.
+ */
+function markerSlot(slot, ids, draggedId) {
+  if (typeof slot !== 'number') return null;
+  const from = ids.indexOf(draggedId);
+  if (from !== -1 && (slot === from || slot === from + 1)) return null;
+  return slot;
 }
 
 /** Collects every pane of one group's tree, in DOM order. Mirrors
@@ -230,6 +265,27 @@ function DropIndicator({ zone }) {
 
 
 /**
+ * The thin bar that says where a dragged chip will land in a row of chips.
+ *
+ * It sits in the 2px gap beside a chip, absolutely placed, rather than being
+ * inserted into the row: an inserted element would push the chips after it
+ * along, which moves the very midpoints the slot is measured against under a
+ * pointer that has not moved, and the marker would flicker between two slots.
+ */
+function InsertionMarker({ side }) {
+  return (
+    <span
+      aria-hidden="true"
+      data-insertion-marker={side}
+      className={cn(
+        'absolute top-0 bottom-0 w-0.5 rounded-full bg-vsc-accent pointer-events-none z-10',
+        side === 'before' ? '-left-0.5' : '-right-0.5'
+      )}
+    />
+  );
+}
+
+/**
  * The chip that follows the cursor while dragging. Portaled straight onto
  * <body> — this pane is a descendant of a panel that keeps a permanent
  * non-`none` `transform` on itself after its mount animation finishes
@@ -256,9 +312,10 @@ function DragPreview({ drag }) {
 
 /**
  * One pane of the active group's tree: its own tab strip plus the persistent
- * xterm for whichever of *its* tabs is active. Tabs can be dragged between
- * panes, onto a pane's edge to split it, or onto another group's switcher chip
- * to move them to that group.
+ * xterm for whichever of *its* tabs is active. Tabs can be dragged along a tab
+ * strip to reorder them (their own, or another pane's, where they go in at the
+ * marker), between panes, onto a pane's edge to split it, or onto another
+ * group's switcher chip to move them to that group.
  */
 function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose, canClose, onRenameGroup }) {
   const { shortcut } = useShortcuts();
@@ -289,6 +346,11 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
   // Only the tabs that belong to this pane, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const boundTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
+
+  // Where in THIS strip the dragged tab would go in, as a slot — the chip it
+  // would land before, or `paneTabs.length` for after the last — or null.
+  const insertAt =
+    dropZone === 'tabs' ? markerSlot(drag.slot, paneTabs.map((t) => t.id), drag.tabId) : null;
 
   const beginRenameTab = (tab) => {
     setRenamingTabId(tab.id);
@@ -327,7 +389,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
         }}
       >
         <div className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
-          {paneTabs.map((tab) => {
+          {paneTabs.map((tab, i) => {
             const isActive = tab.id === boundTab?.id;
             const isBeingDragged = drag?.active && drag.tabId === tab.id;
 
@@ -367,7 +429,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                 title={
                   activityLabel(tab)
                     ? `${tab.title} — ${activityLabel(tab)}`
-                    : `${tab.title} — drag onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
+                    : `${tab.title} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
                 }
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
@@ -408,7 +470,7 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   }
                 }}
                 className={cn(
-                  'group flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
+                  'relative group flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
                   'cursor-grab active:cursor-grabbing touch-none transition-colors',
                   isActive
                     ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
@@ -416,6 +478,10 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
                   isBeingDragged && 'opacity-40'
                 )}
               >
+                {insertAt === i && <InsertionMarker side="before" />}
+                {insertAt === paneTabs.length && i === paneTabs.length - 1 && (
+                  <InsertionMarker side="after" />
+                )}
                 <ActivityDot tab={tab} className="mr-1.5" />
                 <span
                   className={cn(
@@ -974,6 +1040,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const splitPane = useTerminalStore((s) => s.splitPane);
   const closePane = useTerminalStore((s) => s.closePane);
   const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
+  const moveTabInStrip = useTerminalStore((s) => s.moveTabInStrip);
   const moveTabToGroup = useTerminalStore((s) => s.moveTabToGroup);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
 
@@ -984,7 +1051,8 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   // rather than duplicating one inside the pane.
   const [renamingGroupId, setRenamingGroupId] = useState(null);
 
-  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone, targetGroupId }
+  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone, slot, targetGroupId }
+  // `slot` is where in a tab strip it would go in (see `slotAtX`).
   const [drag, setDrag] = useState(null);
   const dragRef = useRef(null);
   const cleanupRef = useRef(null);
@@ -993,70 +1061,76 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   activeGroupIdRef.current = activeGroup?.id ?? null;
 
   /**
+   * Follow one press from pointerdown to release. `started` is the drag state
+   * at the press; `targetAt(x, y)` says what the pointer is over, merged into
+   * that state on every move once the press has travelled past the threshold;
+   * `drop(drag)` acts on the last of it on release. A press that never
+   * travelled that far is a click, and drops nothing.
+   *
    * Listeners are attached synchronously here rather than from an effect: a
    * quick flick delivers pointermove/up before React has committed the state
    * change, so an effect-bound listener would miss the whole gesture.
    */
+  const trackGesture = useCallback((started, targetAt, drop) => {
+    // A press while an earlier gesture is still listening — its release went
+    // somewhere the window never heard — starts over rather than stacking a
+    // second set of listeners that would act on this drag's state.
+    cleanupRef.current?.();
+
+    const detach = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      cleanupRef.current = null;
+    };
+
+    const onMove = (ev) => {
+      const cur = dragRef.current;
+      if (!cur) return;
+      const movedEnough =
+        cur.active ||
+        Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
+      if (!movedEnough) return;
+
+      const next = {
+        ...cur,
+        active: true,
+        x: ev.clientX,
+        y: ev.clientY,
+        ...targetAt(ev.clientX, ev.clientY),
+      };
+      dragRef.current = next;
+      setDrag(next);
+    };
+
+    const onUp = () => {
+      const cur = dragRef.current;
+      detach();
+      dragRef.current = null;
+      setDrag(null);
+      if (cur?.active) lastDragEndAt = Date.now();
+      if (!cur?.active) return;
+      drop(cur);
+    };
+
+    const onCancel = () => {
+      detach();
+      dragRef.current = null;
+      setDrag(null);
+    };
+
+    dragRef.current = started;
+    setDrag(started);
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    cleanupRef.current = detach;
+  }, []);
+
+  /** A terminal tab's chip: onto a pane, a tab strip, or another group's chip. */
   const beginDrag = useCallback(
     (tab, e) => {
-      const detach = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        window.removeEventListener('pointercancel', onCancel);
-        cleanupRef.current = null;
-      };
-
-      const onMove = (ev) => {
-        const cur = dragRef.current;
-        if (!cur) return;
-        const movedEnough =
-          cur.active ||
-          Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
-        if (!movedEnough) return;
-
-        const hit = dropTargetAtPoint(ev.clientX, ev.clientY);
-        // A group chip is only considered when the pointer isn't over a pane —
-        // the switcher sits above the panes, never on top of one.
-        const chip = hit ? null : groupChipAtPoint(ev.clientX, ev.clientY);
-        const next = {
-          ...cur,
-          active: true,
-          x: ev.clientX,
-          y: ev.clientY,
-          targetPaneId: hit?.paneId ?? null,
-          zone: hit?.zone ?? null,
-          // Dropping on the chip of the group the tab already lives in (the
-          // active one — only its tabs are on screen) is a no-op, so it is
-          // never highlighted as a target.
-          targetGroupId:
-            chip && chip.groupId !== activeGroupIdRef.current ? chip.groupId : null,
-        };
-        dragRef.current = next;
-        setDrag(next);
-      };
-
-      const onUp = () => {
-        const cur = dragRef.current;
-        detach();
-        dragRef.current = null;
-        setDrag(null);
-        if (cur?.active) lastDragEndAt = Date.now();
-        if (!cur?.active) return;
-        if (cur.targetPaneId) {
-          // 'tabs' and 'center' both mean "into this pane"; only the
-          // edges split.
-          dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone === 'tabs' ? 'center' : cur.zone || 'center');
-        } else if (cur.targetGroupId) {
-          moveTabToGroup(cur.tabId, cur.targetGroupId);
-        }
-      };
-
-      const onCancel = () => {
-        detach();
-        dragRef.current = null;
-        setDrag(null);
-      };
-
       const started = {
         tabId: tab.id,
         title: tab.title,
@@ -1067,17 +1141,43 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         active: false,
         targetPaneId: null,
         zone: null,
+        slot: null,
         targetGroupId: null,
       };
-      dragRef.current = started;
-      setDrag(started);
 
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onCancel);
-      cleanupRef.current = detach;
+      const targetAt = (x, y) => {
+        const hit = dropTargetAtPoint(x, y);
+        // A group chip is only considered when the pointer isn't over a pane —
+        // the switcher sits above the panes, never on top of one.
+        const chip = hit ? null : groupChipAtPoint(x, y);
+        return {
+          targetPaneId: hit?.paneId ?? null,
+          zone: hit?.zone ?? null,
+          slot: hit?.slot ?? null,
+          // Dropping on the chip of the group the tab already lives in (the
+          // active one — only its tabs are on screen) is a no-op, so it is
+          // never highlighted as a target.
+          targetGroupId:
+            chip && chip.groupId !== activeGroupIdRef.current ? chip.groupId : null,
+        };
+      };
+
+      const drop = (cur) => {
+        if (cur.targetPaneId && cur.zone === 'tabs') {
+          // Into that pane at the marker. Along its own strip that is a
+          // reorder; a drop where it already is changes nothing at all.
+          moveTabInStrip(cur.tabId, cur.targetPaneId, cur.slot);
+        } else if (cur.targetPaneId) {
+          // The centre means "into this pane"; only the edges split.
+          dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+        } else if (cur.targetGroupId) {
+          moveTabToGroup(cur.tabId, cur.targetGroupId);
+        }
+      };
+
+      trackGesture(started, targetAt, drop);
     },
-    [dropTabOnPane, moveTabToGroup]
+    [trackGesture, dropTabOnPane, moveTabInStrip, moveTabToGroup]
   );
 
   // Never leave listeners behind if the terminal unmounts mid-gesture.

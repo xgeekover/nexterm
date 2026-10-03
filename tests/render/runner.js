@@ -551,6 +551,36 @@ stripCase('RN-24', 'a strip the pointer is not over draws no marker', () => {
   }
 });
 
+// ---- The order a drag leaves behind ------------------------------------------
+
+/** The values of one attribute, in the order the markup lists them. */
+const attrOrder = (html, attr) => [...html.matchAll(new RegExp(`\\s${attr}="([^"]+)"`, 'g'))].map((m) => m[1]);
+
+scenario(
+  'RN-25',
+  "a pane draws its tabs in the pane's own order, not the order the terminals were opened",
+  () => {
+    reset();
+    // Opened t1, t2, t3; dragged into t3, t1, t2. The pane's `tabIds` is the
+    // only place that order lives, and what is saved — a strip drawn from
+    // `tabs` would put every reorder back on screen while keeping it on disk.
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2'), tab('t3')],
+      activeTabId: 't2',
+      groups: [
+        { ...baseGroups([])[0], tree: { type: 'leaf', id: 'pane-1', tabIds: ['t3', 't1', 't2'], activeTabId: 't2' } },
+      ],
+    });
+  },
+  (html) => {
+    const chips = attrOrder(html, 'data-tab-chip');
+    expectThat(
+      JSON.stringify(chips) === JSON.stringify(['t3', 't1', 't2']),
+      `the strip draws ${JSON.stringify(chips)}, not the pane's order ["t3","t1","t2"]`
+    );
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');
