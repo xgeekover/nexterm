@@ -29,6 +29,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { openExternal } from '../../lib/openExternal.js';
+import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 
 const instances = new Map();
 
@@ -432,6 +433,13 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     useTerminalStore.getState().setFindResults?.(tabId, results);
   });
   term.open(container);
+
+  // ---- Korean inline IME (macOS only) — see src/lib/hangulInlineIme.js ----
+  // WebKit composes Hangul by rewriting the textarea in place, which xterm
+  // ignores; this sends each syllable whole. Installed once per instance so it
+  // survives remounts, and disposed with the terminal. Does nothing elsewhere.
+  installHangulInlineIme(term, container);
+  // ---- end Korean inline IME ----------------------------------------------
 
   const dataDisposable = onData ? term.onData(onData) : null;
 

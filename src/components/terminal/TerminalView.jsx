@@ -5,7 +5,8 @@ import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch
 import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport } from '../../lib/terminalCompat.js';
 import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
-import { locateSuggestion } from '../../lib/suggestGeometry.js';
+import { locateSuggestion, locateCursorCell } from '../../lib/suggestGeometry.js';
+import { hangulImeFor, isHangulCharacter } from '../../lib/hangulInlineIme.js';
 import { isFailure } from '../../lib/tabActivity.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
@@ -30,6 +31,24 @@ const EMPTY_SUGGEST_STATE = {
   cellWidth: 0,
   cellHeight: 0,
 };
+
+// The Korean syllable being composed (see src/lib/hangulInlineIme.js), drawn
+// over the cursor's cell. `inFlight` is what was just sent to make way for it
+// and is still drawn in front of it until the program's echo moves the cursor
+// — otherwise the previous syllable would blink out for one echo round trip.
+const EMPTY_IME_PREVIEW = {
+  visible: false,
+  pending: '',
+  inFlight: '',
+  left: 0,
+  top: 0,
+  cellWidth: 0,
+  cellHeight: 0,
+};
+
+// How long a sent syllable is drawn while waiting for an echo that may never
+// come (a program that does not echo, or echoes somewhere else).
+const IN_FLIGHT_MS = 500;
 
 /**
  * A single terminal pane's live surface — one persistent @xterm/xterm
@@ -101,6 +120,8 @@ export function TerminalView({ tabId, active = false }) {
   // the bytes this component writes to the PTY (see the class doc above).
   const bufferRef = useRef('');
 
+  const imePreviewRef = useRef(EMPTY_IME_PREVIEW);
+
   // Attach (or create) this tab's persistent xterm instance whenever the
   // bound tab changes. Never disposes it on cleanup — that only happens via
   // `disposeTerminal`, called from the store's `closeTab`/`closePane`.
@@ -163,6 +184,9 @@ export function TerminalView({ tabId, active = false }) {
     // ---- Inline suggestion layer -----------------------------------------
 
     const suggestionsEnabled = () => useSettingsStore.getState().terminalSuggestions ?? true;
+    // The Korean input binding — installed on macOS only, so null elsewhere.
+    // While it holds a syllable, its preview sits where a ghost would go.
+    const ime = hangulImeFor(entry.term);
 
     /**
      * Draw the ranked suggestion at the cursor, once the terminal shows what
@@ -182,6 +206,10 @@ export function TerminalView({ tabId, active = false }) {
     const placeSuggestions = () => {
       const s = suggestStateRef.current;
       if (s.items.length === 0) return;
+      if (ime?.pending) {
+        setSuggestState(EMPTY_SUGGEST_STATE);
+        return;
+      }
       const pos = locateSuggestion(entry.term, wrapper, bufferRef.current);
       if (!pos) {
         if (s.visible) setSuggestState({ ...s, visible: false });
@@ -199,16 +227,79 @@ export function TerminalView({ tabId, active = false }) {
       setSuggestState({ ...s, visible: true, ...pos });
     };
 
+    // ---- Korean syllable being composed (macOS) ---------------------------
+
+    let inFlightTimer = 0;
+    const setImePreview = (next) => {
+      imePreviewRef.current = next;
+      forceRender();
+    };
+    const placeImePreview = () => {
+      const p = imePreviewRef.current;
+      const text = p.inFlight + p.pending;
+      const pos = text ? locateCursorCell(entry.term, wrapper) : null;
+      if (!pos) {
+        if (p.visible) setImePreview({ ...p, visible: false });
+        return;
+      }
+      if (
+        p.visible &&
+        p.left === pos.left &&
+        p.top === pos.top &&
+        p.cellWidth === pos.cellWidth &&
+        p.cellHeight === pos.cellHeight
+      ) {
+        return;
+      }
+      setImePreview({ ...p, visible: true, ...pos });
+    };
+    const dropInFlight = () => {
+      if (inFlightTimer) {
+        clearTimeout(inFlightTimer);
+        inFlightTimer = 0;
+      }
+      const p = imePreviewRef.current;
+      if (p.inFlight) setImePreview({ ...p, inFlight: '' });
+    };
+    const imePreviewDisposable = ime?.onPreview((pending, { flushed = '', retracted = 0 } = {}) => {
+      const p = imePreviewRef.current;
+      let inFlight = retracted ? '' : p.inFlight;
+      if (flushed) {
+        inFlight += flushed;
+        if (inFlightTimer) clearTimeout(inFlightTimer);
+        inFlightTimer = setTimeout(() => {
+          inFlightTimer = 0;
+          dropInFlight();
+          placeImePreview();
+        }, IN_FLIGHT_MS);
+      }
+      // A ghost would sit exactly where the syllable is drawn.
+      if (pending) setSuggestState(EMPTY_SUGGEST_STATE);
+      setImePreview({ ...p, pending, inFlight });
+      placeImePreview();
+    });
+    imePreviewRef.current = { ...EMPTY_IME_PREVIEW, pending: ime?.pending ?? '' };
+    placeImePreview();
+
     // The echo moves the cursor, which makes that the moment a suggestion
     // ranked on a keystroke can be drawn — xterm moves its own IME textarea on
     // the same event. A scroll, a font change or a switch of renderer moves the
     // cursor's cell on screen without moving the cursor, and each of those
     // ends in a render.
-    const cursorMoveDisposable = entry.term.onCursorMove(placeSuggestions);
-    const renderDisposable = entry.term.onRender(placeSuggestions);
+    // The same goes for the Korean syllable being composed, and the echo is
+    // what ends a sent syllable's time in front of it.
+    const cursorMoveDisposable = entry.term.onCursorMove(() => {
+      dropInFlight();
+      placeImePreview();
+      placeSuggestions();
+    });
+    const renderDisposable = entry.term.onRender(() => {
+      placeImePreview();
+      placeSuggestions();
+    });
 
     const updateSuggestions = () => {
-      if (!suggestionsEnabled()) {
+      if (!suggestionsEnabled() || ime?.pending) {
         setSuggestState(EMPTY_SUGGEST_STATE);
         return;
       }
@@ -452,6 +543,9 @@ export function TerminalView({ tabId, active = false }) {
       suggestDataDisposable.dispose();
       cursorMoveDisposable.dispose();
       renderDisposable.dispose();
+      imePreviewDisposable?.dispose();
+      if (inFlightTimer) clearTimeout(inFlightTimer);
+      imePreviewRef.current = EMPTY_IME_PREVIEW;
       entry.term.attachCustomKeyEventHandler(null);
       promptCancelled = true;
       promptUnlisten?.();
@@ -491,6 +585,9 @@ export function TerminalView({ tabId, active = false }) {
   };
 
   const suggestState = suggestStateRef.current;
+  const imePreview = imePreviewRef.current;
+  const imeText = imePreview.inFlight + imePreview.pending;
+  const termTheme = termRef.current?.options?.theme;
 
   return (
     <div className="relative w-full h-full overflow-hidden">
@@ -550,6 +647,38 @@ export function TerminalView({ tabId, active = false }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+      {imePreview.visible && imeText && (
+        <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+          {/* The Korean syllable being composed, over the cursor — in the
+              terminal's font and colours, underlined like composition text,
+              each syllable two cells wide as the terminal will draw it. */}
+          <span
+            data-ime-preview
+            className="absolute flex whitespace-pre bg-vsc-terminal text-vsc-fg"
+            style={{
+              left: imePreview.left,
+              top: imePreview.top,
+              height: imePreview.cellHeight,
+              lineHeight: `${imePreview.cellHeight}px`,
+              fontFamily: termRef.current?.options?.fontFamily,
+              fontSize: termRef.current?.options?.fontSize,
+              color: termTheme?.foreground,
+              background: termTheme?.background,
+            }}
+          >
+            {[...imeText].map((ch, i) => (
+              <span
+                // The text only ever changes at its end; position is identity.
+                key={i}
+                className="inline-block text-center underline"
+                style={{ width: (isHangulCharacter(ch) ? 2 : 1) * imePreview.cellWidth }}
+              >
+                {ch}
+              </span>
+            ))}
+          </span>
         </div>
       )}
     </div>

@@ -105,6 +105,50 @@ export function suggestionAnchor({
 }
 
 /**
+ * The cursor's own cell, relative to `wrapperRect` — where a Korean syllable
+ * still being composed is drawn (see hangulInlineIme.js), on top of the cursor
+ * the way xterm draws its own composition.
+ *
+ * Unlike a suggestion this needs nothing typed to be on screen yet: the
+ * syllable has not been sent, so the cursor is exactly where it will land. A
+ * cursor parked past the last column draws in the last cell, as xterm's
+ * composition view does. Null when the terminal is not laid out or the
+ * cursor's row is scrolled out of the viewport.
+ */
+export function cursorCellAnchor({ screenRect, wrapperRect, cols, rows, cursorX, cursorY, baseY = 0, viewportY = baseY }) {
+  if (!wrapperRect) return null;
+  const cell = cellSize(screenRect, cols, rows);
+  if (!cell) return null;
+  const row = baseY + cursorY - viewportY;
+  if (!(row >= 0 && row < rows) || !(cursorX >= 0)) return null;
+  const col = Math.min(cursorX, cols - 1);
+  return {
+    left: screenRect.left - wrapperRect.left + col * cell.cellWidth,
+    top: screenRect.top - wrapperRect.top + row * cell.cellHeight,
+    cellWidth: cell.cellWidth,
+    cellHeight: cell.cellHeight,
+  };
+}
+
+/** `cursorCellAnchor` for a live xterm instance and the overlay's `wrapper`. */
+export function locateCursorCell(term, wrapper) {
+  if (!wrapper) return null;
+  const screen = term?.element?.querySelector('.xterm-screen');
+  const buffer = term?.buffer?.active;
+  if (!screen || !buffer) return null;
+  return cursorCellAnchor({
+    screenRect: screen.getBoundingClientRect(),
+    wrapperRect: wrapper.getBoundingClientRect(),
+    cols: term.cols,
+    rows: term.rows,
+    cursorX: buffer.cursorX,
+    cursorY: buffer.cursorY,
+    baseY: buffer.baseY,
+    viewportY: buffer.viewportY,
+  });
+}
+
+/**
  * `suggestionAnchor` for a live xterm instance and `wrapper`, the element the
  * suggestion overlay is positioned in.
  */
@@ -127,4 +171,4 @@ export function locateSuggestion(term, wrapper, typed) {
   });
 }
 
-export default { cellSize, textBeforeCursor, suggestionAnchor, locateSuggestion };
+export default { cellSize, textBeforeCursor, suggestionAnchor, locateSuggestion, cursorCellAnchor, locateCursorCell };
