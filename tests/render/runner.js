@@ -525,7 +525,8 @@ stripCase('RN-22', 'the first and last gaps draw the marker at the ends of the s
     [0, ['MARK', ...ALL]],
     [ALL.length, [...ALL, 'MARK']],
   ]) {
-    const seq = stripSequence(renderStrip(ALL, draggingOver('editor-pane-root', 'tabs', gap)));
+    // A tab from another group: beside a tab's own chip a drop moves nothing, and draws no marker.
+    const seq = stripSequence(renderStrip(ALL, { ...draggingOver('editor-pane-root', 'tabs', gap), tabId: 'x9' }));
     expectThat(JSON.stringify(seq) === JSON.stringify(expected), `gap ${gap}: the strip reads ${JSON.stringify(seq)}`);
   }
 });
