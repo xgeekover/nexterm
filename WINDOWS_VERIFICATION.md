@@ -432,6 +432,9 @@ any of it — which is exactly what nothing here can reproduce.
   Windows' mouse settings makes it go further.
 - Whether `claude` frames its output with synchronized updates here is open:
   it asks XTVERSION first, and conhost may answer or swallow that query itself.
+- Inside `claude`'s full-screen view a right-click does not paste: told it
+  runs in xterm.js, claude leaves right-click paste to the terminal, and
+  NexTerm has none. `Ctrl+V` pastes. Expected, not a bug.
 
 ## What the first run found
 

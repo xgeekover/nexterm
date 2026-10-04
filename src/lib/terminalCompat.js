@@ -397,6 +397,30 @@ export const XTERM_VERSION = '6.0.0';
  * program it was wanted for. Answering as xterm.js is the truth (this IS
  * xterm.js) and is what makes Claude Code treat the app as it treats VS
  * Code's terminal. Drop it with the move to xterm 6.1, which says the same.
+ *
+ * What else the name does in Claude Code 2.1.289 — wherever it asks whether
+ * it runs in xterm.js (its `zm()`: a name starting `xterm.js`, or
+ * TERM_PROGRAM=vscode):
+ *
+ *   - its DECSTBM scroll-region renderer stays off, as with no reply at all,
+ *     and as under tmux, Zellij, Windows Terminal and JetBrains' terminals;
+ *   - it sends an occasional `OSC 104;255` to reset xterm.js's WebGL glyph
+ *     atlas against corrupted glyphs. Colour 255 is unchanged, so the addon
+ *     keeps the same atlas and only rebuilds its model; NexTerm repairs the
+ *     atlas itself (webglLifecycle.js);
+ *   - it takes its "wheel flood" profile: one line per wheel report at
+ *     base, three for a notch on its own;
+ *   - on Windows and Linux it leaves right-click paste to the terminal, and
+ *     NexTerm has none: in Claude Code's full-screen view a right-click no
+ *     longer pastes — Ctrl+V does;
+ *   - it no longer opens links on a modifier-click — moot here, since it
+ *     decides to print OSC 8 links from environment variables only, and
+ *     NexTerm sets none of them.
+ *
+ * The name stays. It is what xterm.js 6.1 answers itself (`sendXtVersion`),
+ * so nothing changes again at that upgrade; and any other name would turn on
+ * the scroll-region path Claude Code keeps off for xterm.js on purpose — on
+ * Windows, through ConPTY as well.
  */
 export function xtVersionReply(params, version = XTERM_VERSION) {
   const ps = Array.isArray(params) ? params[0] : undefined;
