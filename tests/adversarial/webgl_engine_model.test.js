@@ -28,6 +28,7 @@ import {
   groupSwitches,
   twentyThroughOnePane,
   closeAndReopenBesideIdlePane,
+  weakrefDriftBesideIdlePane,
   atlasMerges,
   lostContexts,
   eighteenOnScreen,
@@ -148,6 +149,22 @@ describe('WebGL engine model: more terminals than contexts', () => {
     assert.deepEqual(r.evictedOnScreen, []);
     assert.deepEqual(r.evictedLive, []);
     assert.deepEqual(r.shownWithoutWebgl, []);
+  });
+
+  test('WM-11 (webkit, M2): a WeakRef that clears before its slot is freed must not evict an on-screen idle pane', async () => {
+    // Control: no drift in the WeakRef count, so A was never at risk either way.
+    const control = await quietly(() => weakrefDriftBesideIdlePane({ registryUrl, drift: false }));
+    assert.deepEqual(control.evictedOnScreen, []);
+    assert.equal(control.idlePaneLiveWebgl, true);
+
+    // Closing twelve tabs releases twelve contexts together; WebKit keeps every
+    // one of their slots until its sweeper runs, but with the drift applied the
+    // `lingering` WeakRef count already reads zero right then. Opening three
+    // more beside idle pane A must still not push A out.
+    const r = await quietly(() => weakrefDriftBesideIdlePane({ registryUrl, drift: true }));
+    assert.deepEqual(r.evictedOnScreen, [], 'fails on f8a757d: A, drawn only once, was the oldest context');
+    assert.equal(r.idlePaneLiveWebgl, true);
+    assert.deepEqual(r.onScreenWithoutWebgl, []);
   });
 });
 

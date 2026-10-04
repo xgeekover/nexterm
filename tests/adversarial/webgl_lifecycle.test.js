@@ -236,15 +236,25 @@ describe('WebGL contexts: a terminal being shown', () => {
     assert.deepEqual(planGpuAttach(states, 16), { create: false, releaseFirst: [] });
   });
 
-  test('GL-18: near the cap, the terminals on screen draw before a context is made', () => {
+  test('GL-18 (M2): the terminals on screen always draw before a context is made', () => {
     // WebKit pushes out the context that has gone longest without drawing, and
-    // an idle terminal on screen may not have drawn for an hour.
-    assert.equal(mustDrawScreenFirst({ held: 3, lingering: 0 }), false, 'nowhere near: nothing to protect');
-    assert.equal(mustDrawScreenFirst({ held: 14, lingering: 0 }), false);
-    assert.equal(mustDrawScreenFirst({ held: 15, lingering: 0 }), true, 'one slot of margin');
+    // an idle terminal on screen may not have drawn for an hour. This used to
+    // be skipped away from the cap, judged from a `lingering` count of
+    // released-but-maybe-uncollected contexts kept with `WeakRef` — but
+    // JavaScriptCore clears a `WeakRef` at the end of marking while WebKit
+    // frees the context's slot only later, when the sweeper destroys it.
+    // Several contexts released together (closing many tabs) can all drop out
+    // of that count while WebKit still holds every one of their slots, so the
+    // "nowhere near the cap" case could be wrong exactly when it mattered.
+    // Always true now: a context is rarely made at all once shown under v2,
+    // so drawing ahead every time costs nothing.
+    assert.equal(mustDrawScreenFirst({ held: 0, lingering: 0 }), true, 'nothing held: still draw ahead');
+    assert.equal(mustDrawScreenFirst({ held: 3, lingering: 0 }), true);
+    assert.equal(mustDrawScreenFirst({ held: 15, lingering: 0 }), true);
     assert.equal(mustDrawScreenFirst({ held: 4, lingering: 11 }), true,
       'contexts let go still count on WebKit until collected');
     assert.equal(mustDrawScreenFirst({ held: 1, lingering: null }), true, 'unknown counts as full');
+    assert.equal(mustDrawScreenFirst(), true, 'no args at all: still true');
   });
 
   test('GL-19: the first frame is drawn at the fitted size, now, not on the next animation frame', () => {

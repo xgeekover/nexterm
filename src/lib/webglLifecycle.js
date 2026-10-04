@@ -192,15 +192,25 @@ export function planGpuAttach(terminals, index, { budget = GPU_CONTEXT_BUDGET } 
  * drawing, and an idle terminal on screen — unfocused, its cursor not
  * blinking, nothing printed — may not have drawn for an hour. Drawn just
  * before, every terminal on screen is newer than anything the engine could
- * pick. Only needed near the cap: `held` is the contexts NexTerm keeps
- * (after the releases planned), `lingering` the ones it let go that may not
- * have been collected yet — WebKit still counts those. `lingering` null means
- * unknown, and is treated as full. One slot of margin, for a context counted
- * as collected that the engine has not destroyed yet.
+ * pick.
+ *
+ * Always true. This used to be "only near the cap", judged from `held` (the
+ * contexts NexTerm keeps, after the releases planned) plus `lingering` (ones
+ * it let go that may not be collected yet — WebKit still counts those) — but
+ * `lingering` comes from a `WeakRef`, and the two engines disagree about WHEN
+ * a released context's slot is actually freed relative to when a `WeakRef`
+ * to it clears: JavaScriptCore clears a `WeakRef` at the end of marking, while
+ * WebKit frees the slot only later, when the sweeper destroys the context.
+ * Several contexts released together (closing many tabs) can all drop out of
+ * `lingering` while WebKit still holds every one of their slots, undercounting
+ * exactly when the page is actually near the cap — and the next context made
+ * then evicts the least-recently-drawn idle pane on screen instead of one of
+ * those. Making a context at all is rare once v2's `ensureGpuRenderer` keeps
+ * one for as long as the terminal exists, hidden or not, so drawing ahead
+ * every time costs nothing.
  */
-export function mustDrawScreenFirst({ held, lingering }, { budget = GPU_CONTEXT_BUDGET } = {}) {
-  if (lingering === null || lingering === undefined) return true;
-  return held + lingering >= budget - 1;
+export function mustDrawScreenFirst() {
+  return true;
 }
 
 /**

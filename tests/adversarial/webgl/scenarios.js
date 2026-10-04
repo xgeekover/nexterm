@@ -278,6 +278,82 @@ export async function lostContexts({ registryUrl, engine = 'webkit' }) {
   }
 }
 
+/**
+ * A `WeakRef` that can be told its target is gone independently of whether
+ * anything would actually collect it — modelling the gap between
+ * JavaScriptCore, which clears a `WeakRef` at the end of marking, and WebKit,
+ * which frees the context's slot only later, when the sweeper destroys it.
+ * `drift()` clears every instance made so far, as if marking had finished
+ * while every one of their slots was still held.
+ */
+class MarkedWeakRef {
+  constructor(target) {
+    this._target = target;
+    this._cleared = false;
+    MarkedWeakRef.instances.push(this);
+  }
+  deref() {
+    return this._cleared ? undefined : this._target;
+  }
+  static instances = [];
+  static drift() {
+    for (const ref of MarkedWeakRef.instances) ref._cleared = true;
+  }
+}
+
+/**
+ * Pane A shows one idle terminal — drawn once, then never focused or printed
+ * to again. Pane B, focused, holds thirteen more (fourteen contexts: nowhere
+ * near the cap), then closes twelve of them — lost on purpose, so WebKit
+ * keeps their slots until its sweeper runs — and opens three more.
+ *
+ * M2: the registry judges whether it is near the cap partly from `lingering`,
+ * a count of just-released contexts kept with `WeakRef`. With `drift: true`,
+ * those refs report cleared before WebKit's sweeper actually frees their
+ * slots — exactly the JavaScriptCore/WebKit gap above — so the registry can
+ * undercount and skip drawing the screen first. Without the fix, the next
+ * context made then evicts A, the least recently drawn context in the real
+ * engine, even though A is on screen and nothing the user did touched it.
+ * `drift: false` is the control: with no gap in the count, A was never at
+ * risk, fixed or not.
+ */
+export async function weakrefDriftBesideIdlePane({ registryUrl, drift = true }) {
+  const RealWeakRef = globalThis.WeakRef;
+  MarkedWeakRef.instances = [];
+  globalThis.WeakRef = MarkedWeakRef;
+  const app = await openModel({ registryUrl, engine: 'webkit' });
+  try {
+    const A = app.pane();
+    A.show('A');
+    await app.run(200);
+    const B = app.pane();
+    app.focus(B);
+    for (let i = 1; i <= 13; i++) {
+      B.show(`T${i}`);
+      await app.run(300);
+    }
+    for (let i = 1; i <= 12; i++) {
+      await app.close(`T${i}`);
+      await app.run(100);
+    }
+    if (drift) MarkedWeakRef.drift();
+    for (const tab of ['NEW1', 'NEW2', 'NEW3']) {
+      B.show(tab);
+      await app.run(300);
+    }
+    await app.run(8000);
+    return {
+      ...evictionSummary(app),
+      idlePaneLiveWebgl: app.hasLiveWebgl('A'),
+      onScreenWithoutWebgl: app.onScreenWithoutWebgl(),
+      stats: app.reg.getGpuStats(),
+    };
+  } finally {
+    await app.dispose();
+    globalThis.WeakRef = RealWeakRef;
+  }
+}
+
 /** Eighteen panes on screen at once: sixteen get WebGL, two wait; closing two hands theirs on. */
 export async function eighteenOnScreen({ registryUrl, engine = 'webkit' }) {
   const app = await openModel({ registryUrl, engine });
