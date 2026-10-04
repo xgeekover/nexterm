@@ -39,8 +39,9 @@
  * sequences are never combined like that, so neither reaches it in practice.
  *
  * Mode set, highest wins: 9/1000/1002/1003 (X10/VT200/DRAG/ANY) are tracked as
- * INDEPENDENT flags, not xterm's own single `activeProtocol` — real X11 xterm
- * keeps them independent too and reports via the highest one enabled. xterm.js
+ * INDEPENDENT flags for a SET, not xterm's own single `activeProtocol` — VTE,
+ * Alacritty and WezTerm keep them independent too and report via the highest
+ * one enabled (unverified for X11 xterm itself). xterm.js
  * instead keeps one variable and last-DECSET-wins, so a program that
  * (re)states its modes as separate sequences — `?1000h` then `?1002h` then
  * `?1003h`, which is exactly what Ink-based UIs like Claude Code's redraw as
@@ -57,14 +58,33 @@
  * highest flag, nothing re-asserting it) can still happen, which is what
  * "never downgrade during a held button" (below) is for.
  *
+ * A RESET does not stay independent, though: turning off any ONE of
+ * 9/1000/1002/1003 is xterm.js-compatible, not VTE/Alacritty/WezTerm-style —
+ * it clears ALL FOUR flags, same as xterm's own DECRST treats any mouse-mode
+ * reset as "tracking off" outright. Otherwise a program that turns the mouse
+ * off with a single DECRST (the common case) would keep getting reports
+ * because a higher mode it had set earlier was never explicitly reset
+ * itself — and a stray flag like that could outlive the program that set
+ * it, into whatever runs on the normal buffer, or the next full-screen
+ * program, next. See `planPrivateModes` and MR-06b.
+ *
  * Never downgrade during a held button: even a genuine drop of the highest
  * flag is held back from xterm — not merely remembered differently — while
  * the primary button is down, if applying it now would cost xterm's `DRAG` or
- * `MOVE` event bit (`dropsMotion`). Deferred changes settle in one place
- * (`_applyToTerm`, reached from `sync`), so they apply exactly once, the
- * moment the button is let go, recomputed fresh rather than replayed — and
- * never at all once the binding is disposed, because disposing removes the
- * mouseup/blur listener that would have triggered that recompute.
+ * `MOVE` event bit (`dropsMotion`). That protection holds only for a program
+ * still asking from the alternate screen, with the setting still on
+ * (`_applyToTerm` checks both, fresh, not as remembered when the change was
+ * decided): the moment either stops — the program itself leaves the
+ * alternate screen mid-drag (e.g. `?1003l?1002l?1000l?1049l`), or the setting
+ * is switched off — there is no longer a drag listener worth protecting, and
+ * leaving the real protocol at its old value would instead feed the rest of
+ * the drag's motion reports into whatever now owns the normal buffer (the
+ * shell) and keep selection disabled — so that applies at once instead.
+ * Deferred changes settle in one place (`_applyToTerm`, reached from `sync`),
+ * so they apply exactly once, the moment the button is let go, recomputed
+ * fresh rather than replayed — and never at all once the binding is
+ * disposed, because disposing removes the mouseup/blur listener that would
+ * have triggered that recompute.
  *
  * Two parts, both here:
  *
@@ -123,10 +143,12 @@ export function effectiveProtocol({ requested = 'none', alternate = false, enabl
 /**
  * The highest-ranked tracking mode currently set in an independent flag set
  * (`{ [mode]: true }`, as `planPrivateModes` carries and returns — absent or
- * false means not set). Real X11 xterm keeps 9/1000/1002/1003 as independent
- * flags this way and reports through the highest one enabled; see the file
- * doc for why that, rather than xterm.js's own single last-DECSET-wins
- * variable, is what a program restating its modes as separate sequences needs.
+ * false means not set). VTE, Alacritty and WezTerm keep 9/1000/1002/1003 as
+ * independent flags this way for a SET and report through the highest one
+ * enabled (unverified for X11 xterm itself); see the file doc for why that,
+ * rather than xterm.js's own single last-DECSET-wins variable, is what a
+ * program restating its modes as separate sequences needs — and for why a
+ * RESET does not stay independent the same way (MR-06b).
  */
 export function requestedFromFlags(flags) {
   for (let i = MODE_RANK.length - 1; i >= 0; i -= 1) {
@@ -165,10 +187,12 @@ function modeParams(params) {
  * Walks the parameters in order — a sequence may switch screens and ask for
  * tracking in one go (`CSI ? 1049 ; 1003 h`). `flags` is the independent
  * tracking-mode flag set carried in from before this sequence (see
- * `requestedFromFlags`); a tracking mode in the params is ADDED to it on 'h'
- * and REMOVED on 'l', each independent of the others — unlike xterm's own
- * DECSET, which treats ANY mouse-mode reset as "tracking off" and ANY set as
- * "replace whatever was active." Returns:
+ * `requestedFromFlags`). A SET ('h') ADDS its mode to `flags`, independent of
+ * the others — unlike xterm's own DECSET, which treats any set as "replace
+ * whatever was active." A RESET ('l') is different: like xterm's own DECRST,
+ * which treats ANY mouse-mode reset as "tracking off" outright, resetting ANY
+ * ONE of 9/1000/1002/1003 clears ALL FOUR flags, not just its own — see
+ * MR-06b. Returns:
  *
  *   flags      the new flag set (never mutates the one passed in)
  *   requested  the highest mode now set (`requestedFromFlags(flags)`)
@@ -207,8 +231,19 @@ export function planPrivateModes({ final, params, flags = NO_FLAGS, alternate = 
       alt = set;
       others += 1;
     } else if (TRACKING_MODES[mode]) {
-      if (set) nextFlags[mode] = true;
-      else delete nextFlags[mode];
+      if (set) {
+        nextFlags[mode] = true;
+      } else {
+        // xterm.js-compatible, not VTE/Alacritty/WezTerm-style: a RESET of
+        // ANY ONE of 9/1000/1002/1003 turns tracking off outright, same as
+        // xterm's own DECRST — not just this one mode's own flag. Otherwise a
+        // program that turns the mouse off with a single DECRST (the common
+        // case) would keep getting reports because a higher mode it set
+        // earlier was never explicitly reset itself (MR-06b), and a stray
+        // flag could outlive the program that set it into whatever runs on
+        // the normal buffer, or the next full-screen program, next.
+        for (const m of MODE_RANK) delete nextFlags[m];
+      }
       tracking += 1;
     } else {
       others += 1;
@@ -258,9 +293,12 @@ const MODE_OF_NAME = Object.freeze(
  * half (its tail then prints as text). xterm gives no way to know its parser
  * is between sequences. So this sets the protocol on the mouse service xterm's
  * own DECSET uses, synchronously, and reports whether the terminal now says
- * so. Null when this xterm has no such service: the binding then leaves the
- * protocol alone where it would have changed it (see `sync`) — a program asking
- * from the scrollback is still refused, which is the part that matters.
+ * so. Null when this xterm has no such service: `_privateMode` then never
+ * intercepts a tracking sequence on this xterm at all (see `canSetProtocol`),
+ * falling back to letting xterm's own DECSET/DECRST apply it exactly as it
+ * would have before this file existed — there is nothing this binding could
+ * have done with an intercepted sequence anyway, with no setter to apply it
+ * later.
  */
 function protocolSetter(term) {
   const service = term?._core?.coreMouseService;
@@ -425,6 +463,18 @@ class MouseReportingAddon {
    * two terminals open: the second one's mousedown blurred the first one's
    * textarea, and without this check that falsely cleared the first one's
    * held-button state mid-gesture).
+   *
+   * A THIRD way to lose the button that neither of those catches: a native
+   * context menu (macOS ctrl+click, say) grabs the mouse the instant it
+   * opens — no mouseup ever reaches any listener, and the window keeps focus
+   * throughout, so `blur` never fires either. Caught instead on the next
+   * `mousemove` the OS actually delivers (capture-phase on `view`, same as
+   * `blur` — before xterm's own listeners run): `event.buttons` is the OS's
+   * own ground truth for which buttons are ACTUALLY down at that instant,
+   * independent of whatever this binding last heard, so a cleared primary-
+   * button bit means it is already up. `contextmenu` itself is also checked,
+   * since it can fire before any further `mousemove` does (or without one
+   * at all, if the pointer never moves again before the next press).
    */
   _bindButtonTracking() {
     const container = this._container;
@@ -439,15 +489,27 @@ class MouseReportingAddon {
     const onBlur = (e) => {
       if (!e || e.target === view) this._setButtonHeld(false);
     };
+    // A lost mouseup that neither `onUp` nor `onBlur` ever sees (see the doc
+    // above): recovered from `event.buttons`, the OS's own ground truth for
+    // which buttons are down, on the next mousemove it actually delivers —
+    // and from `contextmenu` itself, which can arrive first, or alone.
+    const onMove = (e) => {
+      if (this._buttonHeld && e && e.buttons !== undefined && !(e.buttons & 1)) this._setButtonHeld(false);
+    };
+    const onContextMenu = () => this._setButtonHeld(false);
     container.addEventListener('mousedown', onDown, true);
     this._disposables.push({ dispose: () => container.removeEventListener('mousedown', onDown, true) });
     if (view?.addEventListener) {
       view.addEventListener('mouseup', onUp, true);
       view.addEventListener('blur', onBlur, true);
+      view.addEventListener('mousemove', onMove, true);
+      view.addEventListener('contextmenu', onContextMenu, true);
       this._disposables.push({
         dispose: () => {
           view.removeEventListener('mouseup', onUp, true);
           view.removeEventListener('blur', onBlur, true);
+          view.removeEventListener('mousemove', onMove, true);
+          view.removeEventListener('contextmenu', onContextMenu, true);
         },
       });
     }
@@ -487,6 +549,13 @@ class MouseReportingAddon {
     // target, never whether applying it to xterm was held back for the
     // button — see `_applyToTerm`.
     this._setTracking(plan.effective !== 'none');
+    // No settable mouse service on this xterm (`canSetProtocol` false):
+    // `_applyToTerm` has no setter to call later, so intercepting a tracking
+    // sequence here ('drop') would refuse it FOR GOOD — a full-screen program
+    // would never get the mouse at all on such a terminal. Fall back to the
+    // rule from before this file existed: let xterm's own DECSET/DECRST
+    // apply the sequence natively, on every buffer, ungated.
+    if (!this.canSetProtocol) return false;
     if (plan.action === 'pass') return false;
     // 'drop' and 'pass-then-sync' both settle the real protocol once this
     // write is fully parsed (`onWriteParsed`), not per sequence: several
@@ -530,9 +599,15 @@ class MouseReportingAddon {
     const next = Boolean(value);
     if (next === this._tracking) return;
     this._tracking = next;
-    for (const listener of [...this._trackingListeners]) {
-      this._safeguard('onTrackingChange listener', () => listener(next), undefined);
-    }
+    // Each listener gets its OWN label (position, plus its name when it has
+    // one): `_safeguard` only warns once per label, so sharing one generic
+    // label across every listener would let a first listener's failure use
+    // up the one-time warning and silently bury a SECOND, unrelated
+    // listener's own failure forever.
+    [...this._trackingListeners].forEach((listener, index) => {
+      const label = `onTrackingChange listener ${index}${listener.name ? ` (${listener.name})` : ''}`;
+      this._safeguard(label, () => listener(next), undefined);
+    });
   }
 
   /**
@@ -565,12 +640,23 @@ class MouseReportingAddon {
    * back until the NEXT mousedown, breaking the rest of the gesture even once
    * this corrects back a moment later. `sync()` is what settles it once the
    * button is let go, recomputed fresh at that point rather than replayed.
+   *
+   * That protection is only for a program still asking for the mouse FROM the
+   * alternate screen, with the setting still on — `isAlternate(term)` and
+   * `this._enabled()` are checked fresh here, not remembered from when the
+   * change was decided. The moment either stops holding — the program itself
+   * left the alternate screen, e.g. `?1003l?1002l?1000l?1049l` mid-drag, or
+   * the setting was switched off — there is no longer a drag listener worth
+   * protecting (the program that needed it is gone), and leaving the real
+   * protocol at the old value would instead feed the rest of the drag's
+   * motion reports into whatever now owns the normal buffer (the shell) and
+   * keep selection disabled there, so this applies at once instead.
    */
   _applyToTerm(target) {
     const term = this._term;
     const current = term.modes?.mouseTrackingMode ?? 'none';
     if (target === current) return true;
-    if (this._buttonHeld && dropsMotion(current, target)) return false;
+    if (this._buttonHeld && isAlternate(term) && this._enabled() && dropsMotion(current, target)) return false;
     if (this._setProtocol && this._setProtocol(target)) return true;
     if (!this._warned) {
       this._warned = true;
