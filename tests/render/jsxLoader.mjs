@@ -42,7 +42,12 @@ class Stub {
 }
 export class Terminal extends Stub {}
 export class FitAddon { activate() {} dispose() {} fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } }
-export class WebglAddon { activate() {} dispose() {} onContextLoss() {} }
+export class WebglAddon {
+  activate() {} dispose() {}
+  onContextLoss() { return { dispose() {} }; }
+  onAddTextureAtlasCanvas() { return { dispose() {} }; }
+}
+export class Unicode11Addon { activate() {} dispose() {} }
 export class SearchAddon {
   activate() {} dispose() {}
   findNext() { return false; }

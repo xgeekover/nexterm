@@ -249,6 +249,26 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       description: 'Controls whether inline command suggestions and the completion popup are shown as you type in the terminal.',
       control: 'checkbox',
     },
+    {
+      id: 'terminalCopyOnSelect',
+      section: 'terminal',
+      key: 'terminalCopyOnSelect',
+      settingKey: 'terminal.integrated.copyOnSelection',
+      title: 'Copy on Select',
+      description:
+        'Copies text to the clipboard as soon as you select it with the mouse — a drag, a double-click for a word, a triple-click for a line.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalMouseReporting',
+      section: 'terminal',
+      key: 'terminalMouseReporting',
+      settingKey: 'terminal.integrated.fullScreenMouseReporting',
+      title: 'Mouse Reporting in Full-Screen Apps',
+      description:
+        'Lets a full-screen program such as vim, htop or tmux use the mouse. A program in the scrollback, like Claude Code, never gets it, so a drag there always selects text. Inside a full-screen program, hold Shift while dragging to select (on macOS ⌥ works too).',
+      control: 'checkbox',
+    },
     // ---- Workbench ----
     {
       id: 'reducedMotion',
@@ -387,6 +407,8 @@ export function SettingsWindow() {
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
+  const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
+  const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
@@ -407,6 +429,8 @@ export function SettingsWindow() {
     terminalTheme,
     terminalSuggestions,
     terminalStickyHeader,
+    terminalCopyOnSelect,
+    terminalMouseReporting,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
     terminalDefaultCwd,

@@ -4,8 +4,18 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch } from './terminalRegistry.js';
 import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport } from '../../lib/terminalCompat.js';
-import { suggest, recordCommand, forgetCommand, completionFor } from '../../lib/commandIndex.js';
-import { locateSuggestion } from '../../lib/suggestGeometry.js';
+import { suggest, recordCommand, forgetCommand } from '../../lib/commandIndex.js';
+import { locateSuggestion, locateCursorCell } from '../../lib/suggestGeometry.js';
+import {
+  NEW_LINE,
+  trackInput,
+  rankedSuggestions,
+  suggestionsAllowed,
+  suggestionKeyAction,
+  lineAfterKey,
+} from '../../lib/suggestionLayer.js';
+import { hangulImeFor, isHangulCharacter } from '../../lib/hangulInlineIme.js';
+import { handleClipboardKey } from '../../lib/terminalClipboard.js';
 import { isFailure } from '../../lib/tabActivity.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
@@ -22,14 +32,34 @@ export { disposeTerminal } from './terminalRegistry.js';
 // back, even after an Enter, an Esc or a key with nothing to suggest.
 const EMPTY_SUGGEST_STATE = {
   visible: false,
+  typed: '', // the line the items were ranked for — placement and accept measure against it
   ghost: '', // remaining characters of the top candidate, past what's typed
   items: [], // up to MAX_SUGGESTIONS candidates, for the popup list
   selectedIndex: 0,
+  moved: false, // ↑/↓ moved the highlight, so → takes it rather than the ghost
   left: 0,
   top: 0,
   cellWidth: 0,
   cellHeight: 0,
 };
+
+// The Korean syllable being composed (see src/lib/hangulInlineIme.js), drawn
+// over the cursor's cell. `inFlight` is what was just sent to make way for it
+// and is still drawn in front of it until the program's echo moves the cursor
+// — otherwise the previous syllable would blink out for one echo round trip.
+const EMPTY_IME_PREVIEW = {
+  visible: false,
+  pending: '',
+  inFlight: '',
+  left: 0,
+  top: 0,
+  cellWidth: 0,
+  cellHeight: 0,
+};
+
+// How long a sent syllable is drawn while waiting for an echo that may never
+// come (a program that does not echo, or echoes somewhere else).
+const IN_FLIGHT_MS = 500;
 
 /**
  * A single terminal pane's live surface — one persistent @xterm/xterm
@@ -98,8 +128,11 @@ export function TerminalView({ tabId, active = false }) {
   };
 
   // Best-effort local copy of the current input line, rebuilt purely from
-  // the bytes this component writes to the PTY (see the class doc above).
-  const bufferRef = useRef('');
+  // the bytes this component writes to the PTY (see the class doc above):
+  // `{ buffer, tracked }`, followed by `trackInput` (src/lib/suggestionLayer.js).
+  const lineRef = useRef(NEW_LINE);
+
+  const imePreviewRef = useRef(EMPTY_IME_PREVIEW);
 
   // Attach (or create) this tab's persistent xterm instance whenever the
   // bound tab changes. Never disposes it on cleanup — that only happens via
@@ -113,11 +146,11 @@ export function TerminalView({ tabId, active = false }) {
       onData: (data) => writeRaw(tabId, data),
     });
     termRef.current = entry.term;
-    bufferRef.current = '';
+    lineRef.current = NEW_LINE;
     setSuggestState(EMPTY_SUGGEST_STATE);
 
     wrapper.replaceChildren(entry.container);
-    ensureGpuRenderer(entry);
+    const stopShowing = ensureGpuRenderer(entry);
 
     const doFit = () => {
       // Shared with the Settings window's live refit so the two cannot drift:
@@ -161,8 +194,34 @@ export function TerminalView({ tabId, active = false }) {
     }
 
     // ---- Inline suggestion layer -----------------------------------------
+    //
+    // What it may do and when is decided in src/lib/suggestionLayer.js; this
+    // only reads the facts it needs and draws. All of them are read at call
+    // time rather than captured: the effect is keyed on the tab and its
+    // session, and rebuilding the terminal wiring because a setting moved or a
+    // command started would throw the xterm instance's handlers away with it.
 
     const suggestionsEnabled = () => useSettingsStore.getState().terminalSuggestions ?? true;
+    // OSC 133 "C" until "D": a program has the keyboard, and what is typed
+    // into it is not a shell command.
+    const isRunning = () => useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.running === true;
+    const isAlternate = () => entry.term.buffer?.active?.type === 'alternate';
+    // The find bar highlights its current match with `term.select()` — the
+    // very same call a drag makes (`@xterm/addon-search`) — so Ctrl+C must
+    // not treat it as something the user selected to copy.
+    const isFindOpen = () => {
+      const find = useTerminalStore.getState().find;
+      return Boolean(find?.open && find?.tabId === tabId);
+    };
+    // The Korean input binding — installed on macOS only, so null elsewhere.
+    const ime = hangulImeFor(entry.term);
+    const layerAllowed = () =>
+      suggestionsAllowed({
+        enabled: suggestionsEnabled(),
+        running: isRunning(),
+        alternate: isAlternate(),
+        composing: Boolean(ime?.pending),
+      });
 
     /**
      * Draw the ranked suggestion at the cursor, once the terminal shows what
@@ -178,11 +237,21 @@ export function TerminalView({ tabId, active = false }) {
      * predicting where the shell will put the keys, and a wrong prediction is
      * the same bug again. Conservative either way: nothing rather than a
      * suggestion in the wrong place.
+     *
+     * Measured against the text the items were ranked for, not the live line:
+     * a key the layer takes drops the line, and the popup being navigated
+     * must stay where it is.
      */
     const placeSuggestions = () => {
       const s = suggestStateRef.current;
       if (s.items.length === 0) return;
-      const pos = locateSuggestion(entry.term, wrapper, bufferRef.current);
+      // A program started, the alternate screen came up, or a Korean syllable
+      // began composing where the ghost would be.
+      if (!layerAllowed()) {
+        setSuggestState(EMPTY_SUGGEST_STATE);
+        return;
+      }
+      const pos = locateSuggestion(entry.term, wrapper, s.typed);
       if (!pos) {
         if (s.visible) setSuggestState({ ...s, visible: false });
         return;
@@ -199,35 +268,19 @@ export function TerminalView({ tabId, active = false }) {
       setSuggestState({ ...s, visible: true, ...pos });
     };
 
-    // The echo moves the cursor, which makes that the moment a suggestion
-    // ranked on a keystroke can be drawn — xterm moves its own IME textarea on
-    // the same event. A scroll, a font change or a switch of renderer moves the
-    // cursor's cell on screen without moving the cursor, and each of those
-    // ends in a render.
-    const cursorMoveDisposable = entry.term.onCursorMove(placeSuggestions);
-    const renderDisposable = entry.term.onRender(placeSuggestions);
-
     const updateSuggestions = () => {
-      if (!suggestionsEnabled()) {
+      const { buffer, tracked } = lineRef.current;
+      if (!buffer || !tracked || !layerAllowed()) {
         setSuggestState(EMPTY_SUGGEST_STATE);
         return;
       }
-      const buf = bufferRef.current;
-      if (!buf) {
-        setSuggestState(EMPTY_SUGGEST_STATE);
-        return;
-      }
-      const candidates = suggest(buf);
+      const candidates = suggest(buffer);
       if (candidates.length === 0) {
         setSuggestState(EMPTY_SUGGEST_STATE);
         return;
       }
-      const top = candidates[0];
-      const ghost = top.length > buf.length && top.toLowerCase().startsWith(buf.toLowerCase())
-        ? top.slice(buf.length)
-        : '';
       // Hidden until the key just typed is on screen — see `placeSuggestions`.
-      setSuggestState({ ...EMPTY_SUGGEST_STATE, ghost, items: candidates });
+      setSuggestState({ ...EMPTY_SUGGEST_STATE, ...rankedSuggestions(buffer, candidates) });
       placeSuggestions();
     };
 
@@ -235,138 +288,126 @@ export function TerminalView({ tabId, active = false }) {
     // input line — deliberately not touching the existing handler passed
     // into `getOrCreateTerminal` above, which owns forwarding keystrokes to
     // the PTY. xterm supports multiple onData listeners; both fire on every
-    // keystroke.
+    // keystroke, and on every Korean syllable the IME binding sends.
     const bufferHandler = (data) => {
-      if (!data) return;
-
-      if (data.length > 1) {
-        // Pastes / IME commits arrive as one multi-character chunk. A
-        // single-line chunk with no control bytes is safe to fold into the
-        // buffer; anything containing a newline or control byte is too
-        // ambiguous to reconstruct reliably, so drop tracking instead of
-        // risking a wrong suggestion (see "Known-imperfect cases").
-        if (/[\r\n\x03\x1b\x7f]/.test(data)) {
-          bufferRef.current = '';
-          setSuggestState(EMPTY_SUGGEST_STATE);
-        } else {
-          bufferRef.current += data;
-          updateSuggestions();
-        }
-        return;
+      const { line, record, rank } = trackInput(lineRef.current, data, { running: isRunning() });
+      lineRef.current = line;
+      if (record) {
+        // Recorded on submit, because that is the only moment that works
+        // for a shell without OSC 133 integration. If the shell does report
+        // an exit code and it is non-zero, the command is taken back out
+        // below — a typo should not be suggested for the rest of the day.
+        // The directory as well as the line: it is most of what tells
+        // two similar-looking commands apart in the history palette.
+        recordCommand(record, {
+          cwd: useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.cwd ?? null,
+        });
+        lastSubmittedRef.current = record;
       }
-
-      switch (data) {
-        case '\r':
-        case '\n': {
-          const cmd = bufferRef.current.trim();
-          if (cmd) {
-            // Recorded on submit, because that is the only moment that works
-            // for a shell without OSC 133 integration. If the shell does report
-            // an exit code and it is non-zero, the command is taken back out
-            // below — a typo should not be suggested for the rest of the day.
-            // The directory as well as the line: it is most of what tells
-            // two similar-looking commands apart in the history palette.
-            recordCommand(cmd, {
-              cwd: useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.cwd ?? null,
-            });
-            lastSubmittedRef.current = cmd;
-          }
-          bufferRef.current = '';
-          setSuggestState(EMPTY_SUGGEST_STATE);
-          return;
-        }
-        case '\x7f':
-        case '\b':
-          bufferRef.current = bufferRef.current.slice(0, -1);
-          updateSuggestions();
-          return;
-        case '\x03': // Ctrl-C
-          bufferRef.current = '';
-          setSuggestState(EMPTY_SUGGEST_STATE);
-          return;
-        default:
-          if (data === '\x1b' || data.charCodeAt(0) < 0x20) {
-            // Bare Esc or another control byte (arrow keys arrive as their
-            // own multi-char escape sequences and are handled by the key
-            // handler below, not here) — clear defensively.
-            setSuggestState(EMPTY_SUGGEST_STATE);
-            return;
-          }
-          bufferRef.current += data;
-          updateSuggestions();
-      }
+      if (rank) updateSuggestions();
+      else setSuggestState(EMPTY_SUGGEST_STATE);
     };
     const suggestDataDisposable = entry.term.onData(bufferHandler);
 
-    /**
-     * Accept a suggestion by typing the part the user has not typed yet.
-     *
-     * That only works when the candidate actually CONTINUES what is on the
-     * line. `suggest()` also returns subsequence matches — `gs` matches
-     * `git push` — and slicing those by the buffer's length wrote the tail of
-     * a different string onto the line: `gs` + Enter became `gst push`, and
-     * the Enter was swallowed, so the user got a mangled line instead of a
-     * command. Anything that is not a continuation is left alone.
-     *
-     * @returns true when something was written.
-     */
-    const acceptSuggestion = (index) => {
-      const state = suggestStateRef.current;
-      const chosen = state.items[index ?? 0];
-      const rest = completionFor(bufferRef.current, chosen);
-      if (rest === null) {
-        setSuggestState(EMPTY_SUGGEST_STATE);
-        return false;
-      }
-      if (rest) {
-        writeRaw(tabId, rest);
-        bufferRef.current = chosen;
-      }
-      setSuggestState(EMPTY_SUGGEST_STATE);
-      return true;
+    // ---- Korean syllable being composed (macOS) ---------------------------
+
+    let inFlightTimer = 0;
+    const setImePreview = (next) => {
+      imePreviewRef.current = next;
+      forceRender();
     };
+    const placeImePreview = () => {
+      const p = imePreviewRef.current;
+      const text = p.inFlight + p.pending;
+      const pos = text ? locateCursorCell(entry.term, wrapper) : null;
+      if (!pos) {
+        if (p.visible) setImePreview({ ...p, visible: false });
+        return;
+      }
+      if (
+        p.visible &&
+        p.left === pos.left &&
+        p.top === pos.top &&
+        p.cellWidth === pos.cellWidth &&
+        p.cellHeight === pos.cellHeight
+      ) {
+        return;
+      }
+      setImePreview({ ...p, visible: true, ...pos });
+    };
+    const dropInFlight = () => {
+      if (inFlightTimer) {
+        clearTimeout(inFlightTimer);
+        inFlightTimer = 0;
+      }
+      const p = imePreviewRef.current;
+      if (p.inFlight) setImePreview({ ...p, inFlight: '' });
+    };
+    const imePreviewDisposable = ime?.onPreview((pending, { flushed = '', retracted = 0 } = {}) => {
+      const p = imePreviewRef.current;
+      let inFlight = retracted ? '' : p.inFlight;
+      if (flushed) {
+        inFlight += flushed;
+        if (inFlightTimer) clearTimeout(inFlightTimer);
+        inFlightTimer = setTimeout(() => {
+          inFlightTimer = 0;
+          dropInFlight();
+          placeImePreview();
+        }, IN_FLIGHT_MS);
+      }
+      // A ghost would sit exactly where the syllable is drawn.
+      if (pending) setSuggestState(EMPTY_SUGGEST_STATE);
+      setImePreview({ ...p, pending, inFlight });
+      placeImePreview();
+    });
+    imePreviewRef.current = { ...EMPTY_IME_PREVIEW, pending: ime?.pending ?? '' };
+    placeImePreview();
 
-    // Intercepts specific keys ourselves (Tab/→ to accept, ↑/↓ to move the
-    // popup selection, Enter to accept, Esc to dismiss) and lets everything
-    // else — including arrows when the popup is closed — fall through to
-    // xterm's normal handling untouched.
+    // The echo moves the cursor, which makes that the moment a suggestion
+    // ranked on a keystroke can be drawn — xterm moves its own IME textarea on
+    // the same event. A scroll, a font change or a switch of renderer moves the
+    // cursor's cell on screen without moving the cursor, and each of those
+    // ends in a render. The same goes for the syllable being composed, and the
+    // echo is what ends a sent syllable's time in front of it.
+    const cursorMoveDisposable = entry.term.onCursorMove(() => {
+      dropInFlight();
+      placeImePreview();
+      placeSuggestions();
+    });
+    const renderDisposable = entry.term.onRender(() => {
+      placeImePreview();
+      placeSuggestions();
+    });
+
+    // Intercepts specific keys ourselves (→ to accept, ↑/↓ to move the popup
+    // selection, Esc to dismiss) — and only while something is actually drawn,
+    // at a shell prompt. Tab is the shell's, always. Everything else, including
+    // arrows when the popup is closed, falls through to xterm untouched.
     const handleKeyEvent = (event) => {
-      if (event.type !== 'keydown') return true;
-      const state = suggestStateRef.current;
-      const popupOpen = state.visible && state.items.length > 1;
-
-      if (state.visible && state.ghost && (event.key === 'Tab' || event.key === 'ArrowRight')) {
-        if (!acceptSuggestion(popupOpen ? state.selectedIndex : 0)) return true;
-        event.preventDefault();
-        return false;
-      }
-      if (popupOpen && event.key === 'ArrowDown') {
-        event.preventDefault();
-        setSuggestState((s) => ({ ...s, selectedIndex: (s.selectedIndex + 1) % s.items.length }));
-        return false;
-      }
-      if (popupOpen && event.key === 'ArrowUp') {
-        event.preventDefault();
-        setSuggestState((s) => ({
-          ...s,
-          selectedIndex: (s.selectedIndex - 1 + s.items.length) % s.items.length,
-        }));
-        return false;
-      }
-      // Enter RUNS what is on the line — it never accepts a suggestion. Taking
-      // the highlighted item instead meant typing `opencode`, seeing a stale
-      // `opencoded` offered from history, and having it typed for you. Tab and
-      // → accept; Enter submits, as it does in every shell.
-      if (popupOpen && event.key === 'Enter') {
+      // Copy and paste first — Ctrl+V / Ctrl+C on Windows and the Linux chords
+      // (src/lib/terminalClipboard.js). xterm would otherwise send ^V or ^C and
+      // cancel the key, and WebView2 has no Edit menu to fall back on.
+      const clipboard = handleClipboardKey(entry.term, event, { findOpen: isFindOpen() });
+      if (clipboard !== undefined) return clipboard;
+      const decision = suggestionKeyAction(suggestStateRef.current, event, {
+        running: isRunning(),
+        alternate: isAlternate(),
+      });
+      if (decision.action === 'pass') return true;
+      // A key the layer takes never reaches the program, so whatever it
+      // believed was on the line no longer counts.
+      lineRef.current = lineAfterKey(lineRef.current, decision);
+      if (decision.action === 'move') {
+        setSuggestState((s) => ({ ...s, selectedIndex: decision.selectedIndex, moved: true }));
+      } else {
+        // Typed as the rest of the line, straight to the shell. Only ever a
+        // candidate that continues what was typed — see `completionFor`.
+        if (decision.action === 'accept' && decision.text) writeRaw(tabId, decision.text);
         setSuggestState(EMPTY_SUGGEST_STATE);
-        return true;
       }
-      if (state.visible && event.key === 'Escape') {
-        event.preventDefault();
-        setSuggestState(EMPTY_SUGGEST_STATE);
-        return false;
-      }
-      return true;
+      if (!decision.consume) return true;
+      event.preventDefault();
+      return false;
     };
     entry.term.attachCustomKeyEventHandler(handleKeyEvent);
 
@@ -436,7 +477,9 @@ export function TerminalView({ tabId, active = false }) {
         forgetCommand(lastSubmittedRef.current);
       }
       lastSubmittedRef.current = '';
-      bufferRef.current = '';
+      // A new prompt: a new line, followed from its first key — even one the
+      // layer had lost track of.
+      lineRef.current = NEW_LINE;
       setSuggestState(EMPTY_SUGGEST_STATE);
     }).then((off) => {
       if (promptCancelled) off();
@@ -452,13 +495,18 @@ export function TerminalView({ tabId, active = false }) {
       suggestDataDisposable.dispose();
       cursorMoveDisposable.dispose();
       renderDisposable.dispose();
+      imePreviewDisposable?.dispose();
+      if (inFlightTimer) clearTimeout(inFlightTimer);
+      imePreviewRef.current = EMPTY_IME_PREVIEW;
       entry.term.attachCustomKeyEventHandler(null);
       promptCancelled = true;
       promptUnlisten?.();
       // Deliberately not disposing `entry` or detaching its container here —
       // React unmounting `wrapper` just removes it (and the container inside
       // it) from the document; the instance stays alive in the registry for
-      // the next mount to reattach with scrollback intact.
+      // the next mount to reattach with scrollback intact — WebGL renderer
+      // included. The registry only hears that it is no longer on screen.
+      stopShowing();
     };
   }, [tabId, sessionId, writeRaw, resizePty]);
 
@@ -491,6 +539,9 @@ export function TerminalView({ tabId, active = false }) {
   };
 
   const suggestState = suggestStateRef.current;
+  const imePreview = imePreviewRef.current;
+  const imeText = imePreview.inFlight + imePreview.pending;
+  const termTheme = termRef.current?.options?.theme;
 
   return (
     <div className="relative w-full h-full overflow-hidden">
@@ -550,6 +601,38 @@ export function TerminalView({ tabId, active = false }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+      {imePreview.visible && imeText && (
+        <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+          {/* The Korean syllable being composed, over the cursor — in the
+              terminal's font and colours, underlined like composition text,
+              each syllable two cells wide as the terminal will draw it. */}
+          <span
+            data-ime-preview
+            className="absolute flex whitespace-pre bg-vsc-terminal text-vsc-fg"
+            style={{
+              left: imePreview.left,
+              top: imePreview.top,
+              height: imePreview.cellHeight,
+              lineHeight: `${imePreview.cellHeight}px`,
+              fontFamily: termRef.current?.options?.fontFamily,
+              fontSize: termRef.current?.options?.fontSize,
+              color: termTheme?.foreground,
+              background: termTheme?.background,
+            }}
+          >
+            {[...imeText].map((ch, i) => (
+              <span
+                // The text only ever changes at its end; position is identity.
+                key={i}
+                className="inline-block text-center underline"
+                style={{ width: (isHangulCharacter(ch) ? 2 : 1) * imePreview.cellWidth }}
+              >
+                {ch}
+              </span>
+            ))}
+          </span>
         </div>
       )}
     </div>

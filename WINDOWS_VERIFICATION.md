@@ -366,7 +366,7 @@ folder, and a launch with no saved layout still starts with one terminal.
 
 Put `{c: "echo SAFE\recho INJECTED", n: 9}` into `nexterm.commandHistory`
 through CDP, with a clean `echo SAFECONTROL` beside it as the control, and
-relaunch. In the History palette and with Tab after `echo S`, only the control
+relaunch. In the History palette and with → after `echo S`, only the control
 is offered, and `INJECTED` is never printed.
 
 ### V17 — inline suggestions draw under WebGL, at the cursor
@@ -376,8 +376,36 @@ terminal whose history has `git status`: the ghost text and the popup appear,
 and the ghost starts right **after** the typed text, never over it (#35, #36).
 The ghost is drawn only once the shell has echoed the keys, so type along a
 suggestion one key at a time and watch whether it reads steady or blinks —
-ConPTY echoes later than a unix pty, and that has not been measured. Tab and →
-accept, Esc dismisses.
+ConPTY echoes later than a unix pty, and that has not been measured. → accepts
+the ghost, or the popup item once ↑/↓ has moved the highlight; Esc dismisses.
+Tab always goes to the shell: PowerShell's own completion runs with a ghost on
+screen. Inside a running program — `python`, or an agent — nothing is drawn,
+and Tab, →, Esc, ↑ and ↓ all reach the program.
+
+### V18 — copy and paste reach the terminal, and a drag selects in Claude Code
+
+Never run on Windows: the key path was checked in headless Chromium with the
+platform spoofed to `Win32`, which proves the key reaches the browser
+uncancelled but not what WebView2 then does with it. Check on cmd, PowerShell
+and inside `claude`:
+
+- `Ctrl+V` pastes the clipboard's text — never `^V`, and in claude never the
+  "paste an image" path (that is `Alt+V`). A multi-line paste at a PowerShell
+  prompt arrives as one block, not as commands run line by line.
+  `Ctrl+Shift+V` and `Shift+Insert` paste too.
+- Select some output, `Ctrl+C`: it lands on the clipboard (paste it into
+  Notepad), the selection disappears, and nothing is interrupted. `Ctrl+C`
+  again, with nothing selected, interrupts (`ping -t localhost` stops).
+  `Ctrl+Shift+C` and `Ctrl+Insert` copy as well.
+- Inside claude, a plain drag over its text selects (it used to go to claude
+  and select nothing), and letting go copies it — paste into Notepad without
+  pressing anything else. The wheel scrolls back through claude's output.
+- In a full-screen program that uses the mouse (`vim` with `:set mouse=a`, or
+  `htop` under WSL), a click still reaches the program; `Shift`-drag selects
+  instead.
+- Settings ▸ Terminal: *Copy on Select* off — a drag selects but the clipboard
+  keeps what it had. *Mouse Reporting in Full-Screen Apps* off — vim's clicks
+  stop reaching it at once, a drag there selects.
 
 ## What the first run found
 

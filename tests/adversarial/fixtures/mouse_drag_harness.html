@@ -1,0 +1,91 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/mouse_reporting_headless.test.js.
+
+  Two REAL `@xterm/xterm` 5.5 terminals, same module the app ships, each at a
+  fixed on-screen rect so the Node-side driver can target them with CDP
+  `Input.dispatchMouseEvent` by plain viewport coordinates, no lookup needed:
+
+    #fixed    installMouseReporting (src/lib/mouseReporting.js) applied —
+              this fix, exercised exactly as terminalRegistry.js installs it
+    #control  stock xterm, nothing installed — the bug on 94ec8d6 (and on any
+              other terminal emulator built on xterm.js, unpatched)
+
+  `window.__h.protocolChangeCount(which)` counts real `CoreMouseService.
+  onProtocolChange` firings — xterm's OWN ground truth for "did the real
+  protocol move", independent of anything this fixture or the binding claims
+  about itself. `writeFixed`/`writeControl` return a promise that resolves
+  only once xterm's own write callback fires — a genuine parse barrier, not
+  a fire-and-forget write — so a caller awaiting it can read `protocolOf` /
+  `bufferOf` right after without racing xterm's internal WriteBuffer.
+
+  Not part of the app's own routes; loaded only by that test, over the vite
+  dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; background: #111; }
+      #fixed, #control { position: fixed; left: 0; width: 640px; height: 300px; }
+      #fixed { top: 0; }
+      #control { top: 320px; }
+    </style>
+  </head>
+  <body>
+    <div id="fixed"></div>
+    <div id="control"></div>
+    <script type="module">
+      import { Terminal } from '@xterm/xterm';
+      import '@xterm/xterm/css/xterm.css';
+      import { installMouseReporting } from '../../../src/lib/mouseReporting.js';
+
+      function makeTerm(container, { install }) {
+        const term = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+        term.open(container);
+        const data = [];
+        term.onData((d) => data.push(d));
+        // How many times xterm's OWN CoreMouseService actually changed
+        // protocol — real xterm's setter fires this UNCONDITIONALLY, even
+        // for a repeated value (see mouseReporting.js's file doc), so this
+        // is the one true measure of "did the real protocol ever move",
+        // independent of anything this fixture or the binding claims.
+        const protocolChanges = { count: 0 };
+        term._core.coreMouseService.onProtocolChange(() => {
+          protocolChanges.count += 1;
+        });
+        if (install) installMouseReporting(term, container, { isEnabled: () => true });
+        return { term, data, protocolChanges };
+      }
+
+      const fixed = makeTerm(document.getElementById('fixed'), { install: true });
+      const control = makeTerm(document.getElementById('control'), { install: false });
+      const terms = { fixed, control };
+
+      // The driver's one entry point — everything it needs, nothing it has to
+      // discover. Coordinates are NOT exposed here on purpose: the CSS above
+      // is the contract (each container's fixed rect), so the driver can
+      // compute them itself without an extra round trip.
+      // A genuine parse barrier, not a fire-and-forget write: `term.write`
+      // queues the data and returns immediately, so without awaiting its
+      // own callback a caller could read `protocolOf`/count motion against
+      // PRE-parse state — a race that happens to pass today, not a
+      // guarantee. Resolving only once xterm's own callback fires (its
+      // signal that this chunk is fully parsed) closes that gap; `evalJs`
+      // on the Node side already awaits whatever promise comes back.
+      window.__h = {
+        writeFixed: (seq) => new Promise((resolve) => fixed.term.write(seq, resolve)),
+        writeControl: (seq) => new Promise((resolve) => control.term.write(seq, resolve)),
+        dataFixed: () => fixed.data.slice(),
+        dataControl: () => control.data.slice(),
+        clearFixed: () => { fixed.data.length = 0; },
+        clearControl: () => { control.data.length = 0; },
+        protocolOf: (which) => terms[which].term.modes.mouseTrackingMode,
+        bufferOf: (which) => terms[which].term.buffer.active.type,
+        protocolChangeCount: (which) => terms[which].protocolChanges.count,
+        resetProtocolChangeCount: (which) => { terms[which].protocolChanges.count = 0; },
+        ready: true,
+      };
+    </script>
+  </body>
+</html>

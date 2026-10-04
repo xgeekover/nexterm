@@ -35,6 +35,23 @@ export const SETTINGS_DEFAULTS = {
    * header does, and that row is sometimes the one you scrolled up to read.
    */
   terminalStickyHeader: true,
+  /**
+   * Copy a selection to the clipboard the moment the mouse makes it — a drag,
+   * a double- or triple-click. Warp's default, and the reason a selection can
+   * be pasted elsewhere without a second key. Only mouse selections: a find
+   * match is a selection too, and stepping through matches must not overwrite
+   * the clipboard. See src/lib/terminalClipboard.js.
+   */
+  terminalCopyOnSelect: true,
+  /**
+   * Let a full-screen program (vim, htop, tmux — anything on the alternate
+   * screen) have the mouse when it asks for it. A program in the scrollback —
+   * the shell, Claude Code — never gets it, so a drag there always selects;
+   * inside a full-screen program Shift-drag (and ⌥-drag on macOS) selects.
+   * Off: no program gets the mouse, as in Warp with mouse reporting off. See
+   * src/lib/mouseReporting.js.
+   */
+  terminalMouseReporting: true,
   terminalDefaultShell: 'default',
   /**
    * Where a NEW terminal starts, when nothing has asked for a directory.

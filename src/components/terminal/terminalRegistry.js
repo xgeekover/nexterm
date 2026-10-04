@@ -18,23 +18,38 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
+import { activateUnicode11, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
+import {
+  claimAtlasMergePage,
+  drawWebglNow,
+  gpuFailure,
+  isWebglContextLost,
+  mustDrawScreenFirst,
+  planGpuAttach,
+  planGpuReconcile,
+  releaseWebglAddon,
+  repairWebglAtlas,
+  settleWebglAtlas,
+  webglInternals,
+} from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { openExternal } from '../../lib/openExternal.js';
+import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
+import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 
 const instances = new Map();
 
 /**
- * Draw a terminal with xterm's WebGL renderer, once its element is in the
- * document.
+ * Draw a terminal with xterm's WebGL renderer.
  *
  * The DOM renderer draws block and box-drawing characters with the font, and a
  * glyph only covers the font's height — so at the default line height of 1.5
@@ -42,23 +57,350 @@ const instances = new Map();
  * background (reproduced with the block and box characters opencode draws:
  * gaps at 1.5, solid at 1.0). The WebGL renderer draws those characters itself,
  * filling the whole cell at any line height. It measures the font from the live
- * DOM, hence "once attached". Without WebGL, or when the context is lost, the
- * addon is dropped and xterm carries on with its DOM renderer.
+ * DOM, so it is made when the terminal is first shown. Without WebGL xterm
+ * carries on with its DOM renderer.
+ *
+ * A context is scarce, and on WebKit making one is what costs
+ * (`lib/webglLifecycle.js` has the rules and the reasons):
+ *
+ *   - a pane showing the terminal calls `ensureGpuRenderer`, which makes the
+ *     renderer the first time (before the pane fits the terminal — see
+ *     `planGpuAttach`), and calls the function it returns when it stops; the
+ *     terminal KEEPS its renderer while hidden, so switching tabs or groups
+ *     makes no context;
+ *   - past sixteen, the hidden terminal drawn longest ago gives its context
+ *     back first, and every terminal on screen draws before a context is made
+ *     (`drawScreenFirst`), so the engine never pushes out one on screen;
+ *   - a lost context is retried, on a schedule that cannot become a loop; a
+ *     hidden one whose context was lost gets a new one when shown;
+ *   - when the glyph atlas merges pages, every renderer is repaired in place
+ *     (`repairAtlas`) — addon-webgl 0.18 draws fragments after its second
+ *     merge.
+ *
+ * Everything else is settled in one pass, `reconcileGpus`, queued as a
+ * microtask: it runs after React has attached, detached and fitted every pane
+ * of a commit, and before the browser paints, so a terminal just shown is
+ * drawn at its fitted size for the very first frame.
  */
-export function ensureGpuRenderer(entry) {
-  if (entry.gpu !== undefined || !entry.container.isConnected) return;
+const gpuStats = {
+  created: 0,
+  failed: 0,
+  released: 0,
+  freedContexts: 0,
+  lost: 0,
+  lostOnScreen: 0,
+  drawnAhead: 0,
+  atlasRepairs: 0,
+  atlasRepairFallbacks: 0,
+  lastAtlasRepairMs: 0,
+  maxAtlasRepairMs: 0,
+};
+let gpuReconcileQueued = false;
+let gpuRetryTimer = 0;
+let gpuRetryTimerAt = Infinity;
+let atlasRepairQueued = false;
+// Every live renderer forwards the ONE shared atlas's merge to its own addon
+// (see `claimAtlasMergePage`), so the same canvas is reported once per
+// renderer. Tracked by identity, module-wide, so N reports of one merge ask
+// for exactly one repair — a WeakSet costs nothing once the atlas moves on.
+const handledAtlasMergeCanvases = new WeakSet();
+// The contexts let go of, weakly. WebKit keeps a lost context's slot until it
+// is garbage collected, so until then it still counts towards the cap.
+const releasedContexts = [];
+
+const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+function scheduleGpuReconcile() {
+  if (gpuReconcileQueued) return;
+  gpuReconcileQueued = true;
+  queueMicrotask(reconcileGpus);
+}
+
+/** One timer, for the earliest retry due; the pass it starts sets the next. */
+function scheduleGpuRetry(at) {
+  if (at === null || at >= gpuRetryTimerAt) return;
+  clearTimeout(gpuRetryTimer);
+  gpuRetryTimerAt = at;
+  gpuRetryTimer = setTimeout(() => {
+    gpuRetryTimer = 0;
+    gpuRetryTimerAt = Infinity;
+    scheduleGpuReconcile();
+  }, Math.max(0, at - clock()));
+}
+
+function gpuStateOf(entry) {
+  const attached = entry.attachCount > 0;
+  return {
+    attached,
+    connected: entry.container.isConnected,
+    hasGpu: Boolean(entry.gpu),
+    lost: Boolean(entry.gpu) && isWebglContextLost(entry.gpu),
+    rebuild: entry.gpuRebuild,
+    // Off screen at the last pass and on screen now: the user is looking at
+    // it again, and whatever gave up on its renderer gets another go.
+    freshAttach: attached && !entry.wasAttached,
+    retryAt: entry.gpuRetryAt,
+    attachedAt: entry.attachedAt,
+    drawnAt: entry.lastDrawnAt,
+  };
+}
+
+/** Contexts let go of that may still hold a slot; null when that cannot be known. */
+function lingeringContexts() {
+  if (typeof WeakRef === 'undefined') return null;
+  for (let i = releasedContexts.length - 1; i >= 0; i -= 1) {
+    if (!releasedContexts[i].deref()) releasedContexts.splice(i, 1);
+  }
+  return releasedContexts.length;
+}
+
+function releaseGpu(entry) {
+  const addon = entry.gpu;
+  if (!addon) return;
+  entry.gpu = null;
+  const { gl } = webglInternals(addon);
+  const { freedContext } = releaseWebglAddon(addon);
+  if (gl && typeof WeakRef !== 'undefined') releasedContexts.push(new WeakRef(gl));
+  gpuStats.released += 1;
+  if (freedContext) gpuStats.freedContexts += 1;
+}
+
+/**
+ * Right before a context is made: when the page may be at its cap, every
+ * terminal on screen draws now, so the context the engine pushes out to make
+ * room is one nobody is looking at (`mustDrawScreenFirst`).
+ */
+function drawScreenFirst() {
+  let held = 0;
+  for (const entry of instances.values()) if (entry.gpu && !isWebglContextLost(entry.gpu)) held += 1;
+  if (!mustDrawScreenFirst({ held, lingering: lingeringContexts() })) return;
+  for (const entry of instances.values()) {
+    if (!entry.gpu || entry.attachCount === 0) continue;
+    if (drawWebglNow(entry.gpu, entry.term, { flush: true })) {
+      entry.lastDrawnAt = clock();
+      gpuStats.drawnAhead += 1;
+    }
+  }
+}
+
+/** @returns {boolean} whether the terminal now has a WebGL renderer */
+function createGpu(entry) {
+  let addon = null;
   try {
-    const addon = new WebglAddon();
-    addon.onContextLoss(() => {
-      addon.dispose();
-      entry.gpu = null;
+    addon = new WebglAddon();
+    addon.onContextLoss(() => handleGpuLoss(entry, addon));
+    // The atlas is shared, but this callback is not: every live renderer
+    // forwards the SAME merge canvas here, once each. `claimAtlasMergePage`
+    // lets only the first of those through, so N renderers ask for one
+    // repair instead of N.
+    addon.onAddTextureAtlasCanvas((canvas) => {
+      if (claimAtlasMergePage(canvas, handledAtlasMergeCanvases)) requestAtlasRepair();
     });
     entry.term.loadAddon(addon);
-    entry.gpu = addon;
   } catch (err) {
     console.warn('[Terminal] WebGL renderer unavailable, using the DOM renderer:', err);
-    entry.gpu = null;
+    if (addon) releaseWebglAddon(addon);
+    gpuStats.failed += 1;
+    // Never made, so not a renderer that had been healthy: no fresh count.
+    const next = gpuFailure({ failures: entry.gpuFailures, createdAt: null }, clock());
+    entry.gpuFailures = next.failures;
+    entry.gpuRetryAt = next.retryAt;
+    return false;
   }
+  entry.gpu = addon;
+  entry.gpuCreatedAt = clock();
+  // A context counts as active from the moment it is made.
+  entry.lastDrawnAt = entry.gpuCreatedAt;
+  entry.drawPending = true;
+  gpuStats.created += 1;
+  return true;
+}
+
+/**
+ * Fit a terminal on screen to its pane again, and tell the shell: its renderer
+ * changed under it, and WebGL and DOM cells are not the same width.
+ */
+function refitOnScreen(tabId, entry) {
+  fitAndReport({
+    tabId,
+    term: entry.term,
+    fitAddon: entry.fitAddon,
+    resizePty: useTerminalStore.getState().resizePty,
+    fittable: isFittable(entry.container),
+  });
+}
+
+/**
+ * addon-webgl reports a loss only after waiting 3 s for the browser to restore
+ * the context itself, so by now it is gone for good. A hidden terminal gets a
+ * new one when it is shown again; one on screen after the backoff.
+ */
+function handleGpuLoss(entry, addon) {
+  if (entry.gpu !== addon) return;
+  gpuStats.lost += 1;
+  if (entry.attachCount > 0) gpuStats.lostOnScreen += 1;
+  const createdAt = entry.gpuCreatedAt;
+  releaseGpu(entry);
+  const next = gpuFailure({ failures: entry.gpuFailures, createdAt }, clock());
+  entry.gpuFailures = next.failures;
+  entry.gpuRetryAt = next.retryAt;
+  entry.refitPending = entry.attachCount > 0;
+  scheduleGpuReconcile();
+}
+
+/**
+ * The atlas is shared by every terminal with the same font and colours, and
+ * a merge leaves every renderer drawing from it wrong (see
+ * `repairWebglAtlas`). Called from inside a render, hence a queued pass: by
+ * the time it runs, the render that merged has finished.
+ */
+function requestAtlasRepair() {
+  if (atlasRepairQueued) return;
+  atlasRepairQueued = true;
+  queueMicrotask(repairAtlas);
+}
+
+/**
+ * Every renderer re-uploads its pages and rebuilds its cells: one on screen
+ * draws its whole viewport now, before the frame is painted, and a hidden one
+ * is drawn in full when it is shown. No renderer is made or let go, so no
+ * context is either. Then the atlas stops asking every frame for a rebuild.
+ * A renderer this addon version cannot repair in place is made again — on
+ * screen now, hidden when next shown.
+ */
+function repairAtlas() {
+  atlasRepairQueued = false;
+  const startedAt = clock();
+  const atlases = new Set();
+  let unrepaired = false;
+  for (const entry of instances.values()) {
+    if (!entry.gpu) continue;
+    const atlas = repairWebglAtlas(entry.gpu);
+    if (!atlas) {
+      entry.gpuRebuild = true;
+      unrepaired = true;
+      continue;
+    }
+    atlases.add(atlas);
+    if (entry.attachCount > 0) {
+      if (drawWebglNow(entry.gpu, entry.term)) entry.lastDrawnAt = clock();
+    } else {
+      entry.term.refresh(0, entry.term.rows - 1);
+    }
+  }
+  for (const atlas of atlases) settleWebglAtlas(atlas);
+  const ms = clock() - startedAt;
+  gpuStats.atlasRepairs += 1;
+  gpuStats.lastAtlasRepairMs = ms;
+  gpuStats.maxAtlasRepairMs = Math.max(gpuStats.maxAtlasRepairMs, ms);
+  if (unrepaired) {
+    gpuStats.atlasRepairFallbacks += 1;
+    scheduleGpuReconcile();
+  }
+}
+
+function reconcileGpus() {
+  gpuReconcileQueued = false;
+  const tabIds = [...instances.keys()];
+  const entries = [...instances.values()];
+  const states = entries.map((entry) => {
+    const state = gpuStateOf(entry);
+    if (state.freshAttach) {
+      entry.gpuFailures = 0;
+      entry.gpuRetryAt = 0;
+      state.retryAt = 0;
+    }
+    entry.wasAttached = state.attached;
+    return state;
+  });
+  const plan = planGpuReconcile(states, { now: clock() });
+
+  for (const i of plan.release) {
+    entries[i].gpuRebuild = false;
+    releaseGpu(entries[i]);
+  }
+  if (plan.create.length > 0) drawScreenFirst();
+  for (const i of plan.create) {
+    // Already on screen and fitted — with the DOM renderer's cells, unless
+    // this is a rebuild, where the refit finds nothing to change.
+    if (createGpu(entries[i])) entries[i].refitPending = true;
+  }
+  entries.forEach((entry, i) => {
+    if (entry.refitPending) {
+      entry.refitPending = false;
+      if (entry.attachCount > 0) refitOnScreen(tabIds[i], entry);
+    }
+    if (entry.drawPending) {
+      entry.drawPending = false;
+      if (entry.gpu && entry.attachCount > 0 && drawWebglNow(entry.gpu, entry.term)) entry.lastDrawnAt = clock();
+    }
+  });
+  scheduleGpuRetry(plan.retryAt);
+}
+
+/**
+ * A pane is showing this terminal: give it a WebGL renderer if it has none,
+ * now if a context can be had, else as soon as one is free. Returns the
+ * function to call when the pane stops showing it. The terminal keeps its
+ * renderer after that: a context made on every tab switch is what pushed an
+ * idle terminal on screen out of its own.
+ */
+export function ensureGpuRenderer(entry) {
+  if (!entry || entry.disposed) return () => {};
+  entry.attachCount += 1;
+  if (entry.attachCount === 1) {
+    entry.attachedAt = clock();
+    if (entry.wasAttached === false) {
+      entry.gpuFailures = 0;
+      entry.gpuRetryAt = 0;
+    }
+    // Kept while hidden, and lost meanwhile — pushed out to make room, or a
+    // GPU reset. addon-webgl would say so only after waiting 3 s, with the
+    // terminal blank on screen all the while.
+    if (entry.gpu && isWebglContextLost(entry.gpu)) {
+      gpuStats.lost += 1;
+      releaseGpu(entry);
+    }
+    if (!entry.gpu) {
+      const entries = [...instances.values()];
+      const decision = planGpuAttach(entries.map(gpuStateOf), entries.indexOf(entry));
+      if (decision.create) {
+        for (const i of decision.releaseFirst) releaseGpu(entries[i]);
+        drawScreenFirst();
+        createGpu(entry);
+      }
+    }
+    entry.wasAttached = true;
+  }
+  // Drawn by the queued pass, once the pane has fitted it.
+  entry.drawPending = true;
+  scheduleGpuReconcile();
+  let shown = true;
+  return function stopShowing() {
+    if (!shown) return;
+    shown = false;
+    entry.attachCount = Math.max(0, entry.attachCount - 1);
+    scheduleGpuReconcile();
+  };
+}
+
+/** What the GPU renderers are doing — read by the lab and through the app's debug bridge. */
+export function getGpuStats() {
+  let live = 0;
+  let hidden = 0;
+  let shown = 0;
+  let shownWithoutGpu = 0;
+  for (const entry of instances.values()) {
+    if (entry.gpu) {
+      live += 1;
+      if (entry.attachCount === 0) hidden += 1;
+    }
+    if (entry.attachCount > 0) {
+      shown += 1;
+      if (!entry.gpu) shownWithoutGpu += 1;
+    }
+  }
+  return { live, hidden, shown, shownWithoutGpu, lingering: lingeringContexts(), ...gpuStats };
 }
 
 /** Keys the Settings window exposes that should update every live terminal
@@ -422,6 +764,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  // Emoji are two cells wide to the programs running here; see terminalCompat.js.
+  activateUnicode11(term, Unicode11Addon);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);
@@ -432,6 +776,20 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     useTerminalStore.getState().setFindResults?.(tabId, results);
   });
   term.open(container);
+
+  // ---- Korean inline IME (macOS only) — see src/lib/hangulInlineIme.js ----
+  // WebKit composes Hangul by rewriting the textarea in place, which xterm
+  // ignores; this sends each syllable whole. Installed once per instance so it
+  // survives remounts, and disposed with the terminal. Does nothing elsewhere.
+  installHangulInlineIme(term, container);
+  // ---- end Korean inline IME ----------------------------------------------
+
+  // ---- Selection, copy on select, mouse reporting — src/lib/terminalClipboard.js ----
+  // Warp's model: only a full-screen program gets the mouse, a drag anywhere
+  // else selects, and a selection is copied as it is made. After the IME, so
+  // its mousedown listener still runs first. Disposed with the terminal.
+  installTerminalClipboard(term, container, { settings: useSettingsStore });
+  // ---- end selection, copy on select, mouse reporting ------------------------
 
   const dataDisposable = onData ? term.onData(onData) : null;
 
@@ -452,7 +810,27 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     dataDisposable,
     exited: false,
     stopPtyListener: null,
+    // The WebGL renderer and its bookkeeping — see `ensureGpuRenderer`.
+    gpu: null,
+    attachCount: 0,
+    attachedAt: 0,
+    wasAttached: false,
+    gpuRebuild: false,
+    gpuFailures: 0,
+    gpuRetryAt: 0,
+    gpuCreatedAt: null,
+    // When its renderer last drew: the engines push out the context that has
+    // gone longest without drawing, so this is the order hidden ones go in.
+    lastDrawnAt: 0,
+    renderDisposable: null,
+    drawPending: false,
+    refitPending: false,
+    disposed: false,
   };
+  const drawn = entry;
+  entry.renderDisposable = term.onRender(() => {
+    drawn.lastDrawnAt = clock();
+  });
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
   return entry;
@@ -532,10 +910,19 @@ setTerminalNoticeSink(writeNotice);
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;
+  // Before `term.dispose()`, which would drop the WebGL addon without letting
+  // its context go — and a context nothing can reach still counts against the
+  // browser's 16 until it is collected, evicting terminals that are open.
+  entry.disposed = true;
+  entry.attachCount = 0;
+  releaseGpu(entry);
+  entry.renderDisposable?.dispose();
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.searchAddon?.dispose();
   entry.term.dispose();
   instances.delete(tabId);
+  // The context just freed may be the one a terminal on screen is waiting for.
+  scheduleGpuReconcile();
 }
