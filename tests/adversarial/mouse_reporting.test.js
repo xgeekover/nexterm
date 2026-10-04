@@ -335,7 +335,9 @@ describe('Mouse reporting: the binding, against xterm\'s own handling', () => {
     assert.equal(term.modes.mouseTrackingMode, 'any', 'in force on the alternate screen');
     term.write('\x1b[?1049l');
     assert.equal(term.modes.mouseTrackingMode, 'none', 'off again in the scrollback');
-    assert.equal(binding.requested, 'any', 'still what the program asked for');
+    // L1: forgotten the moment the alternate screen is left, same as a DECRST
+    // or RIS — see MB-04 for why.
+    assert.equal(binding.requested, 'none', 'not remembered past leaving the alternate screen');
     term.write('\x1b[?1003l');
     assert.equal(binding.requested, 'none');
   });
@@ -351,14 +353,21 @@ describe('Mouse reporting: the binding, against xterm\'s own handling', () => {
     assert.equal(term.screen, 'normal');
   });
 
-  test('MB-04: a program that dies on the alternate screen with tracking on leaves the scrollback selectable', () => {
-    const { term } = withBinding();
+  test('MB-04 (L1): a program that dies on the alternate screen with tracking on leaves the scrollback selectable, and the next program starts clean', () => {
+    const { term, binding } = withBinding();
     term.write('\x1b[?1049h\x1b[?1002h');
     assert.equal(term.modes.mouseTrackingMode, 'drag');
-    term.write('\x1b[?1049l'); // `reset`-less recovery: just the screen switch
+    term.write('\x1b[?1049l'); // `reset`-less recovery: just the screen switch — killed, not exited
     assert.equal(term.modes.mouseTrackingMode, 'none');
-    term.write('\x1b[?1049h'); // the next full-screen program inherits it, as in any terminal
-    assert.equal(term.modes.mouseTrackingMode, 'drag');
+    assert.equal(binding.requested, 'none', 'forgotten along with the screen, not just suspended');
+    // fails on f8a757d: the next full-screen program used to inherit it —
+    // `less`, `man`, `git log` would get the mouse (the wheel as `ESC[<64;…M`
+    // instead of scrolling, a drag not selecting) though none of them ever
+    // asked for it themselves.
+    term.write('\x1b[?1049h');
+    assert.equal(term.modes.mouseTrackingMode, 'none', 'the next program starts clean, not inheriting a dead one\'s request');
+    term.write('\x1b[?1000h'); // but asking for its own still works, same as any program
+    assert.equal(term.modes.mouseTrackingMode, 'vt200');
   });
 
   test('MB-05: one sequence that enters the alternate screen and asks for tracking, either order', () => {

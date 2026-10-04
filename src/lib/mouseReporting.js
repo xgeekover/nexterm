@@ -14,11 +14,15 @@
  * anything on the ALTERNATE buffer — gets the mouse when it asks for it. A
  * program writing into the scrollback — the shell, Claude Code, an inline
  * picker — does not, and a drag there selects text as it does at a prompt.
- * What a program asked for is remembered either way: it takes effect the
- * moment that program switches to the alternate screen and stops the moment
- * it leaves, exactly as if it had asked again. Inside a full-screen program,
- * Shift-drag (and ⌥-drag on macOS) still selects — see `pressForcesSelection`
- * and src/lib/terminalClipboard.js, which installs this.
+ * What a program asks for from the scrollback is remembered: it takes effect
+ * the moment that SAME program switches to the alternate screen, exactly as
+ * if it had asked again there. No further than that — leaving the alternate
+ * screen forgets it too, the same as a DECRST or RIS would, so a program
+ * killed without disabling its own tracking first (no clean exit, nothing
+ * sent) cannot leave it for the NEXT full-screen program to inherit: `less`,
+ * `man`, `git log` start clean. Inside a full-screen program, Shift-drag (and
+ * ⌥-drag on macOS) still selects — see `pressForcesSelection` and
+ * src/lib/terminalClipboard.js, which installs this.
  *
  * Only the TRACKING protocols are gated (9, 1000, 1002, 1003). The encodings
  * (1005, 1006, 1015, 1016) and focus reporting (1004) are not mouse events in
@@ -196,6 +200,7 @@ class MouseReportingAddon {
     const current = term.modes?.mouseTrackingMode;
     this._requested = PROTOCOLS.has(current) ? current : 'none';
     this._setProtocol = protocolSetter(term);
+    this._wasAlternate = isAlternate(term);
 
     const parser = term.parser;
     if (parser?.registerCsiHandler) {
@@ -219,7 +224,29 @@ class MouseReportingAddon {
     // A switch of screen is when a remembered request starts or stops
     // applying. Fired synchronously, from inside xterm's own handling of the
     // switch, so the protocol changes with the screen and not a write later.
-    if (term.buffer?.onBufferChange) this._disposables.push(term.buffer.onBufferChange(() => this.sync()));
+    if (term.buffer?.onBufferChange) {
+      this._disposables.push(
+        term.buffer.onBufferChange(() => {
+          const alternate = isAlternate(term);
+          // Leaving the alternate screen forgets the request, same as a
+          // DECRST or RIS would. Without this, a program killed without
+          // disabling its own tracking first (no DECRST, no RIS — just gone)
+          // leaves it for the NEXT full-screen program to inherit: `less`,
+          // `man`, `git log` would get the mouse the moment they draw their
+          // own first alternate-screen frame, though they never asked for it
+          // — the wheel sends `ESC[<64;…M` instead of scrolling, and a drag
+          // stops selecting. The shell's own OSC 133 "D" (next prompt ready)
+          // would be the more exact moment to forget it, but that only
+          // reaches terminalStore.js, keyed by session id over IPC from the
+          // backend — not this module, which (on purpose) knows only the one
+          // `term` it was installed on. Leaving the alternate screen catches
+          // the same case: nothing stays full-screen without it.
+          if (this._wasAlternate && !alternate) this._requested = 'none';
+          this._wasAlternate = alternate;
+          this.sync();
+        })
+      );
+    }
     if (term.onWriteParsed) {
       this._disposables.push(
         term.onWriteParsed(() => {
