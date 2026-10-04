@@ -146,3 +146,87 @@ describe('Mouse reporting: never downgrade during a held button', () => {
     assert.equal(term.modes.mouseTrackingMode, 'any', 'the deferred downgrade never applied — dispose cancelled it');
   });
 });
+
+describe('Mouse reporting: a throwing internal step never wedges the terminal', () => {
+  test('DT-07: the tracking-mode handler throwing is caught, logged once, and the terminal keeps working', () => {
+    // Measured in the real app: a custom parser handler that threw wedged
+    // xterm's WriteBuffer for good — no further output, ever, and write
+    // callbacks that never fired again. This stands in for a bug inside
+    // this binding's OWN handler and checks it cannot do that.
+    const { term, binding } = withBinding();
+    const originalPrivateMode = binding._privateMode.bind(binding);
+    let callCount = 0;
+    let shouldThrow = false;
+    binding._privateMode = (final, params) => {
+      callCount += 1;
+      // What a registered registerCsiHandler callback actually receives,
+      // through xterm's public API: a plain array (`params.toArray()`
+      // already applied), never a Params object — matching FakeXterm's own
+      // write(), which parses straight into one, same as the real thing.
+      assert.ok(Array.isArray(params), 'the public API hands a plain array, not a Params object');
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('boom: a bug inside the handler itself');
+      }
+      return originalPrivateMode(final, params);
+    };
+    const warn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      shouldThrow = true;
+      // Two sequences in one write: the first (1049) throws; the fallback
+      // ('not handled') lets xterm apply THAT one natively, and the second
+      // (1003), reached right after, goes through the handler normally.
+      term.write('\x1b[?1049h\x1b[?1003h');
+      assert.equal(warnings.length, 1, 'logged once');
+      assert.ok(warnings[0].includes('tracking-mode handler'), 'names where it failed');
+      assert.equal(term.screen, 'alternate', 'xterm still switched screens — the fallback let it apply that sequence itself');
+
+      // The WriteBuffer is not wedged: later writes keep reaching the SAME
+      // handler, now behaving normally again, and settle correctly.
+      term.write('\x1b[?1049l'); // a clean slate: L1 clears every flag
+      term.write('\x1b[?1049h\x1b[?1000h');
+      assert.equal(term.modes.mouseTrackingMode, 'vt200', 'a later write reaches the terminal exactly as it should');
+      assert.equal(warnings.length, 1, 'still just the one — not logged again for a handler that now behaves');
+      assert.ok(callCount > 3, 'later sequences keep reaching the handler at all');
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  test('DT-08: a throwing buffer-change or write-parsed step is caught the same way, by its own label', () => {
+    const { term, binding } = withBinding();
+    const originalSync = binding.sync.bind(binding);
+    let shouldThrow = false;
+    binding.sync = (...args) => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('boom: a bug inside sync() itself');
+      }
+      return originalSync(...args);
+    };
+    const warn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      shouldThrow = true;
+      term.write('\x1b[?1049h'); // onBufferChange fires, calls the (now throwing) sync()
+      assert.equal(term.screen, 'alternate', 'the screen switch itself is unaffected — xterm did that before the listener ran');
+      assert.equal(warnings.length, 1);
+      assert.ok(warnings[0].includes('buffer-change handler'));
+
+      shouldThrow = true;
+      term.write('\x1b[?1000h'); // onWriteParsed fires, calls the (again throwing) sync()
+      assert.equal(warnings.length, 2, 'a DIFFERENT label gets its own one-time warning, not swallowed by the first');
+      assert.ok(warnings[1].includes('write-parsed handler'));
+
+      // Nothing wedged: an un-thrown sequence right after settles normally.
+      term.write('\x1b[?1049l\x1b[?1049h\x1b[?1000h');
+      assert.equal(term.modes.mouseTrackingMode, 'vt200', 'a later write still reaches the terminal');
+      assert.equal(warnings.length, 2, 'no further warnings once sync() behaves again');
+    } finally {
+      console.warn = warn;
+    }
+  });
+});

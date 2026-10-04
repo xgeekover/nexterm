@@ -290,6 +290,7 @@ class MouseReportingAddon {
     this._setProtocol = null;
     this._disposables = [];
     this._warned = false;
+    this._warnedLabels = new Set();
     this._tracking = false;
     this._trackingListeners = new Set();
     this._buttonHeld = false;
@@ -308,18 +309,28 @@ class MouseReportingAddon {
       // Run before xterm's own DECSET/DECRST: custom handlers are tried first,
       // and returning true keeps the sequence from xterm entirely.
       this._disposables.push(
-        parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => this._privateMode('h', params)),
-        parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => this._privateMode('l', params))
+        parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) =>
+          this._safeguard('tracking-mode handler', () => this._privateMode('h', params), false)
+        ),
+        parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) =>
+          this._safeguard('tracking-mode handler', () => this._privateMode('l', params), false)
+        )
       );
     }
     if (parser?.registerEscHandler) {
       // RIS (`ESC c`, what `reset` sends): xterm turns tracking off and goes
       // back to the normal screen; every flag goes with it.
       this._disposables.push(
-        parser.registerEscHandler({ final: 'c' }, () => {
-          this._flags = NO_FLAGS;
-          return false;
-        })
+        parser.registerEscHandler({ final: 'c' }, () =>
+          this._safeguard(
+            'RIS handler',
+            () => {
+              this._flags = NO_FLAGS;
+              return false;
+            },
+            false
+          )
+        )
       );
     }
     // A switch of screen is when a remembered request starts or stops
@@ -327,38 +338,71 @@ class MouseReportingAddon {
     // switch, so the protocol changes with the screen and not a write later.
     if (term.buffer?.onBufferChange) {
       this._disposables.push(
-        term.buffer.onBufferChange(() => {
-          const alternate = isAlternate(term);
-          // Leaving the alternate screen forgets every flag, same as a DECRST
-          // or RIS would. Without this, a program killed without disabling
-          // its own tracking first (no DECRST, no RIS — just gone) leaves it
-          // for the NEXT full-screen program to inherit: `less`, `man`,
-          // `git log` would get the mouse the moment they draw their own
-          // first alternate-screen frame, though they never asked for it —
-          // the wheel sends `ESC[<64;…M` instead of scrolling, and a drag
-          // stops selecting. The shell's own OSC 133 "D" (next prompt ready)
-          // would be the more exact moment to forget it, but that only
-          // reaches terminalStore.js, keyed by session id over IPC from the
-          // backend — not this module, which (on purpose) knows only the one
-          // `term` it was installed on. Leaving the alternate screen catches
-          // the same case: nothing stays full-screen without it.
-          if (this._wasAlternate && !alternate) this._flags = NO_FLAGS;
-          this._wasAlternate = alternate;
-          this.sync();
-        })
+        term.buffer.onBufferChange(() =>
+          this._safeguard('buffer-change handler', () => {
+            const alternate = isAlternate(term);
+            // Leaving the alternate screen forgets every flag, same as a
+            // DECRST or RIS would. Without this, a program killed without
+            // disabling its own tracking first (no DECRST, no RIS — just
+            // gone) leaves it for the NEXT full-screen program to inherit:
+            // `less`, `man`, `git log` would get the mouse the moment they
+            // draw their own first alternate-screen frame, though they never
+            // asked for it — the wheel sends `ESC[<64;…M` instead of
+            // scrolling, and a drag stops selecting. The shell's own OSC 133
+            // "D" (next prompt ready) would be the more exact moment to
+            // forget it, but that only reaches terminalStore.js, keyed by
+            // session id over IPC from the backend — not this module, which
+            // (on purpose) knows only the one `term` it was installed on.
+            // Leaving the alternate screen catches the same case: nothing
+            // stays full-screen without it.
+            if (this._wasAlternate && !alternate) this._flags = NO_FLAGS;
+            this._wasAlternate = alternate;
+            this.sync();
+          })
+        )
       );
     }
     if (term.onWriteParsed) {
       this._disposables.push(
-        term.onWriteParsed(() => {
-          if (!this._syncAfterWrite) return;
-          this._syncAfterWrite = false;
-          this.sync();
-        })
+        term.onWriteParsed(() =>
+          this._safeguard('write-parsed handler', () => {
+            if (!this._syncAfterWrite) return;
+            this._syncAfterWrite = false;
+            this.sync();
+          })
+        )
       );
     }
     this._bindButtonTracking();
     this.sync();
+  }
+
+  /**
+   * Run one of this binding's OWN callbacks — everything the parser or a
+   * write calls synchronously, from inside xterm's own processing, rather
+   * than from a browser event (`_bindButtonTracking`'s listeners aren't
+   * routed through this; a DOM event handler throwing does not wedge xterm).
+   *
+   * Measured in the real app: a custom parser handler that threw wedged
+   * xterm's WriteBuffer for good — no further output, ever, and write
+   * callbacks that never fired again. None of this is worth that: on an
+   * exception, xterm is told `fallback` instead (for a parser handler,
+   * `false` — "not handled", so xterm applies the sequence itself) and the
+   * write proceeds. Logged once, not on every write a recurring bug would
+   * otherwise spam the console with.
+   */
+  _safeguard(label, fn, fallback) {
+    try {
+      return fn();
+    } catch (err) {
+      // Once per LABEL, not once ever: a recurring bug in one handler should
+      // not bury a later, different one under "already warned".
+      if (!this._warnedLabels.has(label)) {
+        this._warnedLabels.add(label);
+        console.warn(`[Terminal] mouse reporting's ${label} failed; ignoring it so the terminal keeps working:`, err);
+      }
+      return fallback;
+    }
   }
 
   /**
@@ -367,8 +411,20 @@ class MouseReportingAddon {
    * passed to `term.open()`, an ancestor of xterm's own `term.element` — so
    * this always learns of a press before xterm's own mousedown handler runs
    * (bubble-phase, on `term.element`), regardless of install order. Release
-   * is tracked on the container's window: a drag may end, or the window lose
-   * focus, anywhere.
+   * is tracked on the container's window too: a drag may end anywhere, not
+   * just back over this terminal, and any mouseup, anywhere, means the SAME
+   * single pointer's button is now up, wherever its coordinates land.
+   *
+   * `blur` is the defensive last resort — losing the window itself (OS focus
+   * leaving the browser, e.g. alt-tab) rather than a clean mouseup — so it is
+   * checked against `e.target === view`: focus/blur do not bubble, but a
+   * CAPTURING listener on `view` still sees one from any element on the page
+   * (xterm calling `this.focus()` on mousedown, for instance) — restricted to
+   * events actually targeting the window itself, that does not fire merely
+   * because a SECOND terminal's own press moved focus to it (observed with
+   * two terminals open: the second one's mousedown blurred the first one's
+   * textarea, and without this check that falsely cleared the first one's
+   * held-button state mid-gesture).
    */
   _bindButtonTracking() {
     const container = this._container;
@@ -380,7 +436,9 @@ class MouseReportingAddon {
     const onUp = (e) => {
       if (!e || (e.button ?? 0) === 0 || !e.buttons) this._setButtonHeld(false);
     };
-    const onBlur = () => this._setButtonHeld(false);
+    const onBlur = (e) => {
+      if (!e || e.target === view) this._setButtonHeld(false);
+    };
     container.addEventListener('mousedown', onDown, true);
     this._disposables.push({ dispose: () => container.removeEventListener('mousedown', onDown, true) });
     if (view?.addEventListener) {
@@ -473,11 +531,7 @@ class MouseReportingAddon {
     if (next === this._tracking) return;
     this._tracking = next;
     for (const listener of [...this._trackingListeners]) {
-      try {
-        listener(next);
-      } catch (err) {
-        console.error('[Terminal] a mouse-tracking listener failed:', err);
-      }
+      this._safeguard('onTrackingChange listener', () => listener(next), undefined);
     }
   }
 
