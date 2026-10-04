@@ -126,21 +126,31 @@ describe('Mouse reporting: which protocol is in force (pure)', () => {
     assert.deepEqual(leave, { flags: { 1000: true }, requested: 'vt200', alternate: false, effective: 'none', action: 'pass' });
   });
 
-  test('MR-06b: independent flags — resetting one leaves a HIGHER one in force, or falls back to the next one down', () => {
-    // Claude resends `?1000h` alone (an Ink redraw); 1003 was already on and
-    // stays the highest. Real X11 xterm reports through the highest of
-    // 9/1000/1002/1003 it has enabled — never just "whichever was last set",
-    // which is xterm.js's own (and the bug this whole file is about).
-    const stillAny = planPrivateModes({ final: 'l', params: [1000], flags: { 1000: true, 1003: true }, alternate: true });
-    assert.equal(stillAny.requested, 'any', '?1000l with 1003 on → any');
-    assert.deepEqual(stillAny.flags, { 1003: true });
+  test('MR-06b: independent flags for a SET — but a RESET of any one clears every flag, xterm.js-compatible', () => {
+    // Claude resends `?1000h` alone (an Ink redraw) while 1003 is already on:
+    // a SET is still independent/additive — nothing is cleared, and the
+    // highest of the two stays in force. VTE/Alacritty/WezTerm-style, not
+    // xterm.js's own "replace whatever was active" — see the file doc.
+    const resend = planPrivateModes({ final: 'h', params: [1000], flags: { 1003: true }, alternate: true });
+    assert.equal(resend.requested, 'any', '?1000h with 1003 already on → still any');
+    assert.deepEqual(resend.flags, { 1000: true, 1003: true });
 
-    // Resetting the CURRENTLY highest one falls back to the next one down —
+    // A RESET is NOT independent, though: turning off any ONE of
+    // 9/1000/1002/1003 turns tracking off outright, same as xterm's own
+    // DECRST — not just that one mode's own flag. Otherwise a program that
+    // turns the mouse off with a single DECRST (the common case) would keep
+    // getting reports merely because it had set a higher mode earlier and
+    // never explicitly reset THAT one too.
+    const resetLower = planPrivateModes({ final: 'l', params: [1000], flags: { 1000: true, 1003: true }, alternate: true });
+    assert.equal(resetLower.requested, 'none', '?1000l, even with 1003 also on, turns tracking off entirely');
+    assert.deepEqual(resetLower.flags, {}, 'every flag clears, not just 1000\'s own');
+
+    // Same when it is the currently-highest one that is reset directly —
     // a genuine downgrade (what "never downgrade during a held button", in
     // src/lib/mouseReporting.js, exists for).
-    const fallsBack = planPrivateModes({ final: 'l', params: [1003], flags: { 1000: true, 1003: true }, alternate: true });
-    assert.equal(fallsBack.requested, 'vt200', '?1003l with 1000 still on → vt200');
-    assert.deepEqual(fallsBack.flags, { 1000: true });
+    const resetHigher = planPrivateModes({ final: 'l', params: [1003], flags: { 1000: true, 1003: true }, alternate: true });
+    assert.equal(resetHigher.requested, 'none', '?1003l, even with 1000 also on, turns tracking off entirely');
+    assert.deepEqual(resetHigher.flags, {});
   });
 
   test('MR-07: encodings, focus and every other mode are never touched', () => {
@@ -288,22 +298,41 @@ describe('Mouse reporting: the binding, against xterm\'s own handling', () => {
     assert.equal(term.modes.mouseTrackingMode, 'none', 'nothing comes back on the next full-screen program');
   });
 
-  test('MB-09: an xterm without the mouse service still refuses requests from the scrollback; transitions are left alone', () => {
+  test('MB-09 (LOW 4): no settable mouse service — falls back to passing every tracking sequence straight to xterm', () => {
+    // `_applyToTerm` has no setter to call once a sequence is intercepted on
+    // an xterm like this, so dropping it here (the normal gating) would
+    // refuse every full-screen program's request FOR GOOD. Fails on
+    // 4fc2c7e: used to stay 'none' forever instead, meaning a full-screen
+    // program never got the mouse at all on such a terminal.
     const warn = console.warn;
     const warnings = [];
     console.warn = (...args) => warnings.push(args.join(' '));
     try {
       const { term, binding } = withBinding({ mouseService: false });
       assert.equal(binding.canSetProtocol, false);
+
       term.write('\x1b[?1003h');
-      assert.equal(term.modes.mouseTrackingMode, 'none', 'still refused — the part that matters');
-      term.write('\x1b[?1049h');
-      assert.equal(term.modes.mouseTrackingMode, 'none', 'cannot be put in force without a write');
-      term.write('\x1b[?1049l\x1b[?1049h');
-      assert.equal(warnings.length, 1, 'said so, once');
+      assert.equal(term.modes.mouseTrackingMode, 'any', 'ungated: xterm applied it natively, as it would have before this file existed');
+      assert.equal(binding.requested, 'any');
+
+      term.write('\x1b[?1049h'); // full-screen too — same ungated passthrough, no special casing
+      assert.equal(term.modes.mouseTrackingMode, 'any');
+      term.write('\x1b[?1003l\x1b[?1049l');
+      assert.equal(term.modes.mouseTrackingMode, 'none');
+      assert.equal(warnings.length, 0, 'never even tries to call a setter that does not exist');
     } finally {
       console.warn = warn;
     }
+  });
+
+  test('MB-09b (LOW 4): FakeXterm lacking `_core` entirely — `canSetProtocol` is false, not merely unset', () => {
+    const term = new FakeXterm({ mouseService: false });
+    assert.equal(term._core, undefined);
+    const binding = installMouseReporting(term, null, { isEnabled: () => true });
+    assert.equal(binding.canSetProtocol, false);
+    term.write('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h');
+    assert.equal(term.modes.mouseTrackingMode, 'any', 'every mode applied natively, including the non-tracking ones');
+    assert.equal(term.encoding, 'SGR');
   });
 
   test('MB-10: installed once per terminal, and disposed with it', () => {
@@ -372,6 +401,41 @@ describe('Mouse reporting: the binding, against xterm\'s own handling', () => {
 
     assert.equal(typeof binding.onTrackingChange(() => {}), 'function', 'always returns an unsubscribe function');
     assert.equal(binding.onTrackingChange(null)(), undefined, 'a non-function listener is ignored, harmlessly');
+  });
+
+  test('MB-12 (LOW 6): a second onTrackingChange listener\'s own failure is still logged, under its own label', () => {
+    const { term, binding } = withBinding();
+    const warn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      binding.onTrackingChange(function listenerA() {
+        throw new Error('boom from A');
+      });
+      const seenB = [];
+      binding.onTrackingChange(function listenerB(v) {
+        seenB.push(v);
+        throw new Error('boom from B');
+      });
+
+      // Both listeners run on the same transition; both throw.
+      term.write('\x1b[?1049h\x1b[?1000h');
+      assert.deepEqual(seenB, [true], 'B still ran, despite A throwing first');
+      // Fails on 4fc2c7e: every listener shared ONE generic label, so only
+      // the FIRST failure ever got logged — B's own, distinct failure never
+      // did, silently, forever.
+      assert.equal(warnings.length, 2, 'A and B are each logged once, under their own label');
+      assert.ok(warnings.some((w) => w.includes('listener 0') && w.includes('listenerA')), warnings.join(' | '));
+      assert.ok(warnings.some((w) => w.includes('listener 1') && w.includes('listenerB')), warnings.join(' | '));
+
+      // Each recurs on a later transition: already warned under its OWN
+      // label, so silent again — same "once per bug source" rule as any
+      // other `_safeguard` label.
+      term.write('\x1b[?1049l');
+      assert.equal(warnings.length, 2, 'no further warnings for the SAME listeners repeating the SAME failure');
+    } finally {
+      console.warn = warn;
+    }
   });
 });
 

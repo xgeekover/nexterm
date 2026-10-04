@@ -26,6 +26,12 @@
  *   DT-05b … but an upgrade is not: only a downgrade risks the drag listener
  *   DT-06  disposing while a change is held back cancels it, rather than
  *          applying it later from nowhere
+ *   DT-09  leaving the alternate screen mid-drag applies the change AT ONCE,
+ *          not at release — the protection is only for a program still
+ *          asking from THAT screen (MEDIUM 1)
+ *   DT-10  a lost mouseup that neither a mouseup nor a blur ever reports
+ *          (e.g. a native context menu) is still recovered, from the next
+ *          mousemove's own `buttons` or from `contextmenu` itself (LOW 3)
  *
  * All against `FakeXterm` (tests/adversarial/mouse_reporting_fixtures.js),
  * the same stand-in MB-* uses — `protocolSets` additionally counts every
@@ -62,7 +68,7 @@ describe('Mouse reporting: the pure building blocks for "never downgrade during 
     }
   });
 
-  test('DT-00b: requestedFromFlags — the highest mode set, real X11 xterm\'s own rule', () => {
+  test('DT-00b: requestedFromFlags — the highest mode set (VTE/Alacritty/WezTerm-style for SETS; see MR-06b for RESETS)', () => {
     assert.equal(requestedFromFlags({}), 'none');
     assert.equal(requestedFromFlags({ 1000: true }), 'vt200');
     assert.equal(requestedFromFlags({ 9: true, 1000: true }), 'vt200');
@@ -114,7 +120,12 @@ describe('Mouse reporting: never downgrade during a held button', () => {
     const baseline = term.protocolSets;
 
     press(container); // the primary button goes down — e.g. a drag begins
-    term.write('\x1b[?1003l'); // a real DECRST: any → vt200 (1000 is still set)
+    // A real DECRST, not a redraw — `?1003l` alone would turn tracking fully
+    // off (MR-06b: any ONE tracking DECRST clears every flag, xterm.js-
+    // compatible), so the program re-asks for the lower mode it still wants
+    // right after: any → off → vt200, the genuine downgrade `dropsMotion`
+    // must catch.
+    term.write('\x1b[?1003l\x1b[?1000h');
     assert.equal(term.modes.mouseTrackingMode, 'any', 'held back — xterm still believes ANY, so its drag listener survives');
     assert.equal(term.protocolSets, baseline, 'nothing applied yet');
     assert.equal(binding.requested, 'vt200', 'remembered correctly even though not yet applied to xterm');
@@ -144,6 +155,79 @@ describe('Mouse reporting: never downgrade during a held button', () => {
     term.dispose(); // the addon's disposables go, including the mouseup/blur listeners
     release(view); // nothing is left to hear this
     assert.equal(term.modes.mouseTrackingMode, 'any', 'the deferred downgrade never applied — dispose cancelled it');
+  });
+
+  test('DT-09 (MEDIUM 1): leaving the alternate screen mid-drag applies the downgrade at once, not at release', () => {
+    const { term, binding, container, view } = withBinding();
+    term.write('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h'); // any, full-screen
+    assert.equal(term.modes.mouseTrackingMode, 'any');
+
+    press(container); // a drag begins
+    const baseline = term.protocolSets;
+    // The full-screen program turns off its own tracking AND leaves the
+    // alternate screen, all mid-drag (e.g. `less --mouse`, 'q' while the
+    // button is still down) — unlike DT-05/DT-06, where the program stays on
+    // the alternate screen throughout.
+    term.write('\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l');
+    assert.equal(term.screen, 'normal', 'xterm really left the alternate screen');
+    assert.equal(
+      term.modes.mouseTrackingMode,
+      'none',
+      'fails on 4fc2c7e: stayed ANY on the normal buffer until release — the rest of the drag would report into the shell instead of selecting'
+    );
+    assert.equal(term.protocolSets, baseline + 1, 'applied the moment the screen was left, not deferred to release');
+    assert.equal(binding.requested, 'none');
+
+    release(view);
+    assert.equal(term.protocolSets, baseline + 1, 'nothing left to settle at release — already applied');
+  });
+
+  test('DT-09b (MEDIUM 1): switching the setting off mid-drag applies at once too, same as leaving the screen', () => {
+    const { term, binding, setting, container } = withBinding();
+    term.write('\x1b[?1049h\x1b[?1000h\x1b[?1003h');
+    assert.equal(term.modes.mouseTrackingMode, 'any');
+
+    press(container);
+    setting.on = false;
+    binding.sync(); // the setting is read fresh by `_applyToTerm`, not cached
+    assert.equal(
+      term.modes.mouseTrackingMode,
+      'none',
+      'the setting turning off is not something a drag listener is worth protecting against either'
+    );
+  });
+});
+
+describe('Mouse reporting: recovering a lost mouseup', () => {
+  test('DT-10 (LOW 3): a lost mouseup — e.g. macOS ctrl+click\'s context menu swallowing it — is still recovered', () => {
+    const { term, binding, container, view } = withBinding();
+    term.write('\x1b[?1049h\x1b[?1000h\x1b[?1003h');
+    assert.equal(term.modes.mouseTrackingMode, 'any');
+
+    press(container); // the primary button goes down
+    assert.equal(binding._buttonHeld, true);
+    term.write('\x1b[?1003l\x1b[?1000h'); // a genuine downgrade, held back as in DT-05
+    assert.equal(term.modes.mouseTrackingMode, 'any', 'deferred, same as DT-05');
+
+    // No mouseup ever arrives — a native context menu ate it, with no blur
+    // either (the window kept focus) — but the next mousemove the OS
+    // actually delivers reports no button down any more.
+    view.dispatch({ type: 'mousemove', buttons: 0 });
+    assert.equal(binding._buttonHeld, false, 'fails on 4fc2c7e: recovered without a mouseup or a blur');
+    assert.equal(term.modes.mouseTrackingMode, 'vt200', 'the deferred downgrade settles the moment it is recovered');
+
+    // `contextmenu` itself also clears it, even before any further mousemove.
+    term.write('\x1b[?1003h');
+    press(container);
+    assert.equal(binding._buttonHeld, true);
+    view.dispatch({ type: 'contextmenu' });
+    assert.equal(binding._buttonHeld, false, 'fails on 4fc2c7e: contextmenu alone never cleared it');
+
+    // A mousemove reporting the primary button STILL down changes nothing —
+    // only a cleared bit means the button is up.
+    press(container);
+    view.dispatch({ type: 'mousemove', buttons: 1 });
+    assert.equal(binding._buttonHeld, true, 'still held: the OS says the primary button is still down');
   });
 });
 
