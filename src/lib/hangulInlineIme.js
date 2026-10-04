@@ -9,11 +9,12 @@
  *     insertText 'ㅎ' → insertReplacementText '하' → '한' → (next key) '한' + insertText 'ㄱ' …
  *
  * all with `isComposing: false`, and the `input` event fires BEFORE the
- * keydown (keyCode 229) that caused it. xterm 5.5 only reads `insertText`
- * (`Terminal._inputEvent`), so the shell received `ㅎㄱ` for `한글` — the
- * first jamo of each syllable. Typed fast, keyups land between the IME's
- * events, xterm's `_keyDownSeen` goes stale and whole syllables vanish
- * (xterm #6144). No xterm release handles `insertReplacementText`.
+ * keydown (keyCode 229) that caused it. xterm only reads `insertText`
+ * (`_inputEvent`, the same code in 5.5 and 6.0), so the shell received `ㅎㄱ`
+ * for `한글` — the first jamo of each syllable. Typed fast, keyups land
+ * between the IME's events, xterm's `_keyDownSeen` goes stale and whole
+ * syllables vanish (xterm #6144). No xterm release handles
+ * `insertReplacementText`.
  *
  * So the text being composed is kept here, out of xterm's sight, and sent
  * whole when the syllable is finished — by the next syllable starting, or by

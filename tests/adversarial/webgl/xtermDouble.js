@@ -11,7 +11,7 @@
  *     back, and redraws the cursor of the FOCUSED terminal as it blinks. An
  *     unfocused terminal with no output never draws — which is what made it
  *     the least recently drawn context, and WebKit's victim.
- *   - addon-webgl 0.18: `activate` asks the canvas for a context (which may
+ *   - addon-webgl 0.18/0.19: `activate` asks the canvas for a context (which may
  *     evict another), a renderer draws through it, and a lost context is
  *     reported through `onContextLoss` only after a 3 s wait for a restore.
  *     `dispose()` removes the canvas — the context is the collector's then —
@@ -350,7 +350,7 @@ export function acquireAtlas() {
 }
 
 /**
- * addon-webgl 0.18's shared TextureAtlas, as far as a page merge goes.
+ * addon-webgl's shared TextureAtlas (0.18, and 0.19 unchanged), as far as a page merge goes.
  */
 export class AtlasDouble {
   constructor() {
@@ -372,7 +372,7 @@ export class AtlasDouble {
     return this._requestClearModel;
   }
 
-  /** Four pages become one twice their size; 0.18 never resets the flag. */
+  /** Four pages become one twice their size; 0.18 and 0.19 never reset the flag. */
   merge() {
     this.merges += 1;
     const merged = { canvas: { width: 1024 }, version: 1 };

@@ -80,8 +80,8 @@ const instances = new Map();
  *   - a lost context is retried, on a schedule that cannot become a loop; a
  *     hidden one whose context was lost gets a new one when shown;
  *   - when the glyph atlas merges pages, every renderer is repaired in place
- *     (`repairAtlas`) — addon-webgl 0.18 draws fragments after its second
- *     merge.
+ *     (`repairAtlas`) — addon-webgl 0.18 and 0.19 draw fragments after the
+ *     second merge.
  *
  * Everything else is settled in one pass, `reconcileGpus`, queued as a
  * microtask: it runs after React has attached, detached and fitted every pane

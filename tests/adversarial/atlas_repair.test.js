@@ -1,7 +1,7 @@
 /**
  * Glyph fragments after the WebGL glyph atlas merges pages.
  *
- * addon-webgl 0.18 keeps one glyph atlas per font and colour set, shared by
+ * addon-webgl 0.18 and 0.19 keep one glyph atlas per font and colour set, shared by
  * every terminal, and merges four pages into one when it runs out of texture
  * units. From the second merge on, the merged page lands on a texture unit
  * whose recorded version happens to equal the new page's, so the texture is
@@ -10,7 +10,9 @@
  * glyph drawn from it in fragments (4371 wrong pixels over the two rows that
  * used it). The atlas also gets stuck rebuilding the whole render model on
  * every frame. Upstream fixed it (xterm.js #5883) only in addon-webgl 0.20,
- * which needs xterm 6.1.
+ * which needs xterm 6.1; 0.19, the line for xterm 6.0, still merges this way
+ * (re-measured: unit 93% stale and 3018 wrong pixels with the repair off, 0
+ * with it on, for a terminal on screen and one hidden through the merges).
  *
  * NexTerm watches the addon's public `onAddTextureAtlasCanvas`, and when a
  * merged page appears it repairs every renderer in place: each uploads its
@@ -45,7 +47,7 @@ const term = (over = {}) => ({
 });
 
 /**
- * An addon-webgl 0.18 WebglAddon after a merge, down to what the repair
+ * An addon-webgl 0.18/0.19 WebglAddon after a merge, down to what the repair
  * touches: the renderer's `_charAtlas`, its `_glyphRenderer` (a
  * MutableDisposable, hence `.value`) whose `setAtlas` sets every texture
  * unit's recorded version back to -1, and `_clearModel`.
@@ -88,7 +90,7 @@ describe('Atlas page merges: every renderer is repaired in place', () => {
 
   test('AR-02: the repair makes the next frame upload every page and rebuild every cell', () => {
     const merged = addonAfterMerge();
-    assert.deepEqual(pagesUploadedNext(merged), [1], 'as 0.18 left it: page 0 would stay stale');
+    assert.deepEqual(pagesUploadedNext(merged), [1], 'as the addon left it: page 0 would stay stale');
     assert.equal(repairWebglAtlas(merged.addon), merged.atlas, 'the atlas, for settling once all are repaired');
     assert.deepEqual(pagesUploadedNext(merged), [0, 1], 'every page uploaded again');
     assert.equal(merged.glyphs._atlas, merged.atlas, 're-bound to its own atlas, not another');

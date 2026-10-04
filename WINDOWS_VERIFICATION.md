@@ -407,6 +407,28 @@ and inside `claude`:
   keeps what it had. *Mouse Reporting in Full-Screen Apps* off — vim's clicks
   stop reaching it at once, a drag there selects.
 
+### V19 — xterm 6: widths, keys and the wheel under ConPTY
+
+Never run on Windows: xterm 6 was checked headless on macOS only, and ConPTY
+measures and repaints text with conhost's own width tables before NexTerm sees
+any of it — which is exactly what nothing here can reproduce.
+
+- In PowerShell, `Write-Output "A✅B ⚠️C 👍🏽D 한글E"`: each emoji and each
+  syllable takes two cells, with no gap and no overlap before the next letter.
+  Then make the pane narrower and wider again (ConPTY repaints on resize): the
+  line must come back identical. A letter shifted or eaten after one emoji is
+  conhost and xterm disagreeing about its width — note which emoji.
+- Inside `claude`, ask for a reply with ✅ ⚠️ 👨‍💻 in it, and watch a status line
+  that is redrawn (the spinner, "통과 13개"-style counters): nothing is left
+  over from the previous frame.
+- `Alt+←` / `Alt+→` move a word at the PowerShell, cmd and Git Bash prompts
+  (NexTerm sends `Ctrl+←` / `Ctrl+→`, as xterm 5.5 did; xterm 6 alone sends
+  `ESC[1;3D`).
+- `git log` in Git Bash, or `less` under WSL: one wheel notch moves several
+  lines, as in 0.8.0 — not one.
+- Whether `claude` frames its output with synchronized updates here is open:
+  it asks XTVERSION first, and conhost may answer or swallow that query itself.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

@@ -13,6 +13,10 @@
  * These cases replay the recorded event streams (hangul_ime_recordings.js)
  * through the real binding and its state machine, with a stand-in for the
  * part of xterm 5.5 that turns whatever the binding lets through into bytes.
+ * xterm 6.0's handlers for these events are the same code (CompositionHelper
+ * only learned to keep composing through CapsLock), and replayed into the
+ * real xterm 6 under headless Chromium every one of the recordings sent
+ * exactly what xterm 5.5 sent — and, with the binding, what it must.
  * The stand-in is checked first: with no binding it must send exactly what
  * xterm sent in each recording. The bytes every other case expects are the
  * "must become" column of the investigation's matrix (qa/ime/DESIGN.md).
