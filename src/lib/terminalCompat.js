@@ -111,32 +111,47 @@ export function fitAndReport({ tabId, term, fitAddon, resizePty, fittable = true
   return { cols: term.cols, rows: term.rows };
 }
 
+/** The width provider `@xterm/addon-unicode-graphemes` registers: Unicode 15, by grapheme cluster. */
+export const GRAPHEME_WIDTHS = '15-graphemes';
+
 /**
  * Measure characters the way the programs inside the terminal do.
  *
- * xterm 5.5 defaults to Unicode 6 widths, in which every emoji is ONE cell,
- * while Claude Code (`Bun.stringWidth`), Ink and most modern command-line
- * tools count it as two. A program that redraws by moving the cursor relative
- * to what it believes is on screen then lands one column off for every emoji
- * to the left: a status line `✅ 통과 13개` repainted as `✅ 통과 123`, and the
+ * xterm defaults to Unicode 6 widths, in which every emoji is ONE cell, while
+ * Claude Code (`Bun.stringWidth`), Ink and most modern command-line tools
+ * count it as two. A program that redraws by moving the cursor relative to
+ * what it believes is on screen then lands one column off for every emoji to
+ * the left: a status line `✅ 통과 13개` repainted as `✅ 통과 123`, and the
  * WebGL renderer squeezed each emoji into one cell over its neighbour.
  *
- * The Unicode 11 tables agree on single emoji (✅ ❌ 🚀 …). They still
- * disagree on an emoji made wide by VS16 (⚠️ ✔️ ❤️: 1 here, 2 in Claude Code)
- * and give ZWJ and skin-tone sequences 4 where Claude Code counts 2; matching
- * those needs xterm 6 and its grapheme-aware width provider.
+ * Unicode 11, used before, fixed single emoji but still measured an emoji
+ * made wide by VS16 (⚠️ ✔️ ❤️) as one cell, and a ZWJ or skin-tone sequence
+ * (👨‍💻 👍🏽) as four — 75 of 82 characters measured against Claude Code. The
+ * grapheme provider counts a whole cluster as one character: two cells for
+ * each of those, as Claude Code does, and 82 of 82 agree
+ * (tests/adversarial/unicode_widths.test.js runs them through real xterm).
  *
- * `Unicode11Addon` is passed in so this stays free of xterm and can be checked
- * in Node. Returns whether Unicode 11 is active; never throws — a terminal
- * measuring with the old tables is still a working terminal.
+ * Known limit, measured with zsh 5.9 on macOS: zsh's line editor measures
+ * with the C library's `wcwidth`, so to zsh ⚠️ ✔️ ❤️ are ONE cell and 👍🏽 👨‍💻
+ * 🇰🇷 are FOUR. Editing a command line that holds one of those — moving back
+ * over it and typing, ⌃A, a line long enough to wrap — is drawn a cell or more
+ * off (a stray blank, characters overwritten) until zsh redraws the line;
+ * what runs is still exactly what was typed. Plain emoji (✅ 🚀) agree. Unicode
+ * 11 matched zsh on the VS16 and ZWJ sequences and Claude Code on none of them.
+ *
+ * `UnicodeGraphemesAddon` is passed in so this stays free of xterm and can be
+ * checked in Node. Returns whether grapheme widths are active; never throws —
+ * a terminal measuring with the old tables is still a working terminal.
  */
-export function activateUnicode11(term, Unicode11Addon) {
+export function activateGraphemeWidths(term, UnicodeGraphemesAddon) {
   try {
-    term.loadAddon(new Unicode11Addon());
-    term.unicode.activeVersion = '11';
-    return term.unicode.activeVersion === '11';
+    term.loadAddon(new UnicodeGraphemesAddon());
+    // The addon switches to its provider as it loads; asked for again, so a
+    // version that registers without switching still ends up measuring with it.
+    if (term.unicode.activeVersion !== GRAPHEME_WIDTHS) term.unicode.activeVersion = GRAPHEME_WIDTHS;
+    return term.unicode.activeVersion === GRAPHEME_WIDTHS;
   } catch (err) {
-    console.warn('[Terminal] Unicode 11 widths unavailable, measuring with xterm defaults:', err);
+    console.warn('[Terminal] grapheme widths unavailable, measuring with xterm defaults:', err);
     return false;
   }
 }

@@ -47,7 +47,7 @@ export class WebglAddon {
   onContextLoss() { return { dispose() {} }; }
   onAddTextureAtlasCanvas() { return { dispose() {} }; }
 }
-export class Unicode11Addon { activate() {} dispose() {} }
+export class UnicodeGraphemesAddon { activate() {} dispose() {} }
 export class SearchAddon {
   activate() {} dispose() {}
   findNext() { return false; }

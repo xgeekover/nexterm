@@ -18,13 +18,13 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { activateUnicode11, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
+import { activateGraphemeWidths, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
 import {
   claimAtlasMergePage,
   drawWebglNow,
@@ -764,8 +764,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  // Emoji are two cells wide to the programs running here; see terminalCompat.js.
-  activateUnicode11(term, Unicode11Addon);
+  // Emoji — VS16, ZWJ and skin-tone sequences included — are two cells wide
+  // to the programs running here; see terminalCompat.js.
+  activateGraphemeWidths(term, UnicodeGraphemesAddon);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);

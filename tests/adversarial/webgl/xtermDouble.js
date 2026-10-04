@@ -54,7 +54,25 @@ export class Terminal {
     this.options = { ...options };
     this.cols = 80;
     this.rows = 24;
-    this.unicode = { activeVersion: '6' };
+    // xterm's unicode handling: a version must be registered before it can be
+    // made active, as `@xterm/addon-unicode-graphemes` does on activation.
+    const versions = ['6'];
+    let activeVersion = '6';
+    this.unicode = {
+      get versions() {
+        return versions.slice();
+      },
+      get activeVersion() {
+        return activeVersion;
+      },
+      set activeVersion(version) {
+        if (!versions.includes(version)) throw new Error(`unknown Unicode version "${version}"`);
+        activeVersion = version;
+      },
+      register(provider) {
+        versions.push(provider.version);
+      },
+    };
     this.modes = { mouseTrackingMode: 'none' };
     this.buffer = {
       active: { type: 'normal', cursorX: 0, cursorY: 0, baseY: 0, viewportY: 0, length: 0, getLine: () => undefined },
@@ -163,8 +181,13 @@ export class FitAddon {
   fit() {}
 }
 
-export class Unicode11Addon {
-  activate() {}
+/** As @xterm/addon-unicode-graphemes 0.4: registers its providers and switches to the grapheme one. */
+export class UnicodeGraphemesAddon {
+  activate(term) {
+    term.unicode.register({ version: '15' });
+    term.unicode.register({ version: '15-graphemes' });
+    term.unicode.activeVersion = '15-graphemes';
+  }
 
   dispose() {}
 }

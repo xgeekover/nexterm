@@ -136,12 +136,14 @@ describe('Atlas page merges: every renderer is repaired in place', () => {
     assert.equal(claimAtlasMergePage({ width: ATLAS_PAGE_SIZE }, handled), false);
   });
 
-  test('AR-06: the repair is written against addon-webgl 0.18 — the line for xterm 5', () => {
-    // 0.20 fixes the merge itself and needs xterm 6.1; moving to it makes the
-    // repair unnecessary and its private fields unknown (it then remakes).
+  test('AR-06: the repair is written against addon-webgl 0.19 — the line for xterm 6.0', () => {
+    // 0.19 merges exactly as 0.18 did (the merge, the page versions and the
+    // flag that is never lowered are unchanged). 0.20 fixes the merge itself
+    // and needs xterm 6.1; moving to it makes the repair unnecessary and its
+    // private fields unknown (it then remakes).
     const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-    assert.match(pkg.dependencies['@xterm/addon-webgl'], /^\^0\.18\./);
+    assert.match(pkg.dependencies['@xterm/addon-webgl'], /^\^0\.19\./);
     const lock = JSON.parse(readFileSync(new URL('../../package-lock.json', import.meta.url), 'utf8'));
-    assert.match(lock.packages['node_modules/@xterm/addon-webgl'].version, /^0\.18\./);
+    assert.match(lock.packages['node_modules/@xterm/addon-webgl'].version, /^0\.19\./);
   });
 });
