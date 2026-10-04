@@ -44,6 +44,7 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
+import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 
 const instances = new Map();
 
@@ -782,6 +783,13 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // survives remounts, and disposed with the terminal. Does nothing elsewhere.
   installHangulInlineIme(term, container);
   // ---- end Korean inline IME ----------------------------------------------
+
+  // ---- Selection, copy on select, mouse reporting — src/lib/terminalClipboard.js ----
+  // Warp's model: only a full-screen program gets the mouse, a drag anywhere
+  // else selects, and a selection is copied as it is made. After the IME, so
+  // its mousedown listener still runs first. Disposed with the terminal.
+  installTerminalClipboard(term, container, { settings: useSettingsStore });
+  // ---- end selection, copy on select, mouse reporting ------------------------
 
   const dataDisposable = onData ? term.onData(onData) : null;
 

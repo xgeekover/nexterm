@@ -38,6 +38,7 @@
  *     and xterm never sees it. macOS only; nothing is installed elsewhere.
  */
 import { isMac } from './platform.js';
+import { pressReachesProgram } from './mouseReporting.js';
 
 /** Hangul jamo, compatibility jamo, extended jamo A/B and syllables. */
 const HANGUL = /^[ᄀ-ᇿ㄰-㆏ꥠ-꥿가-힣ힰ-퟿]$/u;
@@ -279,12 +280,14 @@ export function createHangulInlineIme({ send = () => {}, onPreview = () => {} } 
      * back with a DEL that removes one byte for good under a C locale (HI-42:
      * `한`, click, `ㅏ` sent `한` + DEL + `하` + `나`, not `한` then `하`).
      *
-     * `mouseTracking` is true only when the terminal is passing clicks to the
-     * PROGRAM (`term.modes.mouseTrackingMode !== 'none'`) — there, the click
-     * really does have to go out in order, ahead of whatever is still being
-     * composed, the same as any other key composing cannot absorb. Otherwise
-     * the pending syllable, and its preview, are left exactly as they were; a
-     * real focus change away from the terminal is already `blur`'s job.
+     * `mouseTracking` is true only when THIS click is passed to the PROGRAM
+     * (`term.modes.mouseTrackingMode !== 'none'`, and no Shift or ⌥ turning
+     * it into a selection — see `pressReachesProgram` in mouseReporting.js) —
+     * there, the click really does have to go out in order, ahead of whatever
+     * is still being composed, the same as any other key composing cannot
+     * absorb. Otherwise the pending syllable, and its preview, are left
+     * exactly as they were; a real focus change away from the terminal is
+     * already `blur`'s job.
      */
     mouseDown(e) {
       if (!e?.mouseTracking) return PASS;
@@ -399,11 +402,17 @@ class HangulInlineImeAddon {
     on('blur', (e) => {
       if (fromTextarea(e)) machine.blur();
     });
-    on('mousedown', () => {
+    on('mousedown', (e) => {
       // Whether THIS click goes to the program, in order, ahead of the
       // syllable — see the doc comment on `mouseDown` for why that is the
-      // only time flushing here is safe.
-      machine.mouseDown({ mouseTracking: Boolean(term.modes && term.modes.mouseTrackingMode !== 'none') });
+      // only time flushing here is safe. A Shift- or ⌥-press selects instead
+      // (this binding is macOS-only, hence `mac`).
+      machine.mouseDown({
+        mouseTracking: pressReachesProgram(e, {
+          mac: true,
+          tracking: Boolean(term.modes && term.modes.mouseTrackingMode !== 'none'),
+        }),
+      });
     });
   }
 

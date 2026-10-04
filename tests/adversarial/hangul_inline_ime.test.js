@@ -288,8 +288,8 @@ function eventFor(row, textarea) {
       setTextarea(value, start, end);
       return domEvent(kind, textarea);
     }
-    case 'md': // a click on the terminal's screen
-      return domEvent('mousedown', { tagName: 'CANVAS' });
+    case 'md': // a click on the terminal's screen, with any modifiers in row[1]
+      return domEvent('mousedown', { tagName: 'CANVAS' }, { button: 0, shiftKey: false, altKey: false, ...(row[1] ?? {}) });
     default:
       throw new Error(`unknown row ${JSON.stringify(row)}`);
   }
@@ -685,6 +685,35 @@ describe('Korean inline IME: rules the recordings do not reach', () => {
       ...SPACE('하나', 2),
     ];
     assert.deepEqual(replay(rows, { mouseTracking: true }).bytes, ['한', '\x7f', '하', '나', ' ']);
+  });
+
+  test('HI-63: with mouse tracking ON, a Shift- or ⌥-click selects instead — nothing reaches the program, nothing is sent', () => {
+    // src/lib/mouseReporting.js: inside a program that tracks the mouse, Shift
+    // (and ⌥, macOS) turns a press into a selection. The click never reaches
+    // the program, so there is nothing to go out ahead of — and flushing
+    // anyway is HI-42's DEL all over again once the IME carries on composing.
+    for (const mods of [{ shiftKey: true }, { altKey: true }, { shiftKey: true, altKey: true }]) {
+      const click = [...HAN_THEN_CLICK.slice(0, -1), ['md', mods]];
+      assert.deepEqual(replay(click, { mouseTracking: true }).bytes, [], `${JSON.stringify(mods)}: nothing sent`);
+      const rows = [
+        ...click,
+        ['bi', 'IRT', '하', '한', 0, 1],
+        ['in', 'IRT', '하', '하', 1, 1],
+        ['bi', 'IT', '나', '하', 1, 1],
+        ['in', 'IT', '나', '하나', 2, 2],
+        ['kd', 'ㅏ', 229, 'KeyK'],
+        ['ku', 'ㅏ', 75, 'KeyK'],
+        ['bi', 'IRT', '나', '하나', 1, 2],
+        ['in', 'IRT', '나', '하나', 2, 2],
+        ...SPACE('하나', 2),
+      ];
+      assert.deepEqual(replay(rows, { mouseTracking: true }).bytes, ['하', '나', ' '], `${JSON.stringify(mods)}: no DEL`);
+    }
+    // A Shift-click with the RIGHT button is not a selection on macOS: it still reaches the program.
+    assert.deepEqual(
+      replay([...HAN_THEN_CLICK.slice(0, -1), ['md', { shiftKey: true, button: 2 }]], { mouseTracking: true }).bytes,
+      ['한']
+    );
   });
 });
 
