@@ -3,7 +3,8 @@
  * ConPTY wraps and resizes, the size range the backend clamps a pty to, the
  * verbatim paths an older backend handed out — and what ⌥ and an arrow send,
  * and how far the wheel goes, which xterm 6 stopped deciding the way xterm
- * 5.5 did.
+ * 5.5 did. The wheel against real xterm, in a real browser:
+ * wheel_headless.test.js.
  */
 
 import { readFileSync } from 'node:fs';

@@ -60,6 +60,7 @@ import './mouse_reporting_drag.test.js';
 import './mouse_reporting_headless.test.js';
 import './clipboard_keys.test.js';
 import './sync_output.test.js';
+import './wheel_headless.test.js';
 
 async function run() {
   console.log('====================================================');
