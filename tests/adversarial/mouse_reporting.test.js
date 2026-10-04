@@ -437,6 +437,60 @@ describe('Mouse reporting: the binding, against xterm\'s own handling', () => {
     assert.equal(term.modes.mouseTrackingMode, 'any', 'xterm alone again');
     assert.equal(installMouseReporting(null), null);
   });
+
+  test('MB-11 (M1/L4b): onTrackingChange fires exactly on a real transition, never on a no-op write', () => {
+    const { term, binding, setting } = withBinding();
+    const seen = [];
+    binding.onTrackingChange((v) => seen.push(v));
+    assert.equal(binding.isTracking, false);
+
+    // htop/tmux: switch to the alternate screen, THEN ask for the mouse as a
+    // separate sequence — a plain "pass" (MR-03), the common real-world case
+    // and the one a check made only at the next click would miss until then.
+    term.write('\x1b[?1049h');
+    assert.deepEqual(seen, [], 'the screen switch alone asked for no tracking');
+    term.write('\x1b[?1000h');
+    assert.deepEqual(seen, [true]);
+    assert.equal(binding.isTracking, true);
+
+    // Asking again (an Ink-style redraw) changes nothing.
+    term.write('\x1b[?1000h');
+    assert.deepEqual(seen, [true], 'no second notification for an unchanged state');
+
+    // The program dies without disabling tracking first (MB-04).
+    term.write('\x1b[?1049l');
+    assert.deepEqual(seen, [true, false]);
+
+    // A request refused in the scrollback (MB-01) notifies only once it takes
+    // effect — the moment the screen switches to alternate, not before.
+    seen.length = 0;
+    term.write('\x1b[?1003h');
+    assert.deepEqual(seen, [], 'refused throughout: no transition');
+    term.write('\x1b[?1049h');
+    assert.deepEqual(seen, [true], 'the remembered request took effect');
+
+    // The setting is the third way tracking can stop applying, and resume.
+    seen.length = 0;
+    setting.on = false;
+    binding.sync();
+    assert.deepEqual(seen, [false]);
+    setting.on = true;
+    binding.sync();
+    assert.deepEqual(seen, [false, true]);
+    binding.sync(); // already settled: no further notification
+    assert.deepEqual(seen, [false, true]);
+
+    // A refused request mixed with other modes (MB-06), entirely in the
+    // scrollback: applied then put right back before anything else can run
+    // — never effective, so never a transition.
+    term.write('\x1b[?1049l');
+    seen.length = 0;
+    term.write('\x1b[?2004;1003;1006h');
+    assert.deepEqual(seen, [], 'pass-then-sync, but never effective');
+
+    assert.equal(typeof binding.onTrackingChange(() => {}), 'function', 'always returns an unsubscribe function');
+    assert.equal(binding.onTrackingChange(null)(), undefined, 'a non-function listener is ignored, harmlessly');
+  });
 });
 
 // ---- selection and copy on select -------------------------------------------
@@ -716,5 +770,69 @@ describe('Selection and copy on select', () => {
 
     assert.equal(copyTerminalSelection(term, { document: doc, clipboard: null }), 'failed');
     assert.equal(doc.listeners.length, 0, 'no listener left behind');
+  });
+
+  test('CS-08 (M1/L4b): altClickMovesCursor is off whenever ⌥ forces selection, written only by the transition', () => {
+    // A quick ⌥-click, with `macOptionClickForcesSelection` on but
+    // xterm's own `altClickMovesCursor` (default: on) left alone, still runs
+    // ITS mouseup handling underneath the forced selection and sends
+    // `moveToCellSequence` — on the alternate screen, cursor-key presses (a
+    // tmux pane recalls old commands, htop's bar moves). No mousedown is
+    // dispatched anywhere in this test: everything here must follow from the
+    // mouse's own tracking transitions, not from a click.
+    const term = new FakeXterm();
+    const { container } = page(term);
+    let forceWrites = 0;
+    let moveWrites = 0;
+    let forceValue;
+    let moveValue;
+    Object.defineProperty(term.options, 'macOptionClickForcesSelection', {
+      configurable: true,
+      get: () => forceValue,
+      set(v) {
+        forceWrites += 1;
+        forceValue = v;
+      },
+    });
+    Object.defineProperty(term.options, 'altClickMovesCursor', {
+      configurable: true,
+      get: () => moveValue,
+      set(v) {
+        moveWrites += 1;
+        moveValue = v;
+      },
+    });
+
+    installTerminalClipboard(term, container, { platform: 'mac' });
+    assert.equal(term.options.altClickMovesCursor, true, "xterm's own default, at rest");
+    assert.equal(term.options.macOptionClickForcesSelection, false);
+
+    // htop/tmux: the alternate screen, then the mouse.
+    term.write('\x1b[?1049h\x1b[?1000h');
+    assert.equal(term.options.macOptionClickForcesSelection, true, '⌥ forces selection while tracking');
+    assert.equal(
+      term.options.altClickMovesCursor,
+      false,
+      'fails on f8a757d: xterm would still send moveToCellSequence on the ⌥-click release'
+    );
+    assert.equal(forceWrites, 2, 'one write to settle at rest, one for this transition — nothing more');
+    assert.equal(moveWrites, 2);
+
+    term.write('\x1b[?1000l\x1b[?1049l');
+    assert.equal(term.options.macOptionClickForcesSelection, false);
+    assert.equal(term.options.altClickMovesCursor, true, 'restored once the program lets go of the screen');
+    assert.equal(forceWrites, 3, 'exactly one more write for this transition');
+    assert.equal(moveWrites, 3);
+  });
+
+  test('CS-09 (L4b): off macOS, neither option is ever touched', () => {
+    for (const platform of ['windows', 'linux']) {
+      const term = new FakeXterm();
+      const { container } = page(term);
+      installTerminalClipboard(term, container, { platform });
+      term.write('\x1b[?1049h\x1b[?1000h');
+      assert.equal(term.options.macOptionClickForcesSelection, undefined, platform);
+      assert.equal(term.options.altClickMovesCursor, undefined, platform);
+    }
   });
 });

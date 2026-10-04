@@ -231,11 +231,12 @@ const installed = new WeakMap();
 
 /** The mouse side. See `installTerminalClipboard`. */
 class TerminalClipboardAddon {
-  constructor(container, { platform, setting, onSettingsChange }) {
+  constructor(container, { platform, setting, onSettingsChange, mouse }) {
     this._container = container;
     this._platform = platform;
     this._setting = setting;
     this._onSettingsChange = onSettingsChange;
+    this._mouse = mouse;
     this._selecting = false;
     this._removers = [];
   }
@@ -245,6 +246,41 @@ class TerminalClipboardAddon {
     const unsubscribe = this._onSettingsChange?.();
     if (typeof unsubscribe === 'function') this._removers.push(unsubscribe);
     const tracking = () => (term.modes?.mouseTrackingMode ?? 'none') !== 'none';
+
+    if (mac) {
+      // iTerm2's convention: ⌥-drag selects inside a program that has the
+      // mouse. Only then — elsewhere ⌥-drag stays xterm's column selection,
+      // and a quick ⌥-click still has to move the cursor, as any click does.
+      // Both are needed together: with `macOptionClickForcesSelection` alone,
+      // `altClickMovesCursor` (on by default) still runs its OWN mouseup
+      // handling of a forced-selection ⌥-click underneath it and sends
+      // xterm's `moveToCellSequence` — on the alternate screen, cursor-key
+      // presses (tmux recalls old commands on a quick ⌥-click, htop moves its
+      // selection bar). So it is off exactly while the other is on, and back
+      // to whatever it was otherwise.
+      //
+      // Both are `term.options` writes, and addon-webgl re-uploads its whole
+      // glyph atlas texture on every one — so they are set only when the
+      // mouse's EFFECTIVE tracking state actually changes, from the one place
+      // that knows that (`mouse.onTrackingChange`), and only if the value
+      // differs, never from a mousedown that changes nothing.
+      this._defaultAltClickMovesCursor = Boolean(term.options?.altClickMovesCursor ?? true);
+      const applyMacOptionBehavior = (isTracking) => {
+        if (!term.options) return;
+        if (term.options.macOptionClickForcesSelection !== isTracking) {
+          term.options.macOptionClickForcesSelection = isTracking;
+        }
+        const altClickMovesCursor = isTracking ? false : this._defaultAltClickMovesCursor;
+        if (term.options.altClickMovesCursor !== altClickMovesCursor) {
+          term.options.altClickMovesCursor = altClickMovesCursor;
+        }
+      };
+      applyMacOptionBehavior(this._mouse ? this._mouse.isTracking : tracking());
+      if (typeof this._mouse?.onTrackingChange === 'function') {
+        this._removers.push(this._mouse.onTrackingChange(applyMacOptionBehavior));
+      }
+    }
+
     const on = (target, type, handler) => {
       if (!target?.addEventListener) return;
       target.addEventListener(type, handler, true);
@@ -262,14 +298,7 @@ class TerminalClipboardAddon {
     // its element inside it, so they see the press as relabelled here.
     on(this._container, 'mousedown', (e) => {
       const isTracking = tracking();
-      if (mac) {
-        // iTerm2's convention: ⌥-drag selects inside a program that has the
-        // mouse. Only then — elsewhere ⌥-drag stays xterm's column selection.
-        if (term.options && term.options.macOptionClickForcesSelection !== isTracking) {
-          term.options.macOptionClickForcesSelection = isTracking;
-        }
-        if (isTracking && e.shiftKey && !e.altKey && (e.button ?? 0) === 0) pressAsOption(e);
-      }
+      if (mac && isTracking && e.shiftKey && !e.altKey && (e.button ?? 0) === 0) pressAsOption(e);
       this._selecting = pressSelects(e, { mac, tracking: isTracking });
     });
 
@@ -322,7 +351,7 @@ export function installTerminalClipboard(term, container, { settings = null, pla
           if (state?.terminalMouseReporting !== prev?.terminalMouseReporting) mouse?.sync();
         })
       : null;
-  const addon = new TerminalClipboardAddon(container, { platform, setting, onSettingsChange });
+  const addon = new TerminalClipboardAddon(container, { platform, setting, onSettingsChange, mouse });
   if (typeof term.loadAddon === 'function') term.loadAddon(addon);
   else addon.activate(term);
   installed.set(term, addon);

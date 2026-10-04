@@ -187,6 +187,8 @@ class MouseReportingAddon {
     this._setProtocol = null;
     this._disposables = [];
     this._warned = false;
+    this._tracking = false;
+    this._trackingListeners = new Set();
   }
 
   activate(term) {
@@ -249,6 +251,15 @@ class MouseReportingAddon {
     this._requested = plan.requested;
     if (plan.action === 'drop') return true;
     if (plan.action === 'pass-then-sync') this._syncAfterWrite = true;
+    // 'pass' and 'pass-then-sync' both settle, deterministically, on
+    // `plan.effective` — xterm applies 'pass' the moment this returns, on the
+    // same write, and `sync()` (queued above for 'pass-then-sync') corrects
+    // back to it before any mouse event can reach the terminal. Recording it
+    // now, rather than waiting for a screen switch or that correction, is
+    // what lets a listener react to a full-screen program's OWN enabling
+    // sequence — `CSI ? 1003 h` right after it draws its first frame, the
+    // common case (htop, tmux).
+    this._setTracking(plan.effective !== 'none');
     return false;
   }
 
@@ -260,6 +271,37 @@ class MouseReportingAddon {
   /** Whether this xterm lets the protocol be changed without a write. */
   get canSetProtocol() {
     return Boolean(this._setProtocol);
+  }
+
+  /** Whether a program is being given the mouse right now (tracking in force). */
+  get isTracking() {
+    return this._tracking;
+  }
+
+  /**
+   * Called whenever `isTracking` changes — applied or removed — with the new
+   * value. Never on a press or a release: only on a transition, so a
+   * subscriber that sets `term.options` from it (addon-webgl re-uploads its
+   * glyph atlas texture on every change of those) never does so needlessly.
+   * Returns a function that unsubscribes.
+   */
+  onTrackingChange(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this._trackingListeners.add(fn);
+    return () => this._trackingListeners.delete(fn);
+  }
+
+  _setTracking(value) {
+    const next = Boolean(value);
+    if (next === this._tracking) return;
+    this._tracking = next;
+    for (const listener of [...this._trackingListeners]) {
+      try {
+        listener(next);
+      } catch (err) {
+        console.error('[Terminal] a mouse-tracking listener failed:', err);
+      }
+    }
   }
 
   /**
@@ -275,6 +317,7 @@ class MouseReportingAddon {
       alternate: isAlternate(term),
       enabled: this._enabled(),
     });
+    this._setTracking(target !== 'none');
     const current = term.modes?.mouseTrackingMode ?? 'none';
     if (target === current) return true;
     if (this._setProtocol && this._setProtocol(target)) return true;
@@ -290,6 +333,7 @@ class MouseReportingAddon {
   dispose() {
     for (const d of this._disposables.splice(0)) d?.dispose?.();
     this._term = null;
+    this._trackingListeners.clear();
   }
 }
 
