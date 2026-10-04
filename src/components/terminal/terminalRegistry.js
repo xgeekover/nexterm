@@ -26,13 +26,14 @@ import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
 import { activateUnicode11, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
 import {
-  atlasRebuildDelay,
   claimAtlasMergePage,
   drawWebglNow,
   gpuFailure,
   planGpuAttach,
   planGpuReconcile,
   releaseWebglAddon,
+  repairWebglAtlas,
+  settleWebglAtlas,
 } from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
@@ -62,8 +63,9 @@ const instances = new Map();
  *     `planGpuAttach`), and calls the function it returns when it stops; a
  *     terminal no pane shows gives its context back;
  *   - a lost context is retried, on a schedule that cannot become a loop;
- *   - when the glyph atlas merges pages, every live renderer is remade on a
- *     fresh atlas — addon-webgl 0.18 draws fragments after its second merge.
+ *   - when the glyph atlas merges pages, every live renderer is repaired in
+ *     place (`repairAtlas`) — addon-webgl 0.18 draws fragments after its
+ *     second merge.
  *
  * Everything else is settled in one pass, `reconcileGpus`, queued as a
  * microtask: it runs after React has attached, detached and fitted every pane
@@ -78,19 +80,19 @@ const gpuStats = {
   released: 0,
   freedContexts: 0,
   lost: 0,
-  atlasRebuilds: 0,
-  lastRebuildMs: 0,
-  maxRebuildMs: 0,
+  atlasRepairs: 0,
+  atlasRepairFallbacks: 0,
+  lastAtlasRepairMs: 0,
+  maxAtlasRepairMs: 0,
 };
 let gpuReconcileQueued = false;
 let gpuRetryTimer = 0;
 let gpuRetryTimerAt = Infinity;
-let lastAtlasRebuildAt = null;
-let atlasRebuildTimer = 0;
+let atlasRepairQueued = false;
 // Every live renderer forwards the ONE shared atlas's merge to its own addon
 // (see `claimAtlasMergePage`), so the same canvas is reported once per
 // renderer. Tracked by identity, module-wide, so N reports of one merge ask
-// for exactly one rebuild — a WeakSet costs nothing once the atlas moves on.
+// for exactly one repair — a WeakSet costs nothing once the atlas moves on.
 const handledAtlasMergeCanvases = new WeakSet();
 
 const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -146,10 +148,9 @@ function createGpu(entry) {
     // The atlas is shared, but this callback is not: every live renderer
     // forwards the SAME merge canvas here, once each. `claimAtlasMergePage`
     // lets only the first of those through, so N renderers ask for one
-    // rebuild instead of N (the second used to land just past the 1 s floor
-    // below and arm a timer that rebuilt everything again a second time).
+    // repair instead of N.
     addon.onAddTextureAtlasCanvas((canvas) => {
-      if (claimAtlasMergePage(canvas, handledAtlasMergeCanvases)) requestAtlasRebuild();
+      if (claimAtlasMergePage(canvas, handledAtlasMergeCanvases)) requestAtlasRepair();
     });
     entry.term.loadAddon(addon);
   } catch (err) {
@@ -200,27 +201,54 @@ function handleGpuLoss(entry, addon) {
 }
 
 /**
- * The atlas is shared by every terminal with the same font and colours, so
- * every live renderer is remade: released together, the atlas loses its last
- * owner and the next renderer starts a fresh one (which also ends the full
- * model rebuild on every frame that 0.18 gets stuck in after a merge).
- * Called from inside a render, hence flags and a queued pass.
+ * The atlas is shared by every terminal with the same font and colours, and
+ * a merge leaves every renderer drawing from it wrong (see
+ * `repairWebglAtlas`). Called from inside a render, hence a queued pass: by
+ * the time it runs, the render that merged has finished.
  */
-function requestAtlasRebuild() {
-  if (atlasRebuildTimer) return;
-  const wait = atlasRebuildDelay(lastAtlasRebuildAt, clock());
-  if (wait > 0) {
-    atlasRebuildTimer = setTimeout(() => {
-      atlasRebuildTimer = 0;
-      requestAtlasRebuild();
-    }, wait);
-    return;
-  }
-  lastAtlasRebuildAt = clock();
+function requestAtlasRepair() {
+  if (atlasRepairQueued) return;
+  atlasRepairQueued = true;
+  queueMicrotask(repairAtlas);
+}
+
+/**
+ * Every renderer re-uploads its pages and rebuilds its cells: one on screen
+ * draws its whole viewport now, before the frame is painted, and a hidden one
+ * is drawn in full when it is shown. No renderer is made or let go, so no
+ * context is either. Then the atlas stops asking every frame for a rebuild.
+ * A renderer this addon version cannot repair in place is made again — on
+ * screen now, hidden when next shown.
+ */
+function repairAtlas() {
+  atlasRepairQueued = false;
+  const startedAt = clock();
+  const atlases = new Set();
+  let unrepaired = false;
   for (const entry of instances.values()) {
-    if (entry.gpu) entry.gpuRebuild = true;
+    if (!entry.gpu) continue;
+    const atlas = repairWebglAtlas(entry.gpu);
+    if (!atlas) {
+      entry.gpuRebuild = true;
+      unrepaired = true;
+      continue;
+    }
+    atlases.add(atlas);
+    if (entry.attachCount > 0) {
+      drawWebglNow(entry.gpu, entry.term);
+    } else {
+      entry.term.refresh(0, entry.term.rows - 1);
+    }
   }
-  scheduleGpuReconcile();
+  for (const atlas of atlases) settleWebglAtlas(atlas);
+  const ms = clock() - startedAt;
+  gpuStats.atlasRepairs += 1;
+  gpuStats.lastAtlasRepairMs = ms;
+  gpuStats.maxAtlasRepairMs = Math.max(gpuStats.maxAtlasRepairMs, ms);
+  if (unrepaired) {
+    gpuStats.atlasRepairFallbacks += 1;
+    scheduleGpuReconcile();
+  }
 }
 
 function reconcileGpus() {
@@ -240,9 +268,7 @@ function reconcileGpus() {
   });
   const plan = planGpuReconcile(states, { now: startedAt });
 
-  let rebuilt = false;
   for (const i of plan.release) {
-    rebuilt = rebuilt || entries[i].gpuRebuild;
     entries[i].gpuRebuild = false;
     releaseGpu(entries[i]);
   }
@@ -261,12 +287,6 @@ function reconcileGpus() {
       if (entry.gpu && entry.attachCount > 0) drawWebglNow(entry.gpu, entry.term);
     }
   });
-  if (rebuilt) {
-    const ms = clock() - startedAt;
-    gpuStats.atlasRebuilds += 1;
-    gpuStats.lastRebuildMs = ms;
-    gpuStats.maxRebuildMs = Math.max(gpuStats.maxRebuildMs, ms);
-  }
   scheduleGpuRetry(plan.retryAt);
 }
 

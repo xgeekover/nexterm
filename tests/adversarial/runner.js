@@ -30,7 +30,7 @@ import './keybinding_table.test.js';
 import './pty_reload_leak.test.js';
 import './fit_reports_size.test.js';
 import './webgl_lifecycle.test.js';
-import './atlas_rebuild.test.js';
+import './atlas_repair.test.js';
 import './tab_names.test.js';
 import './backend_tree_contract.test.js';
 import './configurable_keybindings.test.js';

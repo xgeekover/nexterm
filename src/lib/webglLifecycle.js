@@ -36,9 +36,6 @@ export const GPU_STABLE_MS = 60000;
 /** Every page addon-webgl 0.18 adds to a glyph atlas starts at this size. */
 export const ATLAS_PAGE_SIZE = 512;
 
-/** Two atlas rebuilds are at least this far apart. */
-export const ATLAS_REBUILD_MIN_INTERVAL_MS = 1000;
-
 /**
  * What to do with every terminal's WebGL renderer, given where each one is.
  *
@@ -46,7 +43,7 @@ export const ATLAS_REBUILD_MIN_INTERVAL_MS = 1000;
  *   attached     it is in a pane on screen
  *   connected    its element is in the document (the renderer measures the font)
  *   hasGpu       it holds a WebGL renderer now
- *   rebuild      its glyph atlas merged pages, so its renderer must be remade
+ *   rebuild      its renderer must be made again (an atlas it could not repair)
  *   freshAttach  it was off screen at the last pass and is on screen now
  *   retryAt      when it may try again after a loss (see `gpuFailure`)
  *   attachedAt   when it was last put on screen
@@ -54,7 +51,7 @@ export const ATLAS_REBUILD_MIN_INTERVAL_MS = 1000;
  * Returns indexes into `terminals`. `release` is carried out before `create`:
  * a rebuild lets go of the shared atlas before anything acquires it again,
  * and a context a hidden terminal gives back is the one a shown terminal
- * gets. Within the budget, terminals being rebuilt come first (they had a
+ * gets. Within the budget, terminals being remade come first (they had a
  * context a moment ago), then the most recently shown. `retryAt` is when the
  * earliest pending retry falls due, or null when nothing is waiting on time.
  */
@@ -151,7 +148,7 @@ export function isAtlasMergePage(canvas) {
 }
 
 /**
- * Whether THIS call is the one that gets to ask for a rebuild over `canvas`.
+ * Whether THIS call is the one that gets to act on `canvas`.
  *
  * The atlas is shared, but `onAddTextureAtlasCanvas` is not: addon-webgl
  * gives every live `WebglRenderer` its own emitter, and forwards the ONE
@@ -163,7 +160,7 @@ export function isAtlasMergePage(canvas) {
  * a canvas the atlas has since discarded costs nothing to keep track of.
  *
  * Only a merge page claims anything; an ordinary new page is never owed a
- * rebuild and never occupies the set.
+ * repair and never occupies the set.
  */
 export function claimAtlasMergePage(canvas, handled) {
   if (!isAtlasMergePage(canvas)) return false;
@@ -173,24 +170,12 @@ export function claimAtlasMergePage(canvas, handled) {
 }
 
 /**
- * How long to hold a requested atlas rebuild back: 0 means now.
- *
- * A rebuild starts the atlas afresh, so the next merge is a whole atlas of new
- * glyph colours away — hours of ordinary output. Only output made of nothing
- * but new colours fills one in under a second, and the floor keeps that from
- * becoming a rebuild every few frames.
- */
-export function atlasRebuildDelay(lastRebuildAt, now) {
-  if (lastRebuildAt === null || lastRebuildAt === undefined) return 0;
-  return Math.max(0, lastRebuildAt + ATLAS_REBUILD_MIN_INTERVAL_MS - now);
-}
-
-/**
  * The renderer and WebGL context inside an addon-webgl 0.18 `WebglAddon`.
  *
- * The ONE place NexTerm reads the addon's private fields (`_renderer`, the
- * WebglRenderer, and its `_gl`). Either may come back null — another version
- * can rename them — and every caller copes with that.
+ * NexTerm reads the addon's private fields only through this and the two
+ * atlas helpers below (`_renderer`, the WebglRenderer, and its `_gl`). Either
+ * may come back null — another version can rename them — and every caller
+ * copes with that.
  */
 export function webglInternals(addon) {
   try {
@@ -277,4 +262,54 @@ export function drawWebglNow(addon, { cols, rows } = {}) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Repair one renderer after its glyph atlas merged pages, in place — no new
+ * renderer, so no new context.
+ *
+ * A merge leaves two things wrong in addon-webgl 0.18 (#5847): a texture unit
+ * can keep the page it held before (the recorded version happens to equal the
+ * new page's, so the page is never uploaded), and the cells built before the
+ * merge still point at where their glyphs used to be. `GlyphRenderer.setAtlas`
+ * sets every texture unit's recorded version to -1, so the next frame uploads
+ * every page again — what a resize does, which is why one column narrower and
+ * back repaired the picture in the lab — and `_clearModel(true)` makes the
+ * next frame rebuild every cell from the glyphs' new places. That next frame
+ * has to draw the whole viewport, or the rows it skipped come out blank.
+ *
+ * Returns the atlas (see `settleWebglAtlas`), or null when the private fields
+ * are not there — another addon version — and nothing was changed.
+ */
+export function repairWebglAtlas(addon) {
+  const { renderer } = webglInternals(addon);
+  try {
+    const glyphs = renderer?._glyphRenderer?.value;
+    const atlas = renderer?._charAtlas;
+    if (!atlas || typeof glyphs?.setAtlas !== 'function' || typeof renderer._clearModel !== 'function') return null;
+    glyphs.setAtlas(atlas);
+    renderer._clearModel(true);
+    return atlas;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * End the whole-model rebuild addon-webgl 0.18 asks every renderer for on
+ * every frame after a merge: the atlas raises `_requestClearModel` and never
+ * lowers it (#5883 does). Only once every renderer drawing from `atlas` has
+ * been through `repairWebglAtlas` — the flag is what told the others to
+ * rebuild. Returns whether it was raised.
+ */
+export function settleWebglAtlas(atlas) {
+  try {
+    if (atlas && atlas._requestClearModel === true) {
+      atlas._requestClearModel = false;
+      return true;
+    }
+  } catch {
+    // A version without the flag has nothing to settle.
+  }
+  return false;
 }
