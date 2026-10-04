@@ -715,6 +715,21 @@ describe('Korean inline IME: rules the recordings do not reach', () => {
       ['한']
     );
   });
+
+  test('HI-64: ⌘V sends the syllable being composed first, and is left for the Edit menu to paste after it', () => {
+    // macOS pastes through the native Edit menu: the keydown reaches the page
+    // first, then the menu's Paste arrives as a `paste` event on xterm's
+    // textarea. The syllable has to be on its way by then, or the pasted text
+    // would land in front of it.
+    const rows = [...HAN_THEN_CLICK.slice(0, -1), ['kd', 'v', 86, 'KeyV', 'm']];
+    const { bytes, consumed } = replay(rows);
+    assert.deepEqual(bytes, ['한'], 'sent at the keydown');
+    assert.equal(
+      consumed.some(({ row }) => row[0] === 'kd' && row[1] === 'v'),
+      false,
+      'the ⌘V keydown itself is not taken — the menu still pastes'
+    );
+  });
 });
 
 describe('Korean inline IME: composition events stay xterm\'s', () => {
