@@ -139,7 +139,81 @@ export function legacyAltArrowSequence(event, { mac = false } = {}) {
   return (mac ? MAC_OPTION_ARROW[arrow] : CTRL_ARROW[arrow]) ?? null;
 }
 
-/** The @xterm/xterm release the app ships — what XTVERSION reports (unicode_widths.test.js keeps it true). */
+const WHEEL_DELTA_LINE = 1;
+const WHEEL_DELTA_PAGE = 2;
+
+/**
+ * How many arrow keys one wheel event is worth to a full-screen program that
+ * did not ask for the mouse (`less`, `man`, `git log`), counted as xterm 5.5
+ * counted them (`Viewport.getLinesScrolled`): the event's pixels over the row
+ * height, the fraction carried to the next event (`partial`); a line-mode
+ * event that many lines, a page-mode one that many screens. Shift — a
+ * sideways scroll — is worth none; ⌥/Alt scrolls `fastScrollSensitivity`
+ * times as far, 5.5's default fast-scroll modifier. Negative is up.
+ *
+ * xterm 6 sends ONE arrow per wheel event whatever its size ("simplified" with
+ * the new viewport): measured under headless Chromium, a mouse-wheel notch
+ * moved a pager 1 line where 5.5 moved it 5, and a short trackpad-like swipe 2
+ * lines where 5.5 moved it 6.
+ */
+export function wheelArrowCount(
+  event,
+  { cellHeight = 0, rows = 0, scrollSensitivity = 1, fastScrollSensitivity = 5, partial = 0 } = {}
+) {
+  const deltaY = Number(event?.deltaY) || 0;
+  if (!deltaY || event.shiftKey) return { lines: 0, partial };
+  const amount = deltaY * scrollSensitivity * (event.altKey ? fastScrollSensitivity : 1);
+  // 5.5 sent one key for every whole step begun: 1.5 lines were two keys.
+  const whole = (n) => Math.sign(n) * Math.ceil(Math.abs(n));
+  if (event.deltaMode === WHEEL_DELTA_LINE) return { lines: whole(amount), partial };
+  if (event.deltaMode === WHEEL_DELTA_PAGE) return { lines: whole(amount * rows), partial };
+  if (!(cellHeight > 0)) return { lines: 0, partial };
+  const total = partial + amount / cellHeight;
+  const lines = Math.trunc(total);
+  return { lines, partial: total - lines };
+}
+
+/**
+ * Turn the wheel into as many arrow keys as xterm 5.5 did (`wheelArrowCount`)
+ * wherever xterm turns it into arrow keys at all: a screen with no scrollback
+ * (the alternate one, or scrollback 0) and no mouse reporting in force.
+ * Everywhere else the event is xterm's, untouched: the scrollback scrolls, or
+ * the program gets wheel reports. Uses the terminal's one custom wheel slot;
+ * returns whether it was installed.
+ */
+export function installPagerWheel(term) {
+  if (typeof term?.attachCustomWheelEventHandler !== 'function') return false;
+  let partial = 0;
+  term.attachCustomWheelEventHandler((event) => {
+    try {
+      const noScrollback = term.buffer?.active?.type === 'alternate' || term.options?.scrollback === 0;
+      if (!noScrollback || (term.modes?.mouseTrackingMode ?? 'none') !== 'none') return true;
+      const screen = term.element?.querySelector?.('.xterm-screen');
+      const height = screen?.getBoundingClientRect?.().height ?? 0;
+      const result = wheelArrowCount(event, {
+        cellHeight: term.rows > 0 ? height / term.rows : 0,
+        rows: term.rows,
+        scrollSensitivity: term.options?.scrollSensitivity ?? 1,
+        fastScrollSensitivity: term.options?.fastScrollSensitivity ?? 5,
+        partial,
+      });
+      partial = result.partial;
+      if (result.lines !== 0) {
+        const key = `\x1b${term.modes?.applicationCursorKeysMode ? 'O' : '['}${result.lines < 0 ? 'A' : 'B'}`;
+        term.input(key.repeat(Math.abs(result.lines)), true);
+      }
+      // As xterm cancels a wheel it turned into keys: the page must not scroll.
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  return true;
+}
+
+/** The @xterm/xterm release the app ships — what XTVERSION reports (SO-02 keeps it true). */
 export const XTERM_VERSION = '6.0.0';
 
 /**

@@ -24,7 +24,13 @@ import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { activateGraphemeWidths, fitAndReport, installXtVersionReply, windowsPtyFor } from '../../lib/terminalCompat.js';
+import {
+  activateGraphemeWidths,
+  fitAndReport,
+  installPagerWheel,
+  installXtVersionReply,
+  windowsPtyFor,
+} from '../../lib/terminalCompat.js';
 import {
   claimAtlasMergePage,
   drawWebglNow,
@@ -773,6 +779,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // XTVERSION, answered as xterm.js 6.1 answers it: Claude Code asks for DEC
   // 2026 (synchronized output) only after this reply. See terminalCompat.js.
   installXtVersionReply(term);
+  // The wheel over a pager (`less`, `man`, `git log`) moves it as far as it did
+  // under xterm 5.5 — xterm 6 sends one arrow per wheel event. terminalCompat.js.
+  installPagerWheel(term);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);

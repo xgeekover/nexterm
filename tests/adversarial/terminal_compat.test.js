@@ -14,6 +14,8 @@ import {
   usablePtySize,
   withoutVerbatimPrefix,
   legacyAltArrowSequence,
+  wheelArrowCount,
+  installPagerWheel,
 } from '../../src/lib/terminalCompat.js';
 
 const ARROW_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
@@ -28,6 +30,44 @@ const altArrow = (key, over = {}) => ({
   metaKey: false,
   shiftKey: false,
   isComposing: false,
+  ...over,
+});
+
+/** Enough of an xterm for the pager wheel: its one custom wheel slot, a screen 21 px a row, input(). */
+function wheelTerm({ type = 'alternate', tracking = 'none', scrollback = 1000, appCursor = false } = {}) {
+  const term = {
+    rows: 30,
+    options: { scrollback, scrollSensitivity: 1, fastScrollSensitivity: 5 },
+    modes: { mouseTrackingMode: tracking, applicationCursorKeysMode: appCursor },
+    buffer: { active: { type } },
+    element: { querySelector: (sel) => (sel === '.xterm-screen' ? { getBoundingClientRect: () => ({ height: 30 * 21 }) } : null) },
+    sent: [],
+    handler: null,
+    input(data, wasUserInput) {
+      this.sent.push({ data, wasUserInput });
+    },
+    attachCustomWheelEventHandler(fn) {
+      this.handler = fn;
+    },
+  };
+  installPagerWheel(term);
+  return term;
+}
+
+/** A wheel event as the browser hands it over; pixels unless said otherwise. */
+const wheelEvent = (deltaY, over = {}) => ({
+  deltaY,
+  deltaMode: 0,
+  shiftKey: false,
+  altKey: false,
+  defaultPrevented: false,
+  stopped: false,
+  preventDefault() {
+    this.defaultPrevented = true;
+  },
+  stopPropagation() {
+    this.stopped = true;
+  },
   ...over,
 });
 
@@ -120,5 +160,74 @@ describe('Terminal compatibility: windowsPty, pty size, verbatim paths, ⌥ and 
     // The suggestion layer keeps first say (⌥→ over a ghost accepts it, as before).
     assert.match(src, /if \(decision\.action === 'pass'\) return !sendLegacyAltArrow\(event\);/);
     assert.match(src, /entry\.term\.attachCustomKeyEventHandler\(handleKeyEvent\);/);
+  });
+
+  test('TC-10: a wheel over a pager is worth its pixels over the row height, the fraction carried — xterm 5.5\'s count', () => {
+    const at21 = { cellHeight: 21, rows: 30 };
+    assert.deepEqual(wheelArrowCount(wheelEvent(105), at21), { lines: 5, partial: 0 }, 'one mouse notch, 5 rows');
+    const first = wheelArrowCount(wheelEvent(100), at21);
+    assert.equal(first.lines, 4);
+    assert.ok(Math.abs(first.partial - 16 / 21) < 1e-9, 'the rest of the notch is kept');
+    assert.equal(wheelArrowCount(wheelEvent(100), { ...at21, partial: first.partial }).lines, 5, 'and counted with the next one');
+    assert.equal(wheelArrowCount(wheelEvent(-63), at21).lines, -3, 'up is negative');
+    // A trackpad: many small events, nothing lost between them.
+    let partial = 0;
+    let lines = 0;
+    for (let i = 0; i < 25; i++) {
+      const step = wheelArrowCount(wheelEvent(5.25), { ...at21, partial });
+      lines += step.lines;
+      partial = step.partial;
+    }
+    assert.equal(lines, 6, '25 × 5.25 px is 6.25 rows: 6 keys');
+    assert.equal(partial, 0.25, 'and the quarter row waits for the next event');
+  });
+
+  test('TC-11: line and page events, Shift, ⌥ and a sensitivity, as 5.5 counted them', () => {
+    const at21 = { cellHeight: 21, rows: 30 };
+    assert.equal(wheelArrowCount(wheelEvent(3, { deltaMode: 1 }), at21).lines, 3, 'line mode: that many lines');
+    assert.equal(wheelArrowCount(wheelEvent(1.5, { deltaMode: 1 }), at21).lines, 2, 'every step begun is a key');
+    assert.equal(wheelArrowCount(wheelEvent(-1, { deltaMode: 2 }), at21).lines, -30, 'page mode: a screen');
+    assert.deepEqual(wheelArrowCount(wheelEvent(105, { shiftKey: true }), at21), { lines: 0, partial: 0 }, 'Shift scrolls sideways');
+    assert.equal(wheelArrowCount(wheelEvent(21, { altKey: true }), at21).lines, 5, '⌥: fastScrollSensitivity times');
+    assert.equal(wheelArrowCount(wheelEvent(21), { ...at21, scrollSensitivity: 2 }).lines, 2);
+    assert.deepEqual(wheelArrowCount(wheelEvent(0), at21), { lines: 0, partial: 0 });
+    assert.deepEqual(wheelArrowCount(wheelEvent(50), { cellHeight: 0, rows: 30 }), { lines: 0, partial: 0 }, 'not laid out');
+    assert.deepEqual(wheelArrowCount(null), { lines: 0, partial: 0 });
+  });
+
+  test('TC-12: on the alternate screen with no mouse reporting the wheel becomes that many arrows, and goes no further', () => {
+    const term = wheelTerm();
+    const notch = wheelEvent(105);
+    assert.equal(term.handler(notch), false, 'xterm does not add its own single arrow');
+    assert.deepEqual(term.sent, [{ data: '\x1b[B'.repeat(5), wasUserInput: true }]);
+    assert.ok(notch.defaultPrevented && notch.stopped, 'cancelled, as xterm cancels a wheel it turned into keys');
+    term.sent.length = 0;
+    term.handler(wheelEvent(-42));
+    assert.deepEqual(term.sent, [{ data: '\x1b[A\x1b[A', wasUserInput: true }]);
+
+    const app = wheelTerm({ appCursor: true });
+    app.handler(wheelEvent(42));
+    assert.deepEqual(app.sent.map((s) => s.data), ['\x1bOB\x1bOB'], 'application cursor keys, as the program asked');
+
+    const small = wheelTerm();
+    assert.equal(small.handler(wheelEvent(10)), false);
+    assert.deepEqual(small.sent, [], 'less than a row: kept for the next event, nothing sent');
+    small.handler(wheelEvent(11));
+    assert.deepEqual(small.sent.map((s) => s.data), ['\x1b[B']);
+  });
+
+  test('TC-13: anywhere else the wheel is xterm\'s, untouched', () => {
+    for (const term of [wheelTerm({ type: 'normal' }), wheelTerm({ tracking: 'any' }), wheelTerm({ tracking: 'vt200' })]) {
+      const event = wheelEvent(105);
+      assert.equal(term.handler(event), true);
+      assert.deepEqual(term.sent, []);
+      assert.ok(!event.defaultPrevented && !event.stopped);
+    }
+    const noScrollback = wheelTerm({ type: 'normal', scrollback: 0 });
+    assert.equal(noScrollback.handler(wheelEvent(42)), false, 'a normal screen with no scrollback is turned into keys too, as xterm does');
+    assert.equal(installPagerWheel({}), false, 'an xterm without the slot is left alone');
+    const src = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
+    const create = src.slice(src.indexOf('export function getOrCreateTerminal('));
+    assert.ok(create.indexOf('installPagerWheel(term);') > 0, 'every terminal the app makes has it');
   });
 });
