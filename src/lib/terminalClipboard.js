@@ -231,16 +231,19 @@ const installed = new WeakMap();
 
 /** The mouse side. See `installTerminalClipboard`. */
 class TerminalClipboardAddon {
-  constructor(container, { platform, setting }) {
+  constructor(container, { platform, setting, onSettingsChange }) {
     this._container = container;
     this._platform = platform;
     this._setting = setting;
+    this._onSettingsChange = onSettingsChange;
     this._selecting = false;
     this._removers = [];
   }
 
   activate(term) {
     const mac = this._platform === 'mac';
+    const unsubscribe = this._onSettingsChange?.();
+    if (typeof unsubscribe === 'function') this._removers.push(unsubscribe);
     const tracking = () => (term.modes?.mouseTrackingMode ?? 'none') !== 'none';
     const on = (target, type, handler) => {
       if (!target?.addEventListener) return;
@@ -312,13 +315,14 @@ export function installTerminalClipboard(term, container, { settings = null, pla
   };
 
   const mouse = installMouseReporting(term, { isEnabled: () => setting('terminalMouseReporting') });
-  const addon = new TerminalClipboardAddon(container, { platform, setting });
-  if (typeof settings?.subscribe === 'function') {
-    const unsubscribe = settings.subscribe((state, prev) => {
-      if (state?.terminalMouseReporting !== prev?.terminalMouseReporting) mouse?.sync();
-    });
-    addon._removers.push(unsubscribe);
-  }
+  // Subscribed while the terminal lives; the addon unsubscribes on dispose.
+  const onSettingsChange = () =>
+    typeof settings?.subscribe === 'function'
+      ? settings.subscribe((state, prev) => {
+          if (state?.terminalMouseReporting !== prev?.terminalMouseReporting) mouse?.sync();
+        })
+      : null;
+  const addon = new TerminalClipboardAddon(container, { platform, setting, onSettingsChange });
   if (typeof term.loadAddon === 'function') term.loadAddon(addon);
   else addon.activate(term);
   installed.set(term, addon);
