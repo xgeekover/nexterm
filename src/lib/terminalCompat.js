@@ -111,6 +111,34 @@ export function fitAndReport({ tabId, term, fitAddon, resizePty, fittable = true
   return { cols: term.cols, rows: term.rows };
 }
 
+const ARROW_KEYS = Object.freeze({ ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' });
+const ARROW_KEY_CODES = Object.freeze({ 37: 'left', 39: 'right', 38: 'up', 40: 'down' });
+const CTRL_ARROW = Object.freeze({ left: '\x1b[1;5D', right: '\x1b[1;5C', up: '\x1b[1;5A', down: '\x1b[1;5B' });
+const MAC_OPTION_ARROW = Object.freeze({ left: '\x1bb', right: '\x1bf' });
+
+/**
+ * What xterm 5.5 sent for Option/Alt and an arrow key, or null for any other
+ * key — xterm 6 no longer does it (xterm.js #5346).
+ *
+ * xterm 6 sends the arrow with the Alt modifier, `CSI 1;3D` / `CSI 1;3C`, and
+ * a default zsh has nothing bound to either. Measured with a real zsh 5.9,
+ * with no startup files and with macOS's /etc/zshrc alike: ⌥← at the end of
+ * `echo aaa bbb ccc` typed `;3D` into the line instead of moving, so Enter ran
+ * the echo and then a command named `3DX`; ⌥→ typed `;3C`. xterm 5.5 sent
+ * `ESC b` / `ESC f` on macOS — a word back and forward to zsh, bash and Claude
+ * Code alike — and Ctrl and the arrow everywhere else, ↑ and ↓ included. This
+ * is that mapping, exactly: Alt alone (with Shift, Ctrl or ⌘ it is another
+ * key), on keydown, and never for a key an IME is composing with.
+ */
+export function legacyAltArrowSequence(event, { mac = false } = {}) {
+  if (!event || event.type !== 'keydown') return null;
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return null;
+  if (event.isComposing || event.keyCode === 229) return null;
+  const arrow = ARROW_KEYS[event.key] ?? ARROW_KEY_CODES[event.keyCode];
+  if (!arrow) return null;
+  return (mac ? MAC_OPTION_ARROW[arrow] : CTRL_ARROW[arrow]) ?? null;
+}
+
 /** The width provider `@xterm/addon-unicode-graphemes` registers: Unicode 15, by grapheme cluster. */
 export const GRAPHEME_WIDTHS = '15-graphemes';
 

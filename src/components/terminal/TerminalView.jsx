@@ -3,7 +3,8 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch } from './terminalRegistry.js';
 import { TerminalFindBar } from './TerminalFindBar.jsx';
-import { fitAndReport } from '../../lib/terminalCompat.js';
+import { fitAndReport, legacyAltArrowSequence } from '../../lib/terminalCompat.js';
+import { isMac } from '../../lib/platform.js';
 import { suggest, recordCommand, forgetCommand } from '../../lib/commandIndex.js';
 import { locateSuggestion, locateCursorCell } from '../../lib/suggestGeometry.js';
 import {
@@ -379,10 +380,24 @@ export function TerminalView({ tabId, active = false }) {
       placeSuggestions();
     });
 
+    // ⌥← / ⌥→ (Alt+arrows off macOS) send what xterm 5.5 sent: xterm 6's own
+    // `CSI 1;3D` is not bound in a default zsh, which types `;3D` into the
+    // line instead of moving a word (see `legacyAltArrowSequence`). Sent the
+    // way xterm sends a key, and the key cancelled the way xterm cancels one.
+    const sendLegacyAltArrow = (event) => {
+      const sequence = legacyAltArrowSequence(event, { mac: isMac });
+      if (!sequence) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      entry.term.input(sequence, true);
+      return true;
+    };
+
     // Intercepts specific keys ourselves (→ to accept, ↑/↓ to move the popup
     // selection, Esc to dismiss) — and only while something is actually drawn,
     // at a shell prompt. Tab is the shell's, always. Everything else, including
-    // arrows when the popup is closed, falls through to xterm untouched.
+    // arrows when the popup is closed, falls through to xterm untouched — bar
+    // ⌥ and an arrow, sent as xterm 5.5 sent them.
     const handleKeyEvent = (event) => {
       // Copy and paste first — Ctrl+V / Ctrl+C on Windows and the Linux chords
       // (src/lib/terminalClipboard.js). xterm would otherwise send ^V or ^C and
@@ -393,7 +408,7 @@ export function TerminalView({ tabId, active = false }) {
         running: isRunning(),
         alternate: isAlternate(),
       });
-      if (decision.action === 'pass') return true;
+      if (decision.action === 'pass') return !sendLegacyAltArrow(event);
       // A key the layer takes never reaches the program, so whatever it
       // believed was on the line no longer counts.
       lineRef.current = lineAfterKey(lineRef.current, decision);

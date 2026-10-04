@@ -1,9 +1,11 @@
 /**
  * The rules for what xterm.js is told about the pty behind it: how Windows'
- * ConPTY wraps and resizes, the size range the backend clamps a pty to, and
- * the verbatim paths an older backend handed out.
+ * ConPTY wraps and resizes, the size range the backend clamps a pty to, the
+ * verbatim paths an older backend handed out — and what ⌥ and an arrow send,
+ * which xterm 6 stopped deciding the way xterm 5.5 did.
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import {
   PTY_COLS,
@@ -11,9 +13,25 @@ import {
   windowsPtyFor,
   usablePtySize,
   withoutVerbatimPrefix,
+  legacyAltArrowSequence,
 } from '../../src/lib/terminalCompat.js';
 
-describe('Terminal compatibility: windowsPty, pty size, verbatim paths', () => {
+const ARROW_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
+
+/** A keydown as the browser reports ⌥/Alt and an arrow. */
+const altArrow = (key, over = {}) => ({
+  type: 'keydown',
+  key,
+  keyCode: ARROW_CODES[key],
+  altKey: true,
+  ctrlKey: false,
+  metaKey: false,
+  shiftKey: false,
+  isComposing: false,
+  ...over,
+});
+
+describe('Terminal compatibility: windowsPty, pty size, verbatim paths, ⌥ and an arrow', () => {
   test('TC-01: windowsPty is set on Windows only, with the build when the backend knows it', () => {
     assert.deepEqual(windowsPtyFor({ os: 'windows', osBuild: 19045 }), { backend: 'conpty', buildNumber: 19045 });
     assert.deepEqual(windowsPtyFor({ os: 'windows', osBuild: 22631 }), { backend: 'conpty', buildNumber: 22631 });
@@ -54,5 +72,53 @@ describe('Terminal compatibility: windowsPty, pty size, verbatim paths', () => {
     for (const p of ['D:\\workspace', '/Users/me/project', '\\\\server\\share', '~/project', '', null, undefined]) {
       assert.equal(withoutVerbatimPrefix(p), p);
     }
+  });
+
+  test('TC-06: ⌥← / ⌥→ on macOS send ESC b / ESC f — a word back and forward, as xterm 5.5 sent them', () => {
+    const mac = { mac: true };
+    assert.equal(legacyAltArrowSequence(altArrow('ArrowLeft'), mac), '\x1bb');
+    assert.equal(legacyAltArrowSequence(altArrow('ArrowRight'), mac), '\x1bf');
+    // xterm 5.5 left ⌥↑ / ⌥↓ alone on macOS, and so does xterm 6: nothing to restore.
+    assert.equal(legacyAltArrowSequence(altArrow('ArrowUp'), mac), null);
+    assert.equal(legacyAltArrowSequence(altArrow('ArrowDown'), mac), null);
+    // A WebKit event without `key` is still the same key.
+    assert.equal(legacyAltArrowSequence(altArrow(undefined, { keyCode: 37 }), mac), '\x1bb');
+  });
+
+  test('TC-07: Alt and an arrow elsewhere send Ctrl and the arrow, all four, as xterm 5.5 did', () => {
+    for (const mac of [false, undefined]) {
+      const opts = mac === undefined ? undefined : { mac };
+      assert.equal(legacyAltArrowSequence(altArrow('ArrowLeft'), opts), '\x1b[1;5D');
+      assert.equal(legacyAltArrowSequence(altArrow('ArrowRight'), opts), '\x1b[1;5C');
+      assert.equal(legacyAltArrowSequence(altArrow('ArrowUp'), opts), '\x1b[1;5A');
+      assert.equal(legacyAltArrowSequence(altArrow('ArrowDown'), opts), '\x1b[1;5B');
+    }
+  });
+
+  test('TC-08: any other key, modifier, phase or a composing IME is left to xterm', () => {
+    for (const mac of [true, false]) {
+      const left = (over) => legacyAltArrowSequence(altArrow('ArrowLeft', over), { mac });
+      assert.equal(left({ altKey: false }), null, 'a plain arrow');
+      assert.equal(left({ shiftKey: true }), null, '⇧⌥← is a selection key, not a word move');
+      assert.equal(left({ ctrlKey: true }), null);
+      assert.equal(left({ metaKey: true }), null, '⌘⌥← is the app\'s focus-previous-pane');
+      assert.equal(left({ type: 'keyup' }), null);
+      assert.equal(left({ type: 'keypress' }), null);
+      assert.equal(left({ isComposing: true }), null);
+      assert.equal(left({ keyCode: 229 }), null, 'the IME owns the key');
+      assert.equal(legacyAltArrowSequence({ type: 'keydown', key: 'b', keyCode: 66, altKey: true }, { mac }), null);
+      assert.equal(legacyAltArrowSequence(null, { mac }), null);
+    }
+  });
+
+  test('TC-09: the terminal sends it from its key handler, after the suggestion layer has passed on the key', () => {
+    const src = readFileSync(new URL('../../src/components/terminal/TerminalView.jsx', import.meta.url), 'utf8');
+    const handler = src.slice(src.indexOf('const sendLegacyAltArrow = (event) => {'));
+    assert.match(handler, /legacyAltArrowSequence\(event, \{ mac: isMac \}\)/);
+    assert.match(handler, /entry\.term\.input\(sequence, true\)/, 'as a keystroke: every onData listener sees it');
+    assert.match(handler, /event\.preventDefault\(\);\s*event\.stopPropagation\(\);/, 'and cancelled, as xterm cancels a key it sends');
+    // The suggestion layer keeps first say (⌥→ over a ghost accepts it, as before).
+    assert.match(src, /if \(decision\.action === 'pass'\) return !sendLegacyAltArrow\(event\);/);
+    assert.match(src, /entry\.term\.attachCustomKeyEventHandler\(handleKeyEvent\);/);
   });
 });
