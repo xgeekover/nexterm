@@ -328,3 +328,18 @@ describe('Terminal compatibility: ⌥→ with the suggestion popup open', () => 
     }
   });
 });
+
+describe('Terminal compatibility: X10 tracking and the wheel over a pager', () => {
+  test("TC-15: X10 reports presses only — over a pager the wheel is still 5.5's arrows, not xterm's one", () => {
+    const term = wheelTerm({ tracking: 'x10' });
+    const notch = wheelEvent(105);
+    assert.equal(term.handler(notch), false, 'xterm adds no arrow of its own');
+    assert.deepEqual(term.sent, [{ data: '\x1b[B'.repeat(5), wasUserInput: true }]);
+    assert.ok(notch.defaultPrevented && notch.stopped);
+    for (const tracking of ['vt200', 'drag', 'any']) {
+      const reported = wheelTerm({ tracking });
+      assert.equal(reported.handler(wheelEvent(105)), true, `${tracking} reports the wheel: the program's`);
+      assert.deepEqual(reported.sent, []);
+    }
+  });
+});

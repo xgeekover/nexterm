@@ -174,9 +174,21 @@ export function wheelArrowCount(
 }
 
 /**
+ * Whether the program is told about the wheel rather than xterm acting on it:
+ * a mouse protocol that reports it — VT200, DRAG or ANY. X10 (`?9h`) reports
+ * presses only, so under it xterm scrolls and sends arrows exactly as with no
+ * protocol at all, and so does every rule here.
+ */
+function wheelReported(term) {
+  const mode = term.modes?.mouseTrackingMode ?? 'none';
+  return mode !== 'none' && mode !== 'x10';
+}
+
+/**
  * Turn the wheel into as many arrow keys as xterm 5.5 did (`wheelArrowCount`)
  * wherever xterm turns it into arrow keys at all: a screen with no scrollback
- * (the alternate one, or scrollback 0) and no mouse reporting in force.
+ * (the alternate one, or scrollback 0) and no protocol that reports the wheel
+ * — X10 included, under which xterm 6 sent one arrow per event as well.
  * Everywhere else the event is xterm's, untouched: the scrollback scrolls, or
  * the program gets wheel reports. Uses the terminal's one custom wheel slot;
  * returns whether it was installed.
@@ -187,7 +199,7 @@ export function installPagerWheel(term) {
   term.attachCustomWheelEventHandler((event) => {
     try {
       const noScrollback = term.buffer?.active?.type === 'alternate' || term.options?.scrollback === 0;
-      if (!noScrollback || (term.modes?.mouseTrackingMode ?? 'none') !== 'none') return true;
+      if (!noScrollback || wheelReported(term)) return true;
       const screen = term.element?.querySelector?.('.xterm-screen');
       const height = screen?.getBoundingClientRect?.().height ?? 0;
       const result = wheelArrowCount(event, {
