@@ -53,6 +53,7 @@ import './agent_lifecycle.test.js';
 import './suggest_geometry.test.js';
 import './mouse_reporting.test.js';
 import './mouse_reporting_drag.test.js';
+import './mouse_reporting_headless.test.js';
 import './clipboard_keys.test.js';
 
 async function run() {
