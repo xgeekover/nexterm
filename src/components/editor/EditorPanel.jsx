@@ -10,7 +10,7 @@ import '../../lib/monaco.js';
 import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { EditorTabs, EditorDragContext, markEditorDragEnded } from './EditorTabs.jsx';
+import { EditorTabs, EditorDragContext, markEditorDragEnded, stripSlotAt } from './EditorTabs.jsx';
 import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
@@ -58,6 +58,12 @@ function useMonacoOptions() {
 const DRAG_THRESHOLD_PX = 4;
 /** How deep into a pane counts as an edge (split) rather than the centre (move). */
 const EDGE_FRACTION = 0.25;
+/** How near either end of a tab row a dragged tab starts scrolling it. */
+const AUTO_SCROLL_ZONE_PX = 32;
+/** Scrolling speed, in px per second, with the pointer at the very end of a row. */
+const AUTO_SCROLL_PX_PER_S = 480;
+/** Past the end — over the strip's own buttons — it keeps speeding up, to this many times that. */
+const AUTO_SCROLL_MAX_FACTOR = 3;
 
 /**
  * Dragging is done with pointer events rather than HTML5 drag & drop — same
@@ -80,12 +86,243 @@ function zoneFromPoint(rect, clientX, clientY) {
   return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
 }
 
-/** Resolve the editor pane body under the pointer, if any. */
-function paneAtPoint(clientX, clientY) {
-  const el = document.elementFromPoint(clientX, clientY);
+/**
+ * What a drop at this point would do.
+ *
+ * Over a pane's BODY, the centre moves the tab into that group and the edges
+ * split it. Over a TAB STRIP — its row of chips or its own buttons — the tab
+ * goes into that strip at a gap, which is how the order of the tabs is
+ * changed at all. `stripSlotAt` picks the gap: before or after the chip under
+ * the pointer, counting the dragged chip like any other (it stays in its
+ * strip, dimmed, for the whole gesture), which is exactly how
+ * `moveEditorTabInStrip` takes it. Only the part of the row that is on screen
+ * counts: past the last chip that can be seen — over the buttons of a strip
+ * with more tabs than fit, say — the gap is the last one in view, not the end
+ * of the strip. The end is reached by scrolling the row, which holding the
+ * drag near it does (`createStripAutoScroller`).
+ *
+ * `doc` is a parameter only so that a test can stand in for the page.
+ */
+export function dropTargetAtPoint(clientX, clientY, doc = document) {
+  const el = doc.elementFromPoint(clientX, clientY);
+
+  const strip = el?.closest?.('[data-editor-tab-strip]');
+  if (strip) {
+    const row = strip.querySelector('[data-editor-tab-row]') ?? strip;
+    const chips = Array.from(strip.querySelectorAll('[data-tab-chip]'), (chip) => chip.getBoundingClientRect());
+    return {
+      paneId: strip.getAttribute('data-editor-tab-strip'),
+      zone: 'tabs',
+      index: stripSlotAt(chips, row.getBoundingClientRect(), clientX),
+    };
+  }
+
   const body = el?.closest?.('[data-editor-pane-body]');
   if (!body) return null;
-  return { paneId: body.getAttribute('data-editor-pane-body'), rect: body.getBoundingClientRect() };
+  return {
+    paneId: body.getAttribute('data-editor-pane-body'),
+    zone: zoneFromPoint(body.getBoundingClientRect(), clientX, clientY),
+    index: null,
+  };
+}
+
+/**
+ * How fast a tab row should scroll with a dragged tab held at `clientX`, in
+ * px per second: negative toward its start, positive toward its end, 0
+ * anywhere but near one of them. Within AUTO_SCROLL_ZONE_PX of an end the
+ * speed grows in proportion to how near the pointer is, reaching
+ * AUTO_SCROLL_PX_PER_S at the end itself, and past the end — over the strip's
+ * own buttons — it keeps growing, up to AUTO_SCROLL_MAX_FACTOR times that. A
+ * row too narrow for two zones is split between them.
+ */
+export function stripAutoScrollSpeed(row, clientX) {
+  const zone = Math.min(AUTO_SCROLL_ZONE_PX, (row.right - row.left) / 2);
+  if (!(zone > 0)) return 0;
+  const towardEnd = (clientX - (row.right - zone)) / zone;
+  if (towardEnd > 0) return AUTO_SCROLL_PX_PER_S * Math.min(towardEnd, AUTO_SCROLL_MAX_FACTOR);
+  const towardStart = (row.left + zone - clientX) / zone;
+  if (towardStart > 0) return -AUTO_SCROLL_PX_PER_S * Math.min(towardStart, AUTO_SCROLL_MAX_FACTOR);
+  return 0;
+}
+
+/**
+ * Scrolls a tab strip's row while a dragged tab is held near either end of
+ * it, so that every gap of a strip with more tabs than fit can be reached —
+ * a drop only ever goes into a gap that is on screen (see `stripSlotAt`).
+ *
+ * Call `follow(paneId, x)` whenever the pointer moves, with the pane whose
+ * strip it is over (null for none), and `stop()` when the gesture ends,
+ * however it ends. Between the two it runs at most one requestAnimationFrame
+ * loop, which ends by itself as soon as there is nothing to do: the pointer
+ * is not near an end, or the row is already as far as it goes. It only
+ * scrolls; what is under the pointer is measured again by whoever listens for
+ * the row's `scroll` events.
+ *
+ * `rowOf(paneId)` finds a strip's scrolling row. The frame functions are
+ * parameters only so that a test can run the loop on a clock of its own.
+ */
+export function createStripAutoScroller({
+  rowOf,
+  requestFrame = (callback) => requestAnimationFrame(callback),
+  cancelFrame = (id) => cancelAnimationFrame(id),
+}) {
+  let pointer = null; // { paneId, x } while the pointer is over a tab strip
+  let frame = 0;
+  let lastTime = null;
+  let owed = 0; // the part of a pixel not scrolled yet
+
+  const idle = () => {
+    if (frame) cancelFrame(frame);
+    frame = 0;
+    lastTime = null;
+    owed = 0;
+  };
+
+  const tick = (time) => {
+    frame = 0;
+    const row = pointer ? rowOf(pointer.paneId) : null;
+    const speed = row ? stripAutoScrollSpeed(row.getBoundingClientRect(), pointer.x) : 0;
+    const from = row ? row.scrollLeft : 0;
+    const max = row ? row.scrollWidth - row.clientWidth : 0;
+    if (speed === 0 || (speed < 0 ? from <= 0 : from >= max)) {
+      idle();
+      return;
+    }
+
+    // Per second, not per frame — a 120Hz screen scrolls no faster — and a
+    // long wait between frames (a hidden window) is not made up in one jump.
+    const elapsed = lastTime === null ? 1000 / 60 : Math.min(Math.max(time - lastTime, 0), 50);
+    lastTime = time;
+    owed += (speed * elapsed) / 1000;
+    const step = Math.trunc(owed);
+    owed -= step;
+    // The next frame is asked for before scrolling, so that anything the
+    // scroll sets off before this returns — a `follow` included — finds one
+    // already asked for and never starts a second loop.
+    frame = requestFrame(tick);
+    if (step === 0) return;
+    row.scrollLeft = Math.min(Math.max(from + step, 0), max);
+    // A row that did not move is as far as it goes.
+    if (row.scrollLeft === from) idle();
+  };
+
+  return {
+    follow(paneId, x) {
+      pointer = paneId == null ? null : { paneId, x };
+      if (pointer && !frame) frame = requestFrame(tick);
+    },
+    stop() {
+      pointer = null;
+      idle();
+    },
+  };
+}
+
+/**
+ * Follows one press on a tab chip from pointerdown to release, and returns
+ * the function that ends it early: on an unmount, or on a second press while
+ * this one is still listening.
+ *
+ * `onChange(drag)` is handed the drag state whenever it changes, and null
+ * once the gesture is over: { tabId, title, startX, startY, x, y, active,
+ * targetPaneId, zone, index }, where `zone` is 'tabs' over a tab strip and
+ * `index` the gap the pointer is over, or else the body's move/split zone and
+ * `index` null. A press only becomes a drag once it has travelled
+ * DRAG_THRESHOLD_PX; until then it is a click. `onDrop(drag)` is handed the
+ * state a drag was let go in, if that was over somewhere a tab can go — the
+ * very state the marker was drawn from.
+ *
+ * What is under the pointer is measured again whenever anything scrolls, not
+ * only when the pointer moves: a row scrolled by the wheel, or by its own
+ * auto-scroll (`createStripAutoScroller`), moves its chips under a pointer
+ * that stays put, and the gap — and the marker drawn in it — has to go with
+ * them, or a release right after drops the tab in a gap the marker has left.
+ *
+ * Listeners are attached synchronously here rather than from an effect: a
+ * quick flick delivers pointermove/up before React has committed anything, so
+ * an effect-bound listener would miss the whole gesture. `win`, `doc` and the
+ * frame functions are parameters only so that a test can drive a gesture
+ * without a browser.
+ */
+export function trackTabDrag(tab, press, { onChange, onDrop, win = window, doc = document, requestFrame, cancelFrame }) {
+  let drag = {
+    tabId: tab.id,
+    title: tab.fileName,
+    startX: press.clientX,
+    startY: press.clientY,
+    x: press.clientX,
+    y: press.clientY,
+    active: false,
+    targetPaneId: null,
+    zone: null,
+    index: null,
+  };
+
+  const scroller = createStripAutoScroller({
+    rowOf: (paneId) => doc.querySelector(`[data-editor-tab-row="${paneId}"]`),
+    requestFrame,
+    cancelFrame,
+  });
+
+  const pointAt = (x, y) => {
+    const hit = dropTargetAtPoint(x, y, doc);
+    const next = {
+      ...drag,
+      active: true,
+      x,
+      y,
+      targetPaneId: hit?.paneId ?? null,
+      zone: hit?.zone ?? null,
+      index: hit?.index ?? null,
+    };
+    if (!drag.active || ['x', 'y', 'targetPaneId', 'zone', 'index'].some((key) => next[key] !== drag[key])) {
+      drag = next;
+      onChange(next);
+    }
+    scroller.follow(next.zone === 'tabs' ? next.targetPaneId : null, x);
+  };
+
+  const detach = () => {
+    win.removeEventListener('pointermove', onMove);
+    win.removeEventListener('pointerup', onUp);
+    win.removeEventListener('pointercancel', onCancel);
+    win.removeEventListener('scroll', onScroll, true);
+    scroller.stop();
+  };
+
+  const onMove = (ev) => {
+    const travelled = Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY);
+    if (!drag.active && travelled <= DRAG_THRESHOLD_PX) return;
+    pointAt(ev.clientX, ev.clientY);
+  };
+
+  // `scroll` does not bubble, so the window hears it in the capture phase.
+  // Any element's will do: whatever scrolled, the pointer may be over
+  // something else now.
+  const onScroll = () => {
+    if (drag.active) pointAt(drag.x, drag.y);
+  };
+
+  const onUp = () => {
+    detach();
+    const last = drag;
+    onChange(null);
+    if (!last.active) return;
+    markEditorDragEnded();
+    if (last.targetPaneId) onDrop(last);
+  };
+
+  const onCancel = () => {
+    detach();
+    onChange(null);
+  };
+
+  onChange(drag);
+  win.addEventListener('pointermove', onMove);
+  win.addEventListener('pointerup', onUp);
+  win.addEventListener('pointercancel', onCancel);
+  win.addEventListener('scroll', onScroll, { capture: true, passive: true });
+  return detach;
 }
 
 /** Translucent overlay showing where the dropped tab will land. */
@@ -145,7 +382,8 @@ function relativeSegments(filePath, rootPath) {
 /**
  * One editor group (leaf of the split tree): its own tab strip plus the
  * Monaco editor for whichever of *its* tabs is active. Tabs can be dragged
- * between groups, or onto a group's edge to split it.
+ * along a strip to reorder them, into another group (at a position in its
+ * strip, or onto its body), or onto a group's edge to split it.
  */
 function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const { shortcut } = useShortcuts();
@@ -165,7 +403,10 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const { drag } = useContext(EditorDragContext);
 
   const isActivePane = activeEditorPaneId === paneId;
-  const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
+  // Over this pane's tab strip the strip draws its own marker; the body's
+  // overlay is only for the move and split zones.
+  const dropZone =
+    drag?.active && drag.targetPaneId === paneId && drag.zone !== 'tabs' ? drag.zone : null;
 
   /**
    * Put the caret where a terminal link asked for, if that link meant the file
@@ -341,86 +582,34 @@ export function EditorPanel() {
   const confirmPendingOverwrite = useEditorStore((s) => s.confirmPendingOverwrite);
   const reloadFromDisk = useEditorStore((s) => s.reloadFromDisk);
   const dropEditorTabOnPane = useEditorStore((s) => s.dropEditorTabOnPane);
+  const moveEditorTabInStrip = useEditorStore((s) => s.moveEditorTabInStrip);
 
-  // null while idle; { tabId, title, startX, startY, x, y, active, targetPaneId, zone }
+  // null while idle; while a tab is dragged, the state `trackTabDrag` reports.
   const [drag, setDrag] = useState(null);
-  const dragRef = useRef(null);
   const cleanupRef = useRef(null);
 
-  /**
-   * Listeners are attached synchronously here rather than from an effect: a
-   * quick flick delivers pointermove/up before React has committed the state
-   * change, so an effect-bound listener would miss the whole gesture.
-   */
   const beginDrag = useCallback(
     (tab, e) => {
-      const detach = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        window.removeEventListener('pointercancel', onCancel);
-        cleanupRef.current = null;
-      };
-
-      const onMove = (ev) => {
-        const cur = dragRef.current;
-        if (!cur) return;
-        const movedEnough =
-          cur.active ||
-          Math.hypot(ev.clientX - cur.startX, ev.clientY - cur.startY) > DRAG_THRESHOLD_PX;
-        if (!movedEnough) return;
-
-        const hit = paneAtPoint(ev.clientX, ev.clientY);
-        const next = {
-          ...cur,
-          active: true,
-          x: ev.clientX,
-          y: ev.clientY,
-          targetPaneId: hit?.paneId ?? null,
-          zone: hit ? zoneFromPoint(hit.rect, ev.clientX, ev.clientY) : null,
-        };
-        dragRef.current = next;
-        setDrag(next);
-      };
-
-      const onUp = () => {
-        const cur = dragRef.current;
-        detach();
-        dragRef.current = null;
-        setDrag(null);
-        if (cur?.active) markEditorDragEnded();
-        if (!cur?.active || !cur.targetPaneId) return;
-        dropEditorTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
-      };
-
-      const onCancel = () => {
-        detach();
-        dragRef.current = null;
-        setDrag(null);
-      };
-
-      const started = {
-        tabId: tab.id,
-        title: tab.fileName,
-        startX: e.clientX,
-        startY: e.clientY,
-        x: e.clientX,
-        y: e.clientY,
-        active: false,
-        targetPaneId: null,
-        zone: null,
-      };
-      dragRef.current = started;
-      setDrag(started);
-
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onCancel);
-      cleanupRef.current = detach;
+      // A press while an earlier gesture is still listening — its release
+      // went somewhere the window never heard — starts over, rather than
+      // leaving that gesture's listeners and scrolling at work beside this one.
+      cleanupRef.current?.();
+      cleanupRef.current = trackTabDrag(tab, e, {
+        onChange: setDrag,
+        onDrop: (cur) => {
+          if (cur.zone === 'tabs') {
+            moveEditorTabInStrip(cur.tabId, cur.targetPaneId, cur.index);
+          } else {
+            dropEditorTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+          }
+        },
+      });
     },
-    [dropEditorTabOnPane]
+    [dropEditorTabOnPane, moveEditorTabInStrip]
   );
 
-  // Never leave listeners behind if the editor unmounts mid-gesture.
+  // Never leave listeners, or a strip still scrolling, behind if the editor
+  // unmounts mid-gesture.
   useEffect(() => () => cleanupRef.current?.(), []);
 
   const handleSplit = useCallback((paneId, direction) => {

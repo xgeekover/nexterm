@@ -453,6 +453,165 @@ scenario(
   }
 );
 
+// ---- Dragging an editor tab over a tab strip ---------------------------------
+
+/**
+ * The editor is the one part of the app the whole-App render cannot reach:
+ * PanelLayout loads it lazily, and `renderToString` draws a lazy component's
+ * Suspense fallback instead. So these cases render the tab strip itself,
+ * inside the drag context EditorPanel provides, in the state a drag is in
+ * while the pointer is over a strip.
+ */
+const { EditorTabs, EditorDragContext } = await import('../../src/components/editor/EditorTabs.jsx');
+
+const editorTab = (id) => ({
+  id,
+  filePath: `/workspace/${id}.js`,
+  fileName: `${id}.js`,
+  content: '',
+  savedContent: '',
+  isDirty: false,
+  language: 'javascript',
+});
+
+/** A drag that has crossed the threshold, with the pointer over `targetPaneId`. */
+const draggingOver = (targetPaneId, zone, index) => ({
+  tabId: 'e1', title: 'e1.js', startX: 0, startY: 0, x: 100, y: 10,
+  active: true, targetPaneId, zone, index,
+});
+
+/** The root group's tab strip holding `tabIds`, drawn while `drag` is in progress. */
+function renderStrip(tabIds, drag) {
+  const node = { type: 'leaf', id: 'editor-pane-root', tabIds, activeTabId: tabIds[0] ?? null };
+  return renderToString(
+    React.createElement(
+      EditorDragContext.Provider,
+      { value: { drag, beginDrag() {} } },
+      React.createElement(EditorTabs, { node })
+    )
+  );
+}
+
+/** The strip read left to right: chip ids, with MARK where the drop marker is drawn. */
+const stripSequence = (html) =>
+  [...html.matchAll(/data-tab-chip="([^"]+)"|data-tab-drop-marker=""/g)].map((m) => m[1] ?? 'MARK');
+
+function stripCase(id, description, check) {
+  const started = Date.now();
+  try {
+    reset();
+    useEditorStore.setState({ tabs: ['e1', 'e2', 'e3', 'e4'].map(editorTab) });
+    for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+    check();
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+const ALL = ['e1', 'e2', 'e3', 'e4'];
+
+stripCase('RN-21', 'a tab dragged over its own strip draws one marker, in the gap the pointer is over', () => {
+  const seq = stripSequence(renderStrip(ALL, draggingOver('editor-pane-root', 'tabs', 2)));
+  expectThat(
+    JSON.stringify(seq) === JSON.stringify(['e1', 'e2', 'MARK', 'e3', 'e4']),
+    `gap 2 is between e2 and e3, but the strip reads ${JSON.stringify(seq)}`
+  );
+});
+
+stripCase('RN-22', 'the first and last gaps draw the marker at the ends of the strip', () => {
+  for (const [gap, expected] of [
+    [0, ['MARK', ...ALL]],
+    [ALL.length, [...ALL, 'MARK']],
+  ]) {
+    // A tab from another group: beside a tab's own chip a drop moves nothing, and draws no marker.
+    const seq = stripSequence(renderStrip(ALL, { ...draggingOver('editor-pane-root', 'tabs', gap), tabId: 'x9' }));
+    expectThat(JSON.stringify(seq) === JSON.stringify(expected), `gap ${gap}: the strip reads ${JSON.stringify(seq)}`);
+  }
+});
+
+stripCase('RN-23', "an empty group's strip draws the marker, with a height of its own", () => {
+  const html = renderStrip([], draggingOver('editor-pane-root', 'tabs', 0));
+  const seq = stripSequence(html);
+  expectThat(JSON.stringify(seq) === '["MARK"]', `the empty strip reads ${JSON.stringify(seq)}`);
+  // Stretched to the chips' height instead, it was zero pixels tall in a
+  // strip with no chips — found by dragging into a freshly split group.
+  const cls = /<div\b[^>]*\sdata-tab-drop-marker=""[^>]*\sclass="([^"]*)"/.exec(html)?.[1] ?? '';
+  expectThat(/\bh-tab\b/.test(cls), `the marker takes its height from its neighbours again: "${cls}"`);
+});
+
+stripCase('RN-24', 'a strip the pointer is not over draws no marker', () => {
+  for (const [where, drag] of [
+    ["another group's strip", draggingOver('editor-pane-2', 'tabs', 1)],
+    ["this group's body", draggingOver('editor-pane-root', 'center', null)],
+    ['a press still under the drag threshold', { ...draggingOver('editor-pane-root', 'tabs', 1), active: false }],
+  ]) {
+    const seq = stripSequence(renderStrip(ALL, drag));
+    expectThat(!seq.includes('MARK'), `a marker is drawn with the pointer over ${where}: ${JSON.stringify(seq)}`);
+  }
+});
+
+// ---- The order a drag leaves behind ------------------------------------------
+
+/** The values of one attribute, in the order the markup lists them. */
+const attrOrder = (html, attr) => [...html.matchAll(new RegExp(`\\s${attr}="([^"]+)"`, 'g'))].map((m) => m[1]);
+
+scenario(
+  'RN-25',
+  "a pane draws its tabs in the pane's own order, not the order the terminals were opened",
+  () => {
+    reset();
+    // Opened t1, t2, t3; dragged into t3, t1, t2. The pane's `tabIds` is the
+    // only place that order lives, and what is saved — a strip drawn from
+    // `tabs` would put every reorder back on screen while keeping it on disk.
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2'), tab('t3')],
+      activeTabId: 't2',
+      groups: [
+        { ...baseGroups([])[0], tree: { type: 'leaf', id: 'pane-1', tabIds: ['t3', 't1', 't2'], activeTabId: 't2' } },
+      ],
+    });
+  },
+  (html) => {
+    const chips = attrOrder(html, 'data-tab-chip');
+    expectThat(
+      JSON.stringify(chips) === JSON.stringify(['t3', 't1', 't2']),
+      `the strip draws ${JSON.stringify(chips)}, not the pane's order ["t3","t1","t2"]`
+    );
+  }
+);
+
+scenario(
+  'RN-26',
+  'the switcher draws the groups in the order they were dragged into, the one on screen included',
+  () => {
+    reset();
+    const group = (id, tabId) => ({
+      id,
+      name: id,
+      createdAt: Number(id.slice(-1)),
+      tree: { type: 'leaf', id: `pane-${id}`, tabIds: [tabId], activeTabId: tabId },
+      activePaneId: `pane-${id}`,
+    });
+    // Created 1, 2, 3; dragged into 3, 1, 2 — with the one on screen no
+    // longer first, so drawing it first would show as a reorder undone.
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2'), tab('t3')],
+      activeTabId: 't2',
+      groups: [group('group-3', 't3'), group('group-1', 't1'), group('group-2', 't2')],
+      activeGroupId: 'group-2',
+    });
+  },
+  (html) => {
+    const chips = attrOrder(html, 'data-group-chip');
+    expectThat(
+      JSON.stringify(chips) === JSON.stringify(['group-3', 'group-1', 'group-2']),
+      `the switcher draws ${JSON.stringify(chips)}, not the order the groups are in: ["group-3","group-1","group-2"]`
+    );
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

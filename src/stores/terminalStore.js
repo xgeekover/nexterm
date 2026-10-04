@@ -305,6 +305,35 @@ function splitAt(node, paneId, newLeaf, direction, insertFirst) {
   }));
 }
 
+/**
+ * `ids` with `id` moved to SLOT `index`, or null when `index` is not a number.
+ *
+ * A slot is counted in `ids` as it is BEFORE the move, `id` included: slot i
+ * is "just before whatever is at position i now", and slot `ids.length` is
+ * "after the last". That is the number a drag produces — the dragged chip
+ * stays in its row, faded, until it is let go, so the pointer is measured
+ * against the row as it stands — and it means the slots either side of `id`
+ * both leave it where it is, and one place to the right is two slots on.
+ *
+ * `id` need not be in `ids` (a tab dropped on another pane's strip); it is
+ * then simply inserted at the slot. A slot outside the row is clamped into it
+ * and a fraction rounds down. Anything that is not a number is refused rather
+ * than read as "the end": a caller that lost track of where the pointer was
+ * must not move something to a place the user never pointed at.
+ */
+function moveToSlot(ids, id, index) {
+  if (typeof index !== 'number' || Number.isNaN(index)) return null;
+  const from = ids.indexOf(id);
+  const slot = Math.min(Math.max(Math.floor(index), 0), ids.length);
+  // Lifting `id` out of the row first shifts everything after it one place left.
+  const at = from !== -1 && slot > from ? slot - 1 : slot;
+  const rest = from === -1 ? ids : ids.filter((x) => x !== id);
+  return [...rest.slice(0, at), id, ...rest.slice(at)];
+}
+
+/** Whether two id lists hold the same ids in the same order. */
+const sameOrder = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 /** An empty pane, used when the last group loses its last terminal. */
 const emptyPane = () => ({ type: 'leaf', id: makePaneId(), tabIds: [], activeTabId: null });
 
@@ -914,6 +943,38 @@ function nextDefaultTitle(tabs, preferred = null) {
   let n = 1;
   while (taken.has(n)) n += 1;
   return `Terminal ${n}`;
+}
+
+/**
+ * The default name for group `groupId` when its name is cleared: a "Group N"
+ * no OTHER group is called, the way `nextDefaultTitle` numbers terminals.
+ *
+ * It used to be `Group ${position + 1}`, which reads its number off where the
+ * group sits now — and groups move. Drag "Group 3" to the front, clear the
+ * name of the group now second, and there were two "Group 2"s.
+ *
+ * A group already called "Group N" keeps N when nothing else uses it, so
+ * clearing a default name leaves it as it was; otherwise it gets the lowest
+ * number nobody uses.
+ */
+function nextDefaultGroupName(groups, groupId) {
+  const numberIn = (name) => {
+    const match = /^Group (\d+)$/.exec(name || '');
+    return match ? Number(match[1]) : null;
+  };
+
+  const taken = new Set();
+  let own = null;
+  for (const group of groups || []) {
+    const n = numberIn(group?.name);
+    if (group?.id === groupId) own = n;
+    else if (n !== null) taken.add(n);
+  }
+
+  if (own !== null && !taken.has(own)) return `Group ${own}`;
+  let n = 1;
+  while (taken.has(n)) n += 1;
+  return `Group ${n}`;
 }
 
 // The bootstrap still running, shared by every init() until it settles — see init.
@@ -1569,7 +1630,8 @@ export const useTerminalStore = create((set, get, api) => {
 
     /**
      * Name (or rename) a group — reachable from a right-click on the group
-     * switcher. A blank name resets it to the positional default.
+     * switcher. A blank name resets it to a default "Group N" that no other
+     * group is called (see `nextDefaultGroupName`).
      */
     renameGroup: (groupId, name) =>
       set((state) => {
@@ -1577,8 +1639,42 @@ export const useTerminalStore = create((set, get, api) => {
         if (idx === -1) return {};
         const trimmed = typeof name === 'string' ? name.trim() : '';
         return {
-          groups: updateGroup(state, groupId, (g) => ({ ...g, name: trimmed || `Group ${idx + 1}` })),
+          groups: updateGroup(state, groupId, (g) => ({
+            ...g,
+            name: trimmed || nextDefaultGroupName(state.groups, groupId),
+          })),
         };
+      }),
+
+    /**
+     * Drop a group's chip along the switcher: put group `groupId` at slot
+     * `index` of `groups` — the order the switcher shows, and the order that
+     * is saved and comes back on relaunch.
+     *
+     * `index` is a slot counted the way `moveTabInStrip` counts one: among the
+     * groups AS THEY ARE BEFORE THE MOVE, the dragged one included, so slot i
+     * is "just before the group now at position i" and slot `groups.length`
+     * is "after the last" (see `moveToSlot`).
+     *
+     * Only the order changes. Reordering is not switching: the group on
+     * screen stays on screen wherever it now sits, so tidying the row never
+     * swaps the whole terminal area out from under the user, and every group
+     * keeps its panes, its focus and its name. A drop that leaves the order as
+     * it is changes no state at all. An unknown group, or an index that is not
+     * a number, is ignored.
+     */
+    reorderGroup: (groupId, index) =>
+      set((state) => {
+        const ids = state.groups.map((g) => g.id);
+        if (!ids.includes(groupId)) return state;
+        const order = moveToSlot(ids, groupId, index);
+        if (!order || sameOrder(order, ids)) return state;
+        // Not through `settle`: a new order cannot break anything it repairs —
+        // no tree, pane or focus changes — so the very same group objects are
+        // handed back, resequenced. The array is new, which is what schedules
+        // the save (see the persist subscription at the bottom of this file).
+        const byId = new Map(state.groups.map((g) => [g.id, g]));
+        return { groups: order.map((id) => byId.get(id)) };
       }),
 
     /**
@@ -2081,6 +2177,70 @@ export const useTerminalStore = create((set, get, api) => {
         return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
       });
     },
+
+    /**
+     * Drop a terminal tab on a TAB STRIP: put it at slot `index` of pane
+     * `targetPaneId` — its own strip (a reorder) or another pane's, in this
+     * group or another one (a move that lands where it was let go).
+     *
+     * `index` is a slot among the target strip's tabs AS THEY ARE BEFORE THE
+     * MOVE, the dragged tab included when it is already there: slot i is "just
+     * before the tab now at position i", slot `tabIds.length` is "after the
+     * last". In a strip [a, b, c], `a` dropped at slot 2 gives [b, a, c], and
+     * slots 0 and 1 both leave it where it is. Across panes the dragged tab is
+     * not in the target strip, so the slot is simply where it goes. A slot
+     * outside the strip is clamped into it (see `moveToSlot`).
+     *
+     * The tab then shows in that pane, the pane takes focus and its group comes
+     * on screen — what a click on the chip does. A drop that would leave all of
+     * that as it already is changes no state at all: no new `groups` array, so
+     * nothing re-renders and nothing is saved.
+     *
+     * A drop on the strip used to be `dropTabOnPane(…, 'center')`, which always
+     * appends: along its own strip a tab could not move at all, and onto
+     * another one it went to the end wherever it was let go.
+     *
+     * An unknown tab or pane, a pane outside `targetGroupId`, or an index that
+     * is not a number: ignored.
+     */
+    moveTabInStrip: (tabId, targetPaneId, index, targetGroupId = null) =>
+      set((state) => {
+        if (!state.tabs.some((t) => t.id === tabId)) return state;
+        const targetGroup = resolveGroup(state, targetGroupId, targetPaneId);
+        const targetPane = targetGroup && collectLeaves(targetGroup.tree).find((l) => l.id === targetPaneId);
+        if (!targetPane) return state;
+        const tabIds = moveToSlot(targetPane.tabIds, tabId, index);
+        if (!tabIds) return state;
+
+        const fromThisStrip = targetPane.tabIds.includes(tabId);
+        if (
+          fromThisStrip &&
+          sameOrder(tabIds, targetPane.tabIds) &&
+          targetPane.activeTabId === tabId &&
+          targetGroup.activePaneId === targetPaneId &&
+          state.activeGroupId === targetGroup.id &&
+          state.activeTabId === tabId
+        ) {
+          return state;
+        }
+
+        let groups = state.groups;
+        const sourceGroup = fromThisStrip ? null : groupOfTab(state, tabId);
+        if (sourceGroup) {
+          groups = updateGroup(groups, sourceGroup.id, (g) => ({
+            ...g,
+            tree: removeTabFromTree(g.tree, tabId),
+          }));
+        }
+        groups = updateGroup(groups, targetGroup.id, (g) => ({
+          ...g,
+          tree: replaceNode(g.tree, targetPaneId, (n) => ({ ...n, tabIds, activeTabId: tabId })),
+          activePaneId: targetPaneId,
+        }));
+        // `settle` prunes the pane the tab left if that emptied it, exactly as
+        // a drop on a pane's body does.
+        return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
+      }),
 
     /**
      * Rename a tab (double-click its chip, or "Rename" from its right-click
