@@ -25,6 +25,7 @@ import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { WebKitEngine, ChromiumEngine } from './webgl/engines.js';
 import {
   idlePaneWhileTabsSwitch,
+  groupSwitches,
   twentyThroughOnePane,
   closeAndReopenBesideIdlePane,
   atlasMerges,
@@ -84,7 +85,7 @@ describe('WebGL engine model: the rules it follows', () => {
   });
 });
 
-describe('WebGL engine model: switching tabs beside an idle pane', () => {
+describe('WebGL engine model: switching tabs and groups', () => {
   for (const engine of ENGINES) {
     for (const paced of [false, true]) {
       const how = paced ? 'a second apart' : 'as fast as they come';
@@ -97,6 +98,14 @@ describe('WebGL engine model: switching tabs beside an idle pane', () => {
         assert.equal(r.stats.live, 4, 'A, B1, B2, B3 — one each, hidden or not');
       });
     }
+
+    test(`WM-10 (${engine}): forty group switches, fast and paced, make no context and push out nobody`, async () => {
+      const r = await quietly(() => groupSwitches({ registryUrl, engine }));
+      assert.equal(r.createdBySwitching, 0);
+      assert.equal(r.evictions, 0);
+      assert.deepEqual(r.onScreenWithoutWebgl, []);
+      assert.equal(r.stats.lost, 0);
+    });
   }
 });
 

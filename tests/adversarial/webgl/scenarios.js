@@ -69,6 +69,52 @@ export async function idlePaneWhileTabsSwitch({ registryUrl, engine = 'webkit', 
 }
 
 /**
+ * Two groups of two panes each; switching groups unmounts one group's panes
+ * and mounts the other's, 20 times as fast as possible, then 20 times 300 ms
+ * apart.
+ */
+export async function groupSwitches({ registryUrl, engine = 'webkit' }) {
+  const app = await openModel({ registryUrl, engine });
+  try {
+    const groups = [
+      [app.pane(), app.pane()],
+      [app.pane(), app.pane()],
+    ];
+    const tabs = [
+      ['G1a', 'G1b'],
+      ['G2a', 'G2b'],
+    ];
+    const showGroup = (g) => {
+      for (const pane of groups[1 - g]) pane.unmount();
+      groups[g].forEach((pane, i) => pane.show(tabs[g][i]));
+      app.focus(groups[g][0]);
+    };
+    showGroup(0);
+    await app.run(500);
+    showGroup(1);
+    await app.run(500);
+    const createdBefore = app.engine.created;
+    for (let i = 0; i < 20; i++) {
+      showGroup(i % 2);
+      await settle();
+    }
+    for (let i = 0; i < 20; i++) {
+      showGroup(i % 2);
+      await app.run(300);
+    }
+    await app.run(15000);
+    return {
+      ...evictionSummary(app),
+      createdBySwitching: app.engine.created - createdBefore,
+      onScreenWithoutWebgl: app.onScreenWithoutWebgl(),
+      stats: app.reg.getGpuStats(),
+    };
+  } finally {
+    await app.dispose();
+  }
+}
+
+/**
  * Twenty terminals shown one after another in one pane, twice round —
  * optionally with pane A idle beside it. Past sixteen, every new context
  * pushes another out; it must be one nobody is looking at.
