@@ -447,11 +447,17 @@ export const GRAPHEME_WIDTHS = '15-graphemes';
  *
  * Known limit, measured with zsh 5.9 on macOS: zsh's line editor measures
  * with the C library's `wcwidth`, so to zsh ⚠️ ✔️ ❤️ are ONE cell and 👍🏽 👨‍💻
- * 🇰🇷 are FOUR. Editing a command line that holds one of those — moving back
- * over it and typing, ⌃A, a line long enough to wrap — is drawn a cell or more
- * off (a stray blank, characters overwritten) until zsh redraws the line;
- * what runs is still exactly what was typed. Plain emoji (✅ 🚀) agree. Unicode
- * 11 matched zsh on the VS16 and ZWJ sequences and Claude Code on none of them.
+ * 🇰🇷 are FOUR, where they are two here. One in the PROMPT is enough: a VS16
+ * emoji there alone — Starship's default ☁️ or ❄️ — is two cells here and
+ * one to zsh, so EVERY command line long enough to wrap sits a cell off from
+ * where zsh believes it is. Editing across the wrap then shows the wrong
+ * characters — typed past it, deleted back across it and typed again, the
+ * screen read `…qrsZ` where the line was `…qrstZ`. A line that holds one of
+ * those is drawn off the same way when edited (moving back over it and
+ * typing, ⌃A) until zsh redraws it. Only the screen is wrong: zsh's buffer,
+ * and what runs, is exactly what was typed. Plain emoji (✅ 🚀) agree.
+ * Unicode 11 matched zsh on the VS16 and ZWJ sequences and Claude Code on
+ * none of them.
  *
  * `UnicodeGraphemesAddon` is passed in so this stays free of xterm and can be
  * checked in Node. Returns whether grapheme widths are active; never throws —
