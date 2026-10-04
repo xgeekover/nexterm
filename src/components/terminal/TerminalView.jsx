@@ -149,7 +149,7 @@ export function TerminalView({ tabId, active = false }) {
     setSuggestState(EMPTY_SUGGEST_STATE);
 
     wrapper.replaceChildren(entry.container);
-    const releaseGpuRenderer = ensureGpuRenderer(entry);
+    const stopShowing = ensureGpuRenderer(entry);
 
     const doFit = () => {
       // Shared with the Settings window's live refit so the two cannot drift:
@@ -491,9 +491,9 @@ export function TerminalView({ tabId, active = false }) {
       // Deliberately not disposing `entry` or detaching its container here —
       // React unmounting `wrapper` just removes it (and the container inside
       // it) from the document; the instance stays alive in the registry for
-      // the next mount to reattach with scrollback intact. Only its WebGL
-      // context goes, for a terminal on screen to have.
-      releaseGpuRenderer();
+      // the next mount to reattach with scrollback intact — WebGL renderer
+      // included. The registry only hears that it is no longer on screen.
+      stopShowing();
     };
   }, [tabId, sessionId, writeRaw, resizePty]);
 

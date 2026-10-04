@@ -1,21 +1,22 @@
 /**
  * Which terminal holds a WebGL context, and what happens when one is lost.
  *
- * A page gets 16 live WebGL contexts and making a 17th kills the oldest.
- * Every terminal used to keep one for life, so with 18 terminals open the two
- * oldest fell back to the DOM renderer (striped box and block characters at
- * line height 1.5); a lost context was final (`entry.gpu = null`, never
- * retried); and a closed terminal's context was never let go, so three
- * close/open cycles evicted two terminals that were still open. Measured
- * headless: 13 of 18 terminals kept WebGL, 5 were drawn by the DOM renderer
- * when shown, and the page held 16 live contexts for one visible terminal.
+ * A page gets 16 live WebGL contexts, and making one more kills the one that
+ * has gone longest without drawing. Every terminal used to keep one for life
+ * with no limit, so with 18 terminals open the two oldest fell back to the
+ * DOM renderer (striped box and block characters at line height 1.5); a lost
+ * context was final; and a closed terminal's context was never let go.
  *
- * The rules are pure (`src/lib/webglLifecycle.js`) and checked here; the
- * last cases hold the two places that wire them in, which no Node test can
- * run: a pane that stops showing a terminal gives the context back, and
- * closing a terminal releases its context before xterm disposes it.
+ * The next attempt gave a terminal a context only while on screen. On WebKit
+ * that made a context on every tab switch, the ones let go kept their slots
+ * until garbage collection, and the context pushed out to make room was an
+ * idle terminal ON SCREEN in the next pane (macOS, 2026-10-04: twenty tab
+ * switches, fast or a second apart, and the other pane went blank).
+ *
+ * The rules are pure (`src/lib/webglLifecycle.js`) and checked here. What
+ * they add up to, on a model of each engine's cap with the real registry
+ * driving it, is `webgl_engine_model.test.js`.
  */
-import { readFileSync } from 'node:fs';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import {
   GPU_CONTEXT_BUDGET,
@@ -23,21 +24,25 @@ import {
   GPU_STABLE_MS,
   planGpuReconcile,
   planGpuAttach,
+  mustDrawScreenFirst,
   gpuFailure,
   webglInternals,
+  isWebglContextLost,
   releaseWebglAddon,
   drawWebglNow,
 } from '../../src/lib/webglLifecycle.js';
 
-/** One terminal as the planner sees it; on screen with nothing to do by default. */
+/** One terminal as the planner sees it; on screen, drawing, nothing to do by default. */
 const term = (over = {}) => ({
   attached: true,
   connected: true,
   hasGpu: true,
+  lost: false,
   rebuild: false,
   freshAttach: false,
   retryAt: 0,
   attachedAt: 0,
+  drawnAt: 0,
   ...over,
 });
 
@@ -62,6 +67,9 @@ function fakeAddon({ lost = false, extension = true, disposeThrows = false, rend
         },
       };
     },
+    flush() {
+      log.push('flush');
+    },
   };
   const addon = {
     _renderer: renderer ? { _gl: gl } : undefined,
@@ -75,11 +83,11 @@ function fakeAddon({ lost = false, extension = true, disposeThrows = false, rend
   return { addon, gl, log };
 }
 
-describe('WebGL contexts: only a terminal on screen holds one', () => {
-  test('GL-01: a terminal no pane shows gives its context back; one on screen keeps it', () => {
+describe('WebGL contexts: made once, kept while hidden', () => {
+  test('GL-01: a terminal no pane shows KEEPS its renderer — hiding makes and frees nothing', () => {
     const plan = planGpuReconcile([term(), term({ attached: false }), term()], { now: 1 });
-    assert.deepEqual(plan.release, [1], 'the hidden one, and only it');
-    assert.deepEqual(plan.create, [], 'nothing on screen is missing a renderer');
+    assert.deepEqual(plan.release, [], 'a tab switch must not cost a context');
+    assert.deepEqual(plan.create, []);
   });
 
   test('GL-02: a terminal shown without a renderer gets one; a hidden one does not', () => {
@@ -94,29 +102,65 @@ describe('WebGL contexts: only a terminal on screen holds one', () => {
     assert.deepEqual(plan.create, []);
   });
 
-  test('GL-04: never more contexts than the budget — the rest wait instead of evicting', () => {
+  test('GL-04: never more terminals ON SCREEN with a context than the cap — the rest wait', () => {
     const twenty = Array.from({ length: 20 }, (_, i) => term({ hasGpu: false, attachedAt: i }));
     const plan = planGpuReconcile(twenty, { now: 100 });
     assert.equal(plan.create.length, GPU_CONTEXT_BUDGET, 'sixteen made, four wait on the DOM renderer');
-    assert.equal(GPU_CONTEXT_BUDGET, 16, "the browsers' own cap (Chromium and WebKit)");
-
-    // Fifteen on screen already hold one: exactly one more fits.
-    const held = Array.from({ length: 15 }, () => term());
-    const waiting = [term({ hasGpu: false, attachedAt: 1 }), term({ hasGpu: false, attachedAt: 2 })];
-    assert.deepEqual(planGpuReconcile([...held, ...waiting], { now: 100 }).create, [16], 'the most recently shown');
+    assert.equal(GPU_CONTEXT_BUDGET, 16, "the engines' own cap (WebKit and Chromium)");
+    assert.deepEqual(plan.create.slice(0, 2), [19, 18], 'the most recently shown first');
   });
 
-  test('GL-05: a context given back is free for a terminal waiting on screen in the same pass', () => {
-    const full = Array.from({ length: 16 }, () => term());
-    full[3] = term({ attached: false }); // hidden in this commit
-    const plan = planGpuReconcile([...full, term({ hasGpu: false, attachedAt: 9 })], { now: 1 });
-    assert.deepEqual(plan.release, [3]);
-    assert.deepEqual(plan.create, [16], 'released first, then handed on');
+  test('GL-05: past the cap, the hidden renderer drawn longest ago makes room — not the one hidden longest', () => {
+    const states = [
+      term(), // on screen
+      ...Array.from({ length: 12 }, (_, i) => term({ attached: false, drawnAt: 500 + i })),
+      // Hidden a moment ago, but idle on screen for an hour before that: its
+      // context has gone longest without drawing, and that is the engines' order.
+      term({ attached: false, attachedAt: 990, drawnAt: 10 }),
+      term({ attached: false, attachedAt: 100, drawnAt: 400 }),
+      term({ attached: false, attachedAt: 200, drawnAt: 450 }),
+      term({ hasGpu: false, attachedAt: 1000 }), // just shown
+    ];
+    const plan = planGpuReconcile(states, { now: 1000 });
+    assert.deepEqual(plan.create, [16]);
+    assert.deepEqual(plan.release, [13], 'sixteen held + one to make: one hidden goes, by choice');
+  });
+
+  test('GL-06: a context on screen is never given up to make room; with no hidden one to spare, nothing is made', () => {
+    const states = [...Array.from({ length: 15 }, () => term()), term({ attached: false, hasGpu: true }), term({ hasGpu: false })];
+    const one = planGpuReconcile(states, { now: 1 });
+    assert.deepEqual(one.release, [15], 'the hidden one goes');
+    assert.deepEqual(one.create, [16]);
+    const full = [...Array.from({ length: 16 }, () => term()), term({ hasGpu: false })];
+    const none = planGpuReconcile(full, { now: 1 });
+    assert.deepEqual(none.release, []);
+    assert.deepEqual(none.create, [], 'sixteen on screen: the seventeenth waits on the DOM renderer');
+  });
+
+  test('GL-07: several made in one pass each get their room — the page never goes past the cap', () => {
+    const hidden = Array.from({ length: 14 }, (_, i) => term({ attached: false, drawnAt: i }));
+    const shown = [term({ hasGpu: false, attachedAt: 5 }), term({ hasGpu: false, attachedAt: 6 }), term({ hasGpu: false, attachedAt: 7 })];
+    const states = [term(), ...hidden, ...shown];
+    const plan = planGpuReconcile(states, { now: 10 });
+    assert.equal(plan.create.length, 3);
+    const held = states.filter((t) => t.hasGpu).length - plan.release.length + plan.create.length;
+    assert.equal(held, GPU_CONTEXT_BUDGET, `15 held + 3 made needs 2 let go (released ${plan.release})`);
+    assert.deepEqual(plan.release, [1, 2], 'the two drawn longest ago');
+  });
+
+  test('GL-08: a renderer whose context is lost holds no slot worth counting', () => {
+    // Lost and not reported yet: addon-webgl waits 3 s for a restore first.
+    const states = [term({ attached: false, lost: true }), ...Array.from({ length: 15 }, () => term()), term({ hasGpu: false })];
+    const plan = planGpuReconcile(states, { now: 1 });
+    assert.deepEqual(plan.release, [], 'fifteen live + one lost leaves room for one more');
+    assert.deepEqual(plan.create, [16]);
+    const onScreenLost = planGpuReconcile([term({ lost: true })], { now: 1 });
+    assert.deepEqual(onScreenLost, { release: [], create: [], retryAt: null }, 'on screen: left to the loss report and the retry');
   });
 });
 
 describe('WebGL contexts: a lost one comes back, without a loop', () => {
-  test('GL-06: after a loss the terminal retries once the backoff has passed, and not before', () => {
+  test('GL-09: after a loss the terminal retries once the backoff has passed, and not before', () => {
     const lost = term({ hasGpu: false, retryAt: 5000 });
     const early = planGpuReconcile([lost], { now: 4000 });
     assert.deepEqual(early.create, [], 'still backing off');
@@ -124,7 +168,7 @@ describe('WebGL contexts: a lost one comes back, without a loop', () => {
     assert.deepEqual(planGpuReconcile([lost], { now: 5000 }).create, [0], 'then it gets WebGL again');
   });
 
-  test('GL-07: retries back off 1 s, 5 s, 30 s, then stop', () => {
+  test('GL-10: retries back off 1 s, 5 s, 30 s, then stop', () => {
     let state = { failures: 0, createdAt: null };
     const delays = [];
     let now = 1000;
@@ -141,7 +185,7 @@ describe('WebGL contexts: a lost one comes back, without a loop', () => {
       'given up: no automatic retry, however long it waits');
   });
 
-  test('GL-08: a renderer that had been fine for a minute starts the count afresh', () => {
+  test('GL-11: a renderer that had been fine for a minute starts the count afresh', () => {
     const after = gpuFailure({ failures: 3, createdAt: 0 }, GPU_STABLE_MS);
     assert.equal(after.failures, 1, 'one loss after long healthy use is not a third strike');
     assert.equal(after.retryAt, GPU_STABLE_MS + GPU_RETRY_DELAYS_MS[0]);
@@ -149,47 +193,61 @@ describe('WebGL contexts: a lost one comes back, without a loop', () => {
     assert.equal(quick.failures, 2, 'but a renderer lost within the minute keeps counting');
   });
 
-  test('GL-09: a renderer that could not be made at all never counts as healthy', () => {
+  test('GL-12: a renderer that could not be made at all never counts as healthy', () => {
     // A creation failure has no renderer that lived; reading an old creation
     // time as "healthy" would retry every second forever.
     const next = gpuFailure({ failures: 2, createdAt: null }, 10 * GPU_STABLE_MS);
     assert.equal(next.failures, 3);
   });
 
-  test('GL-10: showing the terminal again tries at once, even after the retries gave up', () => {
+  test('GL-13: showing the terminal again tries at once, even after the retries gave up', () => {
     const gaveUp = term({ hasGpu: false, retryAt: Infinity, freshAttach: true });
     assert.deepEqual(planGpuReconcile([gaveUp], { now: 1 }).create, [0]);
     assert.equal(planGpuReconcile([gaveUp], { now: 1 }).retryAt, null);
   });
 });
 
-describe('WebGL contexts: a terminal coming back is drawn at the size it is fitted to', () => {
-  test('GL-11: a terminal just shown gets its renderer at once, before its pane fits it', () => {
+describe('WebGL contexts: a terminal being shown', () => {
+  test('GL-14: shown for the first time, it gets its renderer at once, before its pane fits it', () => {
     // Fitted with the DOM renderer's wider cells first, it got 104 columns and
-    // then 107 a frame later — two resizes on every tab switch.
+    // then 107 a frame later — two resizes for the program inside.
     const states = [term(), term({ hasGpu: false, attachedAt: 50, freshAttach: true })];
-    assert.deepEqual(planGpuAttach(states, 1, { now: 50 }), { create: true, releaseFirst: [] });
+    assert.deepEqual(planGpuAttach(states, 1), { create: true, releaseFirst: [] });
   });
 
-  test('GL-12: a context still held by a terminal just hidden goes first when the budget is full', () => {
+  test('GL-15: shown again with the renderer it kept, it gets nothing new', () => {
+    const states = [term(), term({ attachedAt: 50, freshAttach: true })];
+    assert.deepEqual(planGpuAttach(states, 1), { create: false, releaseFirst: [] });
+  });
+
+  test('GL-16: at the cap, the hidden renderer drawn longest ago goes first', () => {
     const states = [
       ...Array.from({ length: 13 }, () => term()),
-      term({ attached: false, attachedAt: 30 }),
-      term({ attached: false, attachedAt: 10 }), // hidden longest
-      term({ attached: false, attachedAt: 20 }),
+      term({ attached: false, drawnAt: 30 }),
+      term({ attached: false, drawnAt: 10 }), // drawn longest ago
+      term({ attached: false, drawnAt: 20 }),
       term({ hasGpu: false, attachedAt: 99, freshAttach: true }),
     ];
-    const decision = planGpuAttach(states, 16, { now: 99 });
-    assert.equal(decision.create, true);
-    assert.deepEqual(decision.releaseFirst, [14], 'sixteen held + one new: the longest-hidden goes now');
+    assert.deepEqual(planGpuAttach(states, 16), { create: true, releaseFirst: [14] });
   });
 
-  test('GL-13: no renderer at once when sixteen terminals on screen already hold one', () => {
+  test('GL-17: no renderer at once when sixteen terminals on screen already hold one', () => {
     const states = [...Array.from({ length: 16 }, () => term()), term({ hasGpu: false, freshAttach: true })];
-    assert.deepEqual(planGpuAttach(states, 16, { now: 1 }), { create: false, releaseFirst: [] });
+    assert.deepEqual(planGpuAttach(states, 16), { create: false, releaseFirst: [] });
   });
 
-  test('GL-14: the first frame is drawn at the fitted size, now, not on the next animation frame', () => {
+  test('GL-18: near the cap, the terminals on screen draw before a context is made', () => {
+    // WebKit pushes out the context that has gone longest without drawing, and
+    // an idle terminal on screen may not have drawn for an hour.
+    assert.equal(mustDrawScreenFirst({ held: 3, lingering: 0 }), false, 'nowhere near: nothing to protect');
+    assert.equal(mustDrawScreenFirst({ held: 14, lingering: 0 }), false);
+    assert.equal(mustDrawScreenFirst({ held: 15, lingering: 0 }), true, 'one slot of margin');
+    assert.equal(mustDrawScreenFirst({ held: 4, lingering: 11 }), true,
+      'contexts let go still count on WebKit until collected');
+    assert.equal(mustDrawScreenFirst({ held: 1, lingering: null }), true, 'unknown counts as full');
+  });
+
+  test('GL-19: the first frame is drawn at the fitted size, now, not on the next animation frame', () => {
     const calls = [];
     const renderer = {
       dimensions: { css: { canvas: { width: 107 * 7, height: 37 * 18 }, cell: { width: 7, height: 18 } } },
@@ -204,7 +262,18 @@ describe('WebGL contexts: a terminal coming back is drawn at the size it is fitt
     assert.deepEqual(calls, ['renderRows(0,36)'], 'already that size: only drawn');
   });
 
-  test('GL-15: drawing never throws, whatever the addon turned out to be', () => {
+  test('GL-20: a draw ahead of a new context is flushed — Chromium ranks contexts by their last flush', () => {
+    const { addon, log } = fakeAddon();
+    addon._renderer.renderRows = () => log.push('renderRows');
+    addon._renderer.dimensions = { css: { canvas: { width: 70, height: 18 }, cell: { width: 7, height: 18 } } };
+    assert.equal(drawWebglNow(addon, { cols: 10, rows: 1 }, { flush: true }), true);
+    assert.deepEqual(log, ['renderRows', 'flush']);
+    const lost = fakeAddon({ lost: true });
+    lost.addon._renderer.renderRows = () => lost.log.push('renderRows');
+    assert.equal(drawWebglNow(lost.addon, { cols: 10, rows: 1 }), false, 'a lost context draws nothing');
+  });
+
+  test('GL-21: drawing never throws, whatever the addon turned out to be', () => {
     assert.equal(drawWebglNow(undefined, { cols: 80, rows: 24 }), false);
     assert.equal(drawWebglNow({}, { cols: 80, rows: 24 }), false, 'a version without `_renderer`');
     const broken = { _renderer: { renderRows() { throw new Error('context lost'); } } };
@@ -213,21 +282,21 @@ describe('WebGL contexts: a terminal coming back is drawn at the size it is fitt
 });
 
 describe('WebGL contexts: releasing an addon releases its context', () => {
-  test('GL-16: the context is taken before the dispose and lost on purpose after it', () => {
+  test('GL-22: the context is taken before the dispose and lost on purpose after it', () => {
     const { addon, gl, log } = fakeAddon();
     const result = releaseWebglAddon(addon);
     assert.deepEqual(log, ['dispose', 'getExtension(WEBGL_lose_context)', 'loseContext']);
-    assert.equal(gl.lost, true, 'the slot is handed back now, not at garbage collection');
+    assert.equal(gl.lost, true, 'Chromium has the slot back now; WebKit recycles a lost context first');
     assert.deepEqual(result, { disposed: true, freedContext: true });
   });
 
-  test('GL-17: a context that is already lost is disposed and left alone', () => {
+  test('GL-23: a context that is already lost is disposed and left alone', () => {
     const { addon, log } = fakeAddon({ lost: true });
     assert.deepEqual(releaseWebglAddon(addon), { disposed: true, freedContext: false });
     assert.ok(!log.includes('loseContext'));
   });
 
-  test('GL-18: a failing dispose still lets the context go', () => {
+  test('GL-24: a failing dispose still lets the context go', () => {
     const { addon, gl } = fakeAddon({ disposeThrows: true });
     const warn = console.warn;
     console.warn = () => {};
@@ -239,7 +308,7 @@ describe('WebGL contexts: releasing an addon releases its context', () => {
     assert.equal(gl.lost, true);
   });
 
-  test('GL-19: an addon without the private fields, or a browser without the extension, is only disposed', () => {
+  test('GL-25: an addon without the private fields, or a browser without the extension, is only disposed', () => {
     const noRenderer = fakeAddon({ renderer: false });
     assert.deepEqual(releaseWebglAddon(noRenderer.addon), { disposed: true, freedContext: false });
     const noExtension = fakeAddon({ extension: false });
@@ -247,33 +316,15 @@ describe('WebGL contexts: releasing an addon releases its context', () => {
     assert.deepEqual(releaseWebglAddon(null), { disposed: false, freedContext: false });
   });
 
-  test('GL-20: the private fields are read in one guarded place', () => {
+  test('GL-26: the private fields are read in one guarded place, and a loss is seen at once', () => {
     const { addon, gl } = fakeAddon();
     assert.equal(webglInternals(addon).gl, gl);
     assert.deepEqual(webglInternals({ _renderer: { _gl: {} } }).gl, null, 'not a context: no getExtension');
     const hostile = { get _renderer() { throw new Error('renamed'); } };
     assert.deepEqual(webglInternals(hostile), { renderer: null, gl: null });
-  });
-});
-
-describe('WebGL contexts: the two places the rules are wired in', () => {
-  const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
-
-  test('GL-21: a pane that stops showing a terminal gives its context back', () => {
-    const src = read('../../src/components/terminal/TerminalView.jsx');
-    const effect = src.slice(src.indexOf('useEffect(() => {'), src.indexOf('}, [tabId, sessionId'));
-    const m = effect.match(/const (\w+) = ensureGpuRenderer\(entry\);/);
-    assert.ok(m, 'the attach keeps the function that undoes it');
-    const cleanup = effect.slice(effect.lastIndexOf('return () => {'));
-    assert.ok(cleanup.includes(`${m[1]}();`), "and the effect's cleanup calls it");
-  });
-
-  test("GL-22: closing a terminal releases its context before xterm's own dispose", () => {
-    const src = read('../../src/components/terminal/terminalRegistry.js');
-    const body = src.slice(src.indexOf('export function disposeTerminal('));
-    const release = body.indexOf('releaseGpu(entry);');
-    const dispose = body.indexOf('entry.term.dispose();');
-    assert.ok(release > 0 && dispose > 0 && release < dispose,
-      "term.dispose() drops the addon without losing the context, and the zombie counts against the 16");
+    assert.equal(isWebglContextLost(addon), false);
+    gl.lost = true;
+    assert.equal(isWebglContextLost(addon), true, 'not 3 s later, when addon-webgl gives up on a restore');
+    assert.equal(isWebglContextLost(hostile), false);
   });
 });

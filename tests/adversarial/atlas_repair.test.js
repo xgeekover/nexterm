@@ -17,7 +17,8 @@
  * pages again and rebuilds its cells, and the atlas stops asking for a
  * rebuild on every frame. No renderer is made or let go, so no WebGL context
  * is either — remaking them all, as the fix before this did, made up to
- * sixteen contexts at once.
+ * sixteen contexts at once. What the repair adds up to with the registry
+ * driving it is in `webgl_engine_model.test.js`.
  */
 import { readFileSync } from 'node:fs';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';

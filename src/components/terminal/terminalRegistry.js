@@ -29,11 +29,14 @@ import {
   claimAtlasMergePage,
   drawWebglNow,
   gpuFailure,
+  isWebglContextLost,
+  mustDrawScreenFirst,
   planGpuAttach,
   planGpuReconcile,
   releaseWebglAddon,
   repairWebglAtlas,
   settleWebglAtlas,
+  webglInternals,
 } from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
@@ -45,7 +48,7 @@ import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 const instances = new Map();
 
 /**
- * Draw a terminal with xterm's WebGL renderer while it is on screen.
+ * Draw a terminal with xterm's WebGL renderer.
  *
  * The DOM renderer draws block and box-drawing characters with the font, and a
  * glyph only covers the font's height — so at the default line height of 1.5
@@ -53,26 +56,30 @@ const instances = new Map();
  * background (reproduced with the block and box characters opencode draws:
  * gaps at 1.5, solid at 1.0). The WebGL renderer draws those characters itself,
  * filling the whole cell at any line height. It measures the font from the live
- * DOM, hence "on screen". Without WebGL xterm carries on with its DOM renderer.
+ * DOM, so it is made when the terminal is first shown. Without WebGL xterm
+ * carries on with its DOM renderer.
  *
- * A context is scarce (`lib/webglLifecycle.js` has the rules and the reasons),
- * so it follows the terminal on and off the screen:
+ * A context is scarce, and on WebKit making one is what costs
+ * (`lib/webglLifecycle.js` has the rules and the reasons):
  *
  *   - a pane showing the terminal calls `ensureGpuRenderer`, which makes the
- *     renderer at once (before the pane fits the terminal — see
- *     `planGpuAttach`), and calls the function it returns when it stops; a
- *     terminal no pane shows gives its context back;
- *   - a lost context is retried, on a schedule that cannot become a loop;
- *   - when the glyph atlas merges pages, every live renderer is repaired in
- *     place (`repairAtlas`) — addon-webgl 0.18 draws fragments after its
- *     second merge.
+ *     renderer the first time (before the pane fits the terminal — see
+ *     `planGpuAttach`), and calls the function it returns when it stops; the
+ *     terminal KEEPS its renderer while hidden, so switching tabs or groups
+ *     makes no context;
+ *   - past sixteen, the hidden terminal drawn longest ago gives its context
+ *     back first, and every terminal on screen draws before a context is made
+ *     (`drawScreenFirst`), so the engine never pushes out one on screen;
+ *   - a lost context is retried, on a schedule that cannot become a loop; a
+ *     hidden one whose context was lost gets a new one when shown;
+ *   - when the glyph atlas merges pages, every renderer is repaired in place
+ *     (`repairAtlas`) — addon-webgl 0.18 draws fragments after its second
+ *     merge.
  *
  * Everything else is settled in one pass, `reconcileGpus`, queued as a
  * microtask: it runs after React has attached, detached and fitted every pane
- * of a commit, and before the browser paints. A terminal moving between panes
- * in one commit keeps its context, a context a hidden terminal gives back is
- * free for one waiting on screen, and a terminal just shown is drawn at its
- * fitted size for the very first frame.
+ * of a commit, and before the browser paints, so a terminal just shown is
+ * drawn at its fitted size for the very first frame.
  */
 const gpuStats = {
   created: 0,
@@ -80,6 +87,8 @@ const gpuStats = {
   released: 0,
   freedContexts: 0,
   lost: 0,
+  lostOnScreen: 0,
+  drawnAhead: 0,
   atlasRepairs: 0,
   atlasRepairFallbacks: 0,
   lastAtlasRepairMs: 0,
@@ -94,6 +103,9 @@ let atlasRepairQueued = false;
 // renderer. Tracked by identity, module-wide, so N reports of one merge ask
 // for exactly one repair — a WeakSet costs nothing once the atlas moves on.
 const handledAtlasMergeCanvases = new WeakSet();
+// The contexts let go of, weakly. WebKit keeps a lost context's slot until it
+// is garbage collected, so until then it still counts towards the cap.
+const releasedContexts = [];
 
 const clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -121,22 +133,53 @@ function gpuStateOf(entry) {
     attached,
     connected: entry.container.isConnected,
     hasGpu: Boolean(entry.gpu),
+    lost: Boolean(entry.gpu) && isWebglContextLost(entry.gpu),
     rebuild: entry.gpuRebuild,
     // Off screen at the last pass and on screen now: the user is looking at
     // it again, and whatever gave up on its renderer gets another go.
     freshAttach: attached && !entry.wasAttached,
     retryAt: entry.gpuRetryAt,
     attachedAt: entry.attachedAt,
+    drawnAt: entry.lastDrawnAt,
   };
+}
+
+/** Contexts let go of that may still hold a slot; null when that cannot be known. */
+function lingeringContexts() {
+  if (typeof WeakRef === 'undefined') return null;
+  for (let i = releasedContexts.length - 1; i >= 0; i -= 1) {
+    if (!releasedContexts[i].deref()) releasedContexts.splice(i, 1);
+  }
+  return releasedContexts.length;
 }
 
 function releaseGpu(entry) {
   const addon = entry.gpu;
   if (!addon) return;
   entry.gpu = null;
+  const { gl } = webglInternals(addon);
   const { freedContext } = releaseWebglAddon(addon);
+  if (gl && typeof WeakRef !== 'undefined') releasedContexts.push(new WeakRef(gl));
   gpuStats.released += 1;
   if (freedContext) gpuStats.freedContexts += 1;
+}
+
+/**
+ * Right before a context is made: when the page may be at its cap, every
+ * terminal on screen draws now, so the context the engine pushes out to make
+ * room is one nobody is looking at (`mustDrawScreenFirst`).
+ */
+function drawScreenFirst() {
+  let held = 0;
+  for (const entry of instances.values()) if (entry.gpu && !isWebglContextLost(entry.gpu)) held += 1;
+  if (!mustDrawScreenFirst({ held, lingering: lingeringContexts() })) return;
+  for (const entry of instances.values()) {
+    if (!entry.gpu || entry.attachCount === 0) continue;
+    if (drawWebglNow(entry.gpu, entry.term, { flush: true })) {
+      entry.lastDrawnAt = clock();
+      gpuStats.drawnAhead += 1;
+    }
+  }
 }
 
 /** @returns {boolean} whether the terminal now has a WebGL renderer */
@@ -165,6 +208,8 @@ function createGpu(entry) {
   }
   entry.gpu = addon;
   entry.gpuCreatedAt = clock();
+  // A context counts as active from the moment it is made.
+  entry.lastDrawnAt = entry.gpuCreatedAt;
   entry.drawPending = true;
   gpuStats.created += 1;
   return true;
@@ -186,11 +231,13 @@ function refitOnScreen(tabId, entry) {
 
 /**
  * addon-webgl reports a loss only after waiting 3 s for the browser to restore
- * the context itself, so by now it is gone for good.
+ * the context itself, so by now it is gone for good. A hidden terminal gets a
+ * new one when it is shown again; one on screen after the backoff.
  */
 function handleGpuLoss(entry, addon) {
   if (entry.gpu !== addon) return;
   gpuStats.lost += 1;
+  if (entry.attachCount > 0) gpuStats.lostOnScreen += 1;
   const createdAt = entry.gpuCreatedAt;
   releaseGpu(entry);
   const next = gpuFailure({ failures: entry.gpuFailures, createdAt }, clock());
@@ -235,7 +282,7 @@ function repairAtlas() {
     }
     atlases.add(atlas);
     if (entry.attachCount > 0) {
-      drawWebglNow(entry.gpu, entry.term);
+      if (drawWebglNow(entry.gpu, entry.term)) entry.lastDrawnAt = clock();
     } else {
       entry.term.refresh(0, entry.term.rows - 1);
     }
@@ -253,7 +300,6 @@ function repairAtlas() {
 
 function reconcileGpus() {
   gpuReconcileQueued = false;
-  const startedAt = clock();
   const tabIds = [...instances.keys()];
   const entries = [...instances.values()];
   const states = entries.map((entry) => {
@@ -266,12 +312,13 @@ function reconcileGpus() {
     entry.wasAttached = state.attached;
     return state;
   });
-  const plan = planGpuReconcile(states, { now: startedAt });
+  const plan = planGpuReconcile(states, { now: clock() });
 
   for (const i of plan.release) {
     entries[i].gpuRebuild = false;
     releaseGpu(entries[i]);
   }
+  if (plan.create.length > 0) drawScreenFirst();
   for (const i of plan.create) {
     // Already on screen and fitted — with the DOM renderer's cells, unless
     // this is a rebuild, where the refit finds nothing to change.
@@ -284,41 +331,51 @@ function reconcileGpus() {
     }
     if (entry.drawPending) {
       entry.drawPending = false;
-      if (entry.gpu && entry.attachCount > 0) drawWebglNow(entry.gpu, entry.term);
+      if (entry.gpu && entry.attachCount > 0 && drawWebglNow(entry.gpu, entry.term)) entry.lastDrawnAt = clock();
     }
   });
   scheduleGpuRetry(plan.retryAt);
 }
 
 /**
- * A pane is showing this terminal: give it a WebGL renderer, now if a context
- * can be had, else as soon as one is free. Returns the function to call when
- * the pane stops showing it, which gives the context back.
+ * A pane is showing this terminal: give it a WebGL renderer if it has none,
+ * now if a context can be had, else as soon as one is free. Returns the
+ * function to call when the pane stops showing it. The terminal keeps its
+ * renderer after that: a context made on every tab switch is what pushed an
+ * idle terminal on screen out of its own.
  */
 export function ensureGpuRenderer(entry) {
   if (!entry || entry.disposed) return () => {};
   entry.attachCount += 1;
   if (entry.attachCount === 1) {
     entry.attachedAt = clock();
+    if (entry.wasAttached === false) {
+      entry.gpuFailures = 0;
+      entry.gpuRetryAt = 0;
+    }
+    // Kept while hidden, and lost meanwhile — pushed out to make room, or a
+    // GPU reset. addon-webgl would say so only after waiting 3 s, with the
+    // terminal blank on screen all the while.
+    if (entry.gpu && isWebglContextLost(entry.gpu)) {
+      gpuStats.lost += 1;
+      releaseGpu(entry);
+    }
     if (!entry.gpu) {
       const entries = [...instances.values()];
-      if (entry.wasAttached === false) {
-        entry.gpuFailures = 0;
-        entry.gpuRetryAt = 0;
-      }
-      const decision = planGpuAttach(entries.map(gpuStateOf), entries.indexOf(entry), { now: entry.attachedAt });
-      entry.wasAttached = true;
+      const decision = planGpuAttach(entries.map(gpuStateOf), entries.indexOf(entry));
       if (decision.create) {
         for (const i of decision.releaseFirst) releaseGpu(entries[i]);
+        drawScreenFirst();
         createGpu(entry);
       }
     }
+    entry.wasAttached = true;
   }
   // Drawn by the queued pass, once the pane has fitted it.
   entry.drawPending = true;
   scheduleGpuReconcile();
   let shown = true;
-  return function releaseGpuRenderer() {
+  return function stopShowing() {
     if (!shown) return;
     shown = false;
     entry.attachCount = Math.max(0, entry.attachCount - 1);
@@ -329,16 +386,20 @@ export function ensureGpuRenderer(entry) {
 /** What the GPU renderers are doing — read by the lab and through the app's debug bridge. */
 export function getGpuStats() {
   let live = 0;
+  let hidden = 0;
   let shown = 0;
   let shownWithoutGpu = 0;
   for (const entry of instances.values()) {
-    if (entry.gpu) live += 1;
+    if (entry.gpu) {
+      live += 1;
+      if (entry.attachCount === 0) hidden += 1;
+    }
     if (entry.attachCount > 0) {
       shown += 1;
       if (!entry.gpu) shownWithoutGpu += 1;
     }
   }
-  return { live, shown, shownWithoutGpu, ...gpuStats };
+  return { live, hidden, shown, shownWithoutGpu, lingering: lingeringContexts(), ...gpuStats };
 }
 
 /** Keys the Settings window exposes that should update every live terminal
@@ -750,10 +811,18 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     gpuFailures: 0,
     gpuRetryAt: 0,
     gpuCreatedAt: null,
+    // When its renderer last drew: the engines push out the context that has
+    // gone longest without drawing, so this is the order hidden ones go in.
+    lastDrawnAt: 0,
+    renderDisposable: null,
     drawPending: false,
     refitPending: false,
     disposed: false,
   };
+  const drawn = entry;
+  entry.renderDisposable = term.onRender(() => {
+    drawn.lastDrawnAt = clock();
+  });
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
   return entry;
@@ -839,6 +908,7 @@ export function disposeTerminal(tabId) {
   entry.disposed = true;
   entry.attachCount = 0;
   releaseGpu(entry);
+  entry.renderDisposable?.dispose();
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();

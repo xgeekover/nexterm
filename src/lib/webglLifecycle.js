@@ -2,28 +2,54 @@
  * When a terminal holds a WebGL context, when it gets one back, and how one is
  * let go.
  *
- * Pure functions only — no xterm, no DOM — so the rules can be tested in Node.
+ * Pure functions, plus the few guarded reads of addon-webgl's private fields
+ * — no DOM — so the rules can be tested in Node.
  * `components/terminal/terminalRegistry.js` applies them.
  *
- * Why there are rules at all: a page gets at most 16 live WebGL contexts
- * (Chromium, so WebView2, and WebKit, so WKWebView), and making a 17th
- * silently kills the OLDEST. Every terminal used to keep one for life, so the
- * 17th terminal took WebGL away from the first; a lost context was never
- * retried, leaving that terminal on the DOM renderer (box and block characters
- * striped at line height 1.5) for good; and a closed terminal's context was
- * never let go, so it kept counting until garbage collection. Measured
- * headless with 18 terminals and three close/open cycles: 13 kept WebGL, and
- * 5 were drawn by the DOM renderer when shown.
+ * Why there are rules at all: a page gets at most 16 live WebGL contexts, and
+ * making one more silently kills another. Every terminal used to keep one
+ * for life, so the 17th terminal took WebGL away from the first; a lost
+ * context was never retried, leaving that terminal on the DOM renderer (box
+ * and block characters striped at line height 1.5) for good; and a closed
+ * terminal's context was never let go, so it kept counting until garbage
+ * collection.
  *
- * Now only a terminal on screen holds a context, every renderer that is let go
- * takes its context with it, and a lost one is retried on a schedule that
- * cannot become a loop.
+ * WHICH context is killed is the engine's choice, and the two NexTerm runs on
+ * choose alike — the one that has gone longest without drawing:
+ *
+ *   - WebKit (WKWebView, macOS) recycles the context with the lowest "active
+ *     ordinal", which a context takes when it is made and again on every draw
+ *     call. A context lost on purpose (`WEBGL_lose_context`) KEEPS its slot
+ *     until it is garbage collected.
+ *   - Chromium (WebView2, Windows) loses the least recently flushed context.
+ *     A context lost on purpose gives its slot back at once.
+ *
+ * So the slots are not the scarce thing on WebKit — making contexts is. A
+ * terminal that only held one while on screen made a new one on every tab
+ * switch, the lost ones piled up until garbage collection, and the next one
+ * made pushed out the context that had gone longest without drawing: an idle
+ * terminal in the pane beside, on screen and untouched (seen on macOS: twenty
+ * tab switches, fast or a second apart, and the terminal in the other pane
+ * went blank for four seconds).
+ *
+ * Now:
+ *   - a terminal makes its context the first time it is shown and keeps it,
+ *     hidden or not — switching tabs or groups makes none;
+ *   - past sixteen, the hidden terminal that has gone longest without drawing
+ *     gives its context back before another is made, and every terminal on
+ *     screen draws first, so that whatever the engine picks to push out has
+ *     not been drawn since;
+ *   - a lost context is retried on a schedule that cannot become a loop, and
+ *     a hidden terminal whose context was lost gets a new one when it is
+ *     shown;
+ *   - a glyph atlas that merged pages is repaired in place, with no new
+ *     context at all (`repairWebglAtlas`).
  */
 
 /**
- * Contexts NexTerm keeps alive at most: the browsers' own cap. Creating one
- * past it evicts another terminal's, so a terminal over the budget waits on
- * the DOM renderer until a context comes free instead.
+ * Contexts a page can hold: the engines' own cap (WebKit's
+ * `maxActiveContexts`, Chromium's `kMaxGLActiveContexts`). More terminals on
+ * screen than this wait on the DOM renderer instead of evicting each other.
  */
 export const GPU_CONTEXT_BUDGET = 16;
 
@@ -37,38 +63,73 @@ export const GPU_STABLE_MS = 60000;
 export const ATLAS_PAGE_SIZE = 512;
 
 /**
+ * Which hidden renderers give their contexts back so that `count` more can be
+ * made without the page going past `budget`, least recently drawn first.
+ * `holds(t, i)` says whether terminal `i` still counts as holding one.
+ * Returns null when there are not enough hidden ones to let go.
+ */
+function roomFor(terminals, count, budget, holds) {
+  let held = 0;
+  terminals.forEach((t, i) => {
+    if (holds(t, i)) held += 1;
+  });
+  const over = held + count - budget;
+  if (over <= 0) return [];
+  const spare = terminals
+    .map((t, i) => ({ t, i }))
+    .filter(({ t, i }) => !t.attached && holds(t, i))
+    .sort((a, b) => (a.t.drawnAt ?? 0) - (b.t.drawnAt ?? 0))
+    .map(({ i }) => i);
+  return spare.length >= over ? spare.slice(0, over) : null;
+}
+
+/**
  * What to do with every terminal's WebGL renderer, given where each one is.
  *
  * Each element of `terminals` describes one terminal:
  *   attached     it is in a pane on screen
  *   connected    its element is in the document (the renderer measures the font)
- *   hasGpu       it holds a WebGL renderer now
+ *   hasGpu       it holds a WebGL renderer
+ *   lost         that renderer's context is lost (addon-webgl reports it 3 s later)
  *   rebuild      its renderer must be made again (an atlas it could not repair)
  *   freshAttach  it was off screen at the last pass and is on screen now
  *   retryAt      when it may try again after a loss (see `gpuFailure`)
  *   attachedAt   when it was last put on screen
+ *   drawnAt      when its renderer last drew
  *
- * Returns indexes into `terminals`. `release` is carried out before `create`:
- * a rebuild lets go of the shared atlas before anything acquires it again,
- * and a context a hidden terminal gives back is the one a shown terminal
- * gets. Within the budget, terminals being remade come first (they had a
- * context a moment ago), then the most recently shown. `retryAt` is when the
- * earliest pending retry falls due, or null when nothing is waiting on time.
+ * Returns indexes into `terminals`. `release` is carried out before `create`.
+ * A hidden terminal keeps its renderer: only one marked `rebuild` is let go,
+ * and — when the page already holds `budget` contexts — the hidden ones that
+ * have gone longest without drawing, one for every context about to be made.
+ * At most `budget` terminals on screen hold a context; within that, terminals
+ * being remade come first (they had one a moment ago), then the most recently
+ * shown. `retryAt` is when the earliest pending retry falls due, or null when
+ * nothing is waiting on time.
  */
 export function planGpuReconcile(terminals, { now = 0, budget = GPU_CONTEXT_BUDGET } = {}) {
   const release = [];
-  let live = 0;
+  const releasing = new Set();
+  const drop = (i) => {
+    if (releasing.has(i)) return;
+    releasing.add(i);
+    release.push(i);
+  };
   terminals.forEach((t, i) => {
-    if (!t.hasGpu) return;
-    if (!t.attached || t.rebuild) release.push(i);
-    else live += 1;
+    if (t.hasGpu && t.rebuild) drop(i);
+  });
+  const creating = new Set();
+  const holds = (t, i) => creating.has(i) || (t.hasGpu && !t.lost && !releasing.has(i));
+
+  let onScreen = 0;
+  terminals.forEach((t, i) => {
+    if (t.attached && holds(t, i)) onScreen += 1;
   });
 
   const ready = [];
   let retryAt = null;
   terminals.forEach((t, i) => {
     if (!t.attached || !t.connected) return;
-    if (t.hasGpu && !t.rebuild) return;
+    if (t.hasGpu && !releasing.has(i)) return; // drawing, or lost and about to be reported
     // A rebuild is not a retry, and showing a terminal again is the user
     // asking for it: neither waits out a backoff.
     if (t.rebuild || t.freshAttach || now >= (t.retryAt ?? 0)) {
@@ -84,33 +145,62 @@ export function planGpuReconcile(terminals, { now = 0, budget = GPU_CONTEXT_BUDG
     return (tb.attachedAt ?? 0) - (ta.attachedAt ?? 0);
   });
 
-  return { release, create: ready.slice(0, Math.max(0, budget - live)), retryAt };
+  const create = [];
+  for (const i of ready) {
+    if (onScreen >= budget) break;
+    const room = roomFor(terminals, 1, budget, holds);
+    if (room === null) break;
+    room.forEach(drop);
+    create.push(i);
+    creating.add(i);
+    onScreen += 1;
+  }
+  return { release, create, retryAt };
 }
 
 /**
  * Whether a terminal a pane has just started showing gets its renderer NOW —
- * synchronously, before the pane fits it — and which contexts must go first.
+ * synchronously, before the pane fits it — and which hidden renderers must
+ * give their contexts back first.
  *
  * Now, because the fit measures cells with whichever renderer is active, and
  * the DOM renderer's are wider (7.2 px against WebGL's 7 at the default
  * 12 px): fitted first, a terminal coming back got 104 columns, then 107 once
- * WebGL arrived — two reflows and two resizes for the program inside, on every
- * tab switch.
+ * WebGL arrived — two reflows and two resizes for the program inside.
  *
- * `releaseFirst` lists terminals no longer on screen whose contexts are only
- * given back at the end of the pass; when they would put the page over the
- * budget meanwhile, the longest-hidden go now.
+ * Only a terminal without a renderer gets one; one it kept while hidden is
+ * simply drawn again. Showing it is the user asking, so no backoff applies.
  */
-export function planGpuAttach(terminals, index, { now = 0, budget = GPU_CONTEXT_BUDGET } = {}) {
-  const { create } = planGpuReconcile(terminals, { now, budget });
-  if (!create.includes(index)) return { create: false, releaseFirst: [] };
-  const held = terminals.filter((t) => t.hasGpu).length;
-  const spare = terminals
-    .map((t, i) => ({ t, i }))
-    .filter(({ t }) => t.hasGpu && !t.attached)
-    .sort((a, b) => (a.t.attachedAt ?? 0) - (b.t.attachedAt ?? 0))
-    .map(({ i }) => i);
-  return { create: true, releaseFirst: spare.slice(0, Math.max(0, held + 1 - budget)) };
+export function planGpuAttach(terminals, index, { budget = GPU_CONTEXT_BUDGET } = {}) {
+  const t = terminals[index];
+  if (!t || !t.attached || !t.connected || t.hasGpu) return { create: false, releaseFirst: [] };
+  const holds = (u, i) => u.hasGpu && !u.lost && !u.rebuild && i !== index;
+  let onScreen = 0;
+  terminals.forEach((u, i) => {
+    if (u.attached && holds(u, i)) onScreen += 1;
+  });
+  if (onScreen >= budget) return { create: false, releaseFirst: [] };
+  const room = roomFor(terminals, 1, budget, holds);
+  if (room === null) return { create: false, releaseFirst: [] };
+  return { create: true, releaseFirst: room };
+}
+
+/**
+ * Whether the terminals on screen must draw before a context is made.
+ *
+ * The context the engine pushes out is the one that has gone longest without
+ * drawing, and an idle terminal on screen — unfocused, its cursor not
+ * blinking, nothing printed — may not have drawn for an hour. Drawn just
+ * before, every terminal on screen is newer than anything the engine could
+ * pick. Only needed near the cap: `held` is the contexts NexTerm keeps
+ * (after the releases planned), `lingering` the ones it let go that may not
+ * have been collected yet — WebKit still counts those. `lingering` null means
+ * unknown, and is treated as full. One slot of margin, for a context counted
+ * as collected that the engine has not destroyed yet.
+ */
+export function mustDrawScreenFirst({ held, lingering }, { budget = GPU_CONTEXT_BUDGET } = {}) {
+  if (lingering === null || lingering === undefined) return true;
+  return held + lingering >= budget - 1;
 }
 
 /**
@@ -189,13 +279,28 @@ export function webglInternals(addon) {
 }
 
 /**
+ * Whether the addon's context is lost — known at once, where addon-webgl only
+ * reports it after waiting 3 s for a restore that, for a context the engine
+ * pushed out, never comes.
+ */
+export function isWebglContextLost(addon) {
+  const { gl } = webglInternals(addon);
+  try {
+    return Boolean(gl && gl.isContextLost());
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Let go of a WebGL addon AND its context.
  *
  * `dispose()` alone leaves the context alive until garbage collection, and a
- * context nothing can reach still counts against the browser's 16 (xterm.js
- * #6068) — which is how closed terminals evicted open ones. So the context is
- * taken before the dispose and lost on purpose after it, which hands the slot
- * back at once. A context that is already lost has no slot to give back.
+ * context nothing can reach still counts against the cap (xterm.js #6068) —
+ * which is how closed terminals evicted open ones. So the context is taken
+ * before the dispose and lost on purpose after it: Chromium hands the slot
+ * back at once; WebKit keeps it until collection, but a lost context is the
+ * first one it recycles. A context that is already lost is left alone.
  *
  * @returns {{ disposed: boolean, freedContext: boolean }}
  */
@@ -241,23 +346,28 @@ function rendererGrid(renderer) {
  *
  * xterm pauses drawing while it believes a terminal is off screen and learns
  * that it is back from an IntersectionObserver one frame later, holding back a
- * resize made in between. A renderer made for a terminal being shown would
- * leave that first frame blank — a flash on every tab switch — or, after the
- * pane fitted the terminal to a new size, draw it at the old one. So the
- * renderer is sized to the terminal and drawn once here; xterm's own redraw
- * follows with the same picture.
+ * resize made in between. A terminal just shown would leave that first frame
+ * blank — a flash on every tab switch — or, after the pane fitted it to a new
+ * size, draw it at the old one. So the renderer is sized to the terminal and
+ * drawn once here; xterm's own redraw follows with the same picture.
+ *
+ * The same whole-viewport draw is what a terminal on screen does before a new
+ * context is made (`mustDrawScreenFirst`), and `flush` sends the commands on
+ * at once — Chromium ranks contexts by their last flush, not their last draw.
  *
  * @returns {boolean} whether a frame was drawn
  */
-export function drawWebglNow(addon, { cols, rows } = {}) {
-  const { renderer } = webglInternals(addon);
+export function drawWebglNow(addon, { cols, rows } = {}, { flush = false } = {}) {
+  const { renderer, gl } = webglInternals(addon);
   if (!renderer || typeof renderer.renderRows !== 'function' || !(rows > 0)) return false;
   try {
+    if (gl && gl.isContextLost()) return false;
     const grid = rendererGrid(renderer);
     if (grid && (grid.cols !== cols || grid.rows !== rows) && typeof renderer.handleResize === 'function') {
       renderer.handleResize(cols, rows);
     }
     renderer.renderRows(0, rows - 1);
+    if (flush && gl && typeof gl.flush === 'function') gl.flush();
     return true;
   } catch {
     return false;
