@@ -24,7 +24,7 @@ import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { activateGraphemeWidths, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
+import { activateGraphemeWidths, fitAndReport, installXtVersionReply, windowsPtyFor } from '../../lib/terminalCompat.js';
 import {
   claimAtlasMergePage,
   drawWebglNow,
@@ -770,6 +770,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // Emoji — VS16, ZWJ and skin-tone sequences included — are two cells wide
   // to the programs running here; see terminalCompat.js.
   activateGraphemeWidths(term, UnicodeGraphemesAddon);
+  // XTVERSION, answered as xterm.js 6.1 answers it: Claude Code asks for DEC
+  // 2026 (synchronized output) only after this reply. See terminalCompat.js.
+  installXtVersionReply(term);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);

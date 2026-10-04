@@ -139,6 +139,50 @@ export function legacyAltArrowSequence(event, { mac = false } = {}) {
   return (mac ? MAC_OPTION_ARROW[arrow] : CTRL_ARROW[arrow]) ?? null;
 }
 
+/** The @xterm/xterm release the app ships — what XTVERSION reports (unicode_widths.test.js keeps it true). */
+export const XTERM_VERSION = '6.0.0';
+
+/**
+ * The reply to XTVERSION (`CSI > q`, `CSI > 0 q`), or null for any other
+ * parameter: `DCS > | xterm.js(6.0.0) ST`.
+ *
+ * xterm.js answers this itself only from 6.1 (#5502, merged four days after
+ * 6.0.0 shipped), with exactly this text. Claude Code 2.1.289 asks XTVERSION
+ * first and sends its DEC 2026 probe (`CSI ? 2026 $ p`) ONLY if a reply comes
+ * back — its own log says "DECRQM 2026 not asked (no XTVERSION reply)" — and
+ * otherwise guesses from TERM_PROGRAM, which nothing sets for a shell in this
+ * app. So without this, xterm 6's synchronized output went unused by the one
+ * program it was wanted for. Answering as xterm.js is the truth (this IS
+ * xterm.js) and is what makes Claude Code treat the app as it treats VS
+ * Code's terminal. Drop it with the move to xterm 6.1, which says the same.
+ */
+export function xtVersionReply(params, version = XTERM_VERSION) {
+  const ps = Array.isArray(params) ? params[0] : undefined;
+  if (typeof ps === 'number' && ps > 0) return null;
+  return `\x1bP>|xterm.js(${version})\x1b\\`;
+}
+
+/**
+ * Answer XTVERSION on `term` from now on (see `xtVersionReply`): the reply goes
+ * out the way xterm's own replies do, through `onData`, not as typed input.
+ * Returns the parser handler's disposable, or null when `term` has no parser.
+ * Never throws inside the parser — a handler that throws wedges xterm's write
+ * queue for good (see mouseReporting.js).
+ */
+export function installXtVersionReply(term, version = XTERM_VERSION) {
+  const parser = term?.parser;
+  if (typeof parser?.registerCsiHandler !== 'function') return null;
+  return parser.registerCsiHandler({ prefix: '>', final: 'q' }, (params) => {
+    try {
+      const reply = xtVersionReply(params, version);
+      if (reply) term.input(reply, false);
+    } catch (err) {
+      console.warn('[Terminal] could not answer XTVERSION:', err);
+    }
+    return true;
+  });
+}
+
 /** The width provider `@xterm/addon-unicode-graphemes` registers: Unicode 15, by grapheme cluster. */
 export const GRAPHEME_WIDTHS = '15-graphemes';
 

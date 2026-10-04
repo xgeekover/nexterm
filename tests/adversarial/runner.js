@@ -59,6 +59,7 @@ import './mouse_reporting.test.js';
 import './mouse_reporting_drag.test.js';
 import './mouse_reporting_headless.test.js';
 import './clipboard_keys.test.js';
+import './sync_output.test.js';
 
 async function run() {
   console.log('====================================================');
