@@ -381,7 +381,7 @@ export function installTerminalClipboard(term, container, { settings = null, pla
     }
   };
 
-  const mouse = installMouseReporting(term, { isEnabled: () => setting('terminalMouseReporting') });
+  const mouse = installMouseReporting(term, container, { isEnabled: () => setting('terminalMouseReporting') });
   // Subscribed while the terminal lives; the addon unsubscribes on dispose.
   const onSettingsChange = () =>
     typeof settings?.subscribe === 'function'

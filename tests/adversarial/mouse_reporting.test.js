@@ -195,12 +195,49 @@ class FakeXterm {
   }
 }
 
-/** A terminal with mouse reporting installed, the setting read from `setting.on`. */
+/**
+ * A minimal capture-phase-dispatching event target — just enough DOM for
+ * `installMouseReporting`'s button tracking (`container` for mousedown,
+ * `view` for mouseup/blur). Independent of the richer `FakeTarget` below,
+ * which the selection/copy tests use for the same purpose.
+ */
+function fakeContainer() {
+  const listeners = [];
+  return {
+    addEventListener(type, fn, capture) {
+      listeners.push({ type, fn, capture: capture === true });
+    },
+    removeEventListener(type, fn, capture) {
+      const i = listeners.findIndex((l) => l.type === type && l.fn === fn && l.capture === (capture === true));
+      if (i !== -1) listeners.splice(i, 1);
+    },
+    dispatch(event) {
+      for (const l of listeners.filter((x) => x.type === event.type && x.capture)) l.fn(event);
+    },
+  };
+}
+
+/**
+ * A terminal with mouse reporting installed, the setting read from
+ * `setting.on`. `container`/`view` are the fake DOM nodes the binding tracks
+ * the primary-button state through — see MB-12+ below.
+ */
 function withBinding(options = {}) {
   const term = new FakeXterm(options);
   const setting = { on: true };
-  const binding = installMouseReporting(term, { isEnabled: () => setting.on });
-  return { term, binding, setting };
+  const container = fakeContainer();
+  const view = fakeContainer();
+  container.ownerDocument = { defaultView: view };
+  const binding = installMouseReporting(term, container, { isEnabled: () => setting.on });
+  return { term, binding, setting, container, view };
+}
+
+/** Press and release the primary button through `container`/`view`. */
+function press(container, fields = {}) {
+  container.dispatch({ type: 'mousedown', button: 0, buttons: 1, ...fields });
+}
+function release(view, fields = {}) {
+  view.dispatch({ type: 'mouseup', button: 0, buttons: 0, ...fields });
 }
 
 describe('Mouse reporting: which protocol is in force (pure)', () => {
@@ -217,6 +254,7 @@ describe('Mouse reporting: which protocol is in force (pure)', () => {
 
   test('MR-02: Claude Code\'s 1003 at its prompt (normal buffer) is dropped — and remembered', () => {
     assert.deepEqual(planPrivateModes({ final: 'h', params: [1003] }), {
+      flags: { 1003: true },
       requested: 'any',
       alternate: false,
       effective: 'none',
@@ -229,13 +267,19 @@ describe('Mouse reporting: which protocol is in force (pure)', () => {
     }
   });
 
-  test('MR-03: on the alternate screen it passes to xterm untouched', () => {
+  test('MR-03: on the alternate screen a request is still handled here — but now takes effect', () => {
+    // xterm's own DECSET never sees a tracking mode, on EITHER screen — only
+    // that way can this (not xterm's last-wins) decide what stays in force
+    // when a program restates its modes as separate sequences. See MR-08.
     for (const [mode, name] of Object.entries(TRACKING_MODES)) {
       const plan = planPrivateModes({ final: 'h', params: [Number(mode)], alternate: true });
-      assert.deepEqual(plan, { requested: name, alternate: true, effective: name, action: 'pass' }, `?${mode}h`);
+      assert.deepEqual(plan, { flags: { [mode]: true }, requested: name, alternate: true, effective: name, action: 'drop' }, `?${mode}h`);
     }
-    // …unless the setting is off.
-    assert.equal(planPrivateModes({ final: 'h', params: [1000], alternate: true, enabled: false }).action, 'drop');
+    // The setting being off still means this handles it (xterm never sees a
+    // tracking mode either way) — just refused once settled.
+    const off = planPrivateModes({ final: 'h', params: [1000], alternate: true, enabled: false });
+    assert.equal(off.action, 'drop');
+    assert.equal(off.effective, 'none');
   });
 
   test('MR-04: a refused request carrying other modes passes, to be put back once parsed', () => {
@@ -248,48 +292,75 @@ describe('Mouse reporting: which protocol is in force (pure)', () => {
     }
   });
 
-  test('MR-05: a sequence that switches screens decides by where the tracking ends up', () => {
-    // Entering the alternate screen in the same breath: allowed, either order.
+  test('MR-05: a sequence that switches screens together with a tracking request settles once parsed', () => {
+    // Entering the alternate screen in the same breath: allowed, either
+    // order — but xterm has to see the screen-switch param itself, so this
+    // can only settle the tracking part afterward, not swallow it outright.
     for (const params of [[1049, 1003], [1003, 1049], [47, 1000], [1047, 1002]]) {
       const plan = planPrivateModes({ final: 'h', params });
-      assert.equal(plan.action, 'pass', JSON.stringify(params));
+      assert.equal(plan.action, 'pass-then-sync', JSON.stringify(params));
       assert.equal(plan.alternate, true);
       assert.equal(plan.effective, plan.requested);
     }
-    // With the setting off, the screen switch still has to happen: pass, then put back.
+    // With the setting off, same shape: xterm still has to see the screen switch.
     assert.equal(planPrivateModes({ final: 'h', params: [1049, 1003], enabled: false }).action, 'pass-then-sync');
   });
 
-  test('MR-06: a reset always passes; ANY tracking reset ends tracking, as xterm does', () => {
+  test('MR-06: a reset clears only its OWN flag, independent of the others, and is handled here too', () => {
     for (const mode of [9, 1000, 1002, 1003]) {
       for (const alternate of [false, true]) {
-        const plan = planPrivateModes({ final: 'l', params: [mode], requested: 'any', alternate });
-        assert.equal(plan.action, 'pass', `?${mode}l`);
-        assert.equal(plan.requested, 'none', `?${mode}l ends a 1003 as well`);
+        const plan = planPrivateModes({ final: 'l', params: [mode], flags: { [mode]: true }, alternate });
+        assert.equal(plan.action, 'drop', `?${mode}l`);
+        assert.equal(plan.requested, 'none', `?${mode}l, nothing else was set`);
+        assert.deepEqual(plan.flags, {}, `?${mode}l clears its own flag`);
       }
     }
-    // Leaving the alternate screen forgets nothing: the program never said so.
-    const leave = planPrivateModes({ final: 'l', params: [1049], requested: 'vt200', alternate: true });
-    assert.deepEqual(leave, { requested: 'vt200', alternate: false, effective: 'none', action: 'pass' });
+    // Leaving the alternate screen alone (no tracking mode in THIS sequence)
+    // is untouched, same as any other screen switch, and remembers nothing —
+    // the program never reset anything itself. (Forgetting on L1 — because
+    // the alternate screen was left — is the binding's job, not this pure
+    // per-sequence plan: see MB-04.)
+    const leave = planPrivateModes({ final: 'l', params: [1049], flags: { 1000: true }, alternate: true });
+    assert.deepEqual(leave, { flags: { 1000: true }, requested: 'vt200', alternate: false, effective: 'none', action: 'pass' });
+  });
+
+  test('MR-06b: independent flags — resetting one leaves a HIGHER one in force, or falls back to the next one down', () => {
+    // Claude resends `?1000h` alone (an Ink redraw); 1003 was already on and
+    // stays the highest. Real X11 xterm reports through the highest of
+    // 9/1000/1002/1003 it has enabled — never just "whichever was last set",
+    // which is xterm.js's own (and the bug this whole file is about).
+    const stillAny = planPrivateModes({ final: 'l', params: [1000], flags: { 1000: true, 1003: true }, alternate: true });
+    assert.equal(stillAny.requested, 'any', '?1000l with 1003 on → any');
+    assert.deepEqual(stillAny.flags, { 1003: true });
+
+    // Resetting the CURRENTLY highest one falls back to the next one down —
+    // a genuine downgrade (what "never downgrade during a held button", in
+    // src/lib/mouseReporting.js, exists for).
+    const fallsBack = planPrivateModes({ final: 'l', params: [1003], flags: { 1000: true, 1003: true }, alternate: true });
+    assert.equal(fallsBack.requested, 'vt200', '?1003l with 1000 still on → vt200');
+    assert.deepEqual(fallsBack.flags, { 1000: true });
   });
 
   test('MR-07: encodings, focus and every other mode are never touched', () => {
     for (const mode of [1004, 1005, 1006, 1015, 1016, 2004, 25, 1, 7, 12]) {
       for (const final of ['h', 'l']) {
         for (const alternate of [false, true]) {
-          const plan = planPrivateModes({ final, params: [mode], requested: 'drag', alternate });
+          const plan = planPrivateModes({ final, params: [mode], flags: { 1002: true }, alternate });
           assert.equal(plan.action, 'pass', `?${mode}${final}`);
-          assert.equal(plan.requested, 'drag', `?${mode}${final} leaves the request alone`);
+          assert.equal(plan.requested, 'drag', `?${mode}${final} leaves the flags alone`);
+          assert.deepEqual(plan.flags, { 1002: true });
         }
       }
     }
   });
 
-  test('MR-08: the last tracking mode wins, and sub-parameters are ignored like xterm does', () => {
+  test('MR-08: every listed mode is set together — not last-wins — and sub-parameters are ignored like xterm does', () => {
     assert.equal(planPrivateModes({ final: 'h', params: [1000, 1002, 1003], alternate: true }).requested, 'any');
-    assert.equal(planPrivateModes({ final: 'h', params: [1003, 1000], alternate: true }).requested, 'vt200');
+    // DECSET sets EVERYTHING it lists, together — 1000 and 1003 both end up
+    // on, so the highest of the two is requested, not whichever came last.
+    assert.equal(planPrivateModes({ final: 'h', params: [1003, 1000], alternate: true }).requested, 'any');
     const withSubs = planPrivateModes({ final: 'h', params: [1003, [1, 2]] });
-    assert.deepEqual(withSubs, { requested: 'any', alternate: false, effective: 'none', action: 'drop' });
+    assert.deepEqual(withSubs, { flags: { 1003: true }, requested: 'any', alternate: false, effective: 'none', action: 'drop' });
     assert.equal(planPrivateModes({ final: 'h', params: [] }).action, 'pass');
     assert.equal(planPrivateModes({ final: 'h' }).action, 'pass');
   });
