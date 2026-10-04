@@ -263,7 +263,8 @@ function requestAtlasRepair() {
 /**
  * Every renderer re-uploads its pages and rebuilds its cells: one on screen
  * draws its whole viewport now, before the frame is painted, and a hidden one
- * is drawn in full when it is shown. No renderer is made or let go, so no
+ * — or one whose program is in the middle of a synchronized update — is drawn
+ * in full when xterm next draws it. No renderer is made or let go, so no
  * context is either. Then the atlas stops asking every frame for a rebuild.
  * A renderer this addon version cannot repair in place is made again — on
  * screen now, hidden when next shown.
@@ -282,9 +283,11 @@ function repairAtlas() {
       continue;
     }
     atlases.add(atlas);
-    if (entry.attachCount > 0) {
-      if (drawWebglNow(entry.gpu, entry.term)) entry.lastDrawnAt = clock();
+    if (entry.attachCount > 0 && drawWebglNow(entry.gpu, entry.term)) {
+      entry.lastDrawnAt = clock();
     } else {
+      // Hidden, or in the middle of a synchronized update: the next frame
+      // xterm draws covers the whole viewport.
       entry.term.refresh(0, entry.term.rows - 1);
     }
   }

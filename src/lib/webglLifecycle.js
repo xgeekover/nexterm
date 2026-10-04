@@ -365,11 +365,19 @@ function rendererGrid(renderer) {
  * context is made (`mustDrawScreenFirst`), and `flush` sends the commands on
  * at once — Chromium ranks contexts by their last flush, not their last draw.
  *
+ * Never inside a synchronized update (DEC 2026, `CSI ? 2026 h` … `l`): the
+ * program has said the screen is half written, and xterm holds every frame
+ * back until it says otherwise. This draw goes round xterm's own render
+ * service, so it has to hold back as well — measured: a terminal shown again
+ * mid-update, or an atlas repair, drew the half-written frame. Returns false
+ * then, and xterm draws the whole viewport once the update ends.
+ *
  * @returns {boolean} whether a frame was drawn
  */
-export function drawWebglNow(addon, { cols, rows } = {}, { flush = false } = {}) {
+export function drawWebglNow(addon, { cols, rows, modes } = {}, { flush = false } = {}) {
   const { renderer, gl } = webglInternals(addon);
   if (!renderer || typeof renderer.renderRows !== 'function' || !(rows > 0)) return false;
+  if (modes?.synchronizedOutputMode) return false;
   try {
     if (gl && gl.isContextLost()) return false;
     const grid = rendererGrid(renderer);
