@@ -42,8 +42,8 @@
  * sharing module-scoped state; teardown runs even if an earlier case failed,
  * since the runner does not bail.
  */
-import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { spawn, execFileSync } from 'node:child_process';
+import { describe, test, assert, skip } from '../e2e/harness/testFramework.js';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -53,6 +53,23 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const PORT = 1495;
 const HARNESS_URL = `http://127.0.0.1:${PORT}/tests/adversarial/fixtures/mouse_drag_harness.html`;
+
+/**
+ * This file needs a real browser: `agent-browser` (and the Chromium it drives).
+ * CI machines and most checkouts have neither, so there every case reports
+ * itself skipped rather than failing — the Node-level drag tests
+ * (`mouse_reporting_drag.test.js`) still run everywhere.
+ */
+const HEADLESS_AVAILABLE = (() => {
+  if (process.env.NEXTERM_SKIP_HEADLESS) return false;
+  try {
+    const probe = spawnSync('agent-browser', ['--version'], { encoding: 'utf8', timeout: 10000 });
+    return probe.status === 0;
+  } catch {
+    return false;
+  }
+})();
+const NO_BROWSER = 'agent-browser is not installed — the real-browser drag check runs locally only';
 
 let viteChild = null;
 let scratchDir = null;
@@ -156,6 +173,7 @@ function hasMotionReport(joinedOnData) {
 
 describe('Mouse reporting: real xterm 5.5 under headless Chromium (CDP)', () => {
   test('HL-01: setup — the scratch vite server, the harness page, a raw CDP session onto it', async () => {
+    if (!HEADLESS_AVAILABLE) skip(NO_BROWSER);
     scratchDir = mkdtempSync(path.join(tmpdir(), 'nexterm-mousedrag-'));
     const configPath = writeScratchConfig(scratchDir);
     const viteBin = path.join(REPO_ROOT, 'node_modules', '.bin', 'vite');
@@ -179,6 +197,7 @@ describe('Mouse reporting: real xterm 5.5 under headless Chromium (CDP)', () => 
   });
 
   test('HL-02: the fix — a drag survives Claude\'s own `?1000h?1002h?1003h?1006h`, restated mid-drag', async () => {
+    if (!HEADLESS_AVAILABLE) skip(NO_BROWSER);
     await evalJs(String.raw`window.__h.writeFixed('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h')`);
     assert.equal(await evalJs("window.__h.protocolOf('fixed')"), 'any', 'ANY in force before the drag starts');
 
@@ -210,6 +229,7 @@ describe('Mouse reporting: real xterm 5.5 under headless Chromium (CDP)', () => 
   });
 
   test('HL-03: the bug, for real — the identical drag on a stock xterm loses them (the control)', async () => {
+    if (!HEADLESS_AVAILABLE) skip(NO_BROWSER);
     await evalJs(String.raw`window.__h.writeControl('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h')`);
     assert.equal(await evalJs("window.__h.protocolOf('control')"), 'any');
 
@@ -228,6 +248,7 @@ describe('Mouse reporting: real xterm 5.5 under headless Chromium (CDP)', () => 
   });
 
   test('HL-04: a GENUINE downgrade mid-drag keeps its motion until release, and applies only after', async () => {
+    if (!HEADLESS_AVAILABLE) skip(NO_BROWSER);
     // A clean slate: leaving the alternate screen forgets every flag (L1).
     await evalJs(String.raw`window.__h.writeFixed('\x1b[?1049l')`);
     // VT200 + ANY, deliberately WITHOUT the DRAG flag, so resetting ANY falls
@@ -252,6 +273,7 @@ describe('Mouse reporting: real xterm 5.5 under headless Chromium (CDP)', () => 
   });
 
   test('HL-05: teardown — close the browser session and stop the scratch server', async () => {
+    if (!HEADLESS_AVAILABLE) skip(NO_BROWSER);
     try {
       ws?.close();
     } catch {
