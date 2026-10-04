@@ -29,6 +29,12 @@
  * themselves and reach xterm untouched, so a program that asked for SGR
  * reports gets SGR reports the moment tracking takes effect.
  *
+ * Known gap (L2): a refused request COMBINED with other modes in one
+ * sequence ('pass-then-sync', e.g. `?1006;1000h`) still clears the user's
+ * selection — xterm's own DECSET does that the moment ANY tracking mode is
+ * set, before this puts the protocol back. Claude Code's own sequences are
+ * never combined like that, so this does not reach it in practice.
+ *
  * Two parts, both here:
  *
  *   - the decisions, pure: which protocol is in force (`effectiveProtocol`)
