@@ -17,6 +17,8 @@ import {
   wheelArrowCount,
   installPagerWheel,
 } from '../../src/lib/terminalCompat.js';
+import { suggestionKeyAction, lineAfterKey, rankedSuggestions, NEW_LINE } from '../../src/lib/suggestionLayer.js';
+import { handleClipboardKey } from '../../src/lib/terminalClipboard.js';
 
 const ARROW_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
 
@@ -60,6 +62,57 @@ const wheelEvent = (deltaY, over = {}) => ({
   deltaMode: 0,
   shiftKey: false,
   altKey: false,
+  defaultPrevented: false,
+  stopped: false,
+  preventDefault() {
+    this.defaultPrevented = true;
+  },
+  stopPropagation() {
+    this.stopped = true;
+  },
+  ...over,
+});
+
+/**
+ * TerminalView's real key handler, run outside React: `sendLegacyAltArrow`
+ * and `handleKeyEvent` cut from TerminalView.jsx and compiled with the names
+ * they close over handed in — the real suggestion layer and clipboard keys
+ * among them. A name the handler starts to read that is not handed in here
+ * throws, so a change to what it depends on fails loudly instead of testing
+ * a stale copy.
+ */
+function terminalViewKeyHandler({ mac, suggestState }) {
+  const src = readFileSync(new URL('../../src/components/terminal/TerminalView.jsx', import.meta.url), 'utf8');
+  const start = src.indexOf('const sendLegacyAltArrow = (event) => {');
+  const end = src.indexOf('entry.term.attachCustomKeyEventHandler(handleKeyEvent);', start);
+  assert.ok(start > 0 && end > start, 'the key handler is where it was');
+  const calls = { input: [], writeRaw: [], suggestState: [] };
+  const EMPTY_SUGGEST_STATE = { visible: false, items: [] };
+  const scope = {
+    legacyAltArrowSequence,
+    isMac: mac,
+    entry: { term: { input: (data, wasUserInput) => calls.input.push([data, wasUserInput]), hasSelection: () => false } },
+    handleClipboardKey,
+    isFindOpen: () => false,
+    suggestionKeyAction,
+    suggestStateRef: { current: suggestState },
+    isRunning: () => false,
+    isAlternate: () => false,
+    lineRef: { current: NEW_LINE },
+    lineAfterKey,
+    setSuggestState: (next) => calls.suggestState.push(next),
+    writeRaw: (tabId, text) => calls.writeRaw.push([tabId, text]),
+    tabId: 'tab-1',
+    EMPTY_SUGGEST_STATE,
+  };
+  const names = Object.keys(scope);
+  const make = new Function(...names, `${src.slice(start, end)}\nreturn handleKeyEvent;`);
+  return { handleKeyEvent: make(...names.map((name) => scope[name])), calls, EMPTY_SUGGEST_STATE };
+}
+
+/** A keydown as xterm hands it to the custom key handler, recording how it was cancelled. */
+const keydown = (key, over = {}) => ({
+  ...altArrow(key, { altKey: false }),
   defaultPrevented: false,
   stopped: false,
   preventDefault() {
@@ -229,5 +282,49 @@ describe('Terminal compatibility: windowsPty, pty size, verbatim paths, ⌥ and 
     const src = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
     const create = src.slice(src.indexOf('export function getOrCreateTerminal('));
     assert.ok(create.indexOf('installPagerWheel(term);') > 0, 'every terminal the app makes has it');
+  });
+});
+
+describe('Terminal compatibility: ⌥→ with the suggestion popup open', () => {
+  // `gp` typed, the popup drawn, and ↓ moved its highlight onto `git push` —
+  // a subsequence match, which → cannot take (`completionFor`).
+  const popup = () => ({
+    visible: true,
+    ...rankedSuggestions('gp', ['git push', 'gpg --list-keys']),
+    selectedIndex: 0,
+    moved: true,
+  });
+
+  test('TC-14: ⌥→ over a highlighted match that does not continue the line clears the popup and still moves a word', () => {
+    for (const [mac, word] of [
+      [true, '\x1bf'],
+      [false, '\x1b[1;5C'],
+    ]) {
+      const { handleKeyEvent, calls, EMPTY_SUGGEST_STATE } = terminalViewKeyHandler({ mac, suggestState: popup() });
+      const event = keydown('ArrowRight', { altKey: true });
+      assert.deepEqual(suggestionKeyAction(popup(), event), { action: 'clear', consume: false }, 'the layer lets the key go on');
+      assert.equal(handleKeyEvent(event), false, "not xterm 6's own `CSI 1;3C`, which zsh types as `;3C`");
+      assert.deepEqual(calls.input, [[word, true]], 'a word forward, as a keystroke');
+      assert.ok(event.defaultPrevented && event.stopped, 'cancelled, as xterm cancels a key it sends');
+      assert.deepEqual(calls.suggestState, [EMPTY_SUGGEST_STATE], 'and the popup is gone');
+      assert.deepEqual(calls.writeRaw, [], 'nothing of `git push` is typed');
+    }
+
+    // Around it nothing moves: → and Enter still go to xterm, ⌥→ over a ghost still accepts it.
+    for (const mac of [true, false]) {
+      const plain = terminalViewKeyHandler({ mac, suggestState: popup() });
+      assert.equal(plain.handleKeyEvent(keydown('ArrowRight')), true, '→ alone: xterm sends it');
+      assert.deepEqual(plain.calls.input, []);
+      const enter = terminalViewKeyHandler({ mac, suggestState: popup() });
+      assert.equal(enter.handleKeyEvent(keydown('Enter', { keyCode: 13 })), true, 'Enter runs the line');
+      assert.deepEqual(enter.calls.input, []);
+      const ghost = terminalViewKeyHandler({
+        mac,
+        suggestState: { visible: true, ...rankedSuggestions('git st', ['git status']) },
+      });
+      assert.equal(ghost.handleKeyEvent(keydown('ArrowRight', { altKey: true })), false, 'taken by the layer');
+      assert.deepEqual(ghost.calls.writeRaw, [['tab-1', 'atus']], 'the ghost is typed');
+      assert.deepEqual(ghost.calls.input, [], 'with no word move on top of it');
+    }
   });
 });

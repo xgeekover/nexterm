@@ -420,7 +420,10 @@ export function TerminalView({ tabId, active = false }) {
         if (decision.action === 'accept' && decision.text) writeRaw(tabId, decision.text);
         setSuggestState(EMPTY_SUGGEST_STATE);
       }
-      if (!decision.consume) return true;
+      // A key the layer lets go on is the terminal's, ⌥→ included: over a
+      // highlighted match that does not continue the line it clears the
+      // popup and must still move a word, not reach xterm 6 as `CSI 1;3C`.
+      if (!decision.consume) return !sendLegacyAltArrow(event);
       event.preventDefault();
       return false;
     };
