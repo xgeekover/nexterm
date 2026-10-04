@@ -52,6 +52,7 @@ import './held_start_marker.test.js';
 import './agent_lifecycle.test.js';
 import './suggest_geometry.test.js';
 import './mouse_reporting.test.js';
+import './clipboard_keys.test.js';
 
 async function run() {
   console.log('====================================================');

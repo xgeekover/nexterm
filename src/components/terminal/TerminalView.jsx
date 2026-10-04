@@ -15,6 +15,7 @@ import {
   lineAfterKey,
 } from '../../lib/suggestionLayer.js';
 import { hangulImeFor, isHangulCharacter } from '../../lib/hangulInlineIme.js';
+import { handleClipboardKey } from '../../lib/terminalClipboard.js';
 import { isFailure } from '../../lib/tabActivity.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
@@ -376,6 +377,11 @@ export function TerminalView({ tabId, active = false }) {
     // at a shell prompt. Tab is the shell's, always. Everything else, including
     // arrows when the popup is closed, falls through to xterm untouched.
     const handleKeyEvent = (event) => {
+      // Copy and paste first — Ctrl+V / Ctrl+C on Windows and the Linux chords
+      // (src/lib/terminalClipboard.js). xterm would otherwise send ^V or ^C and
+      // cancel the key, and WebView2 has no Edit menu to fall back on.
+      const clipboard = handleClipboardKey(entry.term, event);
+      if (clipboard !== undefined) return clipboard;
       const decision = suggestionKeyAction(suggestStateRef.current, event, {
         running: isRunning(),
         alternate: isAlternate(),
