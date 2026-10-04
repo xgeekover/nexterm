@@ -173,6 +173,19 @@ command from yesterday can be edited before it runs. The history outlives the
 window. It is **not** on `Ctrl+R`: that is reverse-i-search in every shell, and
 a history palette that costs you the shell's own is a bad trade.
 
+**Select, copy and paste — the way Warp does it.** Drag over any text to
+select it; double-click takes a word, triple-click a line. The selection is on
+the clipboard the moment you let go (Settings ▸ Terminal ▸ *Copy on Select*
+turns that off). This works inside Claude Code too: a program writing into the
+scrollback never gets the mouse, even when it asks for it, so a drag there
+selects. A **full-screen** program — vim, htop, tmux, `less --mouse`, anything
+on the alternate screen — does get the mouse when it asks; hold **Shift** while
+dragging to select inside it anyway (on macOS **⌥** works too). *Mouse
+Reporting in Full-Screen Apps* in the same section takes the mouse away from
+every program. Paste with `⌘V` on macOS, `Ctrl+V` on Windows — see the table
+below. A program that asked for bracketed paste gets the text bracketed, so a
+multi-line paste into a shell or an agent is not run line by line.
+
 **Find something in the scrollback.** `⌘F` opens a find bar over the focused
 terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
 `Esc` to close. Match case, whole word and regular expressions are there, every
@@ -216,7 +229,8 @@ application, and this one has git in it already.
 
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
-scrollback, colour theme, and command suggestions.
+scrollback, colour theme, command suggestions, copy on select and mouse
+reporting.
 
 ### Keyboard shortcuts
 
@@ -245,6 +259,20 @@ scrollback, colour theme, and command suggestions.
 On Windows and Linux use `Ctrl` wherever `⌘` is listed. That is the table out
 of the box — every row is rebindable.
 
+Copy and paste in a terminal follow each platform's own terminal, and are not
+in the table above (they are not rebindable):
+
+| | Paste | Copy the selection |
+| --- | --- | --- |
+| macOS | `⌘V` | `⌘C` (or just select — see *Copy on Select*) |
+| Windows | `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | `Ctrl+C` **while something is selected**, `Ctrl+Shift+C`, `Ctrl+Insert` |
+| Linux | `Ctrl+Shift+V`, `Shift+Insert` | `Ctrl+Shift+C`, `Ctrl+Insert` |
+
+On Windows this is Windows Terminal's table: `Ctrl+C` with nothing selected
+still interrupts, and copying clears the selection so the next `Ctrl+C` does
+too. `Ctrl+V` pastes text rather than sending `^V` — Claude Code pastes an image
+with `Alt+V` there, and vim's block selection is `Ctrl+Q`, as in gvim.
+
 **Changing a shortcut.** Settings ▸ Keyboard Shortcuts lists every command,
 records the chord you press, and unbinds or resets one per row. Conflicts are
 reported rather than resolved: two commands on one chord is called out, not
@@ -262,9 +290,9 @@ shortcut.
 
 **Shortcuts yield to the shell, with a few exceptions.** A chord the terminal
 needs goes to the terminal: with a pane focused, `Ctrl+D` is EOF, `Ctrl+K`
-kills to end of line, `Ctrl+C` interrupts, `Ctrl+R` is reverse-i-search, and
-the app does nothing. The same chord elsewhere in the window does what the
-table says.
+kills to end of line, `Ctrl+C` interrupts (on Windows, unless text is selected
+— then it copies), `Ctrl+R` is reverse-i-search, and the app does nothing. The
+same chord elsewhere in the window does what the table says.
 
 The exceptions are the shortcuts that would be useless if they stopped working
 whenever a terminal had focus — which is this app's resting state. The app

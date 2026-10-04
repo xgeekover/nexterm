@@ -266,7 +266,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       settingKey: 'terminal.integrated.fullScreenMouseReporting',
       title: 'Mouse Reporting in Full-Screen Apps',
       description:
-        'Lets a full-screen program such as vim, htop or tmux use the mouse. A program in the scrollback, like Claude Code, never gets it, so a drag there always selects text. Inside a full-screen program, hold Shift (or ⌥ on macOS) while dragging to select.',
+        'Lets a full-screen program such as vim, htop or tmux use the mouse. A program in the scrollback, like Claude Code, never gets it, so a drag there always selects text. Inside a full-screen program, hold Shift while dragging to select (on macOS ⌥ works too).',
       control: 'checkbox',
     },
     // ---- Workbench ----
