@@ -61,23 +61,27 @@ function letterOf(event) {
  * What a key does to the clipboard, or `{ action: 'pass' }` when it is not a
  * clipboard chord here.
  *
- *              paste                                   copy
+ *              paste                                   copy (needs a selection)
  *   macOS      ⌘V (the Edit menu)                      ⌘C (the Edit menu)
- *   Windows    Ctrl+V, Ctrl+Shift+V, Shift+Insert      Ctrl+C WITH a selection,
- *                                                      Ctrl+Shift+C, Ctrl+Insert
+ *   Windows    Ctrl+V, Ctrl+Shift+V, Shift+Insert      Ctrl+C, Ctrl+Shift+C, Ctrl+Insert
  *   Linux      Ctrl+Shift+V, Shift+Insert              Ctrl+Shift+C, Ctrl+Insert
  *
  * Windows is Windows Terminal's table, and like it a copy there also clears
- * the selection — which is what lets the NEXT Ctrl+C interrupt again. Ctrl+C
- * with nothing selected is ^C, as it always was; plain Ctrl+V and Ctrl+C stay
- * the shell's on Linux, as in GNOME Terminal and Konsole. Claude Code pastes an
- * image with Alt+V on Windows, so Ctrl+V pasting text costs it nothing.
+ * the selection — which is what lets the NEXT Ctrl+C interrupt again. Every
+ * copy chord needs a selection, same as Windows Terminal: nothing selected
+ * passes the key through instead — Ctrl+C is ^C, as it always was, and
+ * Ctrl+Shift+C / Ctrl+Insert are left for whatever (if anything) they would
+ * otherwise do, rather than silently copying nothing. Plain Ctrl+V and Ctrl+C
+ * stay the shell's on Linux, as in GNOME Terminal and Konsole. Claude Code
+ * pastes an image with Alt+V on Windows, so Ctrl+V pasting text costs it
+ * nothing.
  *
  * `{ action: 'paste' }` is done by the browser's own paste, so the caller lets
  * the key through untouched; `{ action: 'copy', clearSelection }` is done by
  * the caller. Only keydown counts, and never a key the IME is composing with,
  * nor anything with Alt (Ctrl+Alt is AltGr on Windows: a character, not a
- * chord) or ⌘.
+ * chord) or ⌘. `hasSelection` should already mean a selection the user can
+ * actually see — `hasVisibleSelection` below is what the caller means by it.
  */
 export function clipboardKeyAction(event, { platform = 'linux', hasSelection = false } = {}) {
   if (!event || event.type !== 'keydown') return PASS;
@@ -92,16 +96,13 @@ export function clipboardKeyAction(event, { platform = 'linux', hasSelection = f
 
   if (event.key === 'Insert') {
     if (shift && !ctrl) return PASTE;
-    if (ctrl && !shift) return copy;
+    if (ctrl && !shift) return hasSelection ? copy : PASS;
     return PASS;
   }
   if (!ctrl) return PASS;
   const letter = letterOf(event);
   if (letter === 'v') return shift || windows ? PASTE : PASS;
-  if (letter === 'c') {
-    if (shift) return copy;
-    return windows && hasSelection ? copy : PASS;
-  }
+  if (letter === 'c') return hasSelection && (shift || windows) ? copy : PASS;
   return PASS;
 }
 
@@ -160,6 +161,38 @@ export function copyTerminalSelection(
 }
 
 /**
+ * Does the terminal have a selection worth treating as "the user has
+ * something to copy" — one actually on screen right now, not merely
+ * somewhere in the scrollback.
+ *
+ * `term.hasSelection()` alone is true for either: a selection scrolled out of
+ * the viewport (made earlier, then scrolled past) copies instead of
+ * interrupting a program the user meant to Ctrl+C, invisibly: nothing the
+ * user can see changes, but the clipboard does. `findOpen` is for the other
+ * way a selection can be there unasked: the find bar highlights its current
+ * match with `term.select()` — the very same call a drag makes
+ * (`@xterm/addon-search`) — so while it is open, a "selection" is the match,
+ * not something to copy.
+ *
+ * Without `term.getSelectionPosition()` or the buffer/row fields it is
+ * compared against (an older xterm, or a test double) this cannot be told,
+ * so a plain selection counts — as it always did before this existed.
+ */
+export function hasVisibleSelection(term, { findOpen = false } = {}) {
+  if (findOpen) return false;
+  if (!term?.hasSelection?.()) return false;
+  const range = typeof term.getSelectionPosition === 'function' ? term.getSelectionPosition() : null;
+  const viewportY = term.buffer?.active?.viewportY;
+  const rows = term.rows;
+  if (!range || !Number.isFinite(viewportY) || !Number.isFinite(rows)) return true;
+  const top = viewportY; // 0-based, like `IBuffer.getLine`
+  const bottom = viewportY + rows - 1;
+  const startY = range.start.y - 1; // `IBufferCellPosition.y` is 1-based
+  const endY = range.end.y - 1;
+  return endY >= top && startY <= bottom;
+}
+
+/**
  * The clipboard part of TerminalView's custom key handler. Returns undefined
  * when the key is not a clipboard chord here — the caller carries on — and
  * otherwise what the handler must return to xterm: false, so xterm neither
@@ -168,12 +201,17 @@ export function copyTerminalSelection(
  * A paste is the browser's: with the key left uncancelled, WebView2 (and
  * WebKitGTK) paste into xterm's textarea, xterm gets the `paste` event and
  * sends the text — bracketed, when the program asked for that. A copy is done
- * here, and the key cancelled so nothing else acts on it.
+ * here, and the key cancelled so nothing else acts on it. `findOpen` is the
+ * caller's to supply — see `hasVisibleSelection`.
  */
-export function handleClipboardKey(term, event, { platform = currentPlatform(), copy = copyTerminalSelection } = {}) {
+export function handleClipboardKey(
+  term,
+  event,
+  { platform = currentPlatform(), copy = copyTerminalSelection, findOpen = false } = {}
+) {
   const decision = clipboardKeyAction(event, {
     platform,
-    hasSelection: Boolean(term?.hasSelection?.()),
+    hasSelection: hasVisibleSelection(term, { findOpen }),
   });
   if (decision.action === 'pass') return undefined;
   if (decision.action === 'copy') {
@@ -367,6 +405,7 @@ export default {
   currentPlatform,
   clipboardKeyAction,
   copyTerminalSelection,
+  hasVisibleSelection,
   handleClipboardKey,
   pressSelects,
   shouldCopyOnSelect,

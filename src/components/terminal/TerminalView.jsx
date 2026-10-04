@@ -206,6 +206,13 @@ export function TerminalView({ tabId, active = false }) {
     // into it is not a shell command.
     const isRunning = () => useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.running === true;
     const isAlternate = () => entry.term.buffer?.active?.type === 'alternate';
+    // The find bar highlights its current match with `term.select()` — the
+    // very same call a drag makes (`@xterm/addon-search`) — so Ctrl+C must
+    // not treat it as something the user selected to copy.
+    const isFindOpen = () => {
+      const find = useTerminalStore.getState().find;
+      return Boolean(find?.open && find?.tabId === tabId);
+    };
     // The Korean input binding — installed on macOS only, so null elsewhere.
     const ime = hangulImeFor(entry.term);
     const layerAllowed = () =>
@@ -380,7 +387,7 @@ export function TerminalView({ tabId, active = false }) {
       // Copy and paste first — Ctrl+V / Ctrl+C on Windows and the Linux chords
       // (src/lib/terminalClipboard.js). xterm would otherwise send ^V or ^C and
       // cancel the key, and WebView2 has no Edit menu to fall back on.
-      const clipboard = handleClipboardKey(entry.term, event);
+      const clipboard = handleClipboardKey(entry.term, event, { findOpen: isFindOpen() });
       if (clipboard !== undefined) return clipboard;
       const decision = suggestionKeyAction(suggestStateRef.current, event, {
         running: isRunning(),
