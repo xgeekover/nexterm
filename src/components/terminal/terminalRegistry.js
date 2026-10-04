@@ -28,6 +28,7 @@ import {
   activateGraphemeWidths,
   fitAndReport,
   installPagerWheel,
+  installScrollbackWheel,
   installXtVersionReply,
   windowsPtyFor,
 } from '../../lib/terminalCompat.js';
@@ -779,9 +780,6 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // XTVERSION, answered as xterm.js 6.1 answers it: Claude Code asks for DEC
   // 2026 (synchronized output) only after this reply. See terminalCompat.js.
   installXtVersionReply(term);
-  // The wheel over a pager (`less`, `man`, `git log`) moves it as far as it did
-  // under xterm 5.5 — xterm 6 sends one arrow per wheel event. terminalCompat.js.
-  installPagerWheel(term);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);
@@ -792,6 +790,14 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     useTerminalStore.getState().setFindResults?.(tabId, results);
   });
   term.open(container);
+
+  // The wheel moves the scrollback, and a pager (`less`, `man`, `git log`), as
+  // far as it did under xterm 5.5 — xterm 6 scrolls a fixed 50 px a notch and
+  // sends a pager one arrow per wheel event. The scrollback's listener goes on
+  // `term.element`, hence after `open`; disposed with the terminal.
+  // terminalCompat.js.
+  installPagerWheel(term);
+  installScrollbackWheel(term);
 
   // ---- Korean inline IME (macOS only) — see src/lib/hangulInlineIme.js ----
   // WebKit composes Hangul by rewriting the textarea in place, which xterm

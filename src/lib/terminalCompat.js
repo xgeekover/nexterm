@@ -143,34 +143,72 @@ const WHEEL_DELTA_LINE = 1;
 const WHEEL_DELTA_PAGE = 2;
 
 /**
+ * What one wheel event is worth before its unit is applied, as xterm 5.5
+ * measured it (`Viewport._applyScrollModifier`): its deltaY times
+ * `scrollSensitivity`, and ⌥/Alt — 5.5's default fast-scroll modifier —
+ * `fastScrollSensitivity` times as far again. Shift, a sideways scroll, is
+ * worth nothing. Negative is up.
+ */
+function wheelAmount(event, { scrollSensitivity = 1, fastScrollSensitivity = 5 } = {}) {
+  const deltaY = Number(event?.deltaY) || 0;
+  if (!deltaY || event.shiftKey) return 0;
+  return deltaY * scrollSensitivity * (event.altKey ? fastScrollSensitivity : 1);
+}
+
+/**
  * How many arrow keys one wheel event is worth to a full-screen program that
  * did not ask for the mouse (`less`, `man`, `git log`), counted as xterm 5.5
  * counted them (`Viewport.getLinesScrolled`): the event's pixels over the row
  * height, the fraction carried to the next event (`partial`); a line-mode
- * event that many lines, a page-mode one that many screens. Shift — a
- * sideways scroll — is worth none; ⌥/Alt scrolls `fastScrollSensitivity`
- * times as far, 5.5's default fast-scroll modifier. Negative is up.
+ * event that many lines, a page-mode one that many screens, one key for
+ * every whole step begun — 1.5 lines were two keys. See `wheelAmount` for ⌥
+ * and Shift.
  *
  * xterm 6 sends ONE arrow per wheel event whatever its size ("simplified" with
  * the new viewport): measured under headless Chromium, a mouse-wheel notch
  * moved a pager 1 line where 5.5 moved it 5, and a short trackpad-like swipe 2
  * lines where 5.5 moved it 6.
  */
-export function wheelArrowCount(
-  event,
-  { cellHeight = 0, rows = 0, scrollSensitivity = 1, fastScrollSensitivity = 5, partial = 0 } = {}
-) {
-  const deltaY = Number(event?.deltaY) || 0;
-  if (!deltaY || event.shiftKey) return { lines: 0, partial };
-  const amount = deltaY * scrollSensitivity * (event.altKey ? fastScrollSensitivity : 1);
-  // 5.5 sent one key for every whole step begun: 1.5 lines were two keys.
+export function wheelArrowCount(event, { cellHeight = 0, rows = 0, partial = 0, ...sensitivity } = {}) {
+  const amount = wheelAmount(event, sensitivity);
   const whole = (n) => Math.sign(n) * Math.ceil(Math.abs(n));
-  if (event.deltaMode === WHEEL_DELTA_LINE) return { lines: whole(amount), partial };
-  if (event.deltaMode === WHEEL_DELTA_PAGE) return { lines: whole(amount * rows), partial };
-  if (!(cellHeight > 0)) return { lines: 0, partial };
+  if (event?.deltaMode === WHEEL_DELTA_LINE) return { lines: whole(amount), partial };
+  if (event?.deltaMode === WHEEL_DELTA_PAGE) return { lines: whole(amount * rows), partial };
+  if (!amount || !(cellHeight > 0)) return { lines: 0, partial };
   const total = partial + amount / cellHeight;
   const lines = Math.trunc(total);
   return { lines, partial: total - lines };
+}
+
+/**
+ * How many rows one wheel event scrolls the scrollback, as xterm 5.5 scrolled
+ * it. 5.5 added the event's pixels (`_getPixelsScrolled`: a line-mode event's
+ * lines and a page-mode event's screens in pixels) to its viewport's native
+ * `scrollTop`, and showed the row nearest to it — `Math.round(scrollTop /
+ * rowHeight)` — so what a notch fell short of a row was kept for the next:
+ * 100 px notches at 16 px rows moved 6, then 6, then 7 rows.
+ *
+ * Done relative to the row on screen, which rounds the same way, the row
+ * being whole: `offset` is the remainder the previous call returned, in
+ * pixels like 5.5's, and `min` / `max` are how many rows the viewport can go
+ * each way — where 5.5's `scrollTop` stopped, and its remainder with it.
+ *
+ * The one difference: the remainder is kept exactly, where a browser may hold
+ * `scrollTop` in whole device pixels. A trackpad's fractional deltas can then
+ * reach a row one event sooner or later than under 5.5; whole-pixel deltas —
+ * a mouse notch, in WebView2 and WKWebView alike — count exactly the same.
+ */
+export function wheelScrollRows(
+  event,
+  { cellHeight = 0, rows = 0, offset = 0, min = -Infinity, max = Infinity, ...sensitivity } = {}
+) {
+  if (!(cellHeight > 0)) return { rows: 0, offset };
+  let pixels = wheelAmount(event, sensitivity);
+  if (event?.deltaMode === WHEEL_DELTA_LINE) pixels *= cellHeight;
+  else if (event?.deltaMode === WHEEL_DELTA_PAGE) pixels *= cellHeight * rows;
+  const target = Math.min(Math.max(offset + pixels, min * cellHeight), max * cellHeight);
+  const scrolled = Math.round(target / cellHeight) || 0; // `|| 0`: never -0
+  return { rows: scrolled, offset: target - scrolled * cellHeight };
 }
 
 /**
@@ -184,26 +222,35 @@ function wheelReported(term) {
   return mode !== 'none' && mode !== 'x10';
 }
 
+/** The active screen keeps no scrollback: the alternate one, or a terminal made with none. */
+function noScrollback(term) {
+  return term.buffer?.active?.type === 'alternate' || term.options?.scrollback === 0;
+}
+
+/** One row's height in CSS pixels as drawn — the screen's over its rows — or 0 before it is laid out. */
+function rowHeightOf(term) {
+  const screen = term.element?.querySelector?.('.xterm-screen');
+  const height = screen?.getBoundingClientRect?.().height ?? 0;
+  return term.rows > 0 ? height / term.rows : 0;
+}
+
 /**
  * Turn the wheel into as many arrow keys as xterm 5.5 did (`wheelArrowCount`)
  * wherever xterm turns it into arrow keys at all: a screen with no scrollback
  * (the alternate one, or scrollback 0) and no protocol that reports the wheel
  * — X10 included, under which xterm 6 sent one arrow per event as well.
- * Everywhere else the event is xterm's, untouched: the scrollback scrolls, or
- * the program gets wheel reports. Uses the terminal's one custom wheel slot;
- * returns whether it was installed.
+ * Everywhere else the event is xterm's, untouched: the scrollback scrolls
+ * (`installScrollbackWheel`), or the program gets wheel reports. Uses the
+ * terminal's one custom wheel slot; returns whether it was installed.
  */
 export function installPagerWheel(term) {
   if (typeof term?.attachCustomWheelEventHandler !== 'function') return false;
   let partial = 0;
   term.attachCustomWheelEventHandler((event) => {
     try {
-      const noScrollback = term.buffer?.active?.type === 'alternate' || term.options?.scrollback === 0;
-      if (!noScrollback || wheelReported(term)) return true;
-      const screen = term.element?.querySelector?.('.xterm-screen');
-      const height = screen?.getBoundingClientRect?.().height ?? 0;
+      if (!noScrollback(term) || wheelReported(term)) return true;
       const result = wheelArrowCount(event, {
-        cellHeight: term.rows > 0 ? height / term.rows : 0,
+        cellHeight: rowHeightOf(term),
         rows: term.rows,
         scrollSensitivity: term.options?.scrollSensitivity ?? 1,
         fastScrollSensitivity: term.options?.fastScrollSensitivity ?? 5,
@@ -223,6 +270,115 @@ export function installPagerWheel(term) {
     }
   });
   return true;
+}
+
+/**
+ * The scrollback half of the wheel, as an xterm addon so it is disposed with
+ * its terminal (see `installScrollbackWheel`).
+ *
+ * The listener goes on `term.element` in the CAPTURE phase. xterm 6 scrolls
+ * the scrollback from a bubble-phase listener on the `.xterm-scrollable-
+ * element` it puts inside that element (src/browser/Viewport.ts), so this
+ * runs first, and stopping the event here means xterm never sees it — not the
+ * scrollable element, and not xterm's own listener on `term.element` either.
+ */
+class ScrollbackWheelAddon {
+  constructor() {
+    this._offset = 0;
+    this._scrolling = false;
+    this._disposables = [];
+  }
+
+  activate(term) {
+    const element = term.element;
+    if (typeof element?.addEventListener !== 'function') return;
+    const onWheel = (event) => {
+      try {
+        if (noScrollback(term) || wheelReported(term)) return;
+        // A sideways swipe: nothing for the scrollback, and nothing to cancel.
+        if (!Number(event.deltaY)) return;
+        const cellHeight = rowHeightOf(term);
+        const buffer = term.buffer?.active;
+        // Not laid out, or not an xterm this knows: its own scrolling beats none.
+        if (!(cellHeight > 0) || !Number.isInteger(buffer?.viewportY) || !Number.isInteger(buffer?.baseY)) return;
+        const result = wheelScrollRows(event, {
+          cellHeight,
+          rows: term.rows,
+          scrollSensitivity: term.options?.scrollSensitivity ?? 1,
+          fastScrollSensitivity: term.options?.fastScrollSensitivity ?? 5,
+          offset: this._offset,
+          min: -buffer.viewportY,
+          max: buffer.baseY - buffer.viewportY,
+        });
+        // Cancelled before the scroll: should it throw, the wheel is lost
+        // once rather than counted twice.
+        event.preventDefault();
+        event.stopPropagation();
+        this._offset = result.offset;
+        if (result.rows === 0) return;
+        this._scrolling = true;
+        try {
+          term.scrollLines(result.rows);
+        } finally {
+          this._scrolling = false;
+        }
+      } catch (err) {
+        console.warn('[Terminal] wheel over the scrollback failed:', err);
+      }
+    };
+    element.addEventListener('wheel', onWheel, { capture: true, passive: false });
+    this._disposables.push({ dispose: () => element.removeEventListener('wheel', onWheel, { capture: true }) });
+    // Anything else that moves the viewport — output, a key, the scrollbar —
+    // put 5.5's scrollTop back on a row, and the remainder went with it.
+    // xterm 6 scrolls synchronously (no `smoothScrollDuration`), so the
+    // scroll this addon makes itself is the one that arrives while
+    // `_scrolling` is set.
+    if (typeof term.onScroll === 'function') {
+      this._disposables.push(
+        term.onScroll(() => {
+          if (!this._scrolling) this._offset = 0;
+        })
+      );
+    }
+  }
+
+  dispose() {
+    for (const d of this._disposables.splice(0)) {
+      try {
+        d?.dispose?.();
+      } catch {
+        // the terminal is going anyway
+      }
+    }
+  }
+}
+
+/**
+ * Scroll the scrollback as far per wheel event as xterm 5.5 did
+ * (`wheelScrollRows`) — on every platform, from the event's own delta.
+ *
+ * xterm 6's viewport is VS Code's `SmoothScrollableElement`, which reads the
+ * legacy `wheelDeltaY / 120` (vs/base/browser/mouseEvent.ts) and scrolls
+ * 50 px for each unit: a fixed distance per notch, whatever the event's own
+ * deltaY says, and blind to the OS's lines-per-notch setting, since
+ * wheelDeltaY stays 120. Measured: in Chromium — WebView2 — a notch is deltaY
+ * 100, and xterm 6 scrolled 3 rows of 16 px where 5.5 scrolled 6; in the
+ * macOS app (WKWebView) a notch is deltaY 40, and at 21 px rows xterm 6
+ * scrolled 2.4 rows where 5.5 scrolled 1.9.
+ *
+ * Only where xterm would scroll the scrollback: the normal screen with
+ * scrollback, and no protocol that reports the wheel. The alternate screen
+ * and a terminal without scrollback are `installPagerWheel`'s; a wheel the
+ * program asked to hear about goes to it, as a report.
+ *
+ * Call after `term.open()` — the listener needs `term.element`. Returns the
+ * addon, or null when the terminal has no element yet.
+ */
+export function installScrollbackWheel(term) {
+  if (typeof term?.element?.addEventListener !== 'function' || typeof term.loadAddon !== 'function') return null;
+  const addon = new ScrollbackWheelAddon();
+  term.loadAddon(addon);
+  return addon;
 }
 
 /** The @xterm/xterm release the app ships — what XTVERSION reports (SO-02 keeps it true). */

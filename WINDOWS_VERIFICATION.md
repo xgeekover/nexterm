@@ -426,6 +426,10 @@ any of it — which is exactly what nothing here can reproduce.
   `ESC[1;3D`).
 - `git log` in Git Bash, or `less` under WSL: one wheel notch moves several
   lines, as in 0.8.0 — not one.
+- Over plain scrollback (`dir /s` in cmd, then scroll back): one notch moves
+  as far as in 0.8.0 — about five rows at the default font, where xterm 6
+  alone moved two or three — and raising "lines to scroll at a time" in
+  Windows' mouse settings makes it go further.
 - Whether `claude` frames its output with synchronized updates here is open:
   it asks XTVERSION first, and conhost may answer or swallow that query itself.
 
