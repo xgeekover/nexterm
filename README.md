@@ -235,12 +235,12 @@ alike — in the default shell, since a saved group does not remember which
 shell each terminal ran. Right-click the saved group → *Edit Startup
 Commands…* lists its terminals with their directories and a command field
 each; empty means just a shell. Saving a group fills these in for you from
-what is **running** in each
-terminal at that moment — `npm run dev`, a test watcher, or `claude` /
-`opencode` for an agent NexTerm started — and leaves a terminal sitting at a
-prompt empty: the last command of an idle shell is what it did, not what it is
-for, and opening the template would run it again. A saved row with startup
-commands shows ▶ and how many, and its tooltip lists what opening it will run.
+what is **running** in each terminal at that moment — `npm run dev`, a test
+watcher, or `claude` / `opencode` for an agent NexTerm started — and leaves a
+terminal sitting at a prompt empty: the last command of an idle shell is what
+it did, not what it is for, and opening the template would run it again. A
+saved row with startup commands shows ▶ and how many, and its tooltip lists
+what opening it will run.
 Each command is one line — join several with `&&` or `;` — and a multi-line
 paste is refused with a message rather than run line by line; control
 characters are stripped. Saved workspaces work the same way (the workspace bar
