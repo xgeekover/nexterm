@@ -146,6 +146,7 @@ fn main() {
             commands::system::menu_set_accelerators,
             commands::notification::show_desktop_notification,
             commands::clipboard::clipboard_read,
+            commands::agent::agent_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");

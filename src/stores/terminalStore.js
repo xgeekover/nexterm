@@ -14,7 +14,17 @@ import { routeProgramNotification, windowAttention } from '../lib/programNotific
 import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir } from '../lib/terminalCwd.js';
-import { resumeCommand, serializeAgent, startCommand } from '../lib/agents.js';
+import {
+  agentFromCommandLine,
+  cleanAgentTitle,
+  isSessionIdFor,
+  opencodeTitleMatches,
+  opencodeTitleOf,
+  pickOpencodeSession,
+  resumeCommand,
+  serializeAgent,
+  startCommand,
+} from '../lib/agents.js';
 import {
   followCommandLine,
   normalizeSlotCommand,
@@ -978,6 +988,34 @@ const endsOf = (sessionId) => commandEndsBySession.get(sessionId) ?? 0;
 const typedLines = new Map();
 
 /**
+ * tab id -> the conversation title its opencode shows now (`OC | <title>`),
+ * as shown — cut to 37 characters past 40. What `resolveAgentSession` looks
+ * up; kept out of the store because only the lookup reads it.
+ */
+const shownTitles = new Map();
+
+/** tab id -> the pending lookup of its opencode conversation. */
+const resolveTimers = new Map();
+
+/**
+ * How long a title has to stay before its conversation is looked up. opencode
+ * sends the same title two or three times in a row as it draws (measured),
+ * and switching conversations quickly should cost one lookup, not five.
+ */
+export const AGENT_RESOLVE_DELAY_MS = 400;
+let agentResolveDelayMs = AGENT_RESOLVE_DELAY_MS;
+
+/** Test hook: how long a title holds still before it is looked up. Returns what it replaced. */
+export function __setAgentResolveDelayMs(ms) {
+  const previous = agentResolveDelayMs;
+  agentResolveDelayMs = ms;
+  return previous;
+}
+
+/** Whether a failed lookup has been reported; once a run is enough. */
+let resolveFailureReported = false;
+
+/**
  * How long a submitted line may go unanswered before it counts as a running
  * command, where that inference is made at all (see `noteSubmittedLine`).
  *
@@ -1290,7 +1328,9 @@ export const useTerminalStore = create((set, get, api) => {
    * by, nothing says where the typed line stands, so nothing is watched and
    * the record stays, as it always did.
    */
-  const recordAgent = (tabId, agent, atPrompt) =>
+  const recordAgent = (tabId, agent, atPrompt) => {
+    // A new record has seen no title yet (`noteAgentTitle`).
+    shownTitles.delete(tabId);
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === tabId
@@ -1298,6 +1338,7 @@ export const useTerminalStore = create((set, get, api) => {
           : t
       ),
     }));
+  };
 
   /**
    * Follow one write to `tab`'s terminal (`followCommandLine`) and, when it
@@ -1310,10 +1351,79 @@ export const useTerminalStore = create((set, get, api) => {
       running: Boolean(tab.running),
     });
     typedLines.set(tab.id, line);
-    if (submitted === undefined || (tab.commandLine ?? null) === submitted) return;
+    if (submitted === undefined) return;
+    if (typeof submitted === 'string') noteTypedAgent(tab, submitted);
+    if ((tab.commandLine ?? null) === submitted) return;
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, commandLine: submitted } : t)),
     }));
+  };
+
+  /**
+   * An agent typed by hand at the prompt — `opencode`, `claude`, a layout
+   * template's `opencode -c` — remembered exactly as if NexTerm had started
+   * it: watched from this line on, so its exit ends the record, and offered
+   * back after a restart if it is still running when the app closes.
+   *
+   * Not over a record that is already live: NexTerm records its own agents
+   * (`startAgent`, `resumeAgent`) before typing them, and this sees that line
+   * too. A record still being OFFERED is replaced — the user started the
+   * agent themselves instead of pressing Resume. And not in a shell that has
+   * never reported a command's end (fish, sh): nothing could ever end the
+   * record, and an agent long gone would be offered back on every launch.
+   */
+  const noteTypedAgent = (tab, line) => {
+    if (tab.agent && !tab.agentResumeOffered) return;
+    if (endsOf(tab.sessionId) === 0) return;
+    const typed = agentFromCommandLine(line);
+    if (!typed) return;
+    recordAgent(tab.id, { kind: typed.kind, sessionId: typed.sessionId, startedAt: Date.now(), title: null }, true);
+  };
+
+  /**
+   * Find the opencode conversation `tabId` shows, from the title it shows
+   * (`shownTitles`): `opencode session list`, narrowed to the terminal's
+   * directory by the backend, then `pickOpencodeSession`. Written onto the
+   * record only if it is still the one the lookup was made for and that
+   * title still shows — a quicker switch, or the agent exiting, wins.
+   */
+  const resolveAgentSession = async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    const agent = tab?.agent;
+    const shown = shownTitles.get(tabId);
+    if (!agent || agent.kind !== 'opencode' || tab.agentResumeOffered || !shown || !tab.cwd) return;
+    let sessions;
+    try {
+      sessions = await invoke('agent_sessions', { kind: 'opencode', cwd: tab.cwd });
+    } catch (err) {
+      // opencode not found from here, a CLI that changed its output: the
+      // terminal resumes the folder's latest conversation, as it always did.
+      if (!resolveFailureReported) {
+        resolveFailureReported = true;
+        console.warn('[TerminalStore] could not look up the opencode conversation:', err);
+      }
+      return;
+    }
+    const picked = pickOpencodeSession(sessions, { title: shown, currentId: agent.sessionId });
+    if (!picked) return;
+    set((state) => {
+      let changed = false;
+      const tabs = state.tabs.map((t) => {
+        if (t.id !== tabId || t.agent !== agent || shownTitles.get(tabId) !== shown) return t;
+        const title = cleanAgentTitle(picked.title) ?? agent.title;
+        if (agent.sessionId === picked.id && agent.title === title) return t;
+        changed = true;
+        return { ...t, agent: { ...agent, sessionId: picked.id, title } };
+      });
+      return changed ? { tabs } : state;
+    });
+  };
+
+  /** Forget a closed terminal's conversation bookkeeping. */
+  const forgetAgentTitle = (tabId) => {
+    shownTitles.delete(tabId);
+    clearTimeout(resolveTimers.get(tabId));
+    resolveTimers.delete(tabId);
   };
 
   /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
@@ -1441,6 +1551,7 @@ export const useTerminalStore = create((set, get, api) => {
     }
     await disposeTerminalView(tabId);
     typedLines.delete(tabId);
+    forgetAgentTitle(tabId);
     set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
   };
 
@@ -2816,6 +2927,15 @@ export const useTerminalStore = create((set, get, api) => {
           };
         });
       }));
+      // A window title a program set (OSC 0 / 2), read by the backend whether
+      // or not the terminal has been shown. Only an opencode terminal's means
+      // anything here: the conversation it shows (`noteAgentTitle`).
+      unlisteners.push(await listen('pty-title', (payload) => {
+        const { session_id, title } = payload || {};
+        if (!session_id || typeof title !== 'string') return;
+        const tab = get().tabs.find((t) => t.sessionId === session_id);
+        if (tab?.agent) get().noteAgentTitle(tab.id, title);
+      }));
     },
 
     dispose: () => {
@@ -3114,6 +3234,7 @@ export const useTerminalStore = create((set, get, api) => {
       }
       await disposeTerminalView(tabId);
       typedLines.delete(tabId);
+      forgetAgentTitle(tabId);
       // Whatever its shell printed that no terminal ever showed goes with it.
       forgetOutput(tab.sessionId);
 
@@ -3292,12 +3413,19 @@ export const useTerminalStore = create((set, get, api) => {
      * resume that fails at once, like `claude --resume` for a conversation
      * that was never sent a message and so was never saved (#37).
      */
-    resumeAgent: async (tabId) => {
+    resumeAgent: async (tabId, choice = null) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || tab.running) return false;
 
-      const command = resumeCommand(tab.agent);
+      // A conversation picked from the banner's list (`choice`, from
+      // `listAgentSessions`) instead of the one remembered. Its id is held to
+      // the same standard as a remembered one before it reaches the shell.
+      const agent =
+        choice && tab.agent && isSessionIdFor(tab.agent.kind, choice.sessionId)
+          ? { ...tab.agent, sessionId: choice.sessionId, title: cleanAgentTitle(choice.title) }
+          : tab.agent;
+      const command = resumeCommand(agent);
       // The offer goes away either way: an agent we no longer recognise is
       // not something to keep asking about. And it goes before any wait for
       // a prompt, so it cannot be taken twice while that wait lasts.
@@ -3308,9 +3436,64 @@ export const useTerminalStore = create((set, get, api) => {
 
       const readiness = await untilPromptReady(targetId);
       if (readiness === 'gone') return false;
-      recordAgent(targetId, tab.agent, readiness === 'ready');
+      recordAgent(targetId, agent, readiness === 'ready');
       await get().writeRaw(targetId, `${command}\r`);
       return true;
+    },
+
+    /**
+     * The conversations the agent offered back in `tabId` keeps for that
+     * terminal's directory, newest first — for the resume banner's list.
+     * Only opencode keeps a list NexTerm can read (src-tauri/src/commands/
+     * agent.rs); claude's resume is exact already. Rejects with the reason
+     * when the list cannot be had.
+     */
+    listAgentSessions: async (tabId) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (tab?.agent?.kind !== 'opencode') return [];
+      const sessions = await invoke('agent_sessions', { kind: 'opencode', cwd: tab.cwd || '' });
+      return Array.isArray(sessions) ? sessions.filter((x) => isSessionIdFor('opencode', x?.id)) : [];
+    },
+
+    /**
+     * A window title the program in `tabId` set. While opencode runs there it
+     * names its conversation that way (`OC | <title>`), and that is how the
+     * terminal learns WHICH conversation to resume after a restart: the
+     * title is looked up (`resolveAgentSession`) once it has held still for
+     * AGENT_RESOLVE_DELAY_MS. Its home screen's `OpenCode` and the '' it
+     * sets as it quits say nothing and change nothing.
+     */
+    noteAgentTitle: (tabId, windowTitle) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      const agent = tab?.agent;
+      if (!agent || agent.kind !== 'opencode' || tab.agentResumeOffered) return;
+      const shown = opencodeTitleOf(windowTitle);
+      // opencode sends the same title again as it redraws; this record has
+      // already made of it whatever there was to make.
+      if (!shown || shownTitles.get(tabId) === shown) return;
+      shownTitles.set(tabId, shown);
+      // The conversation it is already known to be in, first shown after a
+      // resume by id.
+      if (agent.sessionId && agent.title && opencodeTitleMatches(shown, agent.title)) return;
+      // Another conversation, or the first title of this one. An id stays
+      // only while no title was ever known for it: one typed with `-s`, or a
+      // record from before titles were kept — the lookup keeps it if it fits.
+      const next = {
+        ...agent,
+        sessionId: agent.sessionId && !agent.title ? agent.sessionId : null,
+        title: cleanAgentTitle(shown),
+      };
+      set((state) => ({
+        tabs: state.tabs.map((t) => (t.id === tabId && t.agent === agent ? { ...t, agent: next } : t)),
+      }));
+      clearTimeout(resolveTimers.get(tabId));
+      resolveTimers.set(
+        tabId,
+        setTimeout(() => {
+          resolveTimers.delete(tabId);
+          resolveAgentSession(tabId);
+        }, agentResolveDelayMs)
+      );
     },
 
     /**

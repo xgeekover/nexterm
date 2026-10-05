@@ -248,7 +248,11 @@ describe('Layout templates: what saving offers as each terminal\'s command', () 
       'claude',
       'the agent as a command that starts one — never `--session-id` with an id already in use'
     );
-    assert.equal(suggestStartupCommand({ agent: { kind: 'opencode' }, running: true }), 'opencode');
+    assert.equal(
+      suggestStartupCommand({ agent: { kind: 'opencode' }, running: true }),
+      'opencode -c',
+      'opencode continues the folder\'s latest conversation when the template opens (the user\'s choice, 2026-10-05)'
+    );
     assert.equal(
       suggestStartupCommand({ agent: { kind: 'claude' }, agentResumeOffered: true }),
       '',

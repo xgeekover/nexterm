@@ -560,6 +560,36 @@ OSC 133 "D" arrives — which ConPTY may hold back with the next frame (see V14)
 - In *Edit Startup Commands…*, paste two lines copied from Notepad into a field:
   it is refused with a message, and nothing is joined into one long line.
 
+### V25 — an OpenCode conversation comes back by name after a restart
+
+Never run on Windows: checked against real OpenCode 1.18.34 on macOS — its
+output through the backend's filter, `opencode session list` through the
+backend with a Finder-like PATH — and in the suites. Three things are new
+under ConPTY and a GUI launch: whether conhost passes OpenCode's window title
+(OSC 0) on; whether a terminal's typed `opencode` is followed in PowerShell and
+cmd; and whether the app, started from the Start menu, finds npm's
+`opencode.cmd` to list conversations.
+
+- In PowerShell, in a project folder: `opencode`, ask it anything, wait for the
+  reply. Quit NexTerm with OpenCode still open (the window's ✕), start it again:
+  that terminal says *Resume opencode?* and *Picks up "<the conversation's
+  title>", the conversation this terminal had*. *Resume* types
+  `opencode -s ses_…` and OpenCode opens that conversation.
+- The same in cmd. And with two OpenCode terminals on the same folder, each in
+  its own conversation: after the restart each offers its own by name, and each
+  resumes into its own.
+- *Choose…* lists the folder's conversations, newest first, the terminal's own
+  ticked; picking another types `opencode -s` with that one's id.
+- `opencode` started and quit again (`/exit`) before the restart: no offer.
+  `opencode run "hi"`, `opencode --version`, `cd .. && opencode`: no offer.
+- When it fails, say which half: an offer that only ever says *the most
+  recent opencode conversation in this folder* — even after the reply — is
+  the title or the lookup. With Developer Tools open, the console says
+  "could not look up the opencode conversation" when the lookup failed (note
+  where `opencode` is installed: `where.exe opencode`); with no such line,
+  conhost dropped the title. No offer at all is the typed line not being
+  followed — note the shell.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

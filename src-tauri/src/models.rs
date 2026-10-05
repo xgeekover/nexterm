@@ -43,6 +43,15 @@ pub struct PtyCwdPayload {
     pub cwd: String,
 }
 
+/// Emitted when a program sets the window title (OSC 0 / OSC 2) — reported
+/// from the backend, so a terminal that has never been shown reports it too.
+/// `title` is exactly what was set, '' when it was cleared.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PtyTitlePayload {
+    pub session_id: String,
+    pub title: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PtySessionInfo {
     pub id: String,

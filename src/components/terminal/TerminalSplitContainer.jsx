@@ -608,6 +608,7 @@ function TerminalPane({
   const startAgent = useTerminalStore((s) => s.startAgent);
   const resumeAgent = useTerminalStore((s) => s.resumeAgent);
   const dismissAgentResume = useTerminalStore((s) => s.dismissAgentResume);
+  const listAgentSessions = useTerminalStore((s) => s.listAgentSessions);
 
   const { drag, beginDrag, cancelActiveDrag } = useContext(DragContext);
 
@@ -956,6 +957,8 @@ function TerminalPane({
               tab={boundTab}
               onResume={() => resumeAgent(boundTab.id)}
               onDismiss={() => dismissAgentResume(boundTab.id)}
+              onListSessions={() => listAgentSessions(boundTab.id)}
+              onResumeWith={(choice) => resumeAgent(boundTab.id, choice)}
             />
             <div className="relative flex-1 min-h-0">
               <TerminalView tabId={boundTab.id} active={isActivePane} />

