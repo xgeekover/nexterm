@@ -185,11 +185,16 @@ export function hasVisibleSelection(term, { findOpen = false } = {}) {
   const viewportY = term.buffer?.active?.viewportY;
   const rows = term.rows;
   if (!range || !Number.isFinite(viewportY) || !Number.isFinite(rows)) return true;
-  const top = viewportY; // 0-based, like `IBuffer.getLine`
+  // Absolute buffer rows, all 0-based — `viewportY` as `IBuffer.getLine`
+  // counts, and the selection as xterm 6 really reports it. Its typings call
+  // `IBufferCellPosition.y` 1-based, but `getSelectionPosition` hands over the
+  // selection model's own rows, which `select()` takes 0-based: measured in
+  // Chromium, a drag over the top row of a fresh terminal reports y 0. Read
+  // as 1-based, a selection on the top row counted as off screen (Ctrl+C
+  // interrupted instead of copying it) and the row below the bottom as on.
+  const top = viewportY;
   const bottom = viewportY + rows - 1;
-  const startY = range.start.y - 1; // `IBufferCellPosition.y` is 1-based
-  const endY = range.end.y - 1;
-  return endY >= top && startY <= bottom;
+  return range.end.y >= top && range.start.y <= bottom;
 }
 
 /**
