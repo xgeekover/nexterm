@@ -135,6 +135,31 @@ export function notificationFor(tab, exitCode, activeTabId, afterMs, now = Date.
 }
 
 /**
+ * What the bell says about what it holds, in words: its button's name, read
+ * out by a screen reader (`label`), its tooltip (`title`), and the list's
+ * heading and name (`heading`, `dialog`).
+ *
+ * Finished commands alone read exactly as they always have. A program's
+ * message (`kind: 'program'`, see `notifyFromProgram` in terminalStore.js) is
+ * not a command finishing, and a bell holding one says so: "2 finished
+ * commands" for something OpenCode said would be wrong about what is in it.
+ */
+export function notificationSummary(notifications = []) {
+  const list = Array.isArray(notifications) ? notifications : [];
+  const programs = list.filter((n) => n?.kind === 'program').length;
+  const commands = list.length - programs;
+  const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const messages = programs > 0 ? count(programs, 'message from a program', 'messages from programs') : '';
+  const both = (commandWords) => [commands > 0 ? commandWords : '', messages].filter(Boolean).join(' and ');
+  return {
+    label: both(count(commands, 'finished command', 'finished commands')),
+    title: `${both(`${count(commands, 'command', 'commands')} finished`)} while you were elsewhere`,
+    heading: programs > 0 ? 'While you were elsewhere' : 'Finished while you were elsewhere',
+    dialog: programs > 0 ? 'Notifications' : 'Finished commands',
+  };
+}
+
+/**
  * Whether `data`, written to a terminal, asks the shell to run a line.
  *
  * The Enter key and a command the app types (`startAgent`, `resumeAgent`) both
@@ -159,4 +184,14 @@ export function durationLabel(ms) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export default { isFailure, tabActivity, activityLabel, hasActivityDot, groupActivity, notificationFor, submitsLine, durationLabel };
+export default {
+  isFailure,
+  tabActivity,
+  activityLabel,
+  hasActivityDot,
+  groupActivity,
+  notificationFor,
+  notificationSummary,
+  submitsLine,
+  durationLabel,
+};

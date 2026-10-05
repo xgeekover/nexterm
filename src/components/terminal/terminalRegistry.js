@@ -53,6 +53,7 @@ import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
+import { installProgramNotifications } from '../../lib/programNotifications.js';
 
 const instances = new Map();
 
@@ -786,6 +787,16 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // It follows the program's output from the first byte; TerminalView sends
   // the keys. See modifyOtherKeys.js.
   const modifyOtherKeys = installModifyOtherKeys(term);
+  // What a program asks to tell the user — OpenCode, Claude Code — through
+  // OSC 9, 99 or 777: to the bell, and to the desktop while the window is in
+  // the background. Read from the first byte, so OpenCode's start-up question
+  // about OSC 99 is answered; the setting is read as each one arrives, and
+  // the store decides where it goes. Disposed with the terminal. See
+  // programNotifications.js.
+  installProgramNotifications(term, {
+    enabled: () => useSettingsStore.getState().terminalProgramNotifications !== false,
+    onNotify: (note) => useTerminalStore.getState().notifyFromProgram?.(tabId, note),
+  });
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);

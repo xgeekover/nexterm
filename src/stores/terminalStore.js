@@ -9,6 +9,7 @@ import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistenc
 import { useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
 import { notificationFor, submitsLine } from '../lib/tabActivity.js';
+import { routeProgramNotification, windowAttention } from '../lib/programNotifications.js';
 import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir } from '../lib/terminalCwd.js';
@@ -221,6 +222,15 @@ function normalizeTree(node) {
 /** The pane that currently hosts `tabId` inside one tree, or null. */
 function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
+}
+
+/**
+ * Whether `tabId` is drawn right now: the tab a pane of the group on screen
+ * is showing. Every pane shows its active tab, so a split shows several.
+ */
+function tabOnScreen(state, tabId) {
+  const group = state.groups.find((g) => g.id === state.activeGroupId);
+  return Boolean(group) && collectLeaves(group.tree).some((leaf) => leaf.activeTabId === tabId);
 }
 
 /** Remove a tab from whichever pane holds it, keeping that pane's active tab valid. */
@@ -1000,6 +1010,9 @@ async function disposeTerminalView(tabId) {
 /** A machine left running overnight must not grow this without bound. */
 const NOTIFICATION_LIMIT = 50;
 
+/** Tells apart two program notifications for one tab in the same millisecond. */
+let programNoteCounter = 0;
+
 export const useTerminalStore = create((set, get, api) => {
   /**
    * Where a new terminal starts, for EVERY way of making one: the directory
@@ -1439,6 +1452,10 @@ export const useTerminalStore = create((set, get, api) => {
     // a build in another group finished four minutes ago — which is the whole
     // point of running things in a terminal you are not watching.
     //
+    // Two kinds: a command that finished (`notificationFor` in tabActivity.js),
+    // and what a program in a terminal asked to tell you (`kind: 'program'`,
+    // see `notifyFromProgram`).
+    //
     // Newest first. Capped, because a machine left running overnight would
     // otherwise grow this without bound.
     notifications: [],
@@ -1447,6 +1464,54 @@ export const useTerminalStore = create((set, get, api) => {
       set((state) => ({ notifications: state.notifications.filter((n) => n.id !== id) })),
 
     clearNotifications: () => set({ notifications: [] }),
+
+    /**
+     * A program in terminal `tabId` asked to tell the user something —
+     * OpenCode's "Session done" or "Permission needs input", Claude Code
+     * waiting — and `note` is what it said, already cleaned and rate-limited
+     * by src/lib/programNotifications.js, which also decides where it goes
+     * (`routeProgramNotification`):
+     *
+     *   - an entry in the bell, beside the finished commands, unless this is
+     *     the terminal being typed into — the active tab, in a focused window;
+     *   - a desktop notification, from the backend, while the window is not
+     *     focused: the reason a program asks at all is that nobody is looking.
+     *
+     * The program's own title when it gave one, else the terminal's: OSC 9
+     * carries a message and nothing else. An entry is never a failure — the
+     * badge turns red for an exit code, and this has none.
+     *
+     * `attention` is the window's focus and visibility, read as the note
+     * arrives; the suites hand theirs in. Returns where it went, or null for
+     * a tab that is gone.
+     */
+    notifyFromProgram: (tabId, note, attention = windowAttention()) => {
+      const state = get();
+      const tab = state.tabs.find((t) => t.id === tabId);
+      if (!tab || !note) return null;
+      const route = routeProgramNotification({
+        occasion: note.occasion,
+        activeTab: state.activeTabId === tabId,
+        onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
+        focused: Boolean(attention?.focused),
+      });
+      const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
+      const title = note.title || tabTitle;
+      const body = note.body || '';
+      if (route.inApp) {
+        const at = Date.now();
+        programNoteCounter += 1;
+        const entry = { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at };
+        set((s) => ({ notifications: [entry, ...s.notifications].slice(0, NOTIFICATION_LIMIT) }));
+      }
+      if (route.desktop) {
+        // Denied by the OS is an answer, not an error: the backend says false.
+        invoke('show_desktop_notification', { title, body }).catch((err) => {
+          console.warn('[TerminalStore] could not show a desktop notification:', err);
+        });
+      }
+      return route;
+    },
 
     // ---- Find in the terminal ------------------------------------------
     // One bar at a time, bound to whichever terminal had focus when it opened

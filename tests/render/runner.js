@@ -453,6 +453,137 @@ scenario(
   }
 );
 
+// ---- What a program asked to tell you ---------------------------------------
+
+/**
+ * The list inside the bell opens only on a click, which a server render never
+ * makes, so RN-29 draws the list itself — as RN-21 draws an editor tab strip.
+ */
+const { NotificationList } = await import('../../src/components/layout/NotificationCenter.jsx');
+
+/** The bell's own button — the one that opens the list — as `{ label, title }`, or null. */
+function bellButton(html) {
+  const attrs = /<button\b(?=[^>]*\saria-expanded=)([^>]*)>/.exec(html)?.[1];
+  if (attrs === undefined) return null;
+  return {
+    label: visibleText(/\saria-label="([^"]*)"/.exec(attrs)?.[1] ?? ''),
+    title: visibleText(/\stitle="([^"]*)"/.exec(attrs)?.[1] ?? ''),
+  };
+}
+
+/** A program's message, as `notifyFromProgram` puts it in the list. */
+const programNote = (id, extra = {}) => ({
+  id,
+  kind: 'program',
+  tabId: 't1',
+  tabTitle: 't1',
+  title: 'opencode',
+  body: 'Session done',
+  at: 1,
+  ...extra,
+});
+
+scenario(
+  'RN-27',
+  "a program's message in the status bar is counted as one, and is no failure",
+  () => {
+    reset();
+    useTerminalStore.setState({ notifications: [programNote('p1')] });
+  },
+  (html) => {
+    const cls = notificationBadgeClass(html);
+    expectThat(cls !== null, 'the notification badge is not drawn');
+    expectThat(!/\bbg-vsc-error\b/.test(cls), `a message from a program is counted as a failure: "${cls}"`);
+    const bell = bellButton(html);
+    expectThat(bell, 'no bell button');
+    expectThat(bell.label === '1 message from a program', `the bell is called ${JSON.stringify(bell.label)}`);
+    expectThat(
+      bell.title === '1 message from a program while you were elsewhere',
+      `the bell's tooltip says ${JSON.stringify(bell.title)}`
+    );
+  }
+);
+
+scenario(
+  'RN-28',
+  'messages beside a failed command — the badge is red for the command, and the bell names both',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      notifications: [
+        programNote('p1'),
+        programNote('p2', { title: 'Claude Code', body: 'Claude is waiting for your input' }),
+        { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1 },
+      ],
+    });
+  },
+  (html) => {
+    expectThat(/\bbg-vsc-error\b/.test(notificationBadgeClass(html) ?? ''), 'a failed command no longer turns the badge red');
+    const bell = bellButton(html);
+    expectThat(
+      bell?.label === '1 finished command and 2 messages from programs',
+      `the bell is called ${JSON.stringify(bell?.label)}`
+    );
+    expectText(html, '3');
+  }
+);
+
+{
+  const id = 'RN-29';
+  const description = "the list draws a program's title over its message, and still a command's exit code";
+  const started = Date.now();
+  try {
+    reset();
+    const long = `Permission needs input: ${'run the migration script against staging, '.repeat(6)}then report back`;
+    const html = renderToString(
+      React.createElement(NotificationList, {
+        notifications: [
+          programNote('p1', { tabId: 't2', tabTitle: 'Terminal 2', title: 'Hello from the mock.', body: 'Session done' }),
+          programNote('p2', { title: 'Only a title', body: '' }),
+          programNote('p3', { title: 'opencode', body: long }),
+          { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1 },
+        ],
+        onGo() {},
+        onDismiss() {},
+      })
+    );
+    const kinds = [...html.matchAll(/\sdata-notification-entry="([^"]+)"/g)].map((m) => m[1]);
+    expectThat(
+      JSON.stringify(kinds) === JSON.stringify(['program', 'program', 'program', 'command']),
+      `the entries are drawn as ${JSON.stringify(kinds)}`
+    );
+    expectText(html, 'Hello from the mock.');
+    expectText(html, 'Session done');
+    expectText(html, 'exit 1');
+    const go = buttonsIn(html).filter((b) => b.title.startsWith('Go to '));
+    expectThat(go[0]?.title === 'Go to Terminal 2', `the first entry goes to ${JSON.stringify(go[0]?.title)}, not its terminal`);
+    expectThat(go[3]?.title === 'Go to build', `the command's entry goes to ${JSON.stringify(go[3]?.title)}`);
+    // Cut to one line by CSS; the whole message is still there, and on hover.
+    expectThat(visibleText(html).includes(long), 'the long message is not in the markup whole');
+    expectThat(html.includes(`title="${long}"`), 'the long message has no tooltip of its own');
+    // A program's entry has no exit code and no duration, and no empty second line.
+    const programRows = html.split('data-notification-entry="program"').slice(1, 4).map((s) => s.split('data-notification-entry=')[0]);
+    for (const row of programRows) expectThat(!/exit \d|\d+m \d+s/.test(visibleText(row)), 'a program entry shows a verdict');
+    expectThat(!/<span[^>]*text-vsc-muted[^>]*><\/span>/.test(programRows[1]), 'an empty message draws an empty line');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+scenario(
+  'RN-30',
+  'the settings window offers notifications from programs',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    expectText(html, 'Notifications from Programs');
+  }
+);
+
 // ---- Dragging an editor tab over a tab strip ---------------------------------
 
 /**
