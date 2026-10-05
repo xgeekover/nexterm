@@ -100,9 +100,10 @@ export function normalizeSlotCommand(slot) {
  *
  *  1. the command it was itself opened with, from a template: saving again
  *     keeps the template's choice, whatever the terminal ran since;
- *  2. an agent NexTerm started there and is still running — as the plain
- *     command (`claude`, `opencode`), which starts a conversation. The line
- *     NexTerm typed carries the session id, and `--session-id` with an id
+ *  2. an agent still running there — NexTerm's or one typed by hand — as the
+ *     agent's `templateCommand`: `claude`, which starts a conversation, or
+ *     `opencode -c`, which continues the folder's latest one. Never the line
+ *     that was typed: it carries a session id, and `--session-id` with an id
  *     already in use is an error;
  *  3. the command running in it right now, as typed at the prompt;
  *  4. nothing.
@@ -117,7 +118,7 @@ export function suggestStartupCommand(tab) {
   if (own.ok && own.command) return own.command;
   if (tab.exited) return '';
   const agent = tab.agent && !tab.agentResumeOffered ? AGENTS[tab.agent.kind] : null;
-  if (agent) return agent.command;
+  if (agent) return agent.templateCommand;
   if (tab.running) {
     const running = sanitizeStartupCommand(tab.commandLine);
     if (running.ok && running.command) return running.command;

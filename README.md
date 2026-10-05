@@ -48,6 +48,9 @@ that layout the next time you open it.
   the agent — each typed as soon as its shell is ready, tmuxinator-style.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
+- **Pick an agent conversation back up.** A terminal that was running OpenCode
+  or Claude Code when NexTerm closed offers that conversation back — the one
+  it had, by name — whether NexTerm started the agent or you typed it.
 - **A real terminal.** xterm.js over a native PTY, with OSC 133 shell
   integration (command start/end + exit status) and OSC 7 so the status bar and
   new splits follow the shell's actual working directory. Terminals draw with
@@ -236,8 +239,9 @@ shell each terminal ran. Right-click the saved group → *Edit Startup
 Commands…* lists its terminals with their directories and a command field
 each; empty means just a shell. Saving a group fills these in for you from
 what is **running** in each terminal at that moment — `npm run dev`, a test
-watcher, or `claude` / `opencode` for an agent NexTerm started — and leaves a
-terminal sitting at a prompt empty: the last command of an idle shell is what
+watcher, `claude` for Claude Code, or `opencode -c` for OpenCode, which
+continues the folder's latest conversation — and leaves a terminal sitting at
+a prompt empty: the last command of an idle shell is what
 it did, not what it is for, and opening the template would run it again. A
 saved row with startup commands shows ▶ and how many, and its tooltip lists
 what opening it will run.
@@ -247,6 +251,23 @@ characters are stripped. Saved workspaces work the same way (the workspace bar
 → *Edit Startup Commands of a Saved Workspace…*), and restoring one starts
 every group's commands. Restoring the session at launch never runs anything: it
 brings the shells back, as it offers an agent back rather than starting it.
+
+**Pick an agent conversation back up.** Quit NexTerm while OpenCode or Claude
+Code runs in a terminal, and that terminal comes back offering the
+conversation: *Resume* types the command that continues it. Nothing starts by
+itself — an agent spends tokens — and the terminal's scrollback is not
+restored, only the conversation inside the agent. It works for an agent you
+typed yourself (`opencode`, `opencode -c`, `claude`, `claude --resume <id>`) as
+well as one started from a pane's menu (right-click the empty part of its tab
+strip → *New opencode Terminal* / *New Claude Code Terminal*); a line that
+does more than start the agent (`cd x && opencode`, a pipe) is not followed.
+Claude Code's conversation is always the exact one. OpenCode chooses its own
+ids, but names the conversation it shows in the terminal's title, and NexTerm
+looks that title up with `opencode session list` — so once the conversation
+has a title, *Resume* is `opencode -s <id>`, that conversation, and the offer
+says which by name. Before then, or if OpenCode cannot be found from NexTerm,
+it is `opencode --continue`: the folder's most recent. *Choose…* lists the
+folder's OpenCode conversations to resume another.
 
 **Save the whole session.** The 💾 on the WORKSPACES section (or *Save All
 Groups…* from the empty-area menu) snapshots every group — layouts and

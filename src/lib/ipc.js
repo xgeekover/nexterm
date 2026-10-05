@@ -72,6 +72,10 @@ class BrowserMockBridge {
     // system clipboard here: the suites put on it what a right-click should
     // find, and a copy made in the page never reaches it.
     this.clipboard = { text: '', has_image: false };
+    // The conversations `agent_sessions` answers from, in the shape
+    // `opencode session list --format json` prints — `directory` included,
+    // which the backend narrows by and does not hand back.
+    this.agentSessions = [];
   }
 
   listen(event, callback) {
@@ -640,6 +644,19 @@ class BrowserMockBridge {
       case 'clipboard_read': {
         const { text = '', has_image = false } = this.clipboard || {};
         return { text: typeof text === 'string' ? text : '', has_image: has_image === true };
+      }
+
+      // 21. agent_sessions — the backend runs `opencode session list` and keeps
+      // the conversations of `cwd`, newest first. The mock reads
+      // `this.agentSessions`; any other agent is refused, as there.
+      case 'agent_sessions': {
+        const { kind, cwd = '' } = args;
+        if (kind !== 'opencode') throw new Error(`${kind} keeps no list NexTerm can read`);
+        const trim = (p) => String(p ?? '').replace(/[\\/]+$/, '');
+        return (this.agentSessions || [])
+          .filter((s) => trim(s.directory) === trim(cwd))
+          .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
+          .map(({ id, title, updated, created }) => ({ id, title, updated, created }));
       }
 
       default:

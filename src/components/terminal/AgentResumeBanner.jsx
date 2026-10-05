@@ -1,7 +1,8 @@
-import React from 'react';
-import { Play, X } from 'lucide-react';
+import React, { useState } from 'react';
+import { Check, ListOrdered, Play, X } from 'lucide-react';
 import { agentLabel, resumeCertainty } from '../../lib/agents.js';
 import { cn } from '../../lib/utils.js';
+import { ContextMenu } from '../common/ContextMenu.jsx';
 
 /** "2 hours ago", roughly. Absent or nonsense timestamps say nothing at all. */
 function when(ts) {
@@ -24,6 +25,9 @@ function when(ts) {
 const BUSY_REASON =
   'Something is still running in this terminal, and Resume would type into it. Available again when it finishes.';
 
+/** How many of a folder's conversations the list offers; the newest come first. */
+const CHOICES_SHOWN = 20;
+
 /**
  * The offer to pick an agent conversation back up in a restored terminal.
  *
@@ -37,10 +41,13 @@ const BUSY_REASON =
  *   the CLI, not the screen. The wording says "conversation" and never
  *   "session" or "restore" for that reason.
  * - **how sure the resume is.** With `claude` NexTerm chose the id, so it is
- *   that conversation. With `opencode` there is no way to choose one, so the
+ *   that conversation. With `opencode` it is that conversation once the
+ *   terminal has learned which one it showed — from the title opencode gives
+ *   the terminal (src/lib/agents.js) — and the offer names it. Until then the
  *   best the CLI can do is the most recent in this folder — and if two such
  *   terminals were open on one folder, they would both land on it. That is
- *   what the second line says instead of pretending otherwise.
+ *   what the second line says instead of pretending otherwise, and why
+ *   "Choose…" lists the folder's conversations to pick from.
  * - **what the time is.** `agent.startedAt` is when the agent was STARTED in
  *   this terminal, and resuming does not move it — so it is "started", never
  *   "last used", which nothing records. With `opencode` the conversation
@@ -55,7 +62,9 @@ const BUSY_REASON =
  * over it: drawn over the terminal it hid the first rows, which is exactly
  * where a freshly restored shell prints its prompt.
  */
-export function AgentResumeBanner({ tab, onResume, onDismiss }) {
+export function AgentResumeBanner({ tab, onResume, onDismiss, onListSessions, onResumeWith }) {
+  // The "Choose…" list: where it opens, and what it holds so far.
+  const [choices, setChoices] = useState(null);
   const agent = tab?.agent;
   if (!tab?.agentResumeOffered || !agent) return null;
 
@@ -65,10 +74,47 @@ export function AgentResumeBanner({ tab, onResume, onDismiss }) {
   const label = agentLabel(agent.kind);
   const ago = when(agent.startedAt);
   const busy = Boolean(tab.running);
+  // The conversation's own name, when the terminal learned it (opencode shows
+  // it as the terminal's title). Quoted as it came, never typed anywhere.
+  const named = agent.title ? `“${agent.title}”` : null;
   const detail =
     certainty === 'exact'
-      ? `Picks up the conversation this terminal had${ago ? `, started ${ago}` : ''}.`
-      : `Picks up the most recent ${label} conversation in this folder${ago ? `; ${label} was started in this terminal ${ago}` : ''}.`;
+      ? `Picks up ${named ? `${named}, ` : ''}the conversation this terminal had${ago ? `, started ${ago}` : ''}.`
+      : `Picks up the most recent ${label} conversation in this folder${ago ? `; ${label} was started in this terminal ${ago}` : ''}${named ? ` — it was in ${named}` : ''}.`;
+  // A list to choose from, for an agent whose conversations NexTerm can list.
+  const canChoose = agent.kind === 'opencode' && typeof onListSessions === 'function' && typeof onResumeWith === 'function';
+
+  const openChoices = async (event) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const at = { x: box.left, y: box.bottom + 2 };
+    setChoices({ ...at, items: [{ key: 'loading', label: `Looking for ${label} conversations…`, disabled: true }] });
+    let items;
+    try {
+      const sessions = await onListSessions();
+      items =
+        sessions.length > 0
+          ? sessions.slice(0, CHOICES_SHOWN).map((s) => ({
+              key: s.id,
+              label: s.title || s.id,
+              // The one this terminal is known to have had.
+              icon: s.id === agent.sessionId ? Check : undefined,
+              shortcut: when(s.updated) ?? undefined,
+              onSelect: () => onResumeWith({ sessionId: s.id, title: s.title }),
+            }))
+          : [{ key: 'none', label: `No ${label} conversations in this folder`, disabled: true }];
+    } catch (err) {
+      items = [
+        {
+          key: 'error',
+          label: `Could not list ${label}’s conversations`,
+          disabled: true,
+          disabledReason: String(err?.message ?? err),
+        },
+      ];
+    }
+    // Only into a list that is still open.
+    setChoices((open) => (open ? { ...open, items } : open));
+  };
 
   return (
     <div
@@ -100,6 +146,18 @@ export function AgentResumeBanner({ tab, onResume, onDismiss }) {
           <Play size={12} />
           Resume
         </button>
+        {canChoose ? (
+          <button
+            type="button"
+            onClick={openChoices}
+            disabled={busy}
+            title={busy ? BUSY_REASON : `Pick one of this folder’s ${label} conversations to resume instead`}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-vsc-fg hover:bg-vsc-item-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          >
+            <ListOrdered size={12} />
+            Choose…
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onDismiss}
@@ -110,6 +168,13 @@ export function AgentResumeBanner({ tab, onResume, onDismiss }) {
           <X size={14} />
         </button>
       </div>
+      <ContextMenu
+        open={Boolean(choices)}
+        x={choices?.x ?? 0}
+        y={choices?.y ?? 0}
+        items={choices?.items ?? []}
+        onClose={() => setChoices(null)}
+      />
     </div>
   );
 }

@@ -69,6 +69,7 @@ import './layout_templates.test.js';
 import './pty_output_bus.test.js';
 import './terminal_right_click.test.js';
 import './terminal_right_click_headless.test.js';
+import './agent_resume_opencode.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -423,6 +423,74 @@ scenario(
   }
 );
 
+const OPENCODE_KNOWN = { kind: 'opencode', sessionId: 'ses_aaaaaaaaaaaaAAAAAAAAAAAAAA', title: 'Fix the login bug' };
+
+scenario(
+  'RN-40',
+  'an opencode terminal that learned its conversation offers that one back, by name',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering(OPENCODE_KNOWN)] });
+  },
+  (html) => {
+    expectText(html, 'Resume opencode?');
+    expectText(html, 'Picks up \u201cFix the login bug\u201d, the conversation this terminal had, started 3h ago.');
+    const buttons = buttonsIn(html);
+    const choose = buttons.find((b) => b.text === 'Choose…');
+    expectThat(choose, 'no Choose… to pick another of the folder\'s conversations');
+    expectThat(!choose.disabled, 'Choose… is disabled with nothing running');
+    expectThat(buttons.find((b) => b.text === 'Resume'), 'no Resume button');
+  }
+);
+
+scenario(
+  'RN-41',
+  'an opencode terminal that saw a title but no id still promises only the latest — and says what it was in',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering({ ...OPENCODE_KNOWN, sessionId: null })] });
+  },
+  (html) => {
+    expectText(
+      html,
+      'Picks up the most recent opencode conversation in this folder; opencode was started in this terminal 3h ago \u2014 it was in \u201cFix the login bug\u201d.'
+    );
+    expectThat(
+      !visibleText(html).includes('the conversation this terminal had'),
+      'promises the exact conversation without its id'
+    );
+    expectThat(buttonsIn(html).find((b) => b.text === 'Choose…'), 'no Choose… when the resume cannot be exact');
+  }
+);
+
+scenario(
+  'RN-42',
+  'Claude Code is offered without a list — its resume is exact already',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering(CLAUDE)] });
+  },
+  (html) => {
+    expectText(html, 'Resume Claude Code?');
+    expectThat(!buttonsIn(html).some((b) => b.text === 'Choose…'), 'a Choose… with nothing behind it');
+  }
+);
+
+scenario(
+  'RN-43',
+  'Choose… waits like Resume while a program is in the foreground',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering(OPENCODE_KNOWN, { running: true })] });
+  },
+  (html) => {
+    const choose = buttonsIn(html).find((b) => b.text === 'Choose…');
+    expectThat(choose, 'Choose… is hidden while running — it should be there, disabled');
+    expectThat(choose.disabled, 'Choose… can be clicked while a program is running, and would type into it');
+    expectThat(choose.title.includes('Resume would type into it'), `no reason given: ${JSON.stringify(choose.title)}`);
+  }
+);
+
 // ---- A command that finished without a code --------------------------------
 
 /** The class list of the status bar's notification badge, or null when it is not drawn. */

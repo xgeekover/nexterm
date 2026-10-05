@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod clipboard;
 pub mod fs;
 pub mod notification;

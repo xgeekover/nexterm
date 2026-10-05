@@ -16,6 +16,7 @@ use super::startup_query::StartupCursorQuery;
 use crate::models::PtyCommandDonePayload;
 use crate::models::PtyCommandStartedPayload;
 use crate::models::PtyCwdPayload;
+use crate::models::PtyTitlePayload;
 
 use crate::models::{PtyExitPayload, PtyOutputPayload, PtySessionInfo};
 
@@ -417,6 +418,17 @@ impl PtyManager {
                                             session_id: session_id_clone.clone(),
                                         };
                                         let _ = app_handle_clone.emit("pty-command-started", &payload);
+                                    }
+                                    // A window title, which the output above
+                                    // still carries to xterm: reported for the
+                                    // agent terminals, whose conversation opencode
+                                    // names there (src/lib/agents.js).
+                                    Marker::Title(title) => {
+                                        let payload = PtyTitlePayload {
+                                            session_id: session_id_clone.clone(),
+                                            title,
+                                        };
+                                        let _ = app_handle_clone.emit("pty-title", &payload);
                                     }
                                     // A is the prompt drawing and B is where the
                                     // user's typing begins; neither says anything

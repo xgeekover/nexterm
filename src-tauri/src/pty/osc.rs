@@ -25,7 +25,13 @@
 //! app can react to command boundaries and cwd changes.
 //!
 //! Everything else in the byte stream passes through untouched, including
-//! other OSC sequences (window title, hyperlinks) and CSI colour codes.
+//! other OSC sequences (window title, hyperlinks) and CSI colour codes. A
+//! window title (OSC 0 / OSC 2) is the one of those that is also REPORTED,
+//! as `Marker::Title` → `pty-title`, while still reaching xterm unchanged:
+//! opencode names the conversation it is showing there, which is how a
+//! terminal learns which one to resume (src/lib/agents.js). Read here rather
+//! than from xterm, because xterm only parses a terminal's output once the
+//! terminal has been shown, and a background tab's agent has a title too.
 //! Sequences may be split across `read()` chunks, so an incomplete escape
 //! tail is held back until the next chunk completes it.
 
@@ -46,6 +52,10 @@ pub enum Marker {
     /// OSC 7: the shell's live working directory, percent-decoded, host
     /// component (if any) stripped.
     WorkingDirectory(String),
+    /// OSC 0 or OSC 2: the window title a program set, as it set it ('' when
+    /// it cleared it). Reported, but NOT removed from the output — unlike
+    /// every other marker here, this one is the program's, not ours.
+    Title(String),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -143,6 +153,11 @@ impl OscFilter {
 
             let payload = &buf[start..payload_end];
             match parse_marker(payload) {
+                Some(Marker::Title(title)) => {
+                    // Observed, and passed through exactly as it came.
+                    markers.push(Marker::Title(title));
+                    out.extend_from_slice(&buf[i..resume]);
+                }
                 Some(marker) => {
                     // Recognised OSC 133 marker: strip it from the stream but
                     // report it — never gate the surrounding output on it.
@@ -221,6 +236,11 @@ fn parse_marker(payload: &[u8]) -> Option<Marker> {
 
     if let Some(rest) = text.strip_prefix("7;") {
         return parse_osc7_path(rest).map(Marker::WorkingDirectory);
+    }
+
+    // OSC 1 is the icon name alone, which says nothing about what is shown.
+    if let Some(title) = text.strip_prefix("0;").or_else(|| text.strip_prefix("2;")) {
+        return Some(Marker::Title(title.to_string()));
     }
 
     None
@@ -392,7 +412,8 @@ mod tests {
         let mut f = OscFilter::new();
         let r = feed_str(&mut f, "\x1b]133;A\x07\x1b]0;my-title\x07\x1b[32m$\x1b[0m ");
         assert_eq!(r.output, "\x1b]0;my-title\x07\x1b[32m$\x1b[0m ");
-        assert_eq!(r.markers, vec![Marker::PromptStart]);
+        // The title is reported as well — and still went out above.
+        assert_eq!(r.markers, vec![Marker::PromptStart, Marker::Title("my-title".to_string())]);
     }
 
     #[test]
@@ -591,5 +612,44 @@ mod tests {
         let out = filter.feed(&[0xFF, b'o', b'k']);
         assert!(out.output.ends_with("ok"));
         assert!(filter.take_utf8_tail().is_empty());
+    }
+
+    #[test]
+    fn a_window_title_is_reported_and_still_reaches_the_screen() {
+        // opencode 1.18.34, measured: OSC 0 ended by BEL, the conversation's
+        // title after `OC | `, and '' as it quits.
+        let mut f = OscFilter::new();
+        let shown = "\x1b]0;OC | Fix the login bug\x07";
+        let r = feed_str(&mut f, &format!("before{shown}after"));
+        assert_eq!(r.output, format!("before{shown}after"), "passed through byte for byte");
+        assert_eq!(r.markers, vec![Marker::Title("OC | Fix the login bug".to_string())]);
+
+        // OSC 2 ended by ST, and a title cleared.
+        let r = feed_str(&mut f, "\x1b]2;vim — main.rs\x1b\\\x1b]0;\x07");
+        assert_eq!(r.output, "\x1b]2;vim — main.rs\x1b\\\x1b]0;\x07");
+        assert_eq!(
+            r.markers,
+            vec![Marker::Title("vim — main.rs".to_string()), Marker::Title(String::new())]
+        );
+    }
+
+    #[test]
+    fn a_title_split_across_reads_is_reported_once_whole() {
+        let mut f = OscFilter::new();
+        let first = feed_str(&mut f, "x\x1b]0;OC | 한글 제");
+        assert_eq!(first.output, "x");
+        assert!(first.markers.is_empty());
+        let second = feed_str(&mut f, "목\x07y");
+        assert_eq!(second.output, "\x1b]0;OC | 한글 제목\x07y");
+        assert_eq!(second.markers, vec![Marker::Title("OC | 한글 제목".to_string())]);
+    }
+
+    #[test]
+    fn an_icon_name_or_a_hyperlink_is_passed_on_and_not_reported() {
+        let mut f = OscFilter::new();
+        let text = "\x1b]1;icon\x07\x1b]8;;https://example.com\x07link\x1b]8;;\x07";
+        let r = feed_str(&mut f, text);
+        assert_eq!(r.output, text);
+        assert!(r.markers.is_empty());
     }
 }
