@@ -311,6 +311,13 @@ cursor forward in readline** (the arrow keys still do). Both rows are rebindable
 in Settings ▸ Keyboard Shortcuts. On macOS nothing is given up — `⌘` never
 reaches the pty. Everything else in the table above is left to the shell.
 
+**`Shift+Enter` for a newline in OpenCode.** A program that turns on xterm's
+*modifyOtherKeys*, as OpenCode does, gets `Shift+Enter` and `Ctrl+Enter` as
+keys of their own (`CSI 27;2;13~`, `CSI 27;5;13~`), so they insert a newline
+there instead of submitting. Where nothing asked for that — the shell, Claude
+Code — they are plain `Enter`, as before. `⌥Enter` / `Alt+Enter` sends
+`Esc Enter` either way.
+
 Packaged builds also refuse the reload chords (`F5`, `Ctrl+Shift+R`, `⌘R`).
 Reloading restarts the frontend, and start-up reaps every terminal the backend
 is holding, so a stray reload would kill every running shell. Development

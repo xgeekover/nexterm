@@ -393,11 +393,38 @@ export function TerminalView({ tabId, active = false }) {
       return true;
     };
 
+    // Shift+Enter and Ctrl+Enter as xterm's modifyOtherKeys sends them,
+    // `CSI 27;2;13~` and `CSI 27;5;13~`, once the program has turned it on
+    // (`CSI > 4 ; 1 m`). OpenCode does, and inserts a newline for them where
+    // the `\r` xterm.js sends for both submits. Where nothing asked, Claude
+    // Code included, Enter stays xterm's (src/lib/modifyOtherKeys.js). Sent
+    // and cancelled as `sendLegacyAltArrow` sends and cancels a key; cancelling
+    // the keydown also stops its keypress, which xterm would send as a second
+    // `\r`. Should anything here throw, the key is xterm's.
+    const sendModifiedEnter = (event) => {
+      try {
+        const sequence = entry.modifyOtherKeys?.sequenceFor(event);
+        if (!sequence) return false;
+        event.preventDefault();
+        event.stopPropagation();
+        entry.term.input(sequence, true);
+        return true;
+      } catch (err) {
+        console.warn('[Terminal] could not send a modified Enter:', err);
+        return false;
+      }
+    };
+
+    // A key this view sends itself instead of leaving it to xterm, once the
+    // clipboard and the suggestion layer have let it go on.
+    const sendKeyItself = (event) => sendLegacyAltArrow(event) || sendModifiedEnter(event);
+
     // Intercepts specific keys ourselves (→ to accept, ↑/↓ to move the popup
     // selection, Esc to dismiss) — and only while something is actually drawn,
     // at a shell prompt. Tab is the shell's, always. Everything else, including
     // arrows when the popup is closed, falls through to xterm untouched — bar
-    // ⌥ and an arrow, sent as xterm 5.5 sent them.
+    // ⌥ and an arrow, sent as xterm 5.5 sent them, and Shift/Ctrl+Enter to a
+    // program that asked for modifyOtherKeys.
     const handleKeyEvent = (event) => {
       // Copy and paste first — Ctrl+V / Ctrl+C on Windows and the Linux chords
       // (src/lib/terminalClipboard.js). xterm would otherwise send ^V or ^C and
@@ -408,7 +435,7 @@ export function TerminalView({ tabId, active = false }) {
         running: isRunning(),
         alternate: isAlternate(),
       });
-      if (decision.action === 'pass') return !sendLegacyAltArrow(event);
+      if (decision.action === 'pass') return !sendKeyItself(event);
       // A key the layer takes never reaches the program, so whatever it
       // believed was on the line no longer counts.
       lineRef.current = lineAfterKey(lineRef.current, decision);
@@ -423,7 +450,9 @@ export function TerminalView({ tabId, active = false }) {
       // A key the layer lets go on is the terminal's, ⌥→ included: over a
       // highlighted match that does not continue the line it clears the
       // popup and must still move a word, not reach xterm 6 as `CSI 1;3C`.
-      if (!decision.consume) return !sendLegacyAltArrow(event);
+      // Shift+Enter clears the popup as Enter does, and still goes as the
+      // program asked: a shell can turn modifyOtherKeys on at its own prompt.
+      if (!decision.consume) return !sendKeyItself(event);
       event.preventDefault();
       return false;
     };

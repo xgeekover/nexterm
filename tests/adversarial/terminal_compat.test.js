@@ -288,7 +288,8 @@ describe('Terminal compatibility: windowsPty, pty size, verbatim paths, ⌥ and 
     assert.match(handler, /entry\.term\.input\(sequence, true\)/, 'as a keystroke: every onData listener sees it');
     assert.match(handler, /event\.preventDefault\(\);\s*event\.stopPropagation\(\);/, 'and cancelled, as xterm cancels a key it sends');
     // The suggestion layer keeps first say (⌥→ over a ghost accepts it, as before).
-    assert.match(src, /if \(decision\.action === 'pass'\) return !sendLegacyAltArrow\(event\);/);
+    assert.match(src, /const sendKeyItself = \(event\) => sendLegacyAltArrow\(event\) \|\| /);
+    assert.match(src, /if \(decision\.action === 'pass'\) return !sendKeyItself\(event\);/);
     assert.match(src, /entry\.term\.attachCustomKeyEventHandler\(handleKeyEvent\);/);
   });
 

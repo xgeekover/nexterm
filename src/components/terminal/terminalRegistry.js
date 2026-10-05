@@ -52,6 +52,7 @@ import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
+import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 
 const instances = new Map();
 
@@ -780,6 +781,11 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // XTVERSION, answered as xterm.js 6.1 answers it: Claude Code asks for DEC
   // 2026 (synchronized output) only after this reply. See terminalCompat.js.
   installXtVersionReply(term);
+  // Shift+Enter and Ctrl+Enter as keys of their own to a program that turns
+  // xterm's modifyOtherKeys on (OpenCode), and Enter as before to every other.
+  // It follows the program's output from the first byte; TerminalView sends
+  // the keys. See modifyOtherKeys.js.
+  const modifyOtherKeys = installModifyOtherKeys(term);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);
@@ -827,6 +833,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     fitAddon,
     linkProvider,
     searchAddon,
+    // Asked for what a key sends by TerminalView's key handler; null when the
+    // terminal has no parser (a test double).
+    modifyOtherKeys,
     sessionId: null,
     container,
     dataDisposable,

@@ -436,6 +436,24 @@ any of it — which is exactly what nothing here can reproduce.
   runs in xterm.js, claude leaves right-click paste to the terminal, and
   NexTerm has none. `Ctrl+V` pastes. Expected, not a bug.
 
+### V20 — Shift+Enter inserts a newline in OpenCode under ConPTY
+
+Never run on Windows: measured and tested on macOS only. ConPTY stands between
+OpenCode and NexTerm both ways. conhost may swallow OpenCode's request for
+modifyOtherKeys (`CSI > 4 ; 1 m`), and then nothing changes from 0.9.0; or it
+may pass the request on, and then it has to pass `CSI 27;2;13~` back to
+OpenCode as well.
+
+- In `opencode`, type a word, then `Shift+Enter` and `Ctrl+Enter`: each
+  inserts a newline. `Enter` submits, `Alt+Enter` still inserts a newline.
+  `Shift+Enter` doing nothing at all means conhost dropped the key; text like
+  `[27;2;13~` in the input, or OpenCode acting as if `Esc` was pressed, means
+  conhost split it. Either way note the Windows build: the encoding can be
+  turned off where `windowsPty` is set.
+- Quit OpenCode. At the PowerShell prompt `Shift+Enter` runs the line, as in
+  0.9.0, with nothing like `;2;13~` typed into it. In `claude`, with nothing
+  typed, it does what `Enter` does, as in 0.9.0.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
