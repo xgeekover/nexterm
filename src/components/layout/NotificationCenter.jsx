@@ -78,11 +78,14 @@ export function NotificationCenter() {
       if (e.key === 'Escape') setOpen(false);
     };
     const onResize = () => setOpen(false);
-    window.addEventListener('mousedown', onDown);
+    // Capture, as the menus' own outside-click listeners are: a press a
+    // terminal keeps to itself — a right-click that pastes, see
+    // terminalRightClick.js — never bubbles up to the window.
+    window.addEventListener('mousedown', onDown, true);
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', onResize);
     return () => {
-      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('mousedown', onDown, true);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', onResize);
     };

@@ -64,6 +64,8 @@ import './sync_output.test.js';
 import './wheel_headless.test.js';
 import './program_notifications.test.js';
 import './focus_report.test.js';
+import './terminal_right_click.test.js';
+import './terminal_right_click_headless.test.js';
 
 async function run() {
   console.log('====================================================');

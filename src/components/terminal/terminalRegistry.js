@@ -52,6 +52,7 @@ import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
+import { installTerminalRightClick } from '../../lib/terminalRightClick.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
@@ -834,6 +835,21 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // its mousedown listener still runs first. Disposed with the terminal.
   installTerminalClipboard(term, container, { settings: useSettingsStore });
   // ---- end selection, copy on select, mouse reporting ------------------------
+
+  // ---- Right-click copies or pastes — src/lib/terminalRightClick.js ----------
+  // Windows Terminal's right-click, Windows' default: the selection is copied,
+  // or the clipboard pasted, and neither xterm nor the program hears of it.
+  // Last of the container's capture listeners, so the IME, mouse reporting and
+  // copy on select still hear the press it stops. The find bar's highlighted
+  // match is not a selection to copy. Disposed with the terminal.
+  installTerminalRightClick(term, container, {
+    settings: useSettingsStore,
+    isFindOpen: () => {
+      const find = useTerminalStore.getState().find;
+      return Boolean(find?.open && find?.tabId === tabId);
+    },
+  });
+  // ---- end right-click ---------------------------------------------------------
 
   const dataDisposable = onData ? term.onData(onData) : null;
 

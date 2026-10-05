@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { loadState, saveState } from '../lib/persistence.js';
+import { defaultRightClick } from '../lib/terminalRightClick.js';
 
 /** Where the Settings window's values live between sessions. */
 export const SETTINGS_KEY = 'nexterm.settings';
@@ -52,6 +53,21 @@ export const SETTINGS_DEFAULTS = {
    * src/lib/mouseReporting.js.
    */
   terminalMouseReporting: true,
+  /**
+   * What a right-click in a terminal does. 'copyPaste': copy the selection
+   * when one is on screen, paste otherwise — and the program under the
+   * pointer never hears of it, full-screen ones included. Shift+right-click
+   * stays the terminal's. 'default': left to xterm, the program and the
+   * webview, as before.
+   *
+   * The one default that depends on the platform, because each platform's own
+   * terminals disagree: Windows Terminal (and VS Code there) copy or paste,
+   * Terminal.app and GNOME Terminal open a menu. 'copyPaste' on Windows,
+   * 'default' elsewhere; like every default here it is not written to
+   * storage, so an untouched setting follows the platform it runs on. See
+   * src/lib/terminalRightClick.js.
+   */
+  terminalRightClick: defaultRightClick(),
   terminalDefaultShell: 'default',
   /**
    * Where a NEW terminal starts, when nothing has asked for a directory.
