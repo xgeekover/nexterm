@@ -28,6 +28,7 @@ import './menu_contract.test.js';
 import './init_once.test.js';
 import './terminal_compat.test.js';
 import './hangul_inline_ime.test.js';
+import './modify_other_keys.test.js';
 import './unicode_widths.test.js';
 import './no_folder.test.js';
 import './keybinding_table.test.js';
