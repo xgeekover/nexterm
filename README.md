@@ -314,10 +314,11 @@ with `Alt+V` there, and vim's block selection is `Ctrl+Q`, as in gvim.
 **Right-click copies or pastes**, as in Windows Terminal: with a selection on
 screen it copies it and clears it, otherwise it pastes — text as `Ctrl+V` does,
 and an image alone as the empty paste that tells OpenCode to attach it. It does
-so inside Claude Code, OpenCode and vim as well, which never see the click;
-`Shift`+right-click goes to the terminal and the program as it always did. On
-by default on Windows; Settings ▸ Terminal ▸ *Right Click* turns it on (*Copy or
-Paste*) or off (*Default*) on any platform.
+so inside Claude Code, OpenCode and vim as well, which never see the click.
+`Shift`+right-click passes the click on to the program instead — on macOS;
+elsewhere xterm keeps a Shift-click for selecting, so there it does nothing.
+On by default on Windows; Settings ▸ Terminal ▸ *Right Click* turns it on
+(*Copy or Paste*) or off (*Default*) on any platform.
 
 **Changing a shortcut.** Settings ▸ Keyboard Shortcuts lists every command,
 records the chord you press, and unbinds or resets one per row. Conflicts are

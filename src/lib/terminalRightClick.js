@@ -25,10 +25,11 @@
  *     tracks the mouse (OpenCode, Claude Code, vim), no word is selected, no
  *     link opens, no context menu appears. Full-screen programs included —
  *     the click is the terminal's, not the program's;
- *   - Shift+right-click is left alone: to xterm, the program and the webview,
- *     exactly as before. (On Windows and Linux xterm itself never reports a
- *     Shift-click — Shift is its "select instead" key — so there it opens the
- *     webview's menu, as every right-click did before.)
+ *   - Shift+right-click is left to xterm and the program, as before — all
+ *     but the webview's own menu, which is cancelled: no use over a terminal,
+ *     and on macOS it takes the button's release with it. (On Windows and
+ *     Linux xterm itself never reports a Shift-click — Shift is its "select
+ *     instead" key — so there a Shift+right-click does nothing at all.)
  *
  * 'default' changes nothing. It is the default on macOS and Linux, whose own
  * terminals open a menu on a right-click; 'copyPaste' is the default on

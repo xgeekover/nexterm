@@ -506,9 +506,9 @@ Terminal ▸ *Right Click* should already say *Copy or Paste*, untouched.
   nothing before — V19), and copies a Shift-drag selection.
 - `vim` with `:set mouse=a`, in insert mode: a right-click pastes, and vim
   hears no click (nothing selected, the cursor does not jump). `Shift`+right-
-  click is left as it always was: WebView2's own menu opens and vim hears
-  nothing either — off macOS xterm never reports a Shift-click, Shift being
-  its "select instead" key.
+  click does nothing at all: no menu opens — NexTerm cancels WebView2's — and
+  vim hears nothing either, as off macOS xterm never reports a Shift-click,
+  Shift being its "select instead" key.
 - Set *Right Click* to *Default*: a right-click opens WebView2's menu again, and
   in vim with `mouse=a` it reaches vim. Back to *Copy or Paste*: the next
   right-click pastes, no restart.
