@@ -518,6 +518,48 @@ Terminal ▸ *Right Click* should already say *Copy or Paste*, untouched.
   that pastes while a screenshot does not is the image check — note what made
   the image (Snipping Tool, PrintScreen, a browser's Copy Image).
 
+### V23 — Ctrl+Shift+Enter zooms a pane, and what it hides keeps running
+
+Never run on Windows: built and tested on macOS, where the chord is ⌘⇧Enter
+and the native menu holds the accelerator. Off macOS the chord is claimed by
+the webview ahead of xterm, and ConPTY has to pass the resize on both ways.
+
+- Split a group in three, run `ping -t localhost` in one pane and `htop` (WSL)
+  or `vim` in another, and press `Ctrl+Shift+Enter` in the vim pane: it fills
+  the group, its tab strip shows *Zoomed*, and vim redraws at the larger size
+  with no stale rows from the smaller one. `Ctrl+Shift+Enter` again: all three
+  panes are back with their old proportions, vim redrawn small, and `ping` has
+  kept counting while hidden.
+- At a PowerShell prompt `Ctrl+Shift+Enter` zooms and types nothing — no
+  empty line runs. Inside `opencode` it zooms rather than inserting anything.
+- While zoomed: ☰ → Terminal → *Toggle Pane Zoom* and the palette's *Toggle
+  Pane Zoom* both toggle, and a click on a hidden terminal in the TERMINALS
+  panel unzooms onto it.
+
+### V24 — a layout template's startup commands run in PowerShell and cmd
+
+Never run on Windows: the suites hold the typing against a mock shell, and on
+macOS it was checked with zsh only. The command is typed when the shell's first
+OSC 133 "D" arrives — which ConPTY may hold back with the next frame (see V14)
+— or three seconds after the shell started.
+
+- A saved group does not remember which shell each terminal ran — it opens
+  every terminal in Settings ▸ Terminal ▸ Default Shell — so run this once with
+  the default set to PowerShell and once with cmd. Make a group of two
+  terminals, right-click it → *Save Group…*, then the saved entry → *Edit
+  Startup Commands…*: `echo one && echo two` and `cd ..` (both valid in cmd,
+  and in PowerShell 7; in Windows PowerShell 5.1 use `echo one; echo two`).
+  Save; the row shows ▶ 2.
+- Double-click the entry: each new terminal shows its prompt, then its command
+  typed once and run — never twice, never before the prompt (a command echoed
+  above the first prompt is typeahead), and never with a stray character from
+  the `\r` that ends it.
+- Run `ping -t localhost` in a terminal, *Save Group…* while it runs, and open
+  *Edit Startup Commands…*: the field holds `ping -t localhost`. A terminal
+  that only *ran* something earlier comes back empty.
+- In *Edit Startup Commands…*, paste two lines copied from Notepad into a field:
+  it is refused with a message, and nothing is joined into one long line.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

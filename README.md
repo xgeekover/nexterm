@@ -35,10 +35,17 @@ that layout the next time you open it.
   a restart.
 - **Move terminals between groups.** Drag a tab onto another group's chip, or
   use *Move to Group* in the TERMINALS panel.
+- **Zoom one pane.** `⌘⇧Enter` (`Ctrl+Shift+Enter` elsewhere) makes the active
+  pane fill its group and hides the rest — tmux's `Prefix z`, iTerm2's
+  *Maximize Active Pane*. The hidden ones keep running; press it again and the
+  split comes back exactly as it was.
 - **Save a group, or the whole desk.** *Save Group…* keeps one group's layout
   and each terminal's current directory. *Save All Groups…* snapshots every
   group at once under a name, and restoring it brings the entire session back —
   same groups, same arrangements, same directories.
+- **Layout templates.** Give each terminal of a saved group a startup command
+  and opening it starts everything at once — the dev server, the test watcher,
+  the agent — each typed as soon as its shell is ready, tmuxinator-style.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
 - **A real terminal.** xterm.js over a native PTY, with OSC 133 shell
@@ -137,6 +144,20 @@ Shell picks what a plain new terminal opens, and still takes a typed path.
 (down), or drag a tab onto an edge of any pane. While dragging, the target
 quarter lights up so you can see where it will land before you let go.
 
+**Zoom a pane.** In a split group, `⌘⇧Enter` (`Ctrl+Shift+Enter` on Windows
+and Linux), the ⤢ button in a pane's tab strip, Terminal → *Toggle Pane Zoom*
+or the command palette makes that pane fill the whole group. The other panes
+are hidden, not closed: what runs in them keeps running, a program that asked
+is told its terminal lost focus, and the pane's tab strip carries a *Zoomed*
+chip — click it, or press the chord again, and the split comes back exactly as
+it was, sizes and all. The terminal that grows or shrinks is told its new size,
+so a full-screen program redraws for it. A zoom ends by itself when it would
+stop making sense: the zoomed pane closes, you split, you move to another pane
+(`⌥⌘←` / `⌥⌘→`, or a hidden terminal in the TERMINALS panel), or a terminal is
+moved into a pane the zoom hides — the way tmux unzooms. Each group keeps its
+own zoom while you switch between them (its chip shows ⤢); a restart comes back
+with every pane in view.
+
 **Work in groups.** The chips above the terminals are your groups; `+` makes a
 new one. Clicking a chip swaps the whole arrangement to that group's. Set up
 one group for the app and another for tests, and switch between them instead of
@@ -203,6 +224,29 @@ rename the same way, from their chip or from the TERMINALS panel.
 **Save a group.** Right-click a group in the TERMINALS panel → *Save Group…*.
 It lands under SAVED with its terminal count and age; right-click it to *Load
 in New Group* or *Load into Current Group*.
+
+**Layout templates.** A saved group whose terminals have startup commands is a
+layout template: open it and each terminal types its command the moment its
+shell has drawn its first prompt — the same wait NexTerm uses before typing an
+agent, so nothing is typed ahead of the prompt and echoed twice (a shell that
+never reports its prompt, like fish or sh, gets it after three seconds). It is
+typed as you would type it, with `Enter`, in zsh, bash, PowerShell or cmd
+alike — in the default shell, since a saved group does not remember which
+shell each terminal ran. Right-click the saved group → *Edit Startup
+Commands…* lists its terminals with their directories and a command field
+each; empty means just a shell. Saving a group fills these in for you from
+what is **running** in each terminal at that moment — `npm run dev`, a test
+watcher, or `claude` / `opencode` for an agent NexTerm started — and leaves a
+terminal sitting at a prompt empty: the last command of an idle shell is what
+it did, not what it is for, and opening the template would run it again. A
+saved row with startup commands shows ▶ and how many, and its tooltip lists
+what opening it will run.
+Each command is one line — join several with `&&` or `;` — and a multi-line
+paste is refused with a message rather than run line by line; control
+characters are stripped. Saved workspaces work the same way (the workspace bar
+→ *Edit Startup Commands of a Saved Workspace…*), and restoring one starts
+every group's commands. Restoring the session at launch never runs anything: it
+brings the shells back, as it offers an agent back rather than starting it.
 
 **Save the whole session.** The 💾 on the WORKSPACES section (or *Save All
 Groups…* from the empty-area menu) snapshots every group — layouts and
@@ -286,6 +330,7 @@ The bell works everywhere either way.
 | `⌘W` | Close the active terminal pane |
 | `⌘⇧W` | Close the window |
 | `⌥⌘←` / `⌥⌘→` | Focus the previous / next pane |
+| `⌘⇧Enter` | Zoom the active pane / show every pane again |
 | `⌘B` | Toggle the primary sidebar |
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
@@ -350,6 +395,11 @@ claims these ahead of xterm:
   nothing at all
 - find, `⌘F` / `Ctrl+F`
 - the zoom keys, which are punctuation and a digit and cost the shell nothing
+- pane zoom, `⌘⇧Enter` / `Ctrl+Shift+Enter`. xterm sends `Ctrl+Shift+Enter` as
+  a plain `Enter`, so a shell gives nothing up; a program that turned on
+  *modifyOtherKeys* (OpenCode, see below) would have received it as a key of
+  its own off macOS, and binds nothing to it. Inside the editor `⌘⇧Enter` stays
+  Monaco's *Insert Line Above*
 
 VS Code makes the same trades with the same keys. Two of them do take something
 away on Windows and Linux, where `⌘` is `Ctrl`: **`Ctrl+B` will not reach tmux**

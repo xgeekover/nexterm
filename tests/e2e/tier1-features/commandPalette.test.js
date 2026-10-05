@@ -39,8 +39,8 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
     const titles = app.searchPalette('').commands.map((c) => c.title);
     assert.deepEqual(
       titles,
-      ['New Terminal Tab', 'Clear Terminal Output', 'Save All Files'],
-      'The palette offers exactly the three commands the app implements'
+      ['New Terminal Tab', 'Clear Terminal Output', 'Toggle Pane Zoom', 'Save All Files'],
+      'The palette offers exactly the four commands the app implements'
     );
   });
 
@@ -101,5 +101,22 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
       '# edited by the palette test\n',
       'Disk must hold what Save All wrote'
     );
+  });
+
+  test('TC-PAL-08: Toggle Pane Zoom zooms the active pane of a split, and the second run shows every pane', async () => {
+    const newPane = await app.terminal.splitActivePane('horizontal');
+    assert.ok(newPane, 'setup: a second pane');
+    const group = () => app.terminal.getActiveGroup();
+
+    app.openCommandPalette();
+    const zoom = app.searchPalette('pane zoom').commands.find((c) => c.command === 'toggle_pane_zoom');
+    assert.ok(zoom, 'the palette offers Toggle Pane Zoom');
+
+    await app.executePaletteItem(zoom);
+    assert.equal(group().zoomedPaneId, newPane, 'the active pane — the one just split off — fills the group');
+
+    await app.executePaletteItem(zoom);
+    assert.equal(group().zoomedPaneId, undefined, 'and running it again shows every pane');
+    assert.equal(group().tree.type, 'split', 'the split itself was never touched');
   });
 });

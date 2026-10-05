@@ -37,6 +37,7 @@ export function useKeybindings() {
   const splitActivePane = useTerminalStore((s) => s.splitActivePane);
   const closeActivePane = useTerminalStore((s) => s.closeActivePane);
   const focusNextPane = useTerminalStore((s) => s.focusNextPane);
+  const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearBlocks = useTerminalStore((s) => s.clearBlocks);
   const openFind = useTerminalStore((s) => s.openFind);
@@ -71,6 +72,7 @@ export function useKeybindings() {
       splitActivePane,
       closeActivePane,
       focusNextPane,
+      togglePaneZoom,
       createTerminalTab,
       clearBlocks,
       openFind,
@@ -118,6 +120,7 @@ export function useKeybindings() {
     splitActivePane,
     closeActivePane,
     focusNextPane,
+    togglePaneZoom,
     createTerminalTab,
     clearBlocks,
     openFind,

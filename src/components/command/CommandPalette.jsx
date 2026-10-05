@@ -6,6 +6,7 @@ import {
   History,
   Terminal,
   Save,
+  Maximize2,
 } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
@@ -28,6 +29,7 @@ export function CommandPalette() {
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminalBlocks = useTerminalStore((s) => s.clearBlocks);
+  const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
   const writeRaw = useTerminalStore((s) => s.writeRaw);
 
   const [query, setQuery] = useState('');
@@ -69,6 +71,7 @@ export function CommandPalette() {
     if (item.type === 'history') return <History size={16} />;
     if (item.type === 'file') return <FileCode size={16} />;
     if (item.command === 'save_all') return <Save size={16} />;
+    if (item.command === 'toggle_pane_zoom') return <Maximize2 size={16} />;
     return <Terminal size={16} />;
   };
 
@@ -101,6 +104,11 @@ export function CommandPalette() {
         return;
       case 'clear_terminal':
         clearTerminalBlocks();
+        return;
+      case 'toggle_pane_zoom':
+        // The active pane of the group on screen, as the shortcut does.
+        togglePaneZoom?.();
+        setActiveView('terminal');
         return;
       case 'save_all':
         await saveAll();

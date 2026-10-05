@@ -55,6 +55,7 @@ import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installTerminalRightClick } from '../../lib/terminalRightClick.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
+import { attachOutput, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
 
 const instances = new Map();
@@ -700,6 +701,9 @@ function registerLinks(term, tabId) {
  */
 function bindSession(entry, sessionId) {
   entry.stopPtyListener?.();
+  // A shell this instance no longer shows is gone (a restore respawned it):
+  // nothing it left waiting will ever be written anywhere.
+  if (entry.sessionId && entry.sessionId !== sessionId) forgetOutput(entry.sessionId);
   entry.sessionId = sessionId;
   entry.exited = false;
 
@@ -708,14 +712,11 @@ function bindSession(entry, sessionId) {
   let cancelled = false;
 
   if (sessionId) {
-    listen('pty-output', (payload) => {
-      const { session_id, data } = payload || {};
-      if (!data || session_id !== sessionId) return;
-      entry.term.write(data);
-    }).then((off) => {
-      if (cancelled) off();
-      else ptyUnlisten = off;
-    });
+    // Output through the one listener in ptyOutputBus.js: first what the shell
+    // printed before this terminal existed — a tab never shown kept it there —
+    // then everything live, with nothing lost or doubled in between.
+    startPtyOutputBus();
+    ptyUnlisten = attachOutput(sessionId, (data) => entry.term.write(data));
 
     // When the shell exits, say so. The pane used to keep a blinking cursor
     // and simply swallow every keystroke, with no way to tell a dead terminal

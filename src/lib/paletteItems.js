@@ -61,6 +61,14 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
     },
     {
       type: 'command',
+      id: 'cmd-toggle-pane-zoom',
+      command: 'toggle_pane_zoom',
+      title: 'Toggle Pane Zoom',
+      subtitle: 'Fill the group with the active pane, or show every pane again',
+      hint: hint('toggle-pane-zoom'),
+    },
+    {
+      type: 'command',
       id: 'cmd-save-all',
       command: 'save_all',
       title: 'Save All Files',

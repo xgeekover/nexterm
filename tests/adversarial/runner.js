@@ -64,6 +64,9 @@ import './sync_output.test.js';
 import './wheel_headless.test.js';
 import './program_notifications.test.js';
 import './focus_report.test.js';
+import './pane_zoom.test.js';
+import './layout_templates.test.js';
+import './pty_output_bus.test.js';
 import './terminal_right_click.test.js';
 import './terminal_right_click_headless.test.js';
 

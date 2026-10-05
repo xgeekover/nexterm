@@ -402,6 +402,9 @@ export class AppEnvironment {
       case 'clear_terminal':
         this.terminal.clearBlocks();
         return null;
+      case 'toggle_pane_zoom':
+        this.terminal.togglePaneZoom();
+        return null;
       case 'save_all':
         await this.editor.saveAll();
         return null;

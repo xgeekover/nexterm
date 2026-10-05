@@ -787,6 +787,232 @@ scenario(
   }
 );
 
+// ---- A zoomed pane ----------------------------------------------------------
+
+/** One group split into three panes side by side, each holding one terminal. */
+function threePaneGroup(extra = {}) {
+  return {
+    id: 'group-1',
+    name: 'Group 1',
+    createdAt: 0,
+    tree: {
+      type: 'split',
+      id: 'split-1',
+      direction: 'horizontal',
+      sizes: [50, 30, 20],
+      children: ['a', 'b', 'c'].map((p) => ({ type: 'leaf', id: `pane-${p}`, tabIds: [`t-${p}`], activeTabId: `t-${p}` })),
+    },
+    activePaneId: 'pane-b',
+    ...extra,
+  };
+}
+
+function arrangeThreePanes(groupExtra = {}) {
+  reset();
+  useTerminalStore.setState({
+    tabs: [tab('t-a'), tab('t-b'), tab('t-c')],
+    activeTabId: 't-b',
+    groups: [threePaneGroup(groupExtra)],
+    activeGroupId: 'group-1',
+  });
+}
+
+/** Markup of the zoomed-pane chip, or null when it is not drawn. */
+const zoomedChip = (html) => /<button\b[^>]*\sdata-zoomed-chip=""[^>]*>[\s\S]*?<\/button>/.exec(html)?.[0] ?? null;
+
+scenario(
+  'RN-33',
+  'a zoomed group draws its zoomed pane alone, with a chip that says so',
+  () => arrangeThreePanes({ zoomedPaneId: 'pane-b' }),
+  (html) => {
+    // The hidden panes are not mounted: neither their strips nor their bodies
+    // are in the markup at all — which is also why their terminals are told
+    // they lost focus, and keep their WebGL renderers, as another group's do.
+    const strips = attrOrder(html, 'data-tab-strip');
+    expectThat(JSON.stringify(strips) === '["pane-b"]', `the panes drawn are ${JSON.stringify(strips)}, not just pane-b`);
+    const chips = attrOrder(html, 'data-tab-chip');
+    expectThat(JSON.stringify(chips) === '["t-b"]', `the tab chips drawn are ${JSON.stringify(chips)}`);
+    const chip = zoomedChip(html);
+    expectThat(chip, 'no "Zoomed" chip on the zoomed pane');
+    expectText(chip, 'Zoomed');
+    const title = visibleText(/\stitle="([^"]*)"/.exec(chip)?.[1] ?? '');
+    expectThat(
+      title.includes('2 other panes hidden, still running') && title.includes('Click to show every pane'),
+      `the chip's tooltip does not say what is hidden or how to get it back: ${JSON.stringify(title)}`
+    );
+    expectThat(/\saria-pressed="true"/.test(chip), 'the chip is not marked as a pressed toggle');
+    // The group's chip in the switcher says it too: every group keeps its zoom.
+    expectThat(/aria-label="one pane zoomed"/.test(html), "the group's switcher chip does not mark it zoomed");
+  }
+);
+
+scenario(
+  'RN-34',
+  'the same group unzoomed draws every pane, each with a zoom button and no chip',
+  () => arrangeThreePanes(),
+  (html) => {
+    const strips = attrOrder(html, 'data-tab-strip');
+    expectThat(
+      JSON.stringify(strips) === '["pane-a","pane-b","pane-c"]',
+      `the panes drawn are ${JSON.stringify(strips)}`
+    );
+    expectThat(zoomedChip(html) === null, 'a "Zoomed" chip is drawn with nothing zoomed');
+    const zoomButtons = buttonsIn(html).filter((b) => b.title.startsWith('Zoom Pane'));
+    expectThat(zoomButtons.length === 3, `${zoomButtons.length} zoom buttons for three panes`);
+    expectThat(!/aria-label="one pane zoomed"/.test(html), 'the switcher marks an unzoomed group as zoomed');
+  }
+);
+
+scenario(
+  'RN-35',
+  'a group with one pane offers no zoom at all',
+  () => reset(),
+  (html) => {
+    expectThat(zoomedChip(html) === null, 'a chip is drawn for a pane with nothing to hide');
+    const zoomButtons = buttonsIn(html).filter((b) => b.title.startsWith('Zoom Pane'));
+    expectThat(zoomButtons.length === 0, 'a lone pane offers to zoom');
+  }
+);
+
+scenario(
+  'RN-36',
+  'a zoom that names a pane no longer there draws the whole group rather than nothing',
+  () => arrangeThreePanes({ zoomedPaneId: 'pane-gone' }),
+  (html) => {
+    const strips = attrOrder(html, 'data-tab-strip');
+    expectThat(strips.length === 3, `drew ${JSON.stringify(strips)}`);
+    expectThat(zoomedChip(html) === null, 'a chip for a zoom that cannot be');
+  }
+);
+
+// ---- Layout templates: startup commands ----------------------------------------
+
+/** A saved group whose first terminal starts the dev server when it opens. */
+const savedTemplate = {
+  id: 'saved-dev',
+  name: 'Dev',
+  savedAt: Date.now() - 60e3,
+  tabs: [
+    { slotId: 'slot-0', title: 'server', cwd: '/workspace/api', command: 'npm run dev' },
+    { slotId: 'slot-1', title: 'shell', cwd: '/workspace' },
+  ],
+  activePaneId: 'saved-pane-1',
+  tree: { type: 'leaf', id: 'saved-pane-1', tabIds: ['slot-0', 'slot-1'], activeTabId: 'slot-0' },
+};
+
+/** Markup of the TERMINALS panel's row for a saved group, found by its name. */
+function savedRow(html, name) {
+  // React writes the bare `data-row` out as `data-row="true"`.
+  const rows = [...html.matchAll(/<div\b[^>]*\sdata-row="[^"]*"[^>]*>[\s\S]*?<\/div>/g)].map((m) => m[0]);
+  return rows.find((row) => visibleText(row).includes(name) && /Double-click to load/.test(row)) ?? null;
+}
+
+scenario(
+  'RN-37',
+  'a saved group with a startup command says so, and its tooltip says what will run',
+  () => {
+    reset();
+    useTerminalStore.setState({ savedGroups: [savedTemplate, { ...savedTemplate, id: 'saved-plain', name: 'Plain', tabs: [savedTemplate.tabs[1]] }] });
+  },
+  (html) => {
+    const row = savedRow(html, 'Dev');
+    expectThat(row, 'the saved group "Dev" is not listed');
+    expectThat(/\sdata-startup-count="1"/.test(row), 'the row does not show that one terminal starts something');
+    const title = visibleText(/\stitle="([^"]*)"/.exec(row)?.[1] ?? '');
+    expectThat(
+      title.includes('Runs when opened:') && title.includes('server: npm run dev'),
+      `the tooltip does not say what opening it runs: ${JSON.stringify(title)}`
+    );
+    const plain = savedRow(html, 'Plain');
+    expectThat(plain && !/data-startup-count/.test(plain), 'a group with no command is marked as starting one');
+    expectThat(!/Runs when opened/.test(plain ?? ''), 'a group with no command has a "runs" tooltip');
+  }
+);
+
+/**
+ * The dialog opens from a right-click, which a server render never makes, so
+ * these draw it directly — as RN-29 draws the bell's list.
+ */
+const { StartupCommandsDialog, StartupCommandField } = await import(
+  '../../src/components/terminal/StartupCommandsDialog.jsx'
+);
+
+{
+  const id = 'RN-38';
+  const description = 'Edit Startup Commands lists every terminal with its directory and command, grouped for a workspace';
+  const started = Date.now();
+  try {
+    reset();
+    const html = renderToString(
+      React.createElement(StartupCommandsDialog, {
+        title: 'Startup Commands — Desk',
+        intro: 'Each terminal types its command as soon as its shell is ready.',
+        sections: [
+          {
+            key: 'group-0',
+            label: 'Backend',
+            terminals: [
+              { key: '0/slot-0', title: 'server', cwd: '~/api', command: 'npm run dev' },
+              { key: '0/slot-1', title: 'repl', cwd: '~/api', command: '' },
+            ],
+          },
+          { key: 'group-1', label: 'Agents', terminals: [{ key: '1/slot-0', title: 'agent', cwd: '~', command: 'claude' }] },
+        ],
+        onSave() {},
+        onCancel() {},
+      })
+    );
+    expectThat(/\srole="dialog"/.test(html) && /\saria-modal="true"/.test(html), 'not drawn as a modal dialog');
+    expectText(html, 'Startup Commands — Desk');
+    for (const words of ['Backend', 'Agents', 'server', 'repl', 'agent', '~/api']) expectText(html, words);
+    const fields = attrOrder(html, 'data-startup-field');
+    expectThat(
+      JSON.stringify(fields) === JSON.stringify(['0/slot-0', '0/slot-1', '1/slot-0']),
+      `the fields are drawn as ${JSON.stringify(fields)}`
+    );
+    const values = [...html.matchAll(/<input\b[^>]*\svalue="([^"]*)"/g)].map((m) => m[1]);
+    expectThat(
+      JSON.stringify(values) === JSON.stringify(['npm run dev', '', 'claude']),
+      `the fields hold ${JSON.stringify(values)}`
+    );
+    expectThat(/placeholder="just a shell"/.test(html), 'an empty field does not say it means just a shell');
+    const buttons = buttonsIn(html).map((b) => b.text);
+    expectThat(buttons.includes('Save') && buttons.includes('Cancel'), `the buttons are ${JSON.stringify(buttons)}`);
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+{
+  const id = 'RN-39';
+  const description = 'a refused command says why, under its own field';
+  const started = Date.now();
+  try {
+    reset();
+    const reason = 'A startup command is one line — it is typed into the shell and run with one Enter.';
+    const html = renderToString(
+      React.createElement(StartupCommandField, {
+        id: 'slot-0',
+        title: 'server',
+        cwd: '~/api',
+        value: 'npm install',
+        error: reason,
+        onChange() {},
+      })
+    );
+    expectText(html, reason);
+    expectThat(/\srole="alert"/.test(html), 'the reason is not announced');
+    expectThat(/\saria-invalid="true"/.test(html), 'the field is not marked invalid');
+    expectThat(/\saria-describedby="startup-slot-0-error"/.test(html), 'the field does not point at its reason');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

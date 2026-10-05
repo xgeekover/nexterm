@@ -228,6 +228,10 @@ pub fn spec() -> Vec<Submenu> {
             per_platform("split-right", "Split Right", "Cmd+D", "Ctrl+Alt+D"),
             custom("split-down", "Split Down", "CmdOrCtrl+Shift+D"),
             terminal_safe("close-pane", "Close Pane", "CmdOrCtrl+W"),
+            // Not `terminal_safe`: Enter is not a letter, and with Shift held
+            // it is no control byte either — xterm sends Ctrl+Shift+Enter as a
+            // plain Enter. ⌘⇧Enter is iTerm2's own chord for this.
+            custom("toggle-pane-zoom", "Toggle Pane Zoom", "CmdOrCtrl+Shift+Enter"),
             Sep,
             terminal_safe("find-in-terminal", "Find…", "CmdOrCtrl+F"),
             // Shift makes it not a bare Ctrl+letter, so the window may claim
@@ -401,8 +405,8 @@ mod tests {
             "command-palette", "quick-open", "search-in-files",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
-            "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
-            "clear-terminal", "close-window",
+            "split-right", "split-down", "close-pane", "toggle-pane-zoom", "find-in-terminal",
+            "command-history", "clear-terminal", "close-window",
         ];
         // Off macOS the window is closed from the app's own title bar, and
         // Quit lives in the File menu as a predefined item.
@@ -412,8 +416,8 @@ mod tests {
             "command-palette", "quick-open", "search-in-files",
             "toggle-sidebar", "toggle-panel", "toggle-secondary",
             "zoom-in", "zoom-out", "zoom-reset",
-            "split-right", "split-down", "close-pane", "find-in-terminal", "command-history",
-            "clear-terminal",
+            "split-right", "split-down", "close-pane", "toggle-pane-zoom", "find-in-terminal",
+            "command-history", "clear-terminal",
         ];
         for e in expected {
             assert!(ids.contains(&e), "missing menu item id: {e}");

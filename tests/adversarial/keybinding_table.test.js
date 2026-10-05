@@ -24,6 +24,7 @@ import {
   findBinding,
   dispatchKeydown,
   dispatchKeydownOverTerminal,
+  keysFor,
   menuIdOf,
   shortcutLabel,
 } from '../../src/lib/keybindings.js';
@@ -101,7 +102,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       .filter((i) => i.id && !i.key)
       .map((i) => i.id);
     assert.deepEqual(withoutShortcut, [], 'these menu entries advertise no shortcut at all');
-    assert.equal(MENU_ITEMS.length, 21, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
+    assert.equal(MENU_ITEMS.length, 22, `expected the whole menu, got ${MENU_ITEMS.length} entries`);
   });
 
   test('KB-01: every shortcut the menu advertises is claimed by a binding', () => {
@@ -163,6 +164,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       splitActivePane: stub('split'),
       closeActivePane: stub('closePane'),
       focusNextPane: stub('focusPane'),
+      togglePaneZoom: stub('zoomPane'),
       createTerminalTab: stub('newTerminal'),
       clearBlocks: stub('clear'),
       openFind: stub('find'),
@@ -186,6 +188,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'split-right': 'split(horizontal)',
       'split-down': 'split(vertical)',
       'close-pane': 'closePane()',
+      'toggle-pane-zoom': 'zoomPane()',
       'clear-terminal': 'clear()',
       'command-palette': 'palette(true)',
       'quick-open': 'palette(true,files)',
@@ -336,6 +339,12 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // broken — and neither spelling is a bare Ctrl+letter, so the shell
       // gives up nothing. KB-15 holds the spelling.
       'split-right',
+      // ⌘⇧Enter, and Ctrl+Shift+Enter off macOS. Zooming the pane a terminal
+      // is in is what the command is for, like Split Right. Neither spelling
+      // is a control byte: xterm sends Ctrl+Shift+Enter as a plain Enter. Off
+      // macOS a program that turned on modifyOtherKeys (OpenCode) no longer
+      // gets its `CSI 27;6;13~` — it binds nothing to it. KB-16 holds that.
+      'toggle-pane-zoom',
       'toggle-secondary',
       'toggle-sidebar',
       // Punctuation and a digit — no control byte is given up for these.
@@ -487,5 +496,66 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       const label = shortcutLabel(id, DEFAULT_RESOLVED, { isMac: false });
       assert.ok(!/Cmd/.test(label), `${id} advertises ${label} off macOS`);
     }
+  });
+
+  test('KB-16: Toggle Pane Zoom is ⌘⇧Enter / Ctrl+Shift+Enter, over a terminal, and nowhere it would cost the shell or the editor', () => {
+    // iTerm2's chord for "Maximize Active Pane", and the obvious spelling of
+    // it off macOS. Shown the way each platform writes it.
+    assert.deepEqual(keysFor('toggle-pane-zoom'), ['mod+shift+enter']);
+    assert.equal(shortcutLabel('toggle-pane-zoom', DEFAULT_RESOLVED, { isMac: true }), '⇧⌘Enter');
+    assert.equal(shortcutLabel('toggle-pane-zoom', DEFAULT_RESOLVED, { isMac: false }), 'Shift+Ctrl+Enter');
+
+    // Claimed ahead of xterm, with a terminal focused — the resting state —
+    // and run, on both platforms. Swallowed, so xterm does not also send the
+    // `\r` it turns Ctrl+Shift+Enter into.
+    for (const platform of PLATFORMS) {
+      const calls = [];
+      let prevented = false;
+      let stopped = false;
+      const e = {
+        ...eventFor('mod+shift+enter', platform),
+        preventDefault: () => { prevented = true; },
+        stopPropagation: () => { stopped = true; },
+      };
+      const fired = dispatchKeydownOverTerminal(e, ctxFor(e, platform, { togglePaneZoom: () => calls.push('zoom') }));
+      assert.equal(fired, 'toggle-pane-zoom', `${platform}: the chord must be claimed over a terminal`);
+      assert.deepEqual(calls, ['zoom'], `${platform}: and zoom exactly once`);
+      assert.ok(prevented && stopped, `${platform}: and never reach xterm as well`);
+    }
+
+    // Plain Enter, Shift+Enter and Ctrl+Enter stay the terminal's: the first
+    // runs the line, and the other two are what OpenCode's modifyOtherKeys
+    // turns into a newline (modify_other_keys.test.js).
+    for (const platform of PLATFORMS) {
+      for (const mods of [{}, { shiftKey: true }, { ctrlKey: true }, { altKey: true }]) {
+        const e = {
+          key: 'Enter', code: 'Enter', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...mods,
+          preventDefault: () => assert.ok(false, `${platform}: ${JSON.stringify(mods)}+Enter must not be swallowed`),
+          stopPropagation: () => assert.ok(false, `${platform}: ${JSON.stringify(mods)}+Enter must reach xterm`),
+        };
+        assert.equal(
+          dispatchKeydownOverTerminal(e, ctxFor(e, platform)),
+          null,
+          `${platform}: ${JSON.stringify(mods)}+Enter is the terminal's`
+        );
+      }
+    }
+
+    // On macOS the app modifier is ⌘, so Ctrl+Shift+Enter is not this chord
+    // and still reaches a program that asked for modifyOtherKeys.
+    const ctrlShiftEnter = {
+      key: 'Enter', code: 'Enter', ctrlKey: true, metaKey: false, shiftKey: true, altKey: false,
+      preventDefault: () => assert.ok(false, 'macOS: Ctrl+Shift+Enter must not be swallowed'),
+      stopPropagation: () => assert.ok(false, 'macOS: Ctrl+Shift+Enter must reach xterm'),
+    };
+    assert.equal(dispatchKeydownOverTerminal(ctrlShiftEnter, ctxFor(ctrlShiftEnter, 'macos')), null);
+
+    // In the editor ⌘⇧Enter is Monaco's "Insert Line Above": the table steps
+    // aside and leaves the key unprevented, as it does for ⌘D.
+    let prevented = false;
+    const inEditor = { ...eventFor('mod+shift+enter', 'macos'), preventDefault: () => { prevented = true; } };
+    const fired = dispatchKeydown(inEditor, ctxFor(inEditor, 'macos', { isInMonacoEditor: true }));
+    assert.equal(fired, 'pass:toggle-pane-zoom', `it must pass through inside Monaco, got ${fired}`);
+    assert.equal(prevented, false, 'and must not be swallowed there');
   });
 });

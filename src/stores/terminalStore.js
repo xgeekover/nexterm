@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
+import { forgetOutput, startPtyOutputBus } from '../lib/ptyOutputBus.js';
 import { notifyTerminal } from '../lib/terminalNotice.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
 // schema as absent, which for this store's keys would mean silently bootstrapping
@@ -14,6 +15,14 @@ import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir } from '../lib/terminalCwd.js';
 import { resumeCommand, serializeAgent, startCommand } from '../lib/agents.js';
+import {
+  followCommandLine,
+  normalizeSlotCommand,
+  sanitizeStartupCommand,
+  startupCommandOf,
+  suggestStartupCommand,
+  withStartupCommands,
+} from '../lib/startupCommands.js';
 
 /**
  * How long a terminal's size has to hold still before the shell is told about
@@ -36,13 +45,21 @@ const pendingResizes = new Map();
 //
 //   Pane  = { type: 'leaf',  id, tabIds: [], activeTabId }
 //   Split = { type: 'split', id, direction, children: [], sizes: [] }
-//   Group = { id, name, createdAt, tree: Pane|Split, activePaneId }
+//   Group = { id, name, createdAt, tree: Pane|Split, activePaneId, zoomedPaneId? }
 //
 // This replaces the previous model, where `splitTree` was ONE tree whose
 // LEAVES were the groups (all on screen at once) and a `groupViewMode` /
 // `focusedPaneId` pair faked "show only one of them". Both are gone: the model
 // is permanently "one group fills the area", so a leaf is now a pane *inside*
 // a group rather than a group itself.
+//
+// `zoomedPaneId` is tmux's zoom (`Prefix z`), iTerm2's "Maximize Active Pane":
+// that one pane fills the group's whole area while its siblings are hidden —
+// hidden, not closed, their programs still running — and the tree itself is
+// untouched, so unzooming puts back exactly the layout that was there. Present
+// only while a group IS zoomed, and `settle` drops it the moment it stops
+// making sense (see `zoomedPaneOf`). Never persisted: a zoom is a way of
+// looking at a layout, not part of it.
 
 let paneCounter = 1;
 const makePaneId = () => `pane-${paneCounter++}`;
@@ -224,13 +241,58 @@ function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
 }
 
+// --- Zoom ----------------------------------------------------------------
+
+/**
+ * The pane `group` is zoomed on — the one filling the group's whole area while
+ * its siblings are hidden — or null when it is not zoomed.
+ *
+ * Read defensively rather than trusted: a zoom only means something on a pane
+ * that is still in the tree, in a tree that still has other panes to hide. A
+ * group whose zoom outlived either is shown whole. `settle` drops such a zoom
+ * as well; this is what keeps a group that never went through it — a test's
+ * hand-made state, a render from an arranged store — from drawing nothing.
+ */
+export function zoomedPaneOf(group) {
+  const id = group?.zoomedPaneId;
+  if (!id) return null;
+  const leaves = collectLeaves(group.tree);
+  if (leaves.length < 2) return null;
+  return leaves.find((leaf) => leaf.id === id) || null;
+}
+
+/**
+ * What of `group`'s tree is drawn: the zoomed pane alone, or the whole tree.
+ *
+ * The one place that decides which panes are on screen. TerminalSplitContainer
+ * renders exactly this, so a hidden pane is not mounted at all — its terminal
+ * stays alive in the registry, as the terminals of a group that is not on
+ * screen do, and its program keeps running.
+ */
+export function treeOnScreen(group) {
+  return zoomedPaneOf(group) ?? group?.tree ?? null;
+}
+
+/** The panes of `group` that are drawn, in DOM order — see `treeOnScreen`. */
+export function panesOnScreen(group) {
+  return collectLeaves(treeOnScreen(group));
+}
+
+/** `group` with no zoom: the key goes, rather than staying behind as null. */
+function withoutZoom(group) {
+  if (!group || !('zoomedPaneId' in group)) return group;
+  const { zoomedPaneId: _unzoomed, ...rest } = group;
+  return rest;
+}
+
 /**
  * Whether `tabId` is drawn right now: the tab a pane of the group on screen
- * is showing. Every pane shows its active tab, so a split shows several.
+ * is showing. Every pane shows its active tab, so a split shows several — and
+ * a zoomed group only the zoomed pane's.
  */
 function tabOnScreen(state, tabId) {
   const group = state.groups.find((g) => g.id === state.activeGroupId);
-  return Boolean(group) && collectLeaves(group.tree).some((leaf) => leaf.activeTabId === tabId);
+  return Boolean(group) && panesOnScreen(group).some((leaf) => leaf.activeTabId === tabId);
 }
 
 /** Remove a tab from whichever pane holds it, keeping that pane's active tab valid. */
@@ -412,8 +474,24 @@ function resolveGroup(state, groupId, paneId) {
  *  - a split has ≥2 children and one `sizes` entry per child
  *  - `pane.activeTabId ∈ pane.tabIds` (null iff empty)
  *  - `group.activePaneId` names a pane in THAT group's tree
+ *  - a group is zoomed on its ACTIVE pane or not at all, and only while it
+ *    has more than one pane (see below)
  *  - `activeGroupId` names an existing group
  *  - `activeTabId` is real and lives in the ACTIVE group
+ *
+ * The zoom rule is how a zoom ends whenever it would stop being true, without
+ * every action having to remember it — tmux's behaviour, stated once:
+ *
+ *  - the zoomed pane closed, or lost its last tab and was pruned: the active
+ *    pane moves to one that survived, so the zoom goes;
+ *  - focus moved to another pane — Focus Next/Previous Pane, a click on a
+ *    hidden pane's terminal in the TERMINALS panel, a tab moved into a hidden
+ *    pane: the active pane is no longer the zoomed one, so the zoom goes, and
+ *    the user sees the whole layout with the pane they went to;
+ *  - the other panes all closed: there is nothing left to hide.
+ *
+ * A split is the one thing this cannot see — the active pane may stay where
+ * it was — so `splitPane` and `dropTabOnPane` drop the zoom themselves.
  *
  * Returns a partial state ready to hand to `set()`. `groups` is always a fresh
  * array, so the persist subscription always sees the change.
@@ -463,8 +541,14 @@ function settle(state, patch = {}) {
       ? group.activePaneId
       : firstLeafId(group.tree);
     const name = typeof group.name === 'string' && group.name ? group.name : 'Group';
-    if (activePaneId === group.activePaneId && name === group.name) return group;
-    return { ...group, name, activePaneId };
+    // Checked against the REPAIRED active pane: a zoomed pane that was pruned
+    // has just handed `activePaneId` to a survivor, which it is not.
+    const zoomHolds =
+      Boolean(group.zoomedPaneId) && group.zoomedPaneId === activePaneId && leaves.length > 1;
+    const zoomSettled = zoomHolds || !('zoomedPaneId' in group);
+    if (activePaneId === group.activePaneId && name === group.name && zoomSettled) return group;
+    const next = { ...group, name, activePaneId };
+    return zoomHolds ? next : withoutZoom(next);
   });
 
   const activeGroupId = groups.some((g) => g.id === wantedActiveGroupId) ? wantedActiveGroupId : groups[0].id;
@@ -529,6 +613,12 @@ function serializeTreeForPersist(node) {
   };
 }
 
+/**
+ * Field by field, on purpose. `zoomedPaneId` is left out: a relaunch comes back
+ * with every pane in view rather than with panes nobody remembers hiding, and
+ * since this payload is also the persist subscription's key, zooming and
+ * unzooming never schedule a write.
+ */
 function serializeGroupForPersist(group) {
   return {
     id: group.id,
@@ -548,6 +638,11 @@ function buildPersistedPayload(state) {
     // conversation back up. `serializeAgent` drops anything unrecognised — an
     // unknown agent, a session id that is not a UUID — so a payload from
     // another build cannot put a command on a shell.
+    //
+    // A terminal's startup command does NOT ride along, nor the line it last
+    // ran: a relaunch brings the shells back and runs nothing in them, as it
+    // offers an agent rather than starting one. Templates are opened on
+    // purpose (`loadSavedGroup`, `loadWorkspace`).
     tabs: state.tabs.map((t) => ({
       id: t.id,
       title: t.title,
@@ -729,6 +824,12 @@ function migrateV1SavedGroup(entry, index) {
  * references stable SLOT ids (`slot-0`, `slot-1`, …) that `loadSavedGroup`
  * maps onto freshly spawned tabs. `tabs` stays a flat array — the Terminals
  * panel renders `entry.tabs.length`.
+ *
+ * A slot may carry a startup command (`command`, see src/lib/startupCommands.js
+ * — what makes a saved group a layout template). It is optional, so every
+ * entry saved before it existed reads exactly as it did, and it is cleaned on
+ * the way in: a command a hand edit made multi-line is dropped here, never
+ * typed into a shell.
  */
 function normalizeSavedEntry(entry, index) {
   if (!entry || typeof entry !== 'object') return null;
@@ -738,7 +839,17 @@ function normalizeSavedEntry(entry, index) {
   const slotIds = new Set(entry.tabs.map((t) => t.slotId));
   const tree = normalizeTree(pruneTree(sanitizeRestoredTree(entry.tree, slotIds, new Set())));
   if (!tree) return migrateV1SavedGroup(entry, index);
-  return { ...entry, tree };
+  return { ...entry, tabs: entry.tabs.map(normalizeSlotCommand), tree };
+}
+
+/** The same cleaning for every group a saved workspace holds. */
+function normalizeWorkspaceCommands(workspace) {
+  return {
+    ...workspace,
+    groups: workspace.groups.map((group) =>
+      group && Array.isArray(group.tabs) ? { ...group, tabs: group.tabs.map(normalizeSlotCommand) } : group
+    ),
+  };
 }
 
 /**
@@ -752,9 +863,9 @@ function loadSavedWorkspaces() {
   const stored = loadVersionedState(SAVED_WORKSPACES_KEY);
   if (!stored || stored.version !== SCHEMA_VERSION) return [];
   const list = Array.isArray(stored.data) ? stored.data : [];
-  return list.filter(
-    (w) => w && typeof w.id === 'string' && Array.isArray(w.groups) && w.groups.length > 0
-  );
+  return list
+    .filter((w) => w && typeof w.id === 'string' && Array.isArray(w.groups) && w.groups.length > 0)
+    .map(normalizeWorkspaceCommands);
 }
 
 function loadSavedGroups() {
@@ -856,6 +967,15 @@ const commandEndsBySession = new Map();
 
 /** How many command ends `sessionId` has reported so far. */
 const endsOf = (sessionId) => commandEndsBySession.get(sessionId) ?? 0;
+
+/**
+ * tab id -> the line being typed at its prompt, followed from every write
+ * (`followCommandLine` in src/lib/startupCommands.js). Kept out of the store:
+ * it changes with every key and nothing draws it. What it yields is: a tab's
+ * `commandLine`, the last line it submitted, which is what a saved group
+ * offers as that terminal's startup command while it is still running.
+ */
+const typedLines = new Map();
 
 /**
  * How long a submitted line may go unanswered before it counts as a running
@@ -1179,11 +1299,35 @@ export const useTerminalStore = create((set, get, api) => {
       ),
     }));
 
+  /**
+   * Follow one write to `tab`'s terminal (`followCommandLine`) and, when it
+   * submits a line at the prompt, remember it as the tab's `commandLine` —
+   * null for a line that cannot be read back. Only a submission touches the
+   * store, and only when it changes something: this runs for every key.
+   */
+  const followTyping = (tab, data) => {
+    const { line, submitted } = followCommandLine(typedLines.get(tab.id), data, {
+      running: Boolean(tab.running),
+    });
+    typedLines.set(tab.id, line);
+    if (submitted === undefined || (tab.commandLine ?? null) === submitted) return;
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, commandLine: submitted } : t)),
+    }));
+  };
+
   /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   /**
    * Freeze one group into something storable: its layout with the live tab
    * ids swapped for stable slot ids, and each terminal's title and CURRENT
    * directory (the live OSC 7 cwd, not the one it was opened at).
+   *
+   * And, where there is one, the command the terminal offers as its startup
+   * command (`suggestStartupCommand`): the one it was opened with from a
+   * template, else the agent or the command running in it right now — never
+   * an idle shell's last command. That is the template's default; "Edit
+   * Startup Commands…" changes it. A terminal with none keeps exactly the
+   * slot shape every saved group always had.
    */
   const snapshotGroup = (state, group) => {
     const slotByTabId = new Map();
@@ -1194,7 +1338,9 @@ export const useTerminalStore = create((set, get, api) => {
         if (!tab) continue;
         const slotId = `slot-${tabs.length}`;
         slotByTabId.set(tabId, slotId);
-        tabs.push({ slotId, title: tab.title, cwd: tab.cwd });
+        const slot = { slotId, title: tab.title, cwd: tab.cwd };
+        const command = suggestStartupCommand(tab);
+        tabs.push(command ? { ...slot, command } : slot);
       }
     }
     if (tabs.length === 0) return null;
@@ -1210,17 +1356,24 @@ export const useTerminalStore = create((set, get, api) => {
    * Turn a snapshot back into a live group: one shell per slot, the saved
    * layout rebuilt around them, fresh pane ids so loading the same snapshot
    * twice cannot collide.
+   *
+   * `startups` is each new terminal's startup command, `{ tabId, command }`,
+   * for the caller to hand to `runStartupCommands` once the group is in
+   * place. Nothing is typed from here.
    */
   const materializeGroup = async (entry, fallbackName = 'Saved group') => {
     if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
 
     const bySlot = new Map();
     const spawned = [];
+    const startups = [];
     for (const saved of entry.tabs) {
       const tab = await spawnTab(saved.title, saved.cwd);
       if (!tab) continue;
       spawned.push(tab);
       if (saved.slotId) bySlot.set(saved.slotId, tab.id);
+      const command = startupCommandOf(saved);
+      if (command) startups.push({ tabId: tab.id, command });
     }
     if (spawned.length === 0) return null;
 
@@ -1255,8 +1408,27 @@ export const useTerminalStore = create((set, get, api) => {
         activePaneId: leaves.some((l) => l.id === activePaneId) ? activePaneId : firstLeafId(tree),
       },
       spawned,
+      startups,
     };
   };
+
+  /**
+   * Start typing every startup command of a template just opened, each into
+   * its own terminal and each on its own schedule (see `typeStartupCommand`).
+   * Not awaited by the loaders: the terminals are on screen already, and one
+   * shell that never reports a prompt must not hold up anything else.
+   */
+  const runStartupCommands = (startups) =>
+    Promise.all(
+      (startups || []).map(({ tabId, command }) =>
+        get()
+          .typeStartupCommand(tabId, command)
+          .catch((err) => {
+            console.warn('[TerminalStore] could not type a startup command:', err);
+            return false;
+          })
+      )
+    );
 
   const killTabIfOrphaned = async (tabId) => {
     if (groupOfTab(get(), tabId)) return;
@@ -1268,6 +1440,7 @@ export const useTerminalStore = create((set, get, api) => {
       console.warn('[TerminalStore] pty_kill failed:', e);
     }
     await disposeTerminalView(tabId);
+    typedLines.delete(tabId);
     set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
   };
 
@@ -1576,7 +1749,10 @@ export const useTerminalStore = create((set, get, api) => {
     /**
      * Mark a pane as the active one (called on click/focus of a pane). The
      * pane's own visible tab becomes the active tab, and if the pane belongs
-     * to another group that group is brought on screen.
+     * to another group that group is brought on screen. A pane hidden by a
+     * zoom can only be reached from outside the terminal area (the TERMINALS
+     * panel); going to it unzooms its group, as selecting a pane does in tmux
+     * — see `settle`.
      */
     setActivePane: (paneId, groupId = null) =>
       set((state) => {
@@ -1621,6 +1797,11 @@ export const useTerminalStore = create((set, get, api) => {
      * Move pane focus by `delta` (±1) through the ACTIVE group's panes in DOM
      * order, wrapping around at the ends. Other groups are off screen, so they
      * are never part of the cycle.
+     *
+     * In a zoomed group the cycle still runs over every pane, hidden ones
+     * included, and landing on another pane unzooms the group (`settle`):
+     * tmux's next-pane does the same, and it is the only way the keyboard
+     * could ever reach a hidden pane.
      */
     focusNextPane: (delta = 1) =>
       set((state) => {
@@ -1636,6 +1817,50 @@ export const useTerminalStore = create((set, get, api) => {
           activeTabId: next.activeTabId ?? state.activeTabId,
         });
       }),
+
+    /**
+     * Zoom a pane — make it fill its group's whole area, hiding the others —
+     * or, when the group is already zoomed, unzoom it. tmux's `Prefix z`,
+     * iTerm2's "Maximize Active Pane".
+     *
+     * `paneId` defaults to the active pane of the active group, which is what
+     * the keyboard, the menu and the palette act on; a pane's own button
+     * passes its id. Zooming makes that pane the active one and brings its
+     * group on screen. A group with one pane has nothing to hide, and is left
+     * as it is.
+     *
+     * The hidden panes are not closed or moved: the tree does not change at
+     * all, so unzooming gives back the very layout that was zoomed, sizes
+     * included. Their terminals stay alive in the registry — TerminalSplit-
+     * Container simply does not mount them (see `treeOnScreen`) — and every
+     * group keeps its own zoom across group switches. What ends a zoom besides
+     * this toggle is listed at `settle`.
+     *
+     * Returns whether the group is zoomed afterwards.
+     */
+    togglePaneZoom: (paneId = null, groupId = null) => {
+      const target = resolveGroup(get(), groupId, paneId);
+      if (!target) return false;
+      set((state) => {
+        const group = state.groups.find((g) => g.id === target.id);
+        if (!group) return {};
+        if (zoomedPaneOf(group)) {
+          // Nothing structural changes, so there is nothing for `settle` to
+          // repair: the same tree, shown whole again.
+          return { groups: updateGroup(state, group.id, withoutZoom) };
+        }
+        const leaves = collectLeaves(group.tree);
+        if (leaves.length < 2) return {};
+        const pane = leaves.find((l) => l.id === (paneId ?? group.activePaneId));
+        if (!pane) return {};
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: pane.id, zoomedPaneId: pane.id })),
+          activeGroupId: group.id,
+          activeTabId: pane.activeTabId ?? state.activeTabId,
+        });
+      });
+      return Boolean(zoomedPaneOf(get().groups.find((g) => g.id === target.id)));
+    },
 
     // ---- Groups --------------------------------------------------------
     /**
@@ -1919,13 +2144,27 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
-     * Re-open a saved group. `mode: 'new-group'` (default) rebuilds it as a
-     * brand-new group, layout and all; `'replace'` drops its terminals into
-     * the active group's active pane. Each terminal respawns at its saved cwd,
-     * falling back to the workspace root when that directory is gone.
+     * Set the startup commands of a saved group's terminals — "Edit Startup
+     * Commands…". `commands` maps a slot id to its command; a slot it leaves
+     * out keeps what it had, and '' makes it just a shell again.
      *
-     * Returns the id of the group the terminals landed in.
+     * All or nothing, and written through like a rename: if any command is
+     * more than one line, nothing changes and `{ ok: false, errors }` says
+     * which, by slot id, for the dialog to show beside each field. Otherwise
+     * `{ ok: true, entry }`. See src/lib/startupCommands.js for what a command
+     * may be.
      */
+    setStartupCommands: (savedId, commands = {}) => {
+      const entry = get().savedGroups.find((g) => g.id === savedId);
+      if (!entry) return { ok: false, errors: {} };
+      const result = withStartupCommands(entry, commands);
+      if (!result.ok) return result;
+      const next = get().savedGroups.map((g) => (g.id === savedId ? result.snapshot : g));
+      set({ savedGroups: next });
+      saveState(SAVED_GROUPS_KEY, next);
+      return { ok: true, entry: result.snapshot };
+    },
+
     /**
      * Snapshot EVERY group at once — each one's layout and each terminal's
      * current directory — under a single name. Saving groups one at a time
@@ -1972,6 +2211,27 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
+     * `setStartupCommands` for a saved workspace: the same per-terminal
+     * commands, one map per group — `commandsByGroup[i]` is slot id → command
+     * for `entry.groups[i]`, as slot ids only name a terminal within its own
+     * group. All or nothing across every group; `errors` comes back the same
+     * shape, one object per group.
+     */
+    setWorkspaceStartupCommands: (savedId, commandsByGroup = []) => {
+      const entry = get().savedWorkspaces.find((w) => w.id === savedId);
+      if (!entry) return { ok: false, errors: [] };
+      const results = entry.groups.map((group, i) => withStartupCommands(group, commandsByGroup?.[i] ?? {}));
+      if (results.some((r) => !r.ok)) {
+        return { ok: false, errors: results.map((r) => (r.ok ? {} : r.errors)) };
+      }
+      const updated = { ...entry, groups: results.map((r) => r.snapshot) };
+      const next = get().savedWorkspaces.map((w) => (w.id === savedId ? updated : w));
+      set({ savedWorkspaces: next });
+      saveState(SAVED_WORKSPACES_KEY, next);
+      return { ok: true, entry: updated };
+    },
+
+    /**
      * Bring a whole workspace back.
      *
      * `replace` puts the session back the way it was — every saved group, and
@@ -1980,6 +2240,10 @@ export const useTerminalStore = create((set, get, api) => {
      *
      * Everything is spawned BEFORE anything is closed, so a failure partway
      * through leaves the user with what they already had rather than nothing.
+     *
+     * A workspace is a template of the whole desk: every terminal that has a
+     * startup command types it once its shell is ready, in either mode (see
+     * `typeStartupCommand`).
      */
     loadWorkspace: async (savedId, { mode = 'replace' } = {}) => {
       const entry = get().savedWorkspaces.find((w) => w.id === savedId);
@@ -2010,10 +2274,24 @@ export const useTerminalStore = create((set, get, api) => {
         })
       );
 
+      runStartupCommands(made.flatMap((m) => m.startups));
       for (const tabId of doomed) await killTabIfOrphaned(tabId);
       return active.id;
     },
 
+    /**
+     * Re-open a saved group. `mode: 'new-group'` (default) rebuilds it as a
+     * brand-new group, layout and all; `'replace'` drops its terminals into
+     * the active group's active pane. Each terminal respawns at its saved cwd,
+     * falling back to the workspace root when that directory is gone.
+     *
+     * Either way, a terminal whose slot has a startup command types it as soon
+     * as its shell is ready — a saved group with commands is a layout
+     * template. One without is just shells, as it always was.
+     *
+     * Returns the id of the group the terminals landed in, as soon as they are
+     * on screen: the commands follow on their own (`runStartupCommands`).
+     */
     loadSavedGroup: async (savedId, { mode = 'new-group' } = {}) => {
       const entry = get().savedGroups.find((g) => g.id === savedId);
       if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
@@ -2024,9 +2302,13 @@ export const useTerminalStore = create((set, get, api) => {
       // at, not for that arrangement to be replaced.
       if (mode === 'replace') {
         const spawned = [];
+        const startups = [];
         for (const saved of entry.tabs) {
           const tab = await spawnTab(saved.title, saved.cwd);
-          if (tab) spawned.push(tab);
+          if (!tab) continue;
+          spawned.push(tab);
+          const command = startupCommandOf(saved);
+          if (command) startups.push({ tabId: tab.id, command });
         }
         if (spawned.length === 0) return null;
 
@@ -2043,6 +2325,7 @@ export const useTerminalStore = create((set, get, api) => {
             activeTabId: spawned[0].id,
           });
         });
+        runStartupCommands(startups);
         return groupId;
       }
 
@@ -2056,6 +2339,7 @@ export const useTerminalStore = create((set, get, api) => {
           activeTabId: made.spawned[0].id,
         })
       );
+      runStartupCommands(made.startups);
       return made.group.id;
     },
 
@@ -2065,6 +2349,9 @@ export const useTerminalStore = create((set, get, api) => {
      * tab is spawned directly into the new pane, never into the pane being
      * split, so the same tab can never end up listed in two panes at once.
      * Returns the new pane's id (or null if the split could not be created).
+     *
+     * A split unzooms the group: a pane made only to be hidden at once would
+     * be a terminal the user cannot see, which is why tmux unzooms too.
      */
     splitPane: async (paneId, direction = 'horizontal', groupId = null) => {
       const group = resolveGroup(get(), groupId, paneId);
@@ -2082,10 +2369,12 @@ export const useTerminalStore = create((set, get, api) => {
         if (!state.groups.some((g) => g.id === group.id)) return {};
         const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id };
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({
-            ...g,
-            tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
-          })),
+          groups: updateGroup(state, group.id, (g) =>
+            withoutZoom({
+              ...g,
+              tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
+            })
+          ),
         });
       });
       return newPaneId;
@@ -2191,6 +2480,12 @@ export const useTerminalStore = create((set, get, api) => {
      *   'center'                  → move the tab into that pane
      *   'left' | 'right'          → split the pane horizontally, tab on that side
      *   'top'  | 'bottom'         → split the pane vertically, tab on that side
+     *
+     * In a zoomed group only the zoomed pane can be dropped on from the screen.
+     * Into it, the zoom stays: the tab lands where the user is looking. An
+     * edge splits, which unzooms (see `splitPane`); and a tab moved into a
+     * hidden pane by any other route makes that pane the active one, which
+     * unzooms through `settle`.
      */
     dropTabOnPane: (tabId, targetPaneId, zone = 'center', targetGroupId = null) => {
       const state0 = get();
@@ -2234,11 +2529,13 @@ export const useTerminalStore = create((set, get, api) => {
         const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
         const insertFirst = zone === 'left' || zone === 'top';
 
-        groups = updateGroup(groups, targetGroup.id, (g) => ({
-          ...g,
-          tree: splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst),
-          activePaneId: newPaneId,
-        }));
+        groups = updateGroup(groups, targetGroup.id, (g) =>
+          withoutZoom({
+            ...g,
+            tree: splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst),
+            activePaneId: newPaneId,
+          })
+        );
         return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
       });
     },
@@ -2327,6 +2624,9 @@ export const useTerminalStore = create((set, get, api) => {
     attachListeners: async () => {
       if (listening) return;
       listening = true;
+      // Before any shell is spawned: output a tab prints before its terminal
+      // exists is kept for it from the first byte (see ptyOutputBus.js).
+      await startPtyOutputBus();
       unlisteners.push(await listen('pty-output', (payload) => {
         const { session_id, data } = payload || {};
         if (!session_id || !data) return;
@@ -2384,6 +2684,9 @@ export const useTerminalStore = create((set, get, api) => {
         // Counted first, and whether or not a tab holds this session yet —
         // see `commandEndsBySession`.
         commandEndsBySession.set(session_id, endsOf(session_id) + 1);
+        // A new prompt: whatever was being typed is gone with the old one,
+        // and the next line is followed from its first key.
+        for (const t of get().tabs) if (t.sessionId === session_id) typedLines.delete(t.id);
         set((state) => {
           // Built inside the same update as the tabs it describes: a second
           // `set` from within an updater is how two writes to one store end up
@@ -2810,6 +3113,9 @@ export const useTerminalStore = create((set, get, api) => {
         console.warn('[TerminalStore] pty_kill failed:', e);
       }
       await disposeTerminalView(tabId);
+      typedLines.delete(tabId);
+      // Whatever its shell printed that no terminal ever showed goes with it.
+      forgetOutput(tab.sessionId);
 
       // `settle` sweeps a dropped tab id out of EVERY group (not just one
       // tree), prunes whichever pane it emptied, and drops a group that ends
@@ -3007,6 +3313,48 @@ export const useTerminalStore = create((set, get, api) => {
       return true;
     },
 
+    /**
+     * Type a layout template's startup command into a terminal it opened.
+     *
+     * The same way, and on the same schedule, as `startAgent` types an agent:
+     * nothing until the shell has drawn its first prompt — its first OSC 133
+     * "D" (`untilPromptReady`) — or, for a shell that never sends one (fish,
+     * sh), until AGENT_PROMPT_WAIT_MS after it started; then the line and an
+     * Enter, `\r`, through `writeRaw`, exactly what pressing Enter sends. The
+     * same on every platform and in every shell: PowerShell, cmd and the
+     * POSIX shells all run a line on `\r`, and the command is the user's own
+     * text, typed as they would type it — nothing is quoted for a shell.
+     *
+     * Typed earlier, the line would be typeahead, echoed once by the tty and
+     * again by the line editor. Not typed at all when the terminal closed
+     * first, or when something is already running in it by then — something
+     * the user started during the wait, which the text would be typed INTO;
+     * that terminal says so instead. Cleaned again here
+     * (`sanitizeStartupCommand`), whoever passed it in: one line, nothing in
+     * it that a line editor would take as a key.
+     *
+     * The terminal remembers the command from the start, so its group saved
+     * again — even before its shell is ready — keeps it as this terminal's
+     * startup command (`suggestStartupCommand`). Resolves with whether it was
+     * typed.
+     */
+    typeStartupCommand: async (tabId, command) => {
+      const { ok, command: line } = sanitizeStartupCommand(command);
+      if (!ok || !line || !get().tabs.some((t) => t.id === tabId)) return false;
+      set((state) => ({
+        tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, startupCommand: line } : t)),
+      }));
+
+      const readiness = await untilPromptReady(tabId);
+      if (readiness === 'gone') return false;
+      if (get().tabs.find((t) => t.id === tabId)?.running) {
+        notifyTerminal(tabId, `startup command not typed — something is already running here: ${line}`);
+        return false;
+      }
+      await get().writeRaw(tabId, `${line}\r`);
+      return true;
+    },
+
     /** Leave the terminal as a plain shell, and stop offering. */
     dismissAgentResume: (tabId) => {
       const targetId = tabId || get().activeTabId;
@@ -3021,6 +3369,9 @@ export const useTerminalStore = create((set, get, api) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      // Every key and every line the app types goes through here, so this is
+      // where the line being typed can be followed to the command it runs.
+      followTyping(tab, data);
       // Both taken before the write: the shell's answer can arrive before
       // `invoke` resolves, and it must still count as an answer to this line.
       const submitted = { at: Date.now(), endsBefore: endsOf(tab.sessionId) };
