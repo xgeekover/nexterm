@@ -14,6 +14,14 @@ import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir } from '../lib/terminalCwd.js';
 import { resumeCommand, serializeAgent, startCommand } from '../lib/agents.js';
+import {
+  followCommandLine,
+  normalizeSlotCommand,
+  sanitizeStartupCommand,
+  startupCommandOf,
+  suggestStartupCommand,
+  withStartupCommands,
+} from '../lib/startupCommands.js';
 
 /**
  * How long a terminal's size has to hold still before the shell is told about
@@ -629,6 +637,11 @@ function buildPersistedPayload(state) {
     // conversation back up. `serializeAgent` drops anything unrecognised — an
     // unknown agent, a session id that is not a UUID — so a payload from
     // another build cannot put a command on a shell.
+    //
+    // A terminal's startup command does NOT ride along, nor the line it last
+    // ran: a relaunch brings the shells back and runs nothing in them, as it
+    // offers an agent rather than starting one. Templates are opened on
+    // purpose (`loadSavedGroup`, `loadWorkspace`).
     tabs: state.tabs.map((t) => ({
       id: t.id,
       title: t.title,
@@ -810,6 +823,12 @@ function migrateV1SavedGroup(entry, index) {
  * references stable SLOT ids (`slot-0`, `slot-1`, …) that `loadSavedGroup`
  * maps onto freshly spawned tabs. `tabs` stays a flat array — the Terminals
  * panel renders `entry.tabs.length`.
+ *
+ * A slot may carry a startup command (`command`, see src/lib/startupCommands.js
+ * — what makes a saved group a layout template). It is optional, so every
+ * entry saved before it existed reads exactly as it did, and it is cleaned on
+ * the way in: a command a hand edit made multi-line is dropped here, never
+ * typed into a shell.
  */
 function normalizeSavedEntry(entry, index) {
   if (!entry || typeof entry !== 'object') return null;
@@ -819,7 +838,17 @@ function normalizeSavedEntry(entry, index) {
   const slotIds = new Set(entry.tabs.map((t) => t.slotId));
   const tree = normalizeTree(pruneTree(sanitizeRestoredTree(entry.tree, slotIds, new Set())));
   if (!tree) return migrateV1SavedGroup(entry, index);
-  return { ...entry, tree };
+  return { ...entry, tabs: entry.tabs.map(normalizeSlotCommand), tree };
+}
+
+/** The same cleaning for every group a saved workspace holds. */
+function normalizeWorkspaceCommands(workspace) {
+  return {
+    ...workspace,
+    groups: workspace.groups.map((group) =>
+      group && Array.isArray(group.tabs) ? { ...group, tabs: group.tabs.map(normalizeSlotCommand) } : group
+    ),
+  };
 }
 
 /**
@@ -833,9 +862,9 @@ function loadSavedWorkspaces() {
   const stored = loadVersionedState(SAVED_WORKSPACES_KEY);
   if (!stored || stored.version !== SCHEMA_VERSION) return [];
   const list = Array.isArray(stored.data) ? stored.data : [];
-  return list.filter(
-    (w) => w && typeof w.id === 'string' && Array.isArray(w.groups) && w.groups.length > 0
-  );
+  return list
+    .filter((w) => w && typeof w.id === 'string' && Array.isArray(w.groups) && w.groups.length > 0)
+    .map(normalizeWorkspaceCommands);
 }
 
 function loadSavedGroups() {
@@ -937,6 +966,15 @@ const commandEndsBySession = new Map();
 
 /** How many command ends `sessionId` has reported so far. */
 const endsOf = (sessionId) => commandEndsBySession.get(sessionId) ?? 0;
+
+/**
+ * tab id -> the line being typed at its prompt, followed from every write
+ * (`followCommandLine` in src/lib/startupCommands.js). Kept out of the store:
+ * it changes with every key and nothing draws it. What it yields is: a tab's
+ * `commandLine`, the last line it submitted, which is what a saved group
+ * offers as that terminal's startup command while it is still running.
+ */
+const typedLines = new Map();
 
 /**
  * How long a submitted line may go unanswered before it counts as a running
@@ -1260,11 +1298,35 @@ export const useTerminalStore = create((set, get, api) => {
       ),
     }));
 
+  /**
+   * Follow one write to `tab`'s terminal (`followCommandLine`) and, when it
+   * submits a line at the prompt, remember it as the tab's `commandLine` —
+   * null for a line that cannot be read back. Only a submission touches the
+   * store, and only when it changes something: this runs for every key.
+   */
+  const followTyping = (tab, data) => {
+    const { line, submitted } = followCommandLine(typedLines.get(tab.id), data, {
+      running: Boolean(tab.running),
+    });
+    typedLines.set(tab.id, line);
+    if (submitted === undefined || (tab.commandLine ?? null) === submitted) return;
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, commandLine: submitted } : t)),
+    }));
+  };
+
   /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   /**
    * Freeze one group into something storable: its layout with the live tab
    * ids swapped for stable slot ids, and each terminal's title and CURRENT
    * directory (the live OSC 7 cwd, not the one it was opened at).
+   *
+   * And, where there is one, the command the terminal offers as its startup
+   * command (`suggestStartupCommand`): the one it was opened with from a
+   * template, else the agent or the command running in it right now — never
+   * an idle shell's last command. That is the template's default; "Edit
+   * Startup Commands…" changes it. A terminal with none keeps exactly the
+   * slot shape every saved group always had.
    */
   const snapshotGroup = (state, group) => {
     const slotByTabId = new Map();
@@ -1275,7 +1337,9 @@ export const useTerminalStore = create((set, get, api) => {
         if (!tab) continue;
         const slotId = `slot-${tabs.length}`;
         slotByTabId.set(tabId, slotId);
-        tabs.push({ slotId, title: tab.title, cwd: tab.cwd });
+        const slot = { slotId, title: tab.title, cwd: tab.cwd };
+        const command = suggestStartupCommand(tab);
+        tabs.push(command ? { ...slot, command } : slot);
       }
     }
     if (tabs.length === 0) return null;
@@ -1291,17 +1355,24 @@ export const useTerminalStore = create((set, get, api) => {
    * Turn a snapshot back into a live group: one shell per slot, the saved
    * layout rebuilt around them, fresh pane ids so loading the same snapshot
    * twice cannot collide.
+   *
+   * `startups` is each new terminal's startup command, `{ tabId, command }`,
+   * for the caller to hand to `runStartupCommands` once the group is in
+   * place. Nothing is typed from here.
    */
   const materializeGroup = async (entry, fallbackName = 'Saved group') => {
     if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
 
     const bySlot = new Map();
     const spawned = [];
+    const startups = [];
     for (const saved of entry.tabs) {
       const tab = await spawnTab(saved.title, saved.cwd);
       if (!tab) continue;
       spawned.push(tab);
       if (saved.slotId) bySlot.set(saved.slotId, tab.id);
+      const command = startupCommandOf(saved);
+      if (command) startups.push({ tabId: tab.id, command });
     }
     if (spawned.length === 0) return null;
 
@@ -1336,8 +1407,27 @@ export const useTerminalStore = create((set, get, api) => {
         activePaneId: leaves.some((l) => l.id === activePaneId) ? activePaneId : firstLeafId(tree),
       },
       spawned,
+      startups,
     };
   };
+
+  /**
+   * Start typing every startup command of a template just opened, each into
+   * its own terminal and each on its own schedule (see `typeStartupCommand`).
+   * Not awaited by the loaders: the terminals are on screen already, and one
+   * shell that never reports a prompt must not hold up anything else.
+   */
+  const runStartupCommands = (startups) =>
+    Promise.all(
+      (startups || []).map(({ tabId, command }) =>
+        get()
+          .typeStartupCommand(tabId, command)
+          .catch((err) => {
+            console.warn('[TerminalStore] could not type a startup command:', err);
+            return false;
+          })
+      )
+    );
 
   const killTabIfOrphaned = async (tabId) => {
     if (groupOfTab(get(), tabId)) return;
@@ -1349,6 +1439,7 @@ export const useTerminalStore = create((set, get, api) => {
       console.warn('[TerminalStore] pty_kill failed:', e);
     }
     await disposeTerminalView(tabId);
+    typedLines.delete(tabId);
     set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
   };
 
@@ -2052,13 +2143,27 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
-     * Re-open a saved group. `mode: 'new-group'` (default) rebuilds it as a
-     * brand-new group, layout and all; `'replace'` drops its terminals into
-     * the active group's active pane. Each terminal respawns at its saved cwd,
-     * falling back to the workspace root when that directory is gone.
+     * Set the startup commands of a saved group's terminals — "Edit Startup
+     * Commands…". `commands` maps a slot id to its command; a slot it leaves
+     * out keeps what it had, and '' makes it just a shell again.
      *
-     * Returns the id of the group the terminals landed in.
+     * All or nothing, and written through like a rename: if any command is
+     * more than one line, nothing changes and `{ ok: false, errors }` says
+     * which, by slot id, for the dialog to show beside each field. Otherwise
+     * `{ ok: true, entry }`. See src/lib/startupCommands.js for what a command
+     * may be.
      */
+    setStartupCommands: (savedId, commands = {}) => {
+      const entry = get().savedGroups.find((g) => g.id === savedId);
+      if (!entry) return { ok: false, errors: {} };
+      const result = withStartupCommands(entry, commands);
+      if (!result.ok) return result;
+      const next = get().savedGroups.map((g) => (g.id === savedId ? result.snapshot : g));
+      set({ savedGroups: next });
+      saveState(SAVED_GROUPS_KEY, next);
+      return { ok: true, entry: result.snapshot };
+    },
+
     /**
      * Snapshot EVERY group at once — each one's layout and each terminal's
      * current directory — under a single name. Saving groups one at a time
@@ -2105,6 +2210,27 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
+     * `setStartupCommands` for a saved workspace: the same per-terminal
+     * commands, one map per group — `commandsByGroup[i]` is slot id → command
+     * for `entry.groups[i]`, as slot ids only name a terminal within its own
+     * group. All or nothing across every group; `errors` comes back the same
+     * shape, one object per group.
+     */
+    setWorkspaceStartupCommands: (savedId, commandsByGroup = []) => {
+      const entry = get().savedWorkspaces.find((w) => w.id === savedId);
+      if (!entry) return { ok: false, errors: [] };
+      const results = entry.groups.map((group, i) => withStartupCommands(group, commandsByGroup?.[i] ?? {}));
+      if (results.some((r) => !r.ok)) {
+        return { ok: false, errors: results.map((r) => (r.ok ? {} : r.errors)) };
+      }
+      const updated = { ...entry, groups: results.map((r) => r.snapshot) };
+      const next = get().savedWorkspaces.map((w) => (w.id === savedId ? updated : w));
+      set({ savedWorkspaces: next });
+      saveState(SAVED_WORKSPACES_KEY, next);
+      return { ok: true, entry: updated };
+    },
+
+    /**
      * Bring a whole workspace back.
      *
      * `replace` puts the session back the way it was — every saved group, and
@@ -2113,6 +2239,10 @@ export const useTerminalStore = create((set, get, api) => {
      *
      * Everything is spawned BEFORE anything is closed, so a failure partway
      * through leaves the user with what they already had rather than nothing.
+     *
+     * A workspace is a template of the whole desk: every terminal that has a
+     * startup command types it once its shell is ready, in either mode (see
+     * `typeStartupCommand`).
      */
     loadWorkspace: async (savedId, { mode = 'replace' } = {}) => {
       const entry = get().savedWorkspaces.find((w) => w.id === savedId);
@@ -2143,10 +2273,24 @@ export const useTerminalStore = create((set, get, api) => {
         })
       );
 
+      runStartupCommands(made.flatMap((m) => m.startups));
       for (const tabId of doomed) await killTabIfOrphaned(tabId);
       return active.id;
     },
 
+    /**
+     * Re-open a saved group. `mode: 'new-group'` (default) rebuilds it as a
+     * brand-new group, layout and all; `'replace'` drops its terminals into
+     * the active group's active pane. Each terminal respawns at its saved cwd,
+     * falling back to the workspace root when that directory is gone.
+     *
+     * Either way, a terminal whose slot has a startup command types it as soon
+     * as its shell is ready — a saved group with commands is a layout
+     * template. One without is just shells, as it always was.
+     *
+     * Returns the id of the group the terminals landed in, as soon as they are
+     * on screen: the commands follow on their own (`runStartupCommands`).
+     */
     loadSavedGroup: async (savedId, { mode = 'new-group' } = {}) => {
       const entry = get().savedGroups.find((g) => g.id === savedId);
       if (!entry || !Array.isArray(entry.tabs) || entry.tabs.length === 0) return null;
@@ -2157,9 +2301,13 @@ export const useTerminalStore = create((set, get, api) => {
       // at, not for that arrangement to be replaced.
       if (mode === 'replace') {
         const spawned = [];
+        const startups = [];
         for (const saved of entry.tabs) {
           const tab = await spawnTab(saved.title, saved.cwd);
-          if (tab) spawned.push(tab);
+          if (!tab) continue;
+          spawned.push(tab);
+          const command = startupCommandOf(saved);
+          if (command) startups.push({ tabId: tab.id, command });
         }
         if (spawned.length === 0) return null;
 
@@ -2176,6 +2324,7 @@ export const useTerminalStore = create((set, get, api) => {
             activeTabId: spawned[0].id,
           });
         });
+        runStartupCommands(startups);
         return groupId;
       }
 
@@ -2189,6 +2338,7 @@ export const useTerminalStore = create((set, get, api) => {
           activeTabId: made.spawned[0].id,
         })
       );
+      runStartupCommands(made.startups);
       return made.group.id;
     },
 
@@ -2530,6 +2680,9 @@ export const useTerminalStore = create((set, get, api) => {
         // Counted first, and whether or not a tab holds this session yet —
         // see `commandEndsBySession`.
         commandEndsBySession.set(session_id, endsOf(session_id) + 1);
+        // A new prompt: whatever was being typed is gone with the old one,
+        // and the next line is followed from its first key.
+        for (const t of get().tabs) if (t.sessionId === session_id) typedLines.delete(t.id);
         set((state) => {
           // Built inside the same update as the tabs it describes: a second
           // `set` from within an updater is how two writes to one store end up
@@ -2956,6 +3109,7 @@ export const useTerminalStore = create((set, get, api) => {
         console.warn('[TerminalStore] pty_kill failed:', e);
       }
       await disposeTerminalView(tabId);
+      typedLines.delete(tabId);
 
       // `settle` sweeps a dropped tab id out of EVERY group (not just one
       // tree), prunes whichever pane it emptied, and drops a group that ends
@@ -3153,6 +3307,48 @@ export const useTerminalStore = create((set, get, api) => {
       return true;
     },
 
+    /**
+     * Type a layout template's startup command into a terminal it opened.
+     *
+     * The same way, and on the same schedule, as `startAgent` types an agent:
+     * nothing until the shell has drawn its first prompt — its first OSC 133
+     * "D" (`untilPromptReady`) — or, for a shell that never sends one (fish,
+     * sh), until AGENT_PROMPT_WAIT_MS after it started; then the line and an
+     * Enter, `\r`, through `writeRaw`, exactly what pressing Enter sends. The
+     * same on every platform and in every shell: PowerShell, cmd and the
+     * POSIX shells all run a line on `\r`, and the command is the user's own
+     * text, typed as they would type it — nothing is quoted for a shell.
+     *
+     * Typed earlier, the line would be typeahead, echoed once by the tty and
+     * again by the line editor. Not typed at all when the terminal closed
+     * first, or when something is already running in it by then — something
+     * the user started during the wait, which the text would be typed INTO;
+     * that terminal says so instead. Cleaned again here
+     * (`sanitizeStartupCommand`), whoever passed it in: one line, nothing in
+     * it that a line editor would take as a key.
+     *
+     * The terminal remembers the command from the start, so its group saved
+     * again — even before its shell is ready — keeps it as this terminal's
+     * startup command (`suggestStartupCommand`). Resolves with whether it was
+     * typed.
+     */
+    typeStartupCommand: async (tabId, command) => {
+      const { ok, command: line } = sanitizeStartupCommand(command);
+      if (!ok || !line || !get().tabs.some((t) => t.id === tabId)) return false;
+      set((state) => ({
+        tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, startupCommand: line } : t)),
+      }));
+
+      const readiness = await untilPromptReady(tabId);
+      if (readiness === 'gone') return false;
+      if (get().tabs.find((t) => t.id === tabId)?.running) {
+        notifyTerminal(tabId, `startup command not typed — something is already running here: ${line}`);
+        return false;
+      }
+      await get().writeRaw(tabId, `${line}\r`);
+      return true;
+    },
+
     /** Leave the terminal as a plain shell, and stop offering. */
     dismissAgentResume: (tabId) => {
       const targetId = tabId || get().activeTabId;
@@ -3167,6 +3363,9 @@ export const useTerminalStore = create((set, get, api) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      // Every key and every line the app types goes through here, so this is
+      // where the line being typed can be followed to the command it runs.
+      followTyping(tab, data);
       // Both taken before the write: the shell's answer can arrive before
       // `invoke` resolves, and it must still count as an answer to this line.
       const submitted = { at: Date.now(), endsBefore: endsOf(tab.sessionId) };

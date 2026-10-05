@@ -502,6 +502,30 @@ the webview ahead of xterm, and ConPTY has to pass the resize on both ways.
   Pane Zoom* both toggle, and a click on a hidden terminal in the TERMINALS
   panel unzooms onto it.
 
+### V23 — a layout template's startup commands run in PowerShell and cmd
+
+Never run on Windows: the suites hold the typing against a mock shell, and on
+macOS it was checked with zsh only. The command is typed when the shell's first
+OSC 133 "D" arrives — which ConPTY may hold back with the next frame (see V14)
+— or three seconds after the shell started.
+
+- A saved group does not remember which shell each terminal ran — it opens
+  every terminal in Settings ▸ Terminal ▸ Default Shell — so run this once with
+  the default set to PowerShell and once with cmd. Make a group of two
+  terminals, right-click it → *Save Group…*, then the saved entry → *Edit
+  Startup Commands…*: `echo one && echo two` and `cd ..` (both valid in cmd,
+  and in PowerShell 7; in Windows PowerShell 5.1 use `echo one; echo two`).
+  Save; the row shows ▶ 2.
+- Double-click the entry: each new terminal shows its prompt, then its command
+  typed once and run — never twice, never before the prompt (a command echoed
+  above the first prompt is typeahead), and never with a stray character from
+  the `\r` that ends it.
+- Run `ping -t localhost` in a terminal, *Save Group…* while it runs, and open
+  *Edit Startup Commands…*: the field holds `ping -t localhost`. A terminal
+  that only *ran* something earlier comes back empty.
+- In *Edit Startup Commands…*, paste two lines copied from Notepad into a field:
+  it is refused with a message, and nothing is joined into one long line.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

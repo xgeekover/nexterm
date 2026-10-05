@@ -43,6 +43,9 @@ that layout the next time you open it.
   and each terminal's current directory. *Save All Groups…* snapshots every
   group at once under a name, and restoring it brings the entire session back —
   same groups, same arrangements, same directories.
+- **Layout templates.** Give each terminal of a saved group a startup command
+  and opening it starts everything at once — the dev server, the test watcher,
+  the agent — each typed as soon as its shell is ready, tmuxinator-style.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
 - **A real terminal.** xterm.js over a native PTY, with OSC 133 shell
@@ -221,6 +224,29 @@ rename the same way, from their chip or from the TERMINALS panel.
 **Save a group.** Right-click a group in the TERMINALS panel → *Save Group…*.
 It lands under SAVED with its terminal count and age; right-click it to *Load
 in New Group* or *Load into Current Group*.
+
+**Layout templates.** A saved group whose terminals have startup commands is a
+layout template: open it and each terminal types its command the moment its
+shell has drawn its first prompt — the same wait NexTerm uses before typing an
+agent, so nothing is typed ahead of the prompt and echoed twice (a shell that
+never reports its prompt, like fish or sh, gets it after three seconds). It is
+typed as you would type it, with `Enter`, in zsh, bash, PowerShell or cmd
+alike — in the default shell, since a saved group does not remember which
+shell each terminal ran. Right-click the saved group → *Edit Startup
+Commands…* lists its terminals with their directories and a command field
+each; empty means just a shell. Saving a group fills these in for you from
+what is **running** in each
+terminal at that moment — `npm run dev`, a test watcher, or `claude` /
+`opencode` for an agent NexTerm started — and leaves a terminal sitting at a
+prompt empty: the last command of an idle shell is what it did, not what it is
+for, and opening the template would run it again. A saved row with startup
+commands shows ▶ and how many, and its tooltip lists what opening it will run.
+Each command is one line — join several with `&&` or `;` — and a multi-line
+paste is refused with a message rather than run line by line; control
+characters are stripped. Saved workspaces work the same way (the workspace bar
+→ *Edit Startup Commands of a Saved Workspace…*), and restoring one starts
+every group's commands. Restoring the session at launch never runs anything: it
+brings the shells back, as it offers an agent back rather than starting it.
 
 **Save the whole session.** The 💾 on the WORKSPACES section (or *Save All
 Groups…* from the empty-area menu) snapshots every group — layouts and

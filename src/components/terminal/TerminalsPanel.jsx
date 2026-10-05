@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Columns2,
   FolderPlus,
+  Play,
   Plus,
   Rows2,
   Save,
@@ -18,7 +19,9 @@ import { useSystemStore } from '../../stores/systemStore.js';
 import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
+import { StartupCommandsDialog } from './StartupCommandsDialog.jsx';
 import { activityLabel } from '../../lib/tabActivity.js';
+import { startupCommandOf, startupCount } from '../../lib/startupCommands.js';
 import { cn } from '../../lib/utils.js';
 
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
@@ -43,6 +46,18 @@ function collectPanes(node, direction = null, acc = []) {
   }
   for (const child of node.children) collectPanes(child, node.direction, acc);
   return acc;
+}
+
+/**
+ * What a saved group runs when it opens, one terminal per line — for its
+ * tooltip, so that what a double-click will start can be read before it does.
+ */
+function startupSummary(slots) {
+  const lines = (Array.isArray(slots) ? slots : [])
+    .map((slot) => ({ title: slot?.title || 'Terminal', command: startupCommandOf(slot) }))
+    .filter((s) => s.command)
+    .map((s) => `  ${s.title}: ${s.command}`);
+  return lines.length > 0 ? `\nRuns when opened:\n${lines.join('\n')}` : '';
 }
 
 function relativeTime(ts) {
@@ -132,6 +147,8 @@ export function TerminalsPanel() {
   const renameSavedWorkspace = useTerminalStore((s) => s.renameSavedWorkspace);
   const deleteSavedWorkspace = useTerminalStore((s) => s.deleteSavedWorkspace);
   const renameWorkspace = useTerminalStore((s) => s.renameWorkspace);
+  const setStartupCommands = useTerminalStore((s) => s.setStartupCommands);
+  const setWorkspaceStartupCommands = useTerminalStore((s) => s.setWorkspaceStartupCommands);
 
   // Collapsed group ids AND pane ids share one set — pane ids are unique
   // across every group, so they cannot collide.
@@ -141,6 +158,8 @@ export function TerminalsPanel() {
   const [draft, setDraft] = useState(null); // { kind: 'group'|'tab'|'saved'|'workspace', id, value }
   // Selecting a saved group is deliberately inert — see the row's comment.
   const [selectedSavedId, setSelectedSavedId] = useState(null);
+  // "Edit Startup Commands…" open on a saved group or workspace: { kind: 'group'|'workspace', id }.
+  const [startupEditor, setStartupEditor] = useState(null);
   const listRef = useRef(null);
 
   const tabById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
@@ -411,6 +430,14 @@ export function TerminalsPanel() {
       onSelect: () => loadSavedGroup(entry.id, { mode: 'replace' }),
     },
     { type: 'separator', key: 's1' },
+    // What turns a saved group into a layout template: a command for each
+    // terminal to type when it opens.
+    {
+      key: 'startup',
+      label: 'Edit Startup Commands…',
+      icon: Play,
+      onSelect: () => setStartupEditor({ kind: 'group', id: entry.id }),
+    },
     { key: 'rename', label: 'Rename…', onSelect: () => startRename('saved', entry.id, entry.name) },
     { key: 'delete', label: 'Delete', danger: true, onSelect: () => deleteSavedGroup(entry.id) },
   ];
@@ -455,15 +482,40 @@ export function TerminalsPanel() {
       disabledReason: savedWorkspaces.length === 0 ? 'Nothing saved yet' : undefined,
       onSelect: () => setMenu({ ...at, kind: 'workspace-list', id: null }),
     },
+    {
+      key: 'startup',
+      label: 'Edit Startup Commands of a Saved Workspace…',
+      disabled: savedWorkspaces.length === 0,
+      disabledReason: savedWorkspaces.length === 0 ? 'Nothing saved yet' : undefined,
+      onSelect: () => setMenu({ ...at, kind: 'workspace-startup-list', id: null }),
+    },
   ];
+
+  /** How a saved workspace is listed: its size, and how many terminals start something. */
+  const workspaceLabel = (entry) => {
+    const terminals = entry.groups.reduce((n, g) => n + (g.tabs?.length || 0), 0);
+    const startups = entry.groups.reduce((n, g) => n + startupCount(g), 0);
+    return `${entry.name} (${entry.groups.length}g · ${terminals}t${startups ? ` · ▶${startups}` : ''})`;
+  };
 
   const savedWorkspaceListItems = (at) => [
     { key: 'back', label: '‹ Back', icon: ChevronLeft, onSelect: () => setMenu({ ...at, kind: 'workspace-bar', id: null }) },
     { type: 'separator', key: 's0' },
     ...savedWorkspaces.map((entry) => ({
       key: entry.id,
-      label: `${entry.name} (${entry.groups.length}g · ${entry.groups.reduce((n, g) => n + (g.tabs?.length || 0), 0)}t)`,
+      label: workspaceLabel(entry),
       onSelect: () => loadWorkspace(entry.id, { mode: 'replace' }),
+    })),
+  ];
+
+  /** The same list, for choosing which workspace's startup commands to edit. */
+  const workspaceStartupListItems = (at) => [
+    { key: 'back', label: '‹ Back', icon: ChevronLeft, onSelect: () => setMenu({ ...at, kind: 'workspace-bar', id: null }) },
+    { type: 'separator', key: 's0' },
+    ...savedWorkspaces.map((entry) => ({
+      key: entry.id,
+      label: workspaceLabel(entry),
+      onSelect: () => setStartupEditor({ kind: 'workspace', id: entry.id }),
     })),
   ];
 
@@ -523,6 +575,7 @@ export function TerminalsPanel() {
     }
     if (menu.kind === 'workspace-bar') return workspaceBarItems(at);
     if (menu.kind === 'workspace-list') return savedWorkspaceListItems(at);
+    if (menu.kind === 'workspace-startup-list') return workspaceStartupListItems(at);
     if (menu.kind === 'workspace') {
       const entry = savedWorkspaces.find((x) => x.id === menu.id);
       return entry ? workspaceItems(entry) : [];
@@ -597,6 +650,79 @@ export function TerminalsPanel() {
       </div>
     );
   };
+
+  /**
+   * What the startup-commands dialog shows for the entry it is open on, and
+   * where its answer goes — or null when it is closed, or its entry was
+   * deleted while it was open.
+   *
+   * A saved group is one list of its terminals, keyed by slot id. A saved
+   * workspace is one list per group, keyed `index/slot` — a slot id only
+   * names a terminal within its own group — and turned back into the
+   * one-map-per-group shape `setWorkspaceStartupCommands` takes.
+   */
+  const startupEditorProps = () => {
+    if (!startupEditor) return null;
+    const terminalsOf = (slots, keyOf) =>
+      (Array.isArray(slots) ? slots : []).map((slot) => ({
+        key: keyOf(slot),
+        title: slot.title || 'Terminal',
+        cwd: slot.cwd ? cwdLabel(slot.cwd, { platform, homeDir }) : '',
+        command: startupCommandOf(slot),
+      }));
+
+    if (startupEditor.kind === 'group') {
+      const entry = savedGroups.find((g) => g.id === startupEditor.id);
+      if (!entry) return null;
+      return {
+        title: `Startup Commands — ${entry.name}`,
+        intro:
+          'Each terminal types its command as soon as its shell is ready, every time this saved group is opened — that is what makes it a layout template. Leave a field empty for just a shell.',
+        sections: [{ key: 'group', label: null, terminals: terminalsOf(entry.tabs, (slot) => slot.slotId) }],
+        onSave: (drafts) => {
+          const result = setStartupCommands(entry.id, drafts);
+          if (result.ok) setStartupEditor(null);
+          return result;
+        },
+      };
+    }
+
+    const entry = savedWorkspaces.find((w) => w.id === startupEditor.id);
+    if (!entry) return null;
+    const keyFor = (gi, slotId) => `${gi}/${slotId}`;
+    return {
+      title: `Startup Commands — ${entry.name}`,
+      intro:
+        'Each terminal types its command as soon as its shell is ready, every time this workspace is restored or added. Leave a field empty for just a shell.',
+      sections: entry.groups.map((group, gi) => ({
+        key: `group-${gi}`,
+        label: group.name || `Group ${gi + 1}`,
+        terminals: terminalsOf(group.tabs, (slot) => keyFor(gi, slot.slotId)),
+      })),
+      onSave: (drafts) => {
+        const byGroup = entry.groups.map((group, gi) => {
+          const commands = {};
+          for (const slot of Array.isArray(group.tabs) ? group.tabs : []) {
+            const key = keyFor(gi, slot.slotId);
+            if (key in drafts) commands[slot.slotId] = drafts[key];
+          }
+          return commands;
+        });
+        const result = setWorkspaceStartupCommands(entry.id, byGroup);
+        if (result.ok) {
+          setStartupEditor(null);
+          return result;
+        }
+        const errors = {};
+        (result.errors || []).forEach((groupErrors, gi) => {
+          for (const [slotId, reason] of Object.entries(groupErrors || {})) errors[keyFor(gi, slotId)] = reason;
+        });
+        return { ok: false, errors };
+      },
+    };
+  };
+
+  const startupEditorView = startupEditorProps();
 
   return (
     <div className="h-full w-full flex flex-col bg-vsc-sidebar overflow-hidden">
@@ -840,6 +966,10 @@ export function TerminalsPanel() {
             savedGroups.map((entry) => {
               const editing = draft?.kind === 'saved' && draft.id === entry.id;
               const selected = selectedSavedId === entry.id;
+              // A saved group whose terminals start something is a layout
+              // template, and opening it runs those commands — so the row says
+              // how many, and its tooltip says what, before anyone double-clicks.
+              const startups = startupCount(entry);
               return (
                 <div
                   key={entry.id}
@@ -870,7 +1000,7 @@ export function TerminalsPanel() {
                   style={{ paddingLeft: padFor(1) }}
                   title={`${entry.tabs.length} terminals · saved ${relativeTime(
                     entry.savedAt
-                  )}\nDouble-click to load in a new group · right-click for more`}
+                  )}${startupSummary(entry.tabs)}\nDouble-click to load in a new group · right-click for more`}
                   className={cn(
                     ROW,
                     'relative',
@@ -884,7 +1014,17 @@ export function TerminalsPanel() {
                   ) : (
                     <>
                       <span className="truncate">{entry.name}</span>
-                      <span className="ml-auto text-ui-sm text-vsc-muted shrink-0">
+                      <span className="ml-auto flex items-center gap-1 text-ui-sm text-vsc-muted shrink-0">
+                        {startups > 0 && (
+                          <span
+                            data-startup-count={startups}
+                            aria-label={`${startups} startup command${startups === 1 ? '' : 's'}`}
+                            className="flex items-center gap-0.5 text-vsc-fg"
+                          >
+                            <Play size={10} className="shrink-0" />
+                            {startups}
+                          </span>
+                        )}
                         {entry.tabs.length} · {relativeTime(entry.savedAt)}
                       </span>
                     </>
@@ -905,6 +1045,15 @@ export function TerminalsPanel() {
         onClose={() => setMenu(null)}
         items={menuItems()}
       />
+
+      {startupEditorView && (
+        <StartupCommandsDialog
+          // A fresh dialog per entry, so its drafts start from what is saved.
+          key={`${startupEditor.kind}:${startupEditor.id}`}
+          {...startupEditorView}
+          onCancel={() => setStartupEditor(null)}
+        />
+      )}
     </div>
   );
 }

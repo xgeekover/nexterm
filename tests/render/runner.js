@@ -848,6 +848,134 @@ scenario(
   }
 );
 
+// ---- Layout templates: startup commands ----------------------------------------
+
+/** A saved group whose first terminal starts the dev server when it opens. */
+const savedTemplate = {
+  id: 'saved-dev',
+  name: 'Dev',
+  savedAt: Date.now() - 60e3,
+  tabs: [
+    { slotId: 'slot-0', title: 'server', cwd: '/workspace/api', command: 'npm run dev' },
+    { slotId: 'slot-1', title: 'shell', cwd: '/workspace' },
+  ],
+  activePaneId: 'saved-pane-1',
+  tree: { type: 'leaf', id: 'saved-pane-1', tabIds: ['slot-0', 'slot-1'], activeTabId: 'slot-0' },
+};
+
+/** Markup of the TERMINALS panel's row for a saved group, found by its name. */
+function savedRow(html, name) {
+  // React writes the bare `data-row` out as `data-row="true"`.
+  const rows = [...html.matchAll(/<div\b[^>]*\sdata-row="[^"]*"[^>]*>[\s\S]*?<\/div>/g)].map((m) => m[0]);
+  return rows.find((row) => visibleText(row).includes(name) && /Double-click to load/.test(row)) ?? null;
+}
+
+scenario(
+  'RN-35',
+  'a saved group with a startup command says so, and its tooltip says what will run',
+  () => {
+    reset();
+    useTerminalStore.setState({ savedGroups: [savedTemplate, { ...savedTemplate, id: 'saved-plain', name: 'Plain', tabs: [savedTemplate.tabs[1]] }] });
+  },
+  (html) => {
+    const row = savedRow(html, 'Dev');
+    expectThat(row, 'the saved group "Dev" is not listed');
+    expectThat(/\sdata-startup-count="1"/.test(row), 'the row does not show that one terminal starts something');
+    const title = visibleText(/\stitle="([^"]*)"/.exec(row)?.[1] ?? '');
+    expectThat(
+      title.includes('Runs when opened:') && title.includes('server: npm run dev'),
+      `the tooltip does not say what opening it runs: ${JSON.stringify(title)}`
+    );
+    const plain = savedRow(html, 'Plain');
+    expectThat(plain && !/data-startup-count/.test(plain), 'a group with no command is marked as starting one');
+    expectThat(!/Runs when opened/.test(plain ?? ''), 'a group with no command has a "runs" tooltip');
+  }
+);
+
+/**
+ * The dialog opens from a right-click, which a server render never makes, so
+ * these draw it directly — as RN-29 draws the bell's list.
+ */
+const { StartupCommandsDialog, StartupCommandField } = await import(
+  '../../src/components/terminal/StartupCommandsDialog.jsx'
+);
+
+{
+  const id = 'RN-36';
+  const description = 'Edit Startup Commands lists every terminal with its directory and command, grouped for a workspace';
+  const started = Date.now();
+  try {
+    reset();
+    const html = renderToString(
+      React.createElement(StartupCommandsDialog, {
+        title: 'Startup Commands — Desk',
+        intro: 'Each terminal types its command as soon as its shell is ready.',
+        sections: [
+          {
+            key: 'group-0',
+            label: 'Backend',
+            terminals: [
+              { key: '0/slot-0', title: 'server', cwd: '~/api', command: 'npm run dev' },
+              { key: '0/slot-1', title: 'repl', cwd: '~/api', command: '' },
+            ],
+          },
+          { key: 'group-1', label: 'Agents', terminals: [{ key: '1/slot-0', title: 'agent', cwd: '~', command: 'claude' }] },
+        ],
+        onSave() {},
+        onCancel() {},
+      })
+    );
+    expectThat(/\srole="dialog"/.test(html) && /\saria-modal="true"/.test(html), 'not drawn as a modal dialog');
+    expectText(html, 'Startup Commands — Desk');
+    for (const words of ['Backend', 'Agents', 'server', 'repl', 'agent', '~/api']) expectText(html, words);
+    const fields = attrOrder(html, 'data-startup-field');
+    expectThat(
+      JSON.stringify(fields) === JSON.stringify(['0/slot-0', '0/slot-1', '1/slot-0']),
+      `the fields are drawn as ${JSON.stringify(fields)}`
+    );
+    const values = [...html.matchAll(/<input\b[^>]*\svalue="([^"]*)"/g)].map((m) => m[1]);
+    expectThat(
+      JSON.stringify(values) === JSON.stringify(['npm run dev', '', 'claude']),
+      `the fields hold ${JSON.stringify(values)}`
+    );
+    expectThat(/placeholder="just a shell"/.test(html), 'an empty field does not say it means just a shell');
+    const buttons = buttonsIn(html).map((b) => b.text);
+    expectThat(buttons.includes('Save') && buttons.includes('Cancel'), `the buttons are ${JSON.stringify(buttons)}`);
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+{
+  const id = 'RN-37';
+  const description = 'a refused command says why, under its own field';
+  const started = Date.now();
+  try {
+    reset();
+    const reason = 'A startup command is one line — it is typed into the shell and run with one Enter.';
+    const html = renderToString(
+      React.createElement(StartupCommandField, {
+        id: 'slot-0',
+        title: 'server',
+        cwd: '~/api',
+        value: 'npm install',
+        error: reason,
+        onChange() {},
+      })
+    );
+    expectText(html, reason);
+    expectThat(/\srole="alert"/.test(html), 'the reason is not announced');
+    expectThat(/\saria-invalid="true"/.test(html), 'the field is not marked invalid');
+    expectThat(/\saria-describedby="startup-slot-0-error"/.test(html), 'the field does not point at its reason');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');
