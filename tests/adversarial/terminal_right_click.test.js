@@ -547,7 +547,9 @@ describe('Right-click: the binding, on a page that dispatches like a browser', (
         ['auxclick:2', 'contextmenu:2', 'link:mousedown:2', 'link:mouseup:2', 'mousedown:2'].sort(),
         `${platform}: every part reached xterm's element and screen`
       );
-      assert.equal(events.menu.defaultPrevented, false, `${platform}: the webview's menu opens, as before`);
+      // The webview's own menu does not open (on macOS it took the release
+      // with it, measured in the app) — but every event still reached xterm.
+      assert.equal(events.menu.defaultPrevented, true, `${platform}: no webview menu`);
       assert.equal(events.up.defaultPrevented, false);
       assert.equal(p.system.reads, 0, 'nothing read');
       assert.equal(p.system.clipboard, '', 'nothing copied');
@@ -572,6 +574,11 @@ describe('Right-click: the binding, on a page that dispatches like a browser', (
     assert.equal(events.menu.defaultPrevented, false);
     assert.deepEqual(p.sent, []);
     assert.equal(p.system.reads, 0);
+    // Nor does 'default' cancel the menu of a Shift+right-click — that is
+    // copyPaste's alone (RC-12).
+    const shifted = p.rightClick({ shiftKey: true });
+    await p.settled();
+    assert.equal(shifted.menu.defaultPrevented, false, "'default' leaves a Shift+right-click's menu alone");
 
     p.settings.terminalRightClick = 'copyPaste';
     p.seen.length = 0;

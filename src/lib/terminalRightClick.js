@@ -194,7 +194,17 @@ class TerminalRightClickAddon {
       behavior: this._behavior(),
       hasSelection: hasVisibleSelection(term, { findOpen: this._isFindOpen() }),
     });
-    if (decision.action === 'pass') return;
+    if (decision.action === 'pass') {
+      // Shift+right-click while this binding is on: the program's, through
+      // xterm, as it always was — but not the webview's own menu. Left to
+      // open, that menu (Back / Reload / Inspect) is no use over a terminal,
+      // and on macOS it takes the button's release with it: the program was
+      // told the button went down and never that it came up (measured in the
+      // app: mousedown, contextmenu, no mouseup). Only the menu's default is
+      // cancelled; every event still reaches xterm.
+      if (e.shiftKey && this._behavior() === 'copyPaste') this._gesture = { menuDefault: true };
+      return;
+    }
 
     // From here on the click is the terminal's. Cancelled, so the webview
     // neither moves the focus nor starts a selection; stopped, so xterm
@@ -219,6 +229,12 @@ class TerminalRightClickAddon {
   /** The release, auxclick or context menu of a handled press: stopped too. */
   _follow(e, part) {
     const gesture = this._gesture;
+    if (part === 'menu' && gesture?.menuDefault) {
+      // A Shift+right-click passed on to xterm: no menu, nothing else.
+      gesture.menuDefault = false;
+      e.preventDefault?.();
+      return;
+    }
     if (!gesture?.[part]) return;
     // The menu is the press's own whatever button an engine reports it with;
     // a release or an auxclick has to be the right button's.
