@@ -463,7 +463,14 @@ const { NotificationList } = await import('../../src/components/layout/Notificat
 
 /** The bell's own button — the one that opens the list — as `{ label, title }`, or null. */
 function bellButton(html) {
-  const attrs = /<button\b(?=[^>]*\saria-expanded=)([^>]*)>/.exec(html)?.[1];
+  // The button that holds the count badge — not just the first one with
+  // `aria-expanded`: off macOS the title bar's Application Menu comes first,
+  // and the suite decides "off macOS" from `navigator.platform`, which Node 20
+  // (CI, on every OS) does not have and Node 24 does.
+  const button = [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].find(([, , inner]) =>
+    /\sdata-notification-count[=\s>]/.test(inner)
+  );
+  const attrs = button?.[1];
   if (attrs === undefined) return null;
   return {
     label: visibleText(/\saria-label="([^"]*)"/.exec(attrs)?.[1] ?? ''),
