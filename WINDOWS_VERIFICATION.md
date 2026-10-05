@@ -446,11 +446,13 @@ OpenCode as well.
 
 - In `opencode`, type a word, then `Shift+Enter` and `Ctrl+Enter`: each
   inserts a newline. `Enter` submits, `Alt+Enter` still inserts a newline.
-  `Shift+Enter` doing nothing at all means conhost dropped the key: note the
-  Windows build.
+  `Shift+Enter` doing nothing at all means conhost dropped the key; text like
+  `[27;2;13~` in the input, or OpenCode acting as if `Esc` was pressed, means
+  conhost split it. Either way note the Windows build: the encoding can be
+  turned off where `windowsPty` is set.
 - Quit OpenCode. At the PowerShell prompt `Shift+Enter` runs the line, as in
-  0.9.0, with nothing like `;2;13~` typed into it. In `claude` it is plain
-  `Enter`, as in 0.9.0.
+  0.9.0, with nothing like `;2;13~` typed into it. In `claude`, with nothing
+  typed, it does what `Enter` does, as in 0.9.0.
 
 ## What the first run found
 
