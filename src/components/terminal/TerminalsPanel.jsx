@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Archive,
   ChevronDown,
@@ -1046,14 +1047,21 @@ export function TerminalsPanel() {
         items={menuItems()}
       />
 
-      {startupEditorView && (
-        <StartupCommandsDialog
-          // A fresh dialog per entry, so its drafts start from what is saved.
-          key={`${startupEditor.kind}:${startupEditor.id}`}
-          {...startupEditorView}
-          onCancel={() => setStartupEditor(null)}
-        />
-      )}
+      {/* Portaled onto <body>, as ContextMenu is: this panel keeps the
+          transform its mount animation ends on (`.animate-panel-in`), which
+          makes it the containing block for anything `position: fixed` inside
+          it — a dialog drawn here would be squeezed into the side bar and
+          clipped by it, not centred over the window. */}
+      {startupEditorView &&
+        createPortal(
+          <StartupCommandsDialog
+            // A fresh dialog per entry, so its drafts start from what is saved.
+            key={`${startupEditor.kind}:${startupEditor.id}`}
+            {...startupEditorView}
+            onCancel={() => setStartupEditor(null)}
+          />,
+          document.body
+        )}
     </div>
   );
 }
