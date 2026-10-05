@@ -68,6 +68,10 @@ class BrowserMockBridge {
     // What `show_desktop_notification` was asked to show, oldest first. There
     // is no desktop here; the suites read this instead.
     this.desktopNotifications = [];
+    // What `clipboard_read` answers — the backend's own shape. There is no
+    // system clipboard here: the suites put on it what a right-click should
+    // find, and a copy made in the page never reaches it.
+    this.clipboard = { text: '', has_image: false };
   }
 
   listen(event, callback) {
@@ -628,6 +632,14 @@ class BrowserMockBridge {
         this.desktopNotifications.push({ title: String(title), body: String(body) });
         if (this.desktopNotifications.length > 50) this.desktopNotifications.shift();
         return false;
+      }
+
+      // 20. clipboard_read — the backend reads the system clipboard for a
+      // right-click paste: its text ('' when it holds none) and whether an
+      // image is on it. The mock answers with whatever `this.clipboard` holds.
+      case 'clipboard_read': {
+        const { text = '', has_image = false } = this.clipboard || {};
+        return { text: typeof text === 'string' ? text : '', has_image: has_image === true };
       }
 
       default:

@@ -591,6 +591,43 @@ scenario(
   }
 );
 
+// ---- What a right-click does ------------------------------------------------
+
+/** The Right Click row's select: the values it offers, and the one drawn as chosen. */
+function rightClickSelect(html) {
+  const at = html.indexOf('terminal.integrated.rightClickBehavior');
+  if (at === -1) return null;
+  const select = /<select\b[^>]*>([\s\S]*?)<\/select>/.exec(html.slice(at))?.[1];
+  if (select === undefined) return null;
+  const options = [...select.matchAll(/<option\b([^>]*)>/g)].map(([, attrs]) => ({
+    value: /\svalue="([^"]*)"/.exec(attrs)?.[1] ?? null,
+    selected: /\sselected=""/.test(attrs),
+  }));
+  return { values: options.map((o) => o.value), chosen: options.filter((o) => o.selected).map((o) => o.value) };
+}
+
+for (const [id, value] of [
+  ['RN-31', 'copyPaste'],
+  ['RN-32', 'default'],
+]) {
+  scenario(
+    id,
+    `the settings window offers the right-click, with ${value} drawn as chosen`,
+    () => {
+      reset();
+      useSettingsStore.setState({ isSettingsModalOpen: true });
+      useSettingsStore.getState().setSetting('terminalRightClick', value);
+    },
+    (html) => {
+      expectText(html, 'Right Click');
+      const select = rightClickSelect(html);
+      expectThat(select, 'the Right Click row draws no select');
+      expectThat(select.values.join() === 'copyPaste,default', `it offers ${JSON.stringify(select.values)}`);
+      expectThat(select.chosen.join() === value, `it draws ${JSON.stringify(select.chosen)} as chosen, not ${value}`);
+    }
+  );
+}
+
 // ---- Dragging an editor tab over a tab strip ---------------------------------
 
 /**

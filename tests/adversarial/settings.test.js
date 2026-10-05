@@ -42,6 +42,7 @@ const SETTINGS_KEYS = [
   'terminalStickyHeader',
   'terminalCopyOnSelect',
   'terminalMouseReporting',
+  'terminalRightClick',
   'terminalDefaultShell',
   'terminalDefaultCwd',
   'terminalDefaultCwdPath',
@@ -104,6 +105,9 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalCopyOnSelect: false,
       terminalMouseReporting: false,
       terminalProgramNotifications: false,
+      // The one default that depends on the platform: the probe is whichever
+      // value this platform does not start with.
+      terminalRightClick: S.getState().settingsDefaults.terminalRightClick === 'copyPaste' ? 'default' : 'copyPaste',
       editorFontSize: 16,
       editorTabSize: 4,
       editorWordWrap: true,

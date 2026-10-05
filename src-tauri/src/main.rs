@@ -145,6 +145,7 @@ fn main() {
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
             commands::notification::show_desktop_notification,
+            commands::clipboard::clipboard_read,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");

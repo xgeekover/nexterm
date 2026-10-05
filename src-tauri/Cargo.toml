@@ -34,6 +34,10 @@ tauri-plugin-window-state = "2"
 # (OpenCode, Claude Code — see src/lib/programNotifications.js). Shown from
 # Rust, by `show_desktop_notification` in src/commands/notification.rs.
 tauri-plugin-notification = "2"
+# The clipboard's text, for a right-click paste in a terminal — read here and
+# not by the webview; src/commands/clipboard.rs says why. Text only: with
+# `image-data` arboard can tell an image is there only by decoding all of it.
+arboard = { version = "3.6", default-features = false }
 
 # getuid(), so the shell-integration files go somewhere only this user can reach.
 [target.'cfg(unix)'.dependencies]
@@ -42,3 +46,13 @@ libc = "0.2"
 # The Windows build number, which the terminal needs to know how ConPTY wraps lines.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+# Whether an image is on the clipboard, without reading it
+# (src/commands/clipboard.rs). arboard reads the text through it already.
+clipboard-win = "5.4"
+
+# Whether an image is on the pasteboard, without reading it
+# (src/commands/clipboard.rs). arboard reads the text through these already.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
