@@ -1,0 +1,180 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/wheel_headless.test.js.
+
+  Four REAL `@xterm/xterm` 6 terminals, each at a fixed on-screen rect so the
+  Node-side driver can aim CDP `Input.dispatchMouseEvent` wheels at them by
+  plain viewport coordinates (`rect`):
+
+    app     made by the app's own `getOrCreateTerminal`
+            (src/components/terminal/terminalRegistry.js) — every installer,
+            in the order the app runs them, mouse reporting included — then
+            attached and sized the way TerminalView attaches it
+    bare    xterm and the two wheel rules alone (`installPagerWheel`,
+            `installScrollbackWheel`), no mouse-reporting gate: a program's
+            tracking applies on the normal screen too
+    stock   xterm and nothing else — the control: xterm 6's own wheel
+    flat    as bare, made with `scrollback: 0`
+
+  All four draw 14 px monospace at line height 1 — 16 px rows in headless
+  Chromium; the driver reads the real height and counts against it. `reset`
+  replaces a pane's terminal with a fresh one, 400 lines written and the view
+  at the bottom, so every case starts with nothing carried over from the
+  last (the app's goes through `disposeTerminal`, as closing a tab does).
+  `write` resolves only once xterm's own write callback fires — a parse
+  barrier, not a fire-and-forget write.
+
+  Not part of the app's own routes; loaded only by that test, over the vite
+  dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; background: #111; }
+      .pane { position: fixed; width: 560px; height: 240px; overflow: hidden; }
+      #app { left: 0; top: 0; }
+      #bare { left: 600px; top: 0; }
+      #stock { left: 0; top: 260px; }
+      #flat { left: 600px; top: 260px; }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="pane"></div>
+    <div id="bare" class="pane"></div>
+    <div id="stock" class="pane"></div>
+    <div id="flat" class="pane"></div>
+    <script type="module">
+      import { Terminal } from '@xterm/xterm';
+      import '@xterm/xterm/css/xterm.css';
+      import { useSettingsStore } from '../../../src/stores/settingsStore.js';
+      import { getOrCreateTerminal, disposeTerminal } from '../../../src/components/terminal/terminalRegistry.js';
+      import { installPagerWheel, installScrollbackWheel } from '../../../src/lib/terminalCompat.js';
+
+      const COLS = 60;
+      const ROWS = 14;
+      const FONT = { fontFamily: 'monospace', fontSize: 14, lineHeight: 1 };
+
+      // What the app's terminal is made with: its settings, set as a user would.
+      useSettingsStore.setState({
+        terminalFontFamily: FONT.fontFamily,
+        terminalFontSize: FONT.fontSize,
+        terminalLineHeight: FONT.lineHeight,
+        terminalScrollback: 1000,
+      });
+
+      let appTabs = 0;
+      let appTabId = null;
+
+      function tracked(term) {
+        const data = [];
+        term.onData((d) => data.push(d));
+        return { term, data };
+      }
+
+      const makers = {
+        app() {
+          if (appTabId) disposeTerminal(appTabId);
+          appTabId = `wheel-harness-${(appTabs += 1)}`;
+          const entry = getOrCreateTerminal(appTabId, {});
+          document.getElementById('app').replaceChildren(entry.container);
+          entry.term.resize(COLS, ROWS);
+          return tracked(entry.term);
+        },
+        bare: () => plain('bare', { wheel: true }),
+        stock: () => plain('stock', { wheel: false }),
+        flat: () => plain('flat', { wheel: true, scrollback: 0 }),
+      };
+
+      function plain(id, { wheel, scrollback = 1000 }) {
+        terms[id]?.term.dispose();
+        const term = new Terminal({ cols: COLS, rows: ROWS, scrollback, allowProposedApi: true, ...FONT });
+        const made = tracked(term);
+        term.open(document.getElementById(id));
+        if (wheel) {
+          // As terminalRegistry.js does it: both after `open`.
+          installPagerWheel(term);
+          installScrollbackWheel(term);
+        }
+        return made;
+      }
+
+      const terms = {};
+      const write = (which, text) => new Promise((resolve) => terms[which].term.write(text, resolve));
+
+      let lines = '';
+      for (let i = 0; i < 400; i += 1) lines += `line ${i}\r\n`;
+
+      async function reset(which) {
+        terms[which] = makers[which]();
+        await write(which, lines);
+        terms[which].term.scrollToBottom();
+        terms[which].data.length = 0;
+        return true;
+      }
+
+      await Promise.all(Object.keys(makers).map(reset));
+
+      const screen = (which) => terms[which].term.element.querySelector('.xterm-screen');
+      const slider = (which) =>
+        terms[which].term.element.querySelector('.xterm-scrollable-element > .scrollbar.vertical > .slider');
+
+      window.__w = {
+        reset,
+        write,
+        /** Where the pane's screen is, in viewport coordinates — where to aim a wheel. */
+        rect: (which) => {
+          const r = screen(which).getBoundingClientRect();
+          return { left: r.left, top: r.top, width: r.width, height: r.height };
+        },
+        /** One row's height in CSS px, as drawn. */
+        cellHeight: (which) => screen(which).getBoundingClientRect().height / terms[which].term.rows,
+        rows: (which) => terms[which].term.rows,
+        viewportY: (which) => terms[which].term.buffer.active.viewportY,
+        baseY: (which) => terms[which].term.buffer.active.baseY,
+        bufferType: (which) => terms[which].term.buffer.active.type,
+        mode: (which) => terms[which].term.modes.mouseTrackingMode,
+        scrollToLine: (which, line) => terms[which].term.scrollToLine(line),
+        data: (which) => terms[which].data.join(''),
+        clearData: (which) => {
+          terms[which].data.length = 0;
+        },
+        /** The slider's top in px, as xterm 6's scrollable element placed it. */
+        sliderTop: (which) => parseFloat(slider(which)?.style.top ?? 'NaN'),
+        /**
+         * Where the scrollable element itself is, in rows — private to xterm
+         * 6, read only to show its scrollbar is on the row the viewport shows.
+         */
+        scrollTopRows: (which) => {
+          const core = terms[which].term._core;
+          const top = core._viewport._scrollableElement.getScrollPosition().scrollTop;
+          return top / core._renderService.dimensions.css.cell.height;
+        },
+        /**
+         * Put the stock terminal's scrollable element exactly on `line`. Its
+         * own wheel leaves it between rows, which `scrollToLine` keeps; going
+         * to the bottom without smooth scrolling (private) lands on a row.
+         */
+        alignStock: (line) => {
+          const term = terms.stock.term;
+          term._core.scrollToBottom(true);
+          term.scrollToLine(line);
+        },
+        /**
+         * A synthetic wheel over the middle of the pane's screen — the only way
+         * to make a line- or page-mode event, which CDP cannot. Returns whether
+         * something cancelled it.
+         */
+        syntheticWheel: (which, init) => {
+          const r = screen(which).getBoundingClientRect();
+          const x = r.left + r.width / 2;
+          const y = r.top + r.height / 2;
+          const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: x, clientY: y, ...init });
+          (document.elementFromPoint(x, y) ?? screen(which)).dispatchEvent(event);
+          return event.defaultPrevented;
+        },
+        ready: true,
+      };
+    </script>
+  </body>
+</html>

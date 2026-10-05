@@ -11,7 +11,7 @@
  *     back, and redraws the cursor of the FOCUSED terminal as it blinks. An
  *     unfocused terminal with no output never draws — which is what made it
  *     the least recently drawn context, and WebKit's victim.
- *   - addon-webgl 0.18: `activate` asks the canvas for a context (which may
+ *   - addon-webgl 0.18/0.19: `activate` asks the canvas for a context (which may
  *     evict another), a renderer draws through it, and a lost context is
  *     reported through `onContextLoss` only after a 3 s wait for a restore.
  *     `dispose()` removes the canvas — the context is the collector's then —
@@ -54,7 +54,25 @@ export class Terminal {
     this.options = { ...options };
     this.cols = 80;
     this.rows = 24;
-    this.unicode = { activeVersion: '6' };
+    // xterm's unicode handling: a version must be registered before it can be
+    // made active, as `@xterm/addon-unicode-graphemes` does on activation.
+    const versions = ['6'];
+    let activeVersion = '6';
+    this.unicode = {
+      get versions() {
+        return versions.slice();
+      },
+      get activeVersion() {
+        return activeVersion;
+      },
+      set activeVersion(version) {
+        if (!versions.includes(version)) throw new Error(`unknown Unicode version "${version}"`);
+        activeVersion = version;
+      },
+      register(provider) {
+        versions.push(provider.version);
+      },
+    };
     this.modes = { mouseTrackingMode: 'none' };
     this.buffer = {
       active: { type: 'normal', cursorX: 0, cursorY: 0, baseY: 0, viewportY: 0, length: 0, getLine: () => undefined },
@@ -163,8 +181,13 @@ export class FitAddon {
   fit() {}
 }
 
-export class Unicode11Addon {
-  activate() {}
+/** As @xterm/addon-unicode-graphemes 0.4: registers its providers and switches to the grapheme one. */
+export class UnicodeGraphemesAddon {
+  activate(term) {
+    term.unicode.register({ version: '15' });
+    term.unicode.register({ version: '15-graphemes' });
+    term.unicode.activeVersion = '15-graphemes';
+  }
 
   dispose() {}
 }
@@ -327,7 +350,7 @@ export function acquireAtlas() {
 }
 
 /**
- * addon-webgl 0.18's shared TextureAtlas, as far as a page merge goes.
+ * addon-webgl's shared TextureAtlas (0.18, and 0.19 unchanged), as far as a page merge goes.
  */
 export class AtlasDouble {
   constructor() {
@@ -349,7 +372,7 @@ export class AtlasDouble {
     return this._requestClearModel;
   }
 
-  /** Four pages become one twice their size; 0.18 never resets the flag. */
+  /** Four pages become one twice their size; 0.18 and 0.19 never reset the flag. */
   merge() {
     this.merges += 1;
     const merged = { canvas: { width: 1024 }, version: 1 };

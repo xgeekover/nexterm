@@ -1,5 +1,6 @@
 /**
- * A stand-in for xterm 5.5, shared by mouse_reporting.test.js (the policy —
+ * A stand-in for xterm 5.5 and 6.0 (whose mouse service, DECSET handling and
+ * forced-selection rule are the same), shared by mouse_reporting.test.js (the policy —
  * which protocol is in force, selection, copy on select) and
  * mouse_reporting_drag.test.js (the held-button, pure-upgrade-only mechanics
  * that fix 94ec8d6's intermittent loss of drag motion — see

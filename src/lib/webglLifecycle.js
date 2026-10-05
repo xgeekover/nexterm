@@ -59,7 +59,7 @@ export const GPU_RETRY_DELAYS_MS = [1000, 5000, 30000];
 /** A renderer that lived this long was healthy: its loss starts a fresh count. */
 export const GPU_STABLE_MS = 60000;
 
-/** Every page addon-webgl 0.18 adds to a glyph atlas starts at this size. */
+/** Every page addon-webgl (0.18, 0.19) adds to a glyph atlas starts at this size. */
 export const ATLAS_PAGE_SIZE = 512;
 
 /**
@@ -239,7 +239,10 @@ export function gpuFailure({ failures = 0, createdAt = null } = {}, now = 0) {
  * merged page lands on a texture unit whose recorded version equals the new
  * page's, so the texture is never uploaded and every glyph on that page is
  * drawn from the old one — fragments (xterm.js #5847; the fix, #5883, ships in
- * addon-webgl 0.20, which needs xterm 6.1). A merge is the only thing that
+ * addon-webgl 0.20, which needs xterm 6.1). 0.19, the line for xterm 6.0,
+ * merges the same way: measured headless with this repair switched off, three
+ * merges left a texture unit 93% stale and 3018 pixels wrong, on screen and in
+ * a terminal hidden through them; with it, none. A merge is the only thing that
  * adds a page larger than the size every new page starts at, and the addon's
  * public `onAddTextureAtlasCanvas` reports every page added.
  */
@@ -270,7 +273,8 @@ export function claimAtlasMergePage(canvas, handled) {
 }
 
 /**
- * The renderer and WebGL context inside an addon-webgl 0.18 `WebglAddon`.
+ * The renderer and WebGL context inside an addon-webgl `WebglAddon` (0.18 and
+ * 0.19 name them alike).
  *
  * NexTerm reads the addon's private fields only through this and the two
  * atlas helpers below (`_renderer`, the WebglRenderer, and its `_gl`). Either
@@ -365,11 +369,19 @@ function rendererGrid(renderer) {
  * context is made (`mustDrawScreenFirst`), and `flush` sends the commands on
  * at once — Chromium ranks contexts by their last flush, not their last draw.
  *
+ * Never inside a synchronized update (DEC 2026, `CSI ? 2026 h` … `l`): the
+ * program has said the screen is half written, and xterm holds every frame
+ * back until it says otherwise. This draw goes round xterm's own render
+ * service, so it has to hold back as well — measured: a terminal shown again
+ * mid-update, or an atlas repair, drew the half-written frame. Returns false
+ * then, and xterm draws the whole viewport once the update ends.
+ *
  * @returns {boolean} whether a frame was drawn
  */
-export function drawWebglNow(addon, { cols, rows } = {}, { flush = false } = {}) {
+export function drawWebglNow(addon, { cols, rows, modes } = {}, { flush = false } = {}) {
   const { renderer, gl } = webglInternals(addon);
   if (!renderer || typeof renderer.renderRows !== 'function' || !(rows > 0)) return false;
+  if (modes?.synchronizedOutputMode) return false;
   try {
     if (gl && gl.isContextLost()) return false;
     const grid = rendererGrid(renderer);
@@ -388,7 +400,7 @@ export function drawWebglNow(addon, { cols, rows } = {}, { flush = false } = {})
  * Repair one renderer after its glyph atlas merged pages, in place — no new
  * renderer, so no new context.
  *
- * A merge leaves two things wrong in addon-webgl 0.18 (#5847): a texture unit
+ * A merge leaves two things wrong in addon-webgl 0.18 and 0.19 (#5847): a texture unit
  * can keep the page it held before (the recorded version happens to equal the
  * new page's, so the page is never uploaded), and the cells built before the
  * merge still point at where their glyphs used to be. `GlyphRenderer.setAtlas`
@@ -416,7 +428,7 @@ export function repairWebglAtlas(addon) {
 }
 
 /**
- * End the whole-model rebuild addon-webgl 0.18 asks every renderer for on
+ * End the whole-model rebuild addon-webgl 0.18/0.19 asks every renderer for on
  * every frame after a merge: the atlas raises `_requestClearModel` and never
  * lowers it (#5883 does). Only once every renderer drawing from `atlas` has
  * been through `repairWebglAtlas` — the flag is what told the others to

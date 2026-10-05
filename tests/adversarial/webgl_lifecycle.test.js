@@ -17,6 +17,7 @@
  * they add up to, on a model of each engine's cap with the real registry
  * driving it, is `webgl_engine_model.test.js`.
  */
+import { readFileSync } from 'node:fs';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import {
   GPU_CONTEXT_BUDGET,
@@ -47,7 +48,7 @@ const term = (over = {}) => ({
 });
 
 /**
- * An addon-webgl 0.18 WebglAddon as far as the release helper can see it:
+ * An addon-webgl WebglAddon (0.18 and 0.19 alike) as far as the release helper can see it:
  * `_renderer._gl`, and a dispose that tears the renderer down.
  */
 function fakeAddon({ lost = false, extension = true, disposeThrows = false, renderer = true } = {}) {
@@ -288,6 +289,33 @@ describe('WebGL contexts: a terminal being shown', () => {
     assert.equal(drawWebglNow({}, { cols: 80, rows: 24 }), false, 'a version without `_renderer`');
     const broken = { _renderer: { renderRows() { throw new Error('context lost'); } } };
     assert.equal(drawWebglNow(broken, { cols: 80, rows: 24 }), false);
+  });
+
+  test('GL-27: nothing is drawn in the middle of a synchronized update (DEC 2026) — xterm draws it when it ends', () => {
+    const calls = [];
+    const renderer = {
+      dimensions: { css: { canvas: { width: 80 * 7, height: 24 * 18 }, cell: { width: 7, height: 18 } } },
+      handleResize: (c, r) => calls.push(`handleResize(${c},${r})`),
+      renderRows: (a, b) => calls.push(`renderRows(${a},${b})`),
+    };
+    const addon = { _renderer: renderer };
+    // `term.modes.synchronizedOutputMode`, as xterm 6 reports it between `CSI ? 2026 h` and `l`.
+    const midUpdate = { cols: 100, rows: 30, modes: { synchronizedOutputMode: true } };
+    assert.equal(drawWebglNow(addon, midUpdate), false);
+    assert.equal(drawWebglNow(addon, midUpdate, { flush: true }), false, 'not even ahead of a new context');
+    assert.deepEqual(calls, [], 'neither resized nor drawn: the program said the screen is half written');
+    assert.equal(drawWebglNow(addon, { cols: 80, rows: 24, modes: { synchronizedOutputMode: false } }), true);
+    assert.deepEqual(calls, ['renderRows(0,23)'], 'and drawn as usual once the update is over');
+  });
+
+  test('GL-28: the registry hands xterm the whole viewport when it could not draw an atlas repair now', () => {
+    const src = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
+    const repair = src.slice(src.indexOf('function repairAtlas()'), src.indexOf('function reconcileGpus()'));
+    assert.match(
+      repair,
+      /if \(entry\.attachCount > 0 && drawWebglNow\(entry\.gpu, entry\.term\)\) \{[\s\S]*?\} else \{[\s\S]*?entry\.term\.refresh\(0, entry\.term\.rows - 1\);/,
+      'hidden or mid-update alike: the repaired model is drawn in full by the next frame'
+    );
   });
 });
 

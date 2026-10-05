@@ -12,7 +12,7 @@
  *
  *   MR  the decisions, pure — which protocol is in force, what each DECSET /
  *       DECRST a program sends does
- *   MB  the binding against a stand-in xterm that does what xterm 5.5 does
+ *   MB  the binding against a stand-in xterm that does what xterm 5.5 and 6.0 do
  *       with those sequences (InputHandler.setModePrivate / resetModePrivate,
  *       CoreMouseService, BufferSet), so the wiring — parser handlers tried
  *       before xterm's own, the switch of screen, the end of a write — is
@@ -515,7 +515,7 @@ function page(term) {
   return { view, container, doc };
 }
 
-/** What xterm 5.5 does with a press: select (forced or not) or report it. */
+/** What xterm (5.5 and 6.0 alike) does with a press: select (forced or not) or report it. */
 function xtermVerdict(term, e, { mac }) {
   const tracking = term.modes.mouseTrackingMode !== 'none';
   if (!tracking) return 'select';

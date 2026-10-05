@@ -18,13 +18,20 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
 import '@xterm/xterm/css/xterm.css';
 import { listen } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
-import { activateUnicode11, fitAndReport, windowsPtyFor } from '../../lib/terminalCompat.js';
+import {
+  activateGraphemeWidths,
+  fitAndReport,
+  installPagerWheel,
+  installScrollbackWheel,
+  installXtVersionReply,
+  windowsPtyFor,
+} from '../../lib/terminalCompat.js';
 import {
   claimAtlasMergePage,
   drawWebglNow,
@@ -74,8 +81,8 @@ const instances = new Map();
  *   - a lost context is retried, on a schedule that cannot become a loop; a
  *     hidden one whose context was lost gets a new one when shown;
  *   - when the glyph atlas merges pages, every renderer is repaired in place
- *     (`repairAtlas`) — addon-webgl 0.18 draws fragments after its second
- *     merge.
+ *     (`repairAtlas`) — addon-webgl 0.18 and 0.19 draw fragments after the
+ *     second merge.
  *
  * Everything else is settled in one pass, `reconcileGpus`, queued as a
  * microtask: it runs after React has attached, detached and fitted every pane
@@ -263,7 +270,8 @@ function requestAtlasRepair() {
 /**
  * Every renderer re-uploads its pages and rebuilds its cells: one on screen
  * draws its whole viewport now, before the frame is painted, and a hidden one
- * is drawn in full when it is shown. No renderer is made or let go, so no
+ * — or one whose program is in the middle of a synchronized update — is drawn
+ * in full when xterm next draws it. No renderer is made or let go, so no
  * context is either. Then the atlas stops asking every frame for a rebuild.
  * A renderer this addon version cannot repair in place is made again — on
  * screen now, hidden when next shown.
@@ -282,9 +290,11 @@ function repairAtlas() {
       continue;
     }
     atlases.add(atlas);
-    if (entry.attachCount > 0) {
-      if (drawWebglNow(entry.gpu, entry.term)) entry.lastDrawnAt = clock();
+    if (entry.attachCount > 0 && drawWebglNow(entry.gpu, entry.term)) {
+      entry.lastDrawnAt = clock();
     } else {
+      // Hidden, or in the middle of a synchronized update: the next frame
+      // xterm draws covers the whole viewport.
       entry.term.refresh(0, entry.term.rows - 1);
     }
   }
@@ -764,8 +774,12 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  // Emoji are two cells wide to the programs running here; see terminalCompat.js.
-  activateUnicode11(term, Unicode11Addon);
+  // Emoji — VS16, ZWJ and skin-tone sequences included — are two cells wide
+  // to the programs running here; see terminalCompat.js.
+  activateGraphemeWidths(term, UnicodeGraphemesAddon);
+  // XTVERSION, answered as xterm.js 6.1 answers it: Claude Code asks for DEC
+  // 2026 (synchronized output) only after this reply. See terminalCompat.js.
+  installXtVersionReply(term);
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);
@@ -776,6 +790,14 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     useTerminalStore.getState().setFindResults?.(tabId, results);
   });
   term.open(container);
+
+  // The wheel moves the scrollback, and a pager (`less`, `man`, `git log`), as
+  // far as it did under xterm 5.5 — xterm 6 scrolls a fixed 50 px a notch and
+  // sends a pager one arrow per wheel event. The scrollback's listener goes on
+  // `term.element`, hence after `open`; disposed with the terminal.
+  // terminalCompat.js.
+  installPagerWheel(term);
+  installScrollbackWheel(term);
 
   // ---- Korean inline IME (macOS only) — see src/lib/hangulInlineIme.js ----
   // WebKit composes Hangul by rewriting the textarea in place, which xterm

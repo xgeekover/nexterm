@@ -1,6 +1,6 @@
 /**
  * The one check Node alone cannot do: that this actually changes what REAL
- * xterm 5.5 does with REAL mouse events, not just what our own model of it
+ * xterm (6.0; 5.5 before it) does with REAL mouse events, not just what our own model of it
  * says it should. Drives tests/adversarial/fixtures/mouse_drag_harness.html
  * — two genuine `@xterm/xterm` terminals, one with `installMouseReporting`
  * (src/lib/mouseReporting.js, this fix), one stock — over a scratch Vite dev
@@ -278,7 +278,7 @@ function hasMotionReport(joinedOnData) {
   return false;
 }
 
-describe('Mouse reporting: real xterm 5.5 under headless Chromium (CDP)', () => {
+describe('Mouse reporting: real xterm under headless Chromium (CDP)', () => {
   test('HL-01: setup — the scratch vite server, the harness page, a raw CDP session onto it', async () => {
     if (!HEADLESS_AVAILABLE) skip(NO_BROWSER);
     scratchDir = mkdtempSync(path.join(tmpdir(), 'nexterm-mousedrag-'));
