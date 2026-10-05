@@ -241,6 +241,16 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       step: 5,
     },
     {
+      id: 'terminalProgramNotifications',
+      section: 'terminal',
+      key: 'terminalProgramNotifications',
+      settingKey: 'terminal.integrated.programNotifications',
+      title: 'Notifications from Programs',
+      description:
+        'Shows what a program in a terminal asks to tell you — OpenCode when a session is done or needs your permission, Claude Code when it is waiting for you — in the status bar, and as a desktop notification while NexTerm is in the background. The program has to be set up to send them; the README says how.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalSuggestions',
       section: 'terminal',
       key: 'terminalSuggestions',
@@ -411,6 +421,7 @@ export function SettingsWindow() {
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
+  const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
   const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
@@ -433,6 +444,7 @@ export function SettingsWindow() {
     terminalMouseReporting,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
+    terminalProgramNotifications,
     terminalDefaultCwd,
     terminalDefaultCwdPath,
     editorFontSize,

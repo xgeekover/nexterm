@@ -53,6 +53,8 @@ import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
+import { installFocusReports } from '../../lib/focusReport.js';
+import { installProgramNotifications } from '../../lib/programNotifications.js';
 
 const instances = new Map();
 
@@ -786,6 +788,20 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // It follows the program's output from the first byte; TerminalView sends
   // the keys. See modifyOtherKeys.js.
   const modifyOtherKeys = installModifyOtherKeys(term);
+  // What xterm last told the program about focus (`CSI I` / `CSI O`), so a
+  // terminal taken off screen without a blur can still be reported as gone —
+  // WebKit sends none. TerminalView asks; see focusReport.js.
+  const focusReports = installFocusReports(term);
+  // What a program asks to tell the user — OpenCode, Claude Code — through
+  // OSC 9, 99 or 777: to the bell, and to the desktop while the window is in
+  // the background. Read from the first byte, so OpenCode's start-up question
+  // about OSC 99 is answered; the setting is read as each one arrives, and
+  // the store decides where it goes. Disposed with the terminal. See
+  // programNotifications.js.
+  installProgramNotifications(term, {
+    enabled: () => useSettingsStore.getState().terminalProgramNotifications !== false,
+    onNotify: (note) => useTerminalStore.getState().notifyFromProgram?.(tabId, note),
+  });
   const linkProvider = registerLinks(term, tabId);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);
@@ -836,6 +852,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // Asked for what a key sends by TerminalView's key handler; null when the
     // terminal has no parser (a test double).
     modifyOtherKeys,
+    // Sends the focus-out a hidden terminal never got (`reportFocusOut`).
+    focusReports,
     sessionId: null,
     container,
     dataDisposable,
@@ -937,6 +955,25 @@ export function writeNotice(tabId, message) {
 // Let the store reach the screen without importing this module (it runs in
 // Node under the test suites, and xterm brings a stylesheet with it).
 setTerminalNoticeSink(writeNotice);
+
+/**
+ * Tell the program in `tabId`'s terminal that the terminal lost focus, when it
+ * asked for focus reports and xterm last told it the opposite — for a terminal
+ * TerminalView is taking off screen, which WebKit does without a `blur` (see
+ * focusReport.js).
+ *
+ * Decided a task later, once React has finished: TerminalView asks from an
+ * effect cleanup, and the cleanup that detaches the terminal from its pane may
+ * not have run yet — asked then, the terminal still looked on screen and
+ * focused, so nothing was sent, and once detached nothing ever was. A task
+ * later it is off screen, or — React's development double run — back on
+ * screen with the focus, and left alone.
+ */
+export function reportFocusOut(tabId) {
+  setTimeout(() => {
+    instances.get(tabId)?.focusReports?.reportOut();
+  }, 0);
+}
 
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);

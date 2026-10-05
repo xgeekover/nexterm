@@ -1,7 +1,7 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch } from './terminalRegistry.js';
+import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch, reportFocusOut } from './terminalRegistry.js';
 import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport, legacyAltArrowSequence } from '../../lib/terminalCompat.js';
 import { isMac } from '../../lib/platform.js';
@@ -569,6 +569,18 @@ export function TerminalView({ tabId, active = false }) {
   useEffect(() => {
     if (active && !findOpen) termRef.current?.focus();
   }, [active, tabId, findOpen, resumeOffered]);
+
+  // A terminal this pane stops showing — another tab bound here, the pane
+  // gone — or a pane that stops being the active one: its program is told it
+  // lost focus, if it asked to be told. WebKit drops the focus of a hidden
+  // textarea without a `blur`, so xterm never says so itself, and OpenCode
+  // would hold back the notification it sends only while you are elsewhere.
+  // Nothing is sent twice, nor while the textarea still has the focus (see
+  // focusReport.js).
+  useEffect(() => () => reportFocusOut(tabId), [tabId]);
+  useEffect(() => {
+    if (!active) reportFocusOut(tabId);
+  }, [active, tabId]);
 
   // `updateSticky` only runs on scroll, so without this the bar would sit there
   // until the next one — a setting you can watch not take effect is worse than

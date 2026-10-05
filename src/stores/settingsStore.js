@@ -76,6 +76,18 @@ export const SETTINGS_DEFAULTS = {
    * minute, and one per two-minute build is the entire reason it exists.
    */
   terminalNotifyAfterSeconds: 10,
+  /**
+   * Show what a program in a terminal asks to tell you — OpenCode's "Session
+   * done" or "Permission needs input", Claude Code waiting for you — in the
+   * status bar's bell, and as a desktop notification while NexTerm is in the
+   * background. A program sends these only once it is set up to (see the
+   * README), and never about the terminal you are typing into.
+   *
+   * Read as each one arrives, so turning it off takes effect at once: they
+   * are dropped, and NexTerm stops answering OpenCode's question about which
+   * kind it understands. See src/lib/programNotifications.js.
+   */
+  terminalProgramNotifications: true,
   editorFontSize: 12,
   editorTabSize: 2,
   editorWordWrap: false,

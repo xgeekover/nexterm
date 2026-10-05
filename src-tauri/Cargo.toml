@@ -30,6 +30,10 @@ tauri-plugin-dialog = "2"
 # that matters when the text came from a program's output.
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
+# Desktop notifications for what a program in a terminal asks to be told about
+# (OpenCode, Claude Code — see src/lib/programNotifications.js). Shown from
+# Rust, by `show_desktop_notification` in src/commands/notification.rs.
+tauri-plugin-notification = "2"
 
 # getuid(), so the shell-integration files go somewhere only this user can reach.
 [target.'cfg(unix)'.dependencies]

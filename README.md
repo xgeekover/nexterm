@@ -232,6 +232,44 @@ window — editor font, terminal font/size/line-height, cursor style and blinkin
 scrollback, colour theme, command suggestions, copy on select and mouse
 reporting.
 
+### Notifications from programs
+
+A program can ask its terminal to tell you something: OpenCode when a session
+is done, needs permission, has a question or fails; Claude Code when it needs
+permission or is waiting for you. NexTerm understands the three ways programs
+ask — OSC 9 (iTerm2's), OSC 99 (kitty's) and OSC 777 (Ghostty's) — and puts
+what they say in the status bar's bell, unless it came from the terminal you
+are typing into. While NexTerm is in the background it also shows a desktop
+notification. Clicking the entry in the bell takes you to that terminal. One
+terminal is heard at most once every two seconds and ten times a minute; the
+rest is dropped. Settings ▸ Terminal ▸ *Notifications from Programs* turns it
+all off.
+
+Neither program does this until you tell it to:
+
+- **OpenCode** — in `~/.config/opencode/tui.json`:
+
+  ```json
+  { "attention": { "enabled": true } }
+  ```
+
+  It notifies only while its terminal is not the one you are typing into, and
+  plays its own sound. NexTerm sets `OPENTUI_NOTIFICATION_PROTOCOL=osc99` in
+  every terminal, unless you set it yourself, so OpenCode sends OSC 99 even
+  where the answer to its start-up question cannot get back to it.
+- **Claude Code** — `/config` → notifications → *Kitty (OSC 99)*, which is the
+  `preferredNotifChannel` setting (`kitty`). *iTerm2 (OSC 9)* and *Ghostty (OSC
+  777)* work too. The default, *Auto*, picks by the terminal's name and has
+  nothing for NexTerm, so it stays silent.
+
+A desktop notification needs the operating system to allow it — on macOS
+System Settings ▸ Notifications, on Windows Settings ▸ System ▸ Notifications,
+on Linux a running notification service. On Windows, toasts are for the
+installed app (the `setup.exe` or `.msi`): Tauri's notification plugin, which
+shows them, documents its Windows support as working only for installed apps.
+The portable `NexTerm.exe` is not installed, so do not count on a toast from it.
+The bell works everywhere either way.
+
 ### Keyboard shortcuts
 
 | Shortcut | Action |

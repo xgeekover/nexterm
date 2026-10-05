@@ -65,6 +65,9 @@ class BrowserMockBridge {
       tauri_version: '2.0.0',
       rust_version: '1.80.0',
     };
+    // What `show_desktop_notification` was asked to show, oldest first. There
+    // is no desktop here; the suites read this instead.
+    this.desktopNotifications = [];
   }
 
   listen(event, callback) {
@@ -614,6 +617,17 @@ class BrowserMockBridge {
           { id: 'login-shell', label: 'zsh (login shell)', spec: '/bin/zsh' },
           { id: 'bash', label: 'bash', spec: '/bin/bash' },
         ];
+      }
+
+      // 19. show_desktop_notification — the backend hands it to the OS and
+      // answers whether it could (false when the OS denies NexTerm). Nothing
+      // can be shown from here, so the answer is false, and what was asked
+      // for is kept — the last 50 — for the suites to read.
+      case 'show_desktop_notification': {
+        const { title = '', body = '' } = args;
+        this.desktopNotifications.push({ title: String(title), body: String(body) });
+        if (this.desktopNotifications.length > 50) this.desktopNotifications.shift();
+        return false;
       }
 
       default:
