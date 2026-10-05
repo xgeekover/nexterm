@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
+import { forgetOutput, startPtyOutputBus } from '../lib/ptyOutputBus.js';
 import { notifyTerminal } from '../lib/terminalNotice.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
 // schema as absent, which for this store's keys would mean silently bootstrapping
@@ -2623,6 +2624,9 @@ export const useTerminalStore = create((set, get, api) => {
     attachListeners: async () => {
       if (listening) return;
       listening = true;
+      // Before any shell is spawned: output a tab prints before its terminal
+      // exists is kept for it from the first byte (see ptyOutputBus.js).
+      await startPtyOutputBus();
       unlisteners.push(await listen('pty-output', (payload) => {
         const { session_id, data } = payload || {};
         if (!session_id || !data) return;
@@ -3110,6 +3114,8 @@ export const useTerminalStore = create((set, get, api) => {
       }
       await disposeTerminalView(tabId);
       typedLines.delete(tabId);
+      // Whatever its shell printed that no terminal ever showed goes with it.
+      forgetOutput(tab.sessionId);
 
       // `settle` sweeps a dropped tab id out of EVERY group (not just one
       // tree), prunes whichever pane it emptied, and drops a group that ends
