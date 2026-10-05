@@ -28,8 +28,10 @@ import {
   Files,
   LayoutGrid,
   Sparkles,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
-import { useTerminalStore } from '../../stores/terminalStore.js';
+import { useTerminalStore, treeOnScreen, zoomedPaneOf } from '../../stores/terminalStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { AgentResumeBanner } from './AgentResumeBanner.jsx';
 import { AGENT_IDS, agentLabel } from '../../lib/agents.js';
@@ -51,6 +53,11 @@ import { useShortcuts } from '../../hooks/useShortcuts.js';
 // groups' terminals keep running (their xterm instances live in
 // terminalRegistry, not in React), they are simply not mounted. The group
 // switcher at the top is the only way to move between them.
+//
+// A zoomed group (`zoomedPaneId`, tmux's `Prefix z`) is drawn the same way one
+// level down: only the zoomed pane is mounted, filling the area, and the panes
+// it hides are unmounted exactly like another group's — alive, running, and
+// told by TerminalView that they lost focus. `treeOnScreen` decides which.
 // ---------------------------------------------------------------------------
 
 const paneHeaderBtn =
@@ -515,13 +522,79 @@ function DragPreview({ drag }) {
 }
 
 /**
+ * The pane strip's zoom control: a button that zooms the pane, or — while it
+ * is zoomed — a chip that says so and unzooms it.
+ *
+ * The chip is the point. With its siblings hidden a zoomed pane looks exactly
+ * like a group that has only one, and the panes it hides are still running:
+ * without something on screen saying "Zoomed", a dev server or an agent in one
+ * of them is easy to forget. Nothing at all for a group of one pane, which has
+ * nothing to hide.
+ */
+function PaneZoomControl({ zoomed, canZoom, hiddenPanes, onToggle, shortcut }) {
+  const keys = shortcut('toggle-pane-zoom');
+  const swallowMenu = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  if (zoomed) {
+    const others = `${hiddenPanes} other pane${hiddenPanes === 1 ? '' : 's'}`;
+    return (
+      <button
+        type="button"
+        data-zoomed-chip=""
+        aria-pressed="true"
+        onClick={onToggle}
+        onContextMenu={swallowMenu}
+        title={`Zoomed — ${others} hidden, still running. Click to show every pane${keys ? ` (${keys})` : ''}`}
+        className={cn(
+          'shrink-0 flex items-center gap-1 h-[18px] px-1.5 rounded-sm text-ui-sm text-vsc-fg-bright',
+          'ring-1 ring-inset ring-vsc-accent transition-colors',
+          'bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]',
+          'hover:bg-[color-mix(in_srgb,var(--vsc-accent)_40%,transparent)]'
+        )}
+      >
+        <Minimize2 size={12} />
+        <span>Zoomed</span>
+      </button>
+    );
+  }
+  if (!canZoom) return null;
+  return (
+    <button
+      type="button"
+      aria-pressed="false"
+      onClick={onToggle}
+      onContextMenu={swallowMenu}
+      className={paneHeaderBtn}
+      title={`Zoom Pane — fill the group with it${keys ? ` (${keys})` : ''}`}
+    >
+      <Maximize2 size={14} />
+    </button>
+  );
+}
+
+/**
  * One pane of the active group's tree: its own tab strip plus the persistent
  * xterm for whichever of *its* tabs is active. Tabs can be dragged along a tab
  * strip to reorder them (their own, or another pane's, where they go in at the
  * marker), between panes, onto a pane's edge to split it, or onto another
  * group's switcher chip to move them to that group.
  */
-function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose, canClose, onRenameGroup }) {
+function TerminalPane({
+  node,
+  groupId,
+  isActivePane,
+  onSplitH,
+  onSplitV,
+  onClose,
+  canClose,
+  onRenameGroup,
+  zoomed = false,
+  canZoom = false,
+  hiddenPanes = 0,
+  onToggleZoom,
+}) {
   const { shortcut } = useShortcuts();
   const paneId = node.id;
   const tabs = useTerminalStore((s) => s.tabs);
@@ -759,6 +832,13 @@ function TerminalPane({ node, groupId, isActivePane, onSplitH, onSplitV, onClose
         </div>
 
         <div className="flex items-center gap-0.5 px-1 shrink-0">
+          <PaneZoomControl
+            zoomed={zoomed}
+            canZoom={canZoom}
+            hiddenPanes={hiddenPanes}
+            onToggle={() => onToggleZoom?.(paneId)}
+            shortcut={shortcut}
+          />
           <button
             type="button"
             onClick={onSplitH}
@@ -987,8 +1067,12 @@ function ResizableSplit({ node, groupId, renderChild }) {
 /**
  * Recursively renders ONE group's tree: a "leaf" is a pane (a terminal with
  * its own tab strip), a "split" is a resizable row/column of children.
+ *
+ * `zoom` is the group's zoom, the same for every pane: `{ paneId, canZoom,
+ * hiddenPanes, onToggle }` — the zoomed pane's id (null when none), whether
+ * the group has panes enough to zoom one, how many a zoom is hiding.
  */
-function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, onRenameGroup }) {
+function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, onRenameGroup, zoom }) {
   if (node.type === 'leaf') {
     return (
       <TerminalPane
@@ -1000,6 +1084,10 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
         onClose={() => onClose(node.id)}
         canClose={canClose}
         onRenameGroup={onRenameGroup}
+        zoomed={Boolean(zoom?.paneId) && zoom.paneId === node.id}
+        canZoom={Boolean(zoom?.canZoom)}
+        hiddenPanes={zoom?.hiddenPanes ?? 0}
+        onToggleZoom={zoom?.onToggle}
       />
     );
   }
@@ -1017,6 +1105,7 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
           onClose={onClose}
           canClose={true}
           onRenameGroup={onRenameGroup}
+          zoom={zoom}
         />
       )}
     />
@@ -1130,6 +1219,9 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
           // Switching groups replaces the whole arrangement, so a command
           // failing in one you are not looking at is invisible without this.
           const activity = groupActivity(tabsOfGroup(group.tree, tabs));
+          // Every group keeps its own zoom across switches, so the chip says
+          // which ones will come back with panes hidden.
+          const zoomed = Boolean(zoomedPaneOf(group));
 
           if (renamingGroupId === group.id) {
             return (
@@ -1168,7 +1260,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                   : activity === 'failed'
                     ? ', one of them ended on a failure'
                     : ''
-              }. Click to switch, drag to reorder, drop a terminal here to move it, double-click to rename.`}
+              }${zoomed ? ', one pane zoomed' : ''}. Click to switch, drag to reorder, drop a terminal here to move it, double-click to rename.`}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
                 beginGroupDrag(group, e);
@@ -1214,6 +1306,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               {insertAt === groups.length && i === groups.length - 1 && <InsertionMarker side="after" />}
               <ActivityDot state={activity} />
               <span className="truncate max-w-[140px]">{group.name}</span>
+              {zoomed && <Maximize2 size={10} aria-label="one pane zoomed" className="shrink-0 opacity-70" />}
               <span className="text-[10px] tabular-nums opacity-60">{terminals}</span>
               {canClose && (
                 <button
@@ -1307,6 +1400,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const reorderGroup = useTerminalStore((s) => s.reorderGroup);
   const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
+  const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
 
@@ -1553,12 +1647,32 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     [closePane]
   );
 
+  const handleToggleZoom = useCallback(
+    (paneId) => {
+      togglePaneZoom?.(paneId, activeGroupIdRef.current);
+    },
+    [togglePaneZoom]
+  );
+
   const dragValue = useMemo(
     () => ({ drag, beginDrag, beginGroupDrag, cancelActiveDrag }),
     [drag, beginDrag, beginGroupDrag, cancelActiveDrag]
   );
 
   if (!activeGroup?.tree) return null;
+
+  // Which panes are drawn: all of them, or the zoomed one alone (see
+  // `treeOnScreen`). A hidden pane is simply not mounted; its terminal waits
+  // in the registry, running, like a terminal in another group.
+  const zoomedPane = zoomedPaneOf(activeGroup);
+  const shownTree = treeOnScreen(activeGroup);
+  const paneCount = collectPanes(activeGroup.tree).length;
+  const zoom = {
+    paneId: zoomedPane?.id ?? null,
+    canZoom: paneCount > 1,
+    hiddenPanes: zoomedPane ? paneCount - 1 : 0,
+    onToggle: handleToggleZoom,
+  };
 
   return (
     <DragContext.Provider value={dragValue}>
@@ -1574,16 +1688,26 @@ export function TerminalSplitContainer({ headerSlot = null }) {
             react-resizable-panels re-reads `defaultLayout` from the group's
             own stored sizes instead of carrying the previous group's layout
             over. The terminals themselves live in terminalRegistry, so
-            remounting costs nothing but a re-attach. */}
-        <div key={activeGroup.id} className="flex-1 overflow-hidden">
+            remounting costs nothing but a re-attach.
+
+            And by zoom, for the same reason: unzooming mounts the splits
+            afresh from the stored sizes, which the zoom never touched — that
+            is what puts the layout back exactly. Both ways the terminals that
+            change size remount and fit, and their programs are told the new
+            size (TerminalView's `fitAndReport`), so a TUI redraws for it. */}
+        <div
+          key={zoomedPane ? `${activeGroup.id}:zoom:${zoomedPane.id}` : activeGroup.id}
+          className="flex-1 overflow-hidden"
+        >
           <SplitNode
-            node={activeGroup.tree}
+            node={shownTree}
             groupId={activeGroup.id}
             activePaneId={activeGroup.activePaneId}
             onSplit={handleSplit}
             onClose={handleClose}
             canClose={activeGroup.tree.type !== 'leaf'}
             onRenameGroup={setRenamingGroupId}
+            zoom={zoom}
           />
         </div>
         <DragPreview drag={drag} />

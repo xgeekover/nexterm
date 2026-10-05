@@ -750,6 +750,104 @@ scenario(
   }
 );
 
+// ---- A zoomed pane ----------------------------------------------------------
+
+/** One group split into three panes side by side, each holding one terminal. */
+function threePaneGroup(extra = {}) {
+  return {
+    id: 'group-1',
+    name: 'Group 1',
+    createdAt: 0,
+    tree: {
+      type: 'split',
+      id: 'split-1',
+      direction: 'horizontal',
+      sizes: [50, 30, 20],
+      children: ['a', 'b', 'c'].map((p) => ({ type: 'leaf', id: `pane-${p}`, tabIds: [`t-${p}`], activeTabId: `t-${p}` })),
+    },
+    activePaneId: 'pane-b',
+    ...extra,
+  };
+}
+
+function arrangeThreePanes(groupExtra = {}) {
+  reset();
+  useTerminalStore.setState({
+    tabs: [tab('t-a'), tab('t-b'), tab('t-c')],
+    activeTabId: 't-b',
+    groups: [threePaneGroup(groupExtra)],
+    activeGroupId: 'group-1',
+  });
+}
+
+/** Markup of the zoomed-pane chip, or null when it is not drawn. */
+const zoomedChip = (html) => /<button\b[^>]*\sdata-zoomed-chip=""[^>]*>[\s\S]*?<\/button>/.exec(html)?.[0] ?? null;
+
+scenario(
+  'RN-31',
+  'a zoomed group draws its zoomed pane alone, with a chip that says so',
+  () => arrangeThreePanes({ zoomedPaneId: 'pane-b' }),
+  (html) => {
+    // The hidden panes are not mounted: neither their strips nor their bodies
+    // are in the markup at all — which is also why their terminals are told
+    // they lost focus, and keep their WebGL renderers, as another group's do.
+    const strips = attrOrder(html, 'data-tab-strip');
+    expectThat(JSON.stringify(strips) === '["pane-b"]', `the panes drawn are ${JSON.stringify(strips)}, not just pane-b`);
+    const chips = attrOrder(html, 'data-tab-chip');
+    expectThat(JSON.stringify(chips) === '["t-b"]', `the tab chips drawn are ${JSON.stringify(chips)}`);
+    const chip = zoomedChip(html);
+    expectThat(chip, 'no "Zoomed" chip on the zoomed pane');
+    expectText(chip, 'Zoomed');
+    const title = visibleText(/\stitle="([^"]*)"/.exec(chip)?.[1] ?? '');
+    expectThat(
+      title.includes('2 other panes hidden, still running') && title.includes('Click to show every pane'),
+      `the chip's tooltip does not say what is hidden or how to get it back: ${JSON.stringify(title)}`
+    );
+    expectThat(/\saria-pressed="true"/.test(chip), 'the chip is not marked as a pressed toggle');
+    // The group's chip in the switcher says it too: every group keeps its zoom.
+    expectThat(/aria-label="one pane zoomed"/.test(html), "the group's switcher chip does not mark it zoomed");
+  }
+);
+
+scenario(
+  'RN-32',
+  'the same group unzoomed draws every pane, each with a zoom button and no chip',
+  () => arrangeThreePanes(),
+  (html) => {
+    const strips = attrOrder(html, 'data-tab-strip');
+    expectThat(
+      JSON.stringify(strips) === '["pane-a","pane-b","pane-c"]',
+      `the panes drawn are ${JSON.stringify(strips)}`
+    );
+    expectThat(zoomedChip(html) === null, 'a "Zoomed" chip is drawn with nothing zoomed');
+    const zoomButtons = buttonsIn(html).filter((b) => b.title.startsWith('Zoom Pane'));
+    expectThat(zoomButtons.length === 3, `${zoomButtons.length} zoom buttons for three panes`);
+    expectThat(!/aria-label="one pane zoomed"/.test(html), 'the switcher marks an unzoomed group as zoomed');
+  }
+);
+
+scenario(
+  'RN-33',
+  'a group with one pane offers no zoom at all',
+  () => reset(),
+  (html) => {
+    expectThat(zoomedChip(html) === null, 'a chip is drawn for a pane with nothing to hide');
+    const zoomButtons = buttonsIn(html).filter((b) => b.title.startsWith('Zoom Pane'));
+    expectThat(zoomButtons.length === 0, 'a lone pane offers to zoom');
+  }
+);
+
+scenario(
+  'RN-34',
+  'a zoom that names a pane no longer there draws the whole group rather than nothing',
+  () => arrangeThreePanes({ zoomedPaneId: 'pane-gone' }),
+  (html) => {
+    const strips = attrOrder(html, 'data-tab-strip');
+    expectThat(strips.length === 3, `drew ${JSON.stringify(strips)}`);
+    expectThat(zoomedChip(html) === null, 'a chip for a zoom that cannot be');
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

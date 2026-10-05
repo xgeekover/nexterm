@@ -36,13 +36,21 @@ const pendingResizes = new Map();
 //
 //   Pane  = { type: 'leaf',  id, tabIds: [], activeTabId }
 //   Split = { type: 'split', id, direction, children: [], sizes: [] }
-//   Group = { id, name, createdAt, tree: Pane|Split, activePaneId }
+//   Group = { id, name, createdAt, tree: Pane|Split, activePaneId, zoomedPaneId? }
 //
 // This replaces the previous model, where `splitTree` was ONE tree whose
 // LEAVES were the groups (all on screen at once) and a `groupViewMode` /
 // `focusedPaneId` pair faked "show only one of them". Both are gone: the model
 // is permanently "one group fills the area", so a leaf is now a pane *inside*
 // a group rather than a group itself.
+//
+// `zoomedPaneId` is tmux's zoom (`Prefix z`), iTerm2's "Maximize Active Pane":
+// that one pane fills the group's whole area while its siblings are hidden —
+// hidden, not closed, their programs still running — and the tree itself is
+// untouched, so unzooming puts back exactly the layout that was there. Present
+// only while a group IS zoomed, and `settle` drops it the moment it stops
+// making sense (see `zoomedPaneOf`). Never persisted: a zoom is a way of
+// looking at a layout, not part of it.
 
 let paneCounter = 1;
 const makePaneId = () => `pane-${paneCounter++}`;
@@ -224,13 +232,58 @@ function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
 }
 
+// --- Zoom ----------------------------------------------------------------
+
+/**
+ * The pane `group` is zoomed on — the one filling the group's whole area while
+ * its siblings are hidden — or null when it is not zoomed.
+ *
+ * Read defensively rather than trusted: a zoom only means something on a pane
+ * that is still in the tree, in a tree that still has other panes to hide. A
+ * group whose zoom outlived either is shown whole. `settle` drops such a zoom
+ * as well; this is what keeps a group that never went through it — a test's
+ * hand-made state, a render from an arranged store — from drawing nothing.
+ */
+export function zoomedPaneOf(group) {
+  const id = group?.zoomedPaneId;
+  if (!id) return null;
+  const leaves = collectLeaves(group.tree);
+  if (leaves.length < 2) return null;
+  return leaves.find((leaf) => leaf.id === id) || null;
+}
+
+/**
+ * What of `group`'s tree is drawn: the zoomed pane alone, or the whole tree.
+ *
+ * The one place that decides which panes are on screen. TerminalSplitContainer
+ * renders exactly this, so a hidden pane is not mounted at all — its terminal
+ * stays alive in the registry, as the terminals of a group that is not on
+ * screen do, and its program keeps running.
+ */
+export function treeOnScreen(group) {
+  return zoomedPaneOf(group) ?? group?.tree ?? null;
+}
+
+/** The panes of `group` that are drawn, in DOM order — see `treeOnScreen`. */
+export function panesOnScreen(group) {
+  return collectLeaves(treeOnScreen(group));
+}
+
+/** `group` with no zoom: the key goes, rather than staying behind as null. */
+function withoutZoom(group) {
+  if (!group || !('zoomedPaneId' in group)) return group;
+  const { zoomedPaneId: _unzoomed, ...rest } = group;
+  return rest;
+}
+
 /**
  * Whether `tabId` is drawn right now: the tab a pane of the group on screen
- * is showing. Every pane shows its active tab, so a split shows several.
+ * is showing. Every pane shows its active tab, so a split shows several — and
+ * a zoomed group only the zoomed pane's.
  */
 function tabOnScreen(state, tabId) {
   const group = state.groups.find((g) => g.id === state.activeGroupId);
-  return Boolean(group) && collectLeaves(group.tree).some((leaf) => leaf.activeTabId === tabId);
+  return Boolean(group) && panesOnScreen(group).some((leaf) => leaf.activeTabId === tabId);
 }
 
 /** Remove a tab from whichever pane holds it, keeping that pane's active tab valid. */
@@ -412,8 +465,24 @@ function resolveGroup(state, groupId, paneId) {
  *  - a split has ≥2 children and one `sizes` entry per child
  *  - `pane.activeTabId ∈ pane.tabIds` (null iff empty)
  *  - `group.activePaneId` names a pane in THAT group's tree
+ *  - a group is zoomed on its ACTIVE pane or not at all, and only while it
+ *    has more than one pane (see below)
  *  - `activeGroupId` names an existing group
  *  - `activeTabId` is real and lives in the ACTIVE group
+ *
+ * The zoom rule is how a zoom ends whenever it would stop being true, without
+ * every action having to remember it — tmux's behaviour, stated once:
+ *
+ *  - the zoomed pane closed, or lost its last tab and was pruned: the active
+ *    pane moves to one that survived, so the zoom goes;
+ *  - focus moved to another pane — Focus Next/Previous Pane, a click on a
+ *    hidden pane's terminal in the TERMINALS panel, a tab moved into a hidden
+ *    pane: the active pane is no longer the zoomed one, so the zoom goes, and
+ *    the user sees the whole layout with the pane they went to;
+ *  - the other panes all closed: there is nothing left to hide.
+ *
+ * A split is the one thing this cannot see — the active pane may stay where
+ * it was — so `splitPane` and `dropTabOnPane` drop the zoom themselves.
  *
  * Returns a partial state ready to hand to `set()`. `groups` is always a fresh
  * array, so the persist subscription always sees the change.
@@ -463,8 +532,14 @@ function settle(state, patch = {}) {
       ? group.activePaneId
       : firstLeafId(group.tree);
     const name = typeof group.name === 'string' && group.name ? group.name : 'Group';
-    if (activePaneId === group.activePaneId && name === group.name) return group;
-    return { ...group, name, activePaneId };
+    // Checked against the REPAIRED active pane: a zoomed pane that was pruned
+    // has just handed `activePaneId` to a survivor, which it is not.
+    const zoomHolds =
+      Boolean(group.zoomedPaneId) && group.zoomedPaneId === activePaneId && leaves.length > 1;
+    const zoomSettled = zoomHolds || !('zoomedPaneId' in group);
+    if (activePaneId === group.activePaneId && name === group.name && zoomSettled) return group;
+    const next = { ...group, name, activePaneId };
+    return zoomHolds ? next : withoutZoom(next);
   });
 
   const activeGroupId = groups.some((g) => g.id === wantedActiveGroupId) ? wantedActiveGroupId : groups[0].id;
@@ -529,6 +604,12 @@ function serializeTreeForPersist(node) {
   };
 }
 
+/**
+ * Field by field, on purpose. `zoomedPaneId` is left out: a relaunch comes back
+ * with every pane in view rather than with panes nobody remembers hiding, and
+ * since this payload is also the persist subscription's key, zooming and
+ * unzooming never schedule a write.
+ */
 function serializeGroupForPersist(group) {
   return {
     id: group.id,
@@ -1576,7 +1657,10 @@ export const useTerminalStore = create((set, get, api) => {
     /**
      * Mark a pane as the active one (called on click/focus of a pane). The
      * pane's own visible tab becomes the active tab, and if the pane belongs
-     * to another group that group is brought on screen.
+     * to another group that group is brought on screen. A pane hidden by a
+     * zoom can only be reached from outside the terminal area (the TERMINALS
+     * panel); going to it unzooms its group, as selecting a pane does in tmux
+     * — see `settle`.
      */
     setActivePane: (paneId, groupId = null) =>
       set((state) => {
@@ -1621,6 +1705,11 @@ export const useTerminalStore = create((set, get, api) => {
      * Move pane focus by `delta` (±1) through the ACTIVE group's panes in DOM
      * order, wrapping around at the ends. Other groups are off screen, so they
      * are never part of the cycle.
+     *
+     * In a zoomed group the cycle still runs over every pane, hidden ones
+     * included, and landing on another pane unzooms the group (`settle`):
+     * tmux's next-pane does the same, and it is the only way the keyboard
+     * could ever reach a hidden pane.
      */
     focusNextPane: (delta = 1) =>
       set((state) => {
@@ -1636,6 +1725,50 @@ export const useTerminalStore = create((set, get, api) => {
           activeTabId: next.activeTabId ?? state.activeTabId,
         });
       }),
+
+    /**
+     * Zoom a pane — make it fill its group's whole area, hiding the others —
+     * or, when the group is already zoomed, unzoom it. tmux's `Prefix z`,
+     * iTerm2's "Maximize Active Pane".
+     *
+     * `paneId` defaults to the active pane of the active group, which is what
+     * the keyboard, the menu and the palette act on; a pane's own button
+     * passes its id. Zooming makes that pane the active one and brings its
+     * group on screen. A group with one pane has nothing to hide, and is left
+     * as it is.
+     *
+     * The hidden panes are not closed or moved: the tree does not change at
+     * all, so unzooming gives back the very layout that was zoomed, sizes
+     * included. Their terminals stay alive in the registry — TerminalSplit-
+     * Container simply does not mount them (see `treeOnScreen`) — and every
+     * group keeps its own zoom across group switches. What ends a zoom besides
+     * this toggle is listed at `settle`.
+     *
+     * Returns whether the group is zoomed afterwards.
+     */
+    togglePaneZoom: (paneId = null, groupId = null) => {
+      const target = resolveGroup(get(), groupId, paneId);
+      if (!target) return false;
+      set((state) => {
+        const group = state.groups.find((g) => g.id === target.id);
+        if (!group) return {};
+        if (zoomedPaneOf(group)) {
+          // Nothing structural changes, so there is nothing for `settle` to
+          // repair: the same tree, shown whole again.
+          return { groups: updateGroup(state, group.id, withoutZoom) };
+        }
+        const leaves = collectLeaves(group.tree);
+        if (leaves.length < 2) return {};
+        const pane = leaves.find((l) => l.id === (paneId ?? group.activePaneId));
+        if (!pane) return {};
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: pane.id, zoomedPaneId: pane.id })),
+          activeGroupId: group.id,
+          activeTabId: pane.activeTabId ?? state.activeTabId,
+        });
+      });
+      return Boolean(zoomedPaneOf(get().groups.find((g) => g.id === target.id)));
+    },
 
     // ---- Groups --------------------------------------------------------
     /**
@@ -2065,6 +2198,9 @@ export const useTerminalStore = create((set, get, api) => {
      * tab is spawned directly into the new pane, never into the pane being
      * split, so the same tab can never end up listed in two panes at once.
      * Returns the new pane's id (or null if the split could not be created).
+     *
+     * A split unzooms the group: a pane made only to be hidden at once would
+     * be a terminal the user cannot see, which is why tmux unzooms too.
      */
     splitPane: async (paneId, direction = 'horizontal', groupId = null) => {
       const group = resolveGroup(get(), groupId, paneId);
@@ -2082,10 +2218,12 @@ export const useTerminalStore = create((set, get, api) => {
         if (!state.groups.some((g) => g.id === group.id)) return {};
         const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id };
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({
-            ...g,
-            tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
-          })),
+          groups: updateGroup(state, group.id, (g) =>
+            withoutZoom({
+              ...g,
+              tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
+            })
+          ),
         });
       });
       return newPaneId;
@@ -2191,6 +2329,12 @@ export const useTerminalStore = create((set, get, api) => {
      *   'center'                  → move the tab into that pane
      *   'left' | 'right'          → split the pane horizontally, tab on that side
      *   'top'  | 'bottom'         → split the pane vertically, tab on that side
+     *
+     * In a zoomed group only the zoomed pane can be dropped on from the screen.
+     * Into it, the zoom stays: the tab lands where the user is looking. An
+     * edge splits, which unzooms (see `splitPane`); and a tab moved into a
+     * hidden pane by any other route makes that pane the active one, which
+     * unzooms through `settle`.
      */
     dropTabOnPane: (tabId, targetPaneId, zone = 'center', targetGroupId = null) => {
       const state0 = get();
@@ -2234,11 +2378,13 @@ export const useTerminalStore = create((set, get, api) => {
         const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
         const insertFirst = zone === 'left' || zone === 'top';
 
-        groups = updateGroup(groups, targetGroup.id, (g) => ({
-          ...g,
-          tree: splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst),
-          activePaneId: newPaneId,
-        }));
+        groups = updateGroup(groups, targetGroup.id, (g) =>
+          withoutZoom({
+            ...g,
+            tree: splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst),
+            activePaneId: newPaneId,
+          })
+        );
         return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
       });
     },

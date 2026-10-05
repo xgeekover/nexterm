@@ -35,6 +35,10 @@ that layout the next time you open it.
   a restart.
 - **Move terminals between groups.** Drag a tab onto another group's chip, or
   use *Move to Group* in the TERMINALS panel.
+- **Zoom one pane.** `⌘⇧Enter` (`Ctrl+Shift+Enter` elsewhere) makes the active
+  pane fill its group and hides the rest — tmux's `Prefix z`, iTerm2's
+  *Maximize Active Pane*. The hidden ones keep running; press it again and the
+  split comes back exactly as it was.
 - **Save a group, or the whole desk.** *Save Group…* keeps one group's layout
   and each terminal's current directory. *Save All Groups…* snapshots every
   group at once under a name, and restoring it brings the entire session back —
@@ -136,6 +140,20 @@ Shell picks what a plain new terminal opens, and still takes a typed path.
 **Split.** Use the split buttons in the panel header, `⌘D` (right) / `⌘⇧D`
 (down), or drag a tab onto an edge of any pane. While dragging, the target
 quarter lights up so you can see where it will land before you let go.
+
+**Zoom a pane.** In a split group, `⌘⇧Enter` (`Ctrl+Shift+Enter` on Windows
+and Linux), the ⤢ button in a pane's tab strip, Terminal → *Toggle Pane Zoom*
+or the command palette makes that pane fill the whole group. The other panes
+are hidden, not closed: what runs in them keeps running, a program that asked
+is told its terminal lost focus, and the pane's tab strip carries a *Zoomed*
+chip — click it, or press the chord again, and the split comes back exactly as
+it was, sizes and all. The terminal that grows or shrinks is told its new size,
+so a full-screen program redraws for it. A zoom ends by itself when it would
+stop making sense: the zoomed pane closes, you split, you move to another pane
+(`⌥⌘←` / `⌥⌘→`, or a hidden terminal in the TERMINALS panel), or a terminal is
+moved into a pane the zoom hides — the way tmux unzooms. Each group keeps its
+own zoom while you switch between them (its chip shows ⤢); a restart comes back
+with every pane in view.
 
 **Work in groups.** The chips above the terminals are your groups; `+` makes a
 new one. Clicking a chip swaps the whole arrangement to that group's. Set up
@@ -286,6 +304,7 @@ The bell works everywhere either way.
 | `⌘W` | Close the active terminal pane |
 | `⌘⇧W` | Close the window |
 | `⌥⌘←` / `⌥⌘→` | Focus the previous / next pane |
+| `⌘⇧Enter` | Zoom the active pane / show every pane again |
 | `⌘B` | Toggle the primary sidebar |
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
@@ -341,6 +360,11 @@ claims these ahead of xterm:
   nothing at all
 - find, `⌘F` / `Ctrl+F`
 - the zoom keys, which are punctuation and a digit and cost the shell nothing
+- pane zoom, `⌘⇧Enter` / `Ctrl+Shift+Enter`. xterm sends `Ctrl+Shift+Enter` as
+  a plain `Enter`, so a shell gives nothing up; a program that turned on
+  *modifyOtherKeys* (OpenCode, see below) would have received it as a key of
+  its own off macOS, and binds nothing to it. Inside the editor `⌘⇧Enter` stays
+  Monaco's *Insert Line Above*
 
 VS Code makes the same trades with the same keys. Two of them do take something
 away on Windows and Linux, where `⌘` is `Ctrl`: **`Ctrl+B` will not reach tmux**

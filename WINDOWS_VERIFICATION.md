@@ -484,6 +484,24 @@ development build shows them as PowerShell's.
   only once something else on screen changes is ConPTY holding a sequence that
   draws nothing, as in V14.
 
+### V22 — Ctrl+Shift+Enter zooms a pane, and what it hides keeps running
+
+Never run on Windows: built and tested on macOS, where the chord is ⌘⇧Enter
+and the native menu holds the accelerator. Off macOS the chord is claimed by
+the webview ahead of xterm, and ConPTY has to pass the resize on both ways.
+
+- Split a group in three, run `ping -t localhost` in one pane and `htop` (WSL)
+  or `vim` in another, and press `Ctrl+Shift+Enter` in the vim pane: it fills
+  the group, its tab strip shows *Zoomed*, and vim redraws at the larger size
+  with no stale rows from the smaller one. `Ctrl+Shift+Enter` again: all three
+  panes are back with their old proportions, vim redrawn small, and `ping` has
+  kept counting while hidden.
+- At a PowerShell prompt `Ctrl+Shift+Enter` zooms and types nothing — no
+  empty line runs. Inside `opencode` it zooms rather than inserting anything.
+- While zoomed: ☰ → Terminal → *Toggle Pane Zoom* and the palette's *Toggle
+  Pane Zoom* both toggle, and a click on a hidden terminal in the TERMINALS
+  panel unzooms onto it.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

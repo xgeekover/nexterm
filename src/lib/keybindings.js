@@ -109,6 +109,22 @@ export const COMMANDS = {
     menuId: null,
     run: (ctx) => ctx.focusNextPane?.(-1),
   },
+  'toggle-pane-zoom': {
+    title: 'Toggle Pane Zoom',
+    // ⌘⇧Enter is Monaco's "Insert Line Above" — the editor keeps it, as it
+    // keeps ⌘D. Ctrl+Shift+Enter means nothing to Monaco, but there is one
+    // binding per chord here, so the mod spelling steps aside in both.
+    passThrough: (ctx) => ctx.isInMonacoEditor,
+    // Zooming the pane a terminal is in is the whole point of the command,
+    // and a focused terminal is this app's resting state. Neither spelling
+    // takes a control byte: ⌘ never reaches the pty, and xterm sends
+    // Ctrl+Shift+Enter as a plain `\r`, the Enter key. The one thing given
+    // up: a program that turned on modifyOtherKeys — OpenCode — would have
+    // got `CSI 27;6;13~` for Ctrl+Shift+Enter off macOS, and binds nothing
+    // to it. KB-11 holds the list.
+    overTerminal: true,
+    run: (ctx) => ctx.togglePaneZoom?.(),
+  },
   'new-terminal': {
     title: 'New Terminal',
     run: (ctx) => ctx.createTerminalTab?.(),
@@ -259,6 +275,10 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'close-pane', key: 'mod+w' },
   { command: 'focus-next-pane', key: 'mod+alt+right' },
   { command: 'focus-previous-pane', key: 'mod+alt+left' },
+  // iTerm2's own chord for "Maximize Active Pane" (⌘⇧Enter), and Ctrl+Shift+
+  // Enter off macOS, where nothing in a shell reads it: xterm sends it as the
+  // Enter key. tmux's `Prefix z` is a prefix NexTerm does not have.
+  { command: 'toggle-pane-zoom', key: 'mod+shift+enter' },
   // Literal Ctrl on every platform, and matched on `code` because shift plus
   // backtick reports `~` on a US layout.
   { command: 'new-terminal', key: 'ctrl+shift+backquote' },

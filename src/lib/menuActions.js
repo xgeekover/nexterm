@@ -73,6 +73,9 @@ export function runMenuAction(id) {
     case 'close-pane':
       terminal.closeActivePane?.();
       break;
+    case 'toggle-pane-zoom':
+      terminal.togglePaneZoom?.();
+      break;
     case 'clear-terminal':
       terminal.clearBlocks?.();
       break;
@@ -142,6 +145,7 @@ const MENU_SPEC = [
       { id: 'split-right', label: 'Split Right' },
       { id: 'split-down', label: 'Split Down' },
       { id: 'close-pane', label: 'Close Pane' },
+      { id: 'toggle-pane-zoom', label: 'Toggle Pane Zoom' },
       { type: 'separator' },
       { id: 'find-in-terminal', label: 'Find…' },
       { id: 'command-history', label: 'Command History…' },
