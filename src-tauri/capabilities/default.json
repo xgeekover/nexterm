@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for NexTerm. Off macOS the app draws its own title bar (decorations: false), so the webview must be able to drag, minimise, maximise and close its window.",
+  "description": "Default permissions for NexTerm. Off macOS the app draws its own title bar (decorations: false), so the webview must be able to drag, minimise, maximise and close its window. The notification plugin's start-up script asks whether notifications are allowed (on macOS and Linux), and that question alone is granted: NexTerm shows its notifications from its own command, show_desktop_notification, and the webview cannot post one through the plugin.",
   "windows": [
     "main"
   ],
@@ -14,6 +14,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
+    "notification:allow-is-permission-granted",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "http://*" }, { "url": "https://*" }]

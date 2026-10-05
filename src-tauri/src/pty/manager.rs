@@ -119,6 +119,10 @@ fn leading_line_len(data: &[u8]) -> usize {
     data.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(data.len())
 }
 
+/// The variable OpenTUI reads for the notification protocol to use: `osc99`
+/// (kitty's) or `osc9` (iTerm2's).
+const OPENTUI_NOTIFICATION_PROTOCOL: &str = "OPENTUI_NOTIFICATION_PROTOCOL";
+
 /// What NexTerm adds to the environment a shell inherits from the app.
 ///
 /// A function of its own so that a test can start a real shell with exactly
@@ -129,6 +133,17 @@ fn set_session_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("NEXTERM", "1");
+
+    // OpenCode's TUI (OpenTUI) sends a notification only in a protocol it has
+    // chosen. It asks the terminal as it starts — kitty's OSC 99 query — and
+    // the frontend answers (src/lib/programNotifications.js); with no answer
+    // it sends nothing at all. ConPTY may not carry that answer back to the
+    // program, so the choice is made here as well, where OpenTUI reads it
+    // before asking anything. Only when the shell would not inherit a choice
+    // already: one the user made wins.
+    if cmd.get_env(OPENTUI_NOTIFICATION_PROTOCOL).is_none() {
+        cmd.env(OPENTUI_NOTIFICATION_PROTOCOL, "osc99");
+    }
 
     // Opened from the Finder, the app inherits launchd's environment, which
     // names no locale, and a shell without one runs in C — where bash's
@@ -1189,6 +1204,52 @@ mod canonical_limit_tests {
         let child = pair.slave.spawn_command(cmd).expect("spawn");
         drop(pair.slave);
         child
+    }
+}
+
+/// The notification protocol OpenCode is told to use, set up by the same code
+/// `spawn` uses — on every platform: the variable is there for ConPTY.
+#[cfg(test)]
+mod session_env_tests {
+    use super::*;
+    use portable_pty::CommandBuilder;
+
+    fn value(cmd: &CommandBuilder, key: &str) -> Option<String> {
+        cmd.get_env(key).map(|v| v.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn opencode_is_told_to_notify_with_osc_99() {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.env_remove(OPENTUI_NOTIFICATION_PROTOCOL);
+        set_session_env(&mut cmd);
+        assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc99"));
+    }
+
+    #[test]
+    fn a_protocol_the_shell_inherits_is_left_exactly_as_it_is() {
+        // Empty is a choice too: the user unset OpenTUI's guess, not NexTerm.
+        for inherited in ["osc9", "osc99", "", "something-newer"] {
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.env("OPENTUI_NOTIFICATION_PROTOCOL", inherited);
+            set_session_env(&mut cmd);
+            assert_eq!(
+                value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(),
+                Some(inherited),
+                "OPENTUI_NOTIFICATION_PROTOCOL={inherited:?} did not survive"
+            );
+        }
+
+        // Windows does not care how a variable's name is cased, so a name the
+        // user spelt in lower case is the same variable, and wins the same way.
+        #[cfg(windows)]
+        {
+            let mut cmd = CommandBuilder::new("cmd.exe");
+            cmd.env_remove(OPENTUI_NOTIFICATION_PROTOCOL);
+            cmd.env("opentui_notification_protocol", "osc9");
+            set_session_env(&mut cmd);
+            assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc9"));
+        }
     }
 }
 

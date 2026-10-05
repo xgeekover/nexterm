@@ -65,6 +65,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Desktop notifications for what a program in a terminal asks to be
+        // told about — see commands/notification.rs.
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_flags())
@@ -141,6 +144,7 @@ fn main() {
             commands::system::system_get_info,
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
+            commands::notification::show_desktop_notification,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");
