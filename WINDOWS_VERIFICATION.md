@@ -454,6 +454,36 @@ OpenCode as well.
   0.9.0, with nothing like `;2;13~` typed into it. In `claude`, with nothing
   typed, it does what `Enter` does, as in 0.9.0.
 
+### V21 — a program's notification reaches the bell and a toast under ConPTY
+
+Never run on Windows, nor yet in the app: OpenCode was measured in a PTY
+harness on macOS, and NexTerm's side through real xterm in the suites.
+OpenCode picks OSC 99 only when the terminal answers its start-up query, and
+whether conhost carries that answer back is unknown — hence
+`OPENTUI_NOTIFICATION_PROTOCOL` below. Use the **installed** build (`setup.exe` or `.msi`): Tauri documents
+its notifications as working only for installed apps on Windows, and a
+development build shows them as PowerShell's.
+
+- In PowerShell, `$env:OPENTUI_NOTIFICATION_PROTOCOL` prints `osc99`.
+- Turn OpenCode's on (`{"attention": {"enabled": true}}` in
+  `.config\opencode\tui.json` under `%USERPROFILE%`), give it a prompt, and
+  Alt+Tab to another app before it answers: a toast with the session's title
+  says "Session done", and the bell holds the same entry; clicking the entry
+  goes to that terminal. Ask for something it needs permission for, and switch
+  away again: "Permission needs input".
+- NexTerm in front with another terminal tab active: an entry, no toast. In
+  OpenCode's own tab, typing into it: nothing at all.
+- No `]99;`, `]9;4;` or `]9;9;` text ever appears — on screen, or typed into
+  OpenCode's input box as it starts (that would be conhost turning NexTerm's
+  answer to OpenCode's query into keystrokes) — and a PowerShell or oh-my-posh
+  prompt (which sends `9;9` with the directory) never adds an entry.
+- *Notifications from Programs* off (Settings ▸ Terminal): nothing appears.
+- When it fails, say which half: an entry but no toast is Windows' side —
+  Settings ▸ System ▸ Notifications for NexTerm, Do not disturb; neither is
+  conhost swallowing OSC 99 — note the Windows build. An entry that arrives
+  only once something else on screen changes is ConPTY holding a sequence that
+  draws nothing, as in V14.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
