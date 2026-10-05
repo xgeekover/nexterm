@@ -195,8 +195,10 @@ describe('Clipboard keys: what the custom key handler does', () => {
 describe('Clipboard keys: a selection must be on screen to count (L3)', () => {
   /**
    * A terminal whose selection sits at absolute buffer rows `startY`..`endY`
-   * — 1-based, as `getSelectionPosition()` reports them — while the viewport
-   * shows buffer rows `viewportY`..`viewportY + rows - 1` (0-based, as
+   * — 0-based, as xterm 6's `getSelectionPosition()` really reports them,
+   * whatever its typings say (measured in Chromium: a drag over the top row of
+   * a fresh terminal reports y 0; see KC-14) — while the viewport shows buffer
+   * rows `viewportY`..`viewportY + rows - 1` (0-based too, as
    * `IBuffer.viewportY` reports it; the top one otherwise defaults to the
    * start of the buffer).
    */
@@ -223,7 +225,7 @@ describe('Clipboard keys: a selection must be on screen to count (L3)', () => {
   }
 
   test('KC-10 (L3): a selection scrolled out of the viewport does not count', () => {
-    // The viewport showing buffer rows 50..73 (0-based) — 1-based 51..74.
+    // The viewport showing buffer rows 50..73.
     assert.equal(
       hasVisibleSelection(termAt({ startY: 5, endY: 5, viewportY: 50, rows: 24 })),
       false,
@@ -232,14 +234,24 @@ describe('Clipboard keys: a selection must be on screen to count (L3)', () => {
     assert.equal(hasVisibleSelection(termAt({ startY: 200, endY: 200, viewportY: 50, rows: 24 })), false, 'scrolled below');
     assert.equal(hasVisibleSelection(termAt({ startY: 60, endY: 60, viewportY: 50, rows: 24 })), true, 'inside the viewport');
     assert.equal(
-      hasVisibleSelection(termAt({ startY: 40, endY: 51, viewportY: 50, rows: 24 })),
+      hasVisibleSelection(termAt({ startY: 40, endY: 50, viewportY: 50, rows: 24 })),
       true,
-      "ends on the viewport's own top row (1-based 51 = 0-based 50)"
+      "ends on the viewport's own top row"
     );
     assert.equal(
-      hasVisibleSelection(termAt({ startY: 40, endY: 50, viewportY: 50, rows: 24 })),
+      hasVisibleSelection(termAt({ startY: 40, endY: 49, viewportY: 50, rows: 24 })),
       false,
       'one row short of the viewport'
+    );
+    assert.equal(
+      hasVisibleSelection(termAt({ startY: 73, endY: 90, viewportY: 50, rows: 24 })),
+      true,
+      "starts on the viewport's own bottom row"
+    );
+    assert.equal(
+      hasVisibleSelection(termAt({ startY: 74, endY: 90, viewportY: 50, rows: 24 })),
+      false,
+      'one row past the bottom — counted as on screen when rows were read as 1-based'
     );
   });
 
@@ -247,6 +259,17 @@ describe('Clipboard keys: a selection must be on screen to count (L3)', () => {
     const term = termAt({ startY: 60, endY: 60, viewportY: 50, rows: 24 });
     assert.equal(hasVisibleSelection(term), true, 'a real selection, on screen');
     assert.equal(hasVisibleSelection(term, { findOpen: true }), false, 'the find bar is open: not counted');
+  });
+
+  test('KC-14: a selection on the top row of a fresh terminal is on screen — Ctrl+C copies it instead of interrupting', () => {
+    // What xterm 6 reports for a drag over the first row, viewport at the top.
+    const top = termAt({ startY: 0, endY: 0, viewportY: 0, rows: 24, selection: 'hello' });
+    assert.equal(hasVisibleSelection(top), true, 'read as 1-based, row 0 was "above" the viewport');
+    const copied = [];
+    assert.equal(handleClipboardKey(top, key('ctrl+c'), { platform: 'windows', copy: (t) => copied.push(t.getSelection()) }), false);
+    assert.deepEqual(copied, ['hello'], 'copied, not ^C');
+    assert.equal(hasVisibleSelection(termAt({ startY: 23, endY: 23, viewportY: 0, rows: 24 })), true, 'and the bottom row too');
+    assert.equal(hasVisibleSelection(termAt({ startY: 24, endY: 24, viewportY: 0, rows: 24 })), false, 'but not the row below it');
   });
 
   test('KC-12 (L3): without position information (an older xterm, a simpler test double) a plain selection still counts', () => {

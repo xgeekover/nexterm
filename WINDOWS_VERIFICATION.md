@@ -432,9 +432,9 @@ any of it — which is exactly what nothing here can reproduce.
   Windows' mouse settings makes it go further.
 - Whether `claude` frames its output with synchronized updates here is open:
   it asks XTVERSION first, and conhost may answer or swallow that query itself.
-- Inside `claude`'s full-screen view a right-click does not paste: told it
-  runs in xterm.js, claude leaves right-click paste to the terminal, and
-  NexTerm has none. `Ctrl+V` pastes. Expected, not a bug.
+- Inside `claude`'s full-screen view a right-click pastes: told it runs in
+  xterm.js, claude leaves right-click paste to the terminal, which NexTerm
+  now does — see V22. (Through 0.10.0 it did nothing there.)
 
 ### V20 — Shift+Enter inserts a newline in OpenCode under ConPTY
 
@@ -484,7 +484,41 @@ development build shows them as PowerShell's.
   only once something else on screen changes is ConPTY holding a sequence that
   draws nothing, as in V14.
 
-### V22 — Ctrl+Shift+Enter zooms a pane, and what it hides keeps running
+### V22 — right-click copies or pastes, inside Claude Code and OpenCode too
+
+Never run on Windows: checked against real xterm in headless Chromium on macOS
+(with the setting switched on there), and the clipboard read by the backend on
+macOS only. The Windows half — the text through arboard, and whether an image
+is there through `IsClipboardFormatAvailable` — has never run. Settings ▸
+Terminal ▸ *Right Click* should already say *Copy or Paste*, untouched.
+
+- PowerShell: copy a line in Notepad and right-click in the terminal — it is
+  pasted at the prompt and no menu opens. Copy two lines: they arrive as one
+  block, not run one by one. Select some output and right-click: it is copied
+  (paste it into Notepad) and the selection disappears; right-click again and
+  it pastes.
+- `opencode`: right-click with text on the clipboard — pasted into its input,
+  and OpenCode does nothing with the click itself. Take a screenshot with
+  `Win+Shift+S` (an image alone on the clipboard) and right-click — `[Image 1]`
+  appears, as with `Ctrl+V`. Shift-drag over its text, then right-click — it
+  is copied.
+- `claude`: in its full-screen view a right-click pastes into the input (it did
+  nothing before — V19), and copies a Shift-drag selection.
+- `vim` with `:set mouse=a`, in insert mode: a right-click pastes, and vim
+  hears no click (nothing selected, the cursor does not jump). `Shift`+right-
+  click does nothing at all: no menu opens — NexTerm cancels WebView2's — and
+  vim hears nothing either, as off macOS xterm never reports a Shift-click,
+  Shift being its "select instead" key.
+- Set *Right Click* to *Default*: a right-click opens WebView2's menu again, and
+  in vim with `mouse=a` it reaches vim. Back to *Copy or Paste*: the next
+  right-click pastes, no restart.
+- When it fails, say which half: no menu and nothing pasted is the clipboard
+  read (the devtools console says "a right-click could not paste the
+  clipboard"); a menu opening means the click was not claimed at all; text
+  that pastes while a screenshot does not is the image check — note what made
+  the image (Snipping Tool, PrintScreen, a browser's Copy Image).
+
+### V23 — Ctrl+Shift+Enter zooms a pane, and what it hides keeps running
 
 Never run on Windows: built and tested on macOS, where the chord is ⌘⇧Enter
 and the native menu holds the accelerator. Off macOS the chord is claimed by
@@ -502,7 +536,7 @@ the webview ahead of xterm, and ConPTY has to pass the resize on both ways.
   Pane Zoom* both toggle, and a click on a hidden terminal in the TERMINALS
   panel unzooms onto it.
 
-### V23 — a layout template's startup commands run in PowerShell and cmd
+### V24 — a layout template's startup commands run in PowerShell and cmd
 
 Never run on Windows: the suites hold the typing against a mock shell, and on
 macOS it was checked with zsh only. The command is typed when the shell's first

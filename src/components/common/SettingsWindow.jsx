@@ -270,6 +270,20 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       control: 'checkbox',
     },
     {
+      id: 'terminalRightClick',
+      section: 'terminal',
+      key: 'terminalRightClick',
+      settingKey: 'terminal.integrated.rightClickBehavior',
+      title: 'Right Click',
+      description:
+        'Copy or Paste: a right-click copies the selection and clears it, or pastes when nothing is selected, as in Windows Terminal — inside Claude Code, OpenCode and vim too, which never see the click. Shift+right-click passes the click on to the program instead (on macOS; elsewhere it does nothing). Default: the right-click is left to the terminal and the program. Copy or Paste is the default on Windows.',
+      control: 'select',
+      options: [
+        { value: 'copyPaste', label: 'Copy or Paste' },
+        { value: 'default', label: 'Default' },
+      ],
+    },
+    {
       id: 'terminalMouseReporting',
       section: 'terminal',
       key: 'terminalMouseReporting',
@@ -419,6 +433,7 @@ export function SettingsWindow() {
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
+  const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
@@ -442,6 +457,7 @@ export function SettingsWindow() {
     terminalStickyHeader,
     terminalCopyOnSelect,
     terminalMouseReporting,
+    terminalRightClick,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
     terminalProgramNotifications,
