@@ -228,7 +228,10 @@ describe('The right-click: real xterm 6 under headless Chromium (CDP)', () => {
     const stock = await outcome('stock');
     assert.deepEqual(app.seen, EVERY_PART, 'every part reached xterm\'s element');
     assert.deepEqual(app.seen, stock.seen);
-    assert.deepEqual(app.menus, [false], 'the webview\'s menu, as before');
+    // All but the webview's own menu, which xterm alone leaves to open: on
+    // macOS it took the button's release with it (measured in the app).
+    assert.deepEqual(app.menus, [true], 'no webview menu');
+    assert.deepEqual(stock.menus, [false], 'where xterm alone opens one');
     assert.equal(app.raised, true, 'xterm\'s right-click handler ran');
     assert.equal(app.data, stock.data, 'the program got what it gets from xterm alone');
     if (/Mac/.test(await call('platform'))) {

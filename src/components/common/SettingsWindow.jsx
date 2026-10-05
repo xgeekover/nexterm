@@ -276,7 +276,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       settingKey: 'terminal.integrated.rightClickBehavior',
       title: 'Right Click',
       description:
-        'Copy or Paste: a right-click copies the selection and clears it, or pastes when nothing is selected, as in Windows Terminal — inside Claude Code, OpenCode and vim too, which never see the click. Shift+right-click still goes to the terminal as before. Default: the right-click is left to the terminal and the program. Copy or Paste is the default on Windows.',
+        'Copy or Paste: a right-click copies the selection and clears it, or pastes when nothing is selected, as in Windows Terminal — inside Claude Code, OpenCode and vim too, which never see the click. Shift+right-click passes the click on to the program instead (on macOS; elsewhere it does nothing). Default: the right-click is left to the terminal and the program. Copy or Paste is the default on Windows.',
       control: 'select',
       options: [
         { value: 'copyPaste', label: 'Copy or Paste' },
