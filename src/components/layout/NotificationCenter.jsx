@@ -13,6 +13,21 @@ import { cn } from '../../lib/utils.js';
 const failed = (note) => note.kind !== 'program' && isFailure(note.exitCode);
 
 /**
+ * Where the list opens for a bell at `el`: `right` / `bottom` in pixels for a
+ * `fixed` element, so that it sits 4 px above the bell with its right edge on
+ * the bell's — never past the window's right edge. Null with no bell to
+ * measure, which leaves the list at the window's corner.
+ */
+export function listAnchor(el, win = globalThis.window) {
+  const rect = el?.getBoundingClientRect?.();
+  if (!rect || !win) return null;
+  return {
+    right: Math.max(4, Math.round(win.innerWidth - rect.right)),
+    bottom: Math.max(4, Math.round(win.innerHeight - rect.top + 4)),
+  };
+}
+
+/**
  * What finished while you were looking somewhere else.
  *
  * A bell sat at the end of this bar for four releases with no `onClick` at
@@ -41,10 +56,19 @@ export function NotificationCenter() {
   // exact thing the old notifications bell was.
   const switchTab = useTerminalStore((s) => s.switchTab);
   const [open, setOpen] = useState(false);
+  // Where the list opens: just above the bell, its right edge on the bell's.
+  // Measured as it opens, and the list is `fixed`, because the status bar it
+  // hangs from clips what overflows it (`overflow-hidden`, which the bar
+  // needs for its own text): drawn `absolute` above the bar, the list was cut
+  // off entirely — nothing on screen, and a click there landed on the panel
+  // behind it.
+  const [anchor, setAnchor] = useState(null);
   const rootRef = useRef(null);
+  const bellRef = useRef(null);
 
-  // Close on a click anywhere else, or on Escape — a popover pinned to the
-  // bottom-right corner is easy to forget is open.
+  // Close on a click anywhere else, on Escape — a popover pinned to the
+  // bottom-right corner is easy to forget is open — or when the window is
+  // resized, which moves the bell out from under where the list was put.
   useEffect(() => {
     if (!open) return undefined;
     const onDown = (e) => {
@@ -53,11 +77,14 @@ export function NotificationCenter() {
     const onKey = (e) => {
       if (e.key === 'Escape') setOpen(false);
     };
+    const onResize = () => setOpen(false);
     window.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
     };
   }, [open]);
 
@@ -70,11 +97,15 @@ export function NotificationCenter() {
   return (
     <div ref={rootRef} className="relative h-full shrink-0">
       <button
+        ref={bellRef}
         type="button"
         aria-expanded={open}
         aria-label={summary.label}
         title={summary.title}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (!open) setAnchor(listAnchor(bellRef.current));
+          setOpen(!open);
+        }}
         className={cn(
           'h-full px-2 flex items-center gap-1 text-vsc-fg hover:bg-vsc-item-hover',
           open && 'bg-vsc-item-active'
@@ -96,7 +127,8 @@ export function NotificationCenter() {
         <div
           role="dialog"
           aria-label={summary.dialog}
-          className="absolute bottom-full right-0 mb-1 w-[320px] max-h-[320px] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] overflow-hidden"
+          style={anchor ?? undefined}
+          className="fixed z-50 w-[320px] max-h-[320px] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] overflow-hidden"
         >
           <div className="h-[28px] shrink-0 px-2 flex items-center justify-between border-b border-vsc-border">
             <span className="text-ui-sm text-vsc-muted">{summary.heading}</span>
