@@ -229,8 +229,8 @@ application, and this one has git in it already.
 
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
-scrollback, colour theme, command suggestions, copy on select and mouse
-reporting.
+scrollback, colour theme, command suggestions, copy on select, what a
+right-click does, and mouse reporting.
 
 ### Notifications from programs
 
@@ -310,6 +310,14 @@ On Windows this is Windows Terminal's table: `Ctrl+C` with nothing selected
 still interrupts, and copying clears the selection so the next `Ctrl+C` does
 too. `Ctrl+V` pastes text rather than sending `^V` — Claude Code pastes an image
 with `Alt+V` there, and vim's block selection is `Ctrl+Q`, as in gvim.
+
+**Right-click copies or pastes**, as in Windows Terminal: with a selection on
+screen it copies it and clears it, otherwise it pastes — text as `Ctrl+V` does,
+and an image alone as the empty paste that tells OpenCode to attach it. It does
+so inside Claude Code, OpenCode and vim as well, which never see the click;
+`Shift`+right-click goes to the terminal and the program as it always did. On
+by default on Windows; Settings ▸ Terminal ▸ *Right Click* turns it on (*Copy or
+Paste*) or off (*Default*) on any platform.
 
 **Changing a shortcut.** Settings ▸ Keyboard Shortcuts lists every command,
 records the chord you press, and unbinds or resets one per row. Conflicts are
