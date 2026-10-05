@@ -18,16 +18,44 @@
  * uses to switch the widths on.
  */
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 // Static imports on purpose: other files in this runner register module hooks
 // that turn `@xterm/*` into test doubles, and a static import is resolved
 // before any of them runs.
 import headless from '@xterm/headless';
-import graphemes from '@xterm/addon-unicode-graphemes';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { activateGraphemeWidths, GRAPHEME_WIDTHS } from '../../src/lib/terminalCompat.js';
 
 const { Terminal: HeadlessTerminal } = headless;
-const { UnicodeGraphemesAddon } = graphemes;
+const { UnicodeGraphemesAddon } = loadGraphemesAddonAsInBrowser();
+
+/**
+ * `@xterm/addon-unicode-graphemes` as the app's WebView runs it: the shipped
+ * bundle, evaluated with no `Buffer` in scope.
+ *
+ * The addon decodes its Unicode table from base64 as it loads — with `atob`
+ * in a browser, a fresh array, but with `Buffer.from(…, 'base64')` wherever a
+ * `Buffer` exists, and Node hands a table this size (3 KB) out of its shared
+ * 8 KB pool, at whatever offset the pool has reached. The addon then reads the
+ * table's header through `new DataView(data.buffer)` — from the start of the
+ * POOL, not of its own bytes — and gets what an earlier buffer left there.
+ * Where that says the table ends early, every code point above U+FFFF looks
+ * up as a plain narrow character: 🔧 🚀 👍 one cell, while ✅ ⚠️ 한 stay right
+ * (and 👍🏽 is two by accident, one plus one). Under Node 20 that failed UW-05
+ * on all three CI platforms; here the same run passed, the pool holding other
+ * leftovers. The app never takes that path — a WebView has no `Buffer` — and
+ * neither does this test.
+ *
+ * Read from disk rather than imported, so no module hook another test file
+ * registers can stand in for it, and no import order has to be right.
+ */
+function loadGraphemesAddonAsInBrowser() {
+  const require = createRequire(import.meta.url);
+  const source = readFileSync(require.resolve('@xterm/addon-unicode-graphemes'), 'utf8');
+  const mod = { exports: {} };
+  new Function('module', 'exports', 'Buffer', source)(mod, mod.exports, undefined);
+  return mod.exports;
+}
 
 /**
  * Claude Code's own measure, `Bun.stringWidth(s, { ambiguousIsNarrow: true })`
