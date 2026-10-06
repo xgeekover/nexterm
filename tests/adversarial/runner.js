@@ -23,6 +23,7 @@ import './terminal_intellisense.test.js';
 import './suggestion_layer.test.js';
 import './ipc_contract.test.js';
 import './editor_unsaved.test.js';
+import './editor_windows_paths.test.js';
 import './keybindings_platform.test.js';
 import './menu_contract.test.js';
 import './init_once.test.js';

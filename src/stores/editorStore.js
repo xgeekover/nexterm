@@ -10,6 +10,7 @@ import {
   reparent,
   samePath,
   stripTrailingSep,
+  withSepOf,
 } from '../lib/paths.js';
 import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
@@ -485,7 +486,9 @@ export const useEditorStore = create((set, get) => ({
   openFileAt: async (filePath, line, column = null) => {
     const tab = await get().openFile(filePath);
     if (Number.isFinite(line) && line > 0) {
-      set({ pendingReveal: { filePath, line, column: Number.isFinite(column) ? column : 1 } });
+      // The tab's own spelling, which is what the editor compares against:
+      // a link's `C:\proj\src/App.jsx` lands on the tab of `C:\proj\src\App.jsx`.
+      set({ pendingReveal: { filePath: tab.filePath, line, column: Number.isFinite(column) ? column : 1 } });
     }
     return tab;
   },
@@ -493,11 +496,18 @@ export const useEditorStore = create((set, get) => ({
   /** Applied — or abandoned, if nothing could show it. */
   clearReveal: () => set({ pendingReveal: null }),
 
-  openFile: async (filePath) => {
+  openFile: async (requestedPath) => {
+    // Written the way the backend writes the open folder, so that a link
+    // printed in a terminal and a click in the Explorer name the same file
+    // the same way (see `withSepOf`).
+    const filePath = withSepOf(requestedPath, get().rootPath);
     // Check if already open — reveal it in whichever group already shows it
     // (VS Code's "revealIfOpen") rather than yanking it into the active
     // group, which would be surprising if the user deliberately split panes.
-    const existing = get().tabs.find((t) => t.filePath === filePath);
+    // Compared separator-blind: on Windows `C:\p\a.js` and `C:\p/a.js` are
+    // one file, and two tabs on it were two buffers of it, each taking the
+    // other's saves for changes made on disk.
+    const existing = get().tabs.find((t) => samePath(t.filePath, filePath));
     if (existing) {
       set((state) => {
         const holder = leafHoldingTab(state.editorSplitTree, existing.id);
@@ -955,10 +965,11 @@ export const useEditorStore = create((set, get) => ({
       await get().refreshExplorer();
       // Close every tab the delete removed. Matching only the exact path
       // left a deleted folder's files open, and saving one of those
-      // recreated the directory the user had just deleted.
-      const prefix = `${path}/`;
+      // recreated the directory the user had just deleted. Separator-blind:
+      // a `${path}/` prefix never matched a Windows path, so on Windows,
+      // where this app is mostly used, that still happened.
       const orphaned = get().tabs.filter(
-        (t) => t.filePath === path || t.filePath.startsWith(prefix)
+        (t) => samePath(t.filePath, path) || isInside(path, t.filePath)
       );
       orphaned.forEach((t) => get().closeTab(t.id));
     } catch (err) {
@@ -1001,13 +1012,18 @@ export const useEditorStore = create((set, get) => ({
   // refuses to clobber an existing file instead of merging two into one.
   renamePath: async (oldPath, rawName) => {
     const trimmed = (rawName || '').trim();
-    if (!trimmed || trimmed.includes('/')) {
-      throw new Error('Name cannot be empty or contain "/"');
+    // A separator would make this a move into a folder, which the backend
+    // creates on the way. '\' is one on Windows only, and a name that means a
+    // different thing on each platform is refused on both.
+    if (!trimmed || /[\\/]/.test(trimmed)) {
+      throw new Error('Name cannot be empty or contain "/" or "\\"');
     }
 
-    const parent = parentDirOf(oldPath);
-    const newPath = parent === '/' ? `/${trimmed}` : `${parent}/${trimmed}`;
-    if (newPath === oldPath) return;
+    // In the separator the folder already uses: `${parent}/${name}` gave
+    // `C:\proj\src/b.js`, which no Explorer click matched, so the file opened
+    // a second time in a second tab.
+    const newPath = join(parentDirOf(oldPath), trimmed);
+    if (samePath(newPath, oldPath)) return;
 
     try {
       await invoke('fs_rename_path', { from: oldPath, to: newPath });

@@ -14,6 +14,7 @@ import { EditorTabs, EditorDragContext, markEditorDragEnded, stripSlotAt } from 
 import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
+import { segmentsBelow } from '../../lib/paths.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
@@ -371,14 +372,6 @@ function DragPreview({ drag }) {
   );
 }
 
-/** Breadcrumb segments = file path relative to the workspace root. */
-function relativeSegments(filePath, rootPath) {
-  const base = (rootPath || '').replace(/\/+$/, '');
-  let relativePath = base && filePath.startsWith(base) ? filePath.slice(base.length) : filePath;
-  relativePath = relativePath.replace(/^\/+/, '');
-  return relativePath ? relativePath.split('/').filter(Boolean) : [];
-}
-
 /**
  * One editor group (leaf of the split tree): its own tab strip plus the
  * Monaco editor for whichever of *its* tabs is active. Tabs can be dragged
@@ -436,7 +429,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
 
-  const segments = activeTab ? relativeSegments(activeTab.filePath, rootPath) : [];
+  const segments = activeTab ? segmentsBelow(rootPath, activeTab.filePath) : [];
 
   // Clicking a second link into a file that is already open remounts nothing,
   // so `onMount` never fires again and this is the only thing that moves.
