@@ -421,8 +421,9 @@ __nexterm_preexec() {
 # OSC 7: report the live working directory on every prompt (raw path, see
 # the module doc comment above for why this is not percent-encoded here).
 # bash's hostname variable is $HOSTNAME (zsh/csh use $HOST instead).
-# Under bash-preexec, $? is the command's exit status here; otherwise
-# __nexterm_prompt_begin kept it, since the user's commands ran since.
+# Under bash-preexec, $? is the command's exit status here. Otherwise the
+# user's PROMPT_COMMAND has run in between, and __nexterm_prompt_begin kept
+# the status from before it.
 __nexterm_precmd() {
   local __nexterm_code=$?
   if [[ -n "${__nexterm_exit_status-}" ]]; then
@@ -462,6 +463,13 @@ __nexterm_debug() {
     __nexterm_*) return 0 ;;
   esac
   if [[ -n "${__nexterm_user_debug_trap-}" ]]; then
+    # Between our two PROMPT_COMMAND commands, the user's trap is shown the
+    # command it fired for as PROMPT_COMMAND, as when the variable held only
+    # theirs: `[ "$BASH_COMMAND" = "$PROMPT_COMMAND" ]` is how a hand-written
+    # preexec tells the prompt's own command from the user's.
+    if [[ -n "${__nexterm_exit_status-}" ]]; then
+      local PROMPT_COMMAND=$BASH_COMMAND
+    fi
     __nexterm_return "$__nexterm_code" "$__nexterm_last"
     builtin eval -- "$__nexterm_user_debug_trap"
     __nexterm_verdict=$?
@@ -1272,6 +1280,43 @@ preexec_functions+=(__user_preexec)
             );
             assert!(combined.contains("\x1b]133;D;0\x07"), "login={login}: no D;0 marker: {combined:?}");
             assert!(combined.contains("\x1b]133;A\x07"), "login={login}: no A marker: {combined:?}");
+        }
+    }
+
+    /// The DEBUG trap preexec written by hand before bash-preexec existed —
+    /// still in plenty of ~/.bashrc files — tells its own prompt command from
+    /// the user's by `[ "$BASH_COMMAND" = "$PROMPT_COMMAND" ]`. With the
+    /// user's commands between NexTerm's in PROMPT_COMMAND that no longer
+    /// held, and its preexec ran for the prompt itself at every prompt.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_keeps_a_debug_trap_that_looks_for_prompt_command() {
+        let bashrc = r#"
+preexec() { builtin printf 'preexec:[%s]\n' "$1"; }
+precmd() { builtin printf 'precmd\n'; }
+preexec_invoke_exec() {
+  [ -n "${COMP_LINE-}" ] && return
+  [ "$BASH_COMMAND" = "$PROMPT_COMMAND" ] && return
+  preexec "$BASH_COMMAND"
+}
+trap 'preexec_invoke_exec' DEBUG
+PROMPT_COMMAND=precmd
+"#;
+        for login in [false, true] {
+            let Some(combined) = run_real_bash(login, &[(".bashrc", bashrc)], "false\necho x\nexit\n") else {
+                eprintln!("bash not installed; skipping");
+                return;
+            };
+            assert!(
+                combined.contains("preexec:[false]\n") && combined.contains("preexec:[echo x]\n"),
+                "login={login}: the preexec no longer runs for the user's commands: {combined:?}"
+            );
+            assert!(
+                !combined.contains("preexec:[precmd]"),
+                "login={login}: the preexec ran for the prompt's own command: {combined:?}"
+            );
+            assert_eq!(combined.matches("precmd\n").count(), 3, "login={login}: {combined:?}");
+            assert!(combined.contains("\x1b]133;D;1\x07"), "login={login}: {combined:?}");
         }
     }
 
