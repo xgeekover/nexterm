@@ -1552,6 +1552,11 @@ export const useTerminalStore = create((set, get, api) => {
     await disposeTerminalView(tabId);
     typedLines.delete(tabId);
     forgetAgentTitle(tabId);
+    // Whatever its shell printed that no terminal ever showed goes with it, as
+    // in `closeTab`. Closing a pane, a group or the whole workspace comes this
+    // way, and a tab of theirs never brought forward kept up to BACKLOG_LIMIT
+    // characters for the life of the app.
+    forgetOutput(tab.sessionId);
     set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
   };
 
@@ -2879,6 +2884,27 @@ export const useTerminalStore = create((set, get, api) => {
         if (!session_id) return;
         // Nothing more will come from this shell to count.
         commandEndsBySession.delete(session_id);
+
+        // Nor to show, when no tab holds it: its output was kept for a
+        // terminal that will never exist. A tab closed before its shell's end
+        // got here — the backend drains the shell after the kill, so output
+        // arrives after the close freed what was kept — or a shell left by a
+        // previous page load, reaped at startup. Not while the store is still
+        // starting: a restore spawns every shell before any tab holds one, and
+        // a shell already gone (a missing WSL distro, a broken profile) left
+        // its last words for the tab about to show them.
+        const forgetIfUnheld = (state) => {
+          if (!state.tabs.some((t) => t.sessionId === session_id)) forgetOutput(session_id);
+        };
+        if (get().isInitialized) {
+          forgetIfUnheld(get());
+        } else {
+          const stop = api.subscribe((state) => {
+            if (!state.isInitialized) return;
+            stop();
+            forgetIfUnheld(state);
+          });
+        }
 
         set((state) => ({
           tabs: state.tabs.map((tab) => {
