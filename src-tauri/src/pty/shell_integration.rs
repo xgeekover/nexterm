@@ -250,27 +250,35 @@ fi
 # bash has no preexec/precmd hooks, so we build them out of two primitives:
 #   - PROMPT_COMMAND runs right before every prompt is drawn (our precmd).
 #   - `trap ... DEBUG` runs before every top-level simple command (our
-#     preexec). It also fires once for PROMPT_COMMAND's own invocation, and
-#     once per simple command in a compound line (`a; b; c`), so:
-#       * we skip it when $BASH_COMMAND is exactly $PROMPT_COMMAND (the
-#         standard bash-preexec trick for ignoring the trap "for
-#         PROMPT_COMMAND"), and
-#       * a guard flag (set in precmd, cleared in the trap) makes sure the
-#         C marker prints exactly once per typed command rather than once
-#         per simple command inside it.
-#     The trap is not traced into shell functions unless `set -o functrace`
-#     is enabled, which we never do, so the statements inside
-#     __nexterm_precmd/__nexterm_preexec don't retrigger the trap while it
-#     is running (i.e. it is effectively ignored "while running the precmd
-#     itself").
-__nexterm_pending_preexec=0
+#     preexec). It also fires for each command PROMPT_COMMAND runs, and
+#     once per simple command in a compound line (`a; b; c`), so a guard
+#     flag (set in precmd, cleared by the first command after it) makes
+#     sure the C marker prints exactly once per typed command rather than
+#     once per simple command inside it.
+#
+# Neither primitive is ours alone. ~/.bashrc has just run, and it is where
+# direnv, zoxide and starship put their hooks in PROMPT_COMMAND, where
+# `history -a` keeps a shared history, and where a DEBUG trap times
+# commands. Assigning ours over them switched all of that off without a
+# word, so ours are added to what is there:
+#   - PROMPT_COMMAND keeps the user's commands, between two of ours. The
+#     first takes the exit status before anything can change it and returns
+#     it again, so their commands see it as they always did; the last
+#     prints the markers. They stay in PROMPT_COMMAND itself rather than
+#     being run from a copy, so an installer that looks for its hook there
+#     still finds it when ~/.bashrc is read again. starship's, not finding
+#     it, would keep ours and run it from its own hook — and a copy run by
+#     ours holds starship's hook, so each would run the other forever.
+#   - The DEBUG trap that was there runs from ours, with the exit status and
+#     $_ of the command it fired for, and returns what it returns (under
+#     extdebug, non-zero skips the command). It does not run for our two
+#     PROMPT_COMMAND commands, which it would never have seen.
+#   - bash-preexec (atuin, bash-it) owns both primitives already and calls
+#     hook functions from two arrays, so ours join the arrays instead.
 
 __nexterm_preexec() {
-  if [[ "$BASH_COMMAND" == "$PROMPT_COMMAND" ]]; then
-    return
-  fi
-  if [[ "$__nexterm_pending_preexec" != "1" ]]; then
-    return
+  if [[ "${__nexterm_pending_preexec-}" != 1 ]]; then
+    return 0
   fi
   __nexterm_pending_preexec=0
   builtin printf '\e]133;C\a'
@@ -279,16 +287,100 @@ __nexterm_preexec() {
 # OSC 7: report the live working directory on every prompt (raw path, see
 # the module doc comment above for why this is not percent-encoded here).
 # bash's hostname variable is $HOSTNAME (zsh/csh use $HOST instead).
+# Under bash-preexec, $? is the command's exit status here; otherwise
+# __nexterm_prompt_begin kept it, since the user's commands ran since.
 __nexterm_precmd() {
-  local __nexterm_status=$?
-  builtin printf '\e]133;D;%d\a' "$__nexterm_status"
+  local __nexterm_code=$?
+  if [[ -n "${__nexterm_exit_status-}" ]]; then
+    __nexterm_code=$__nexterm_exit_status
+    __nexterm_exit_status=
+  fi
+  builtin printf '\e]133;D;%d\a' "$__nexterm_code"
   builtin printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD"
   builtin printf '\e]133;A\a'
   __nexterm_pending_preexec=1
 }
 
-trap '__nexterm_preexec' DEBUG
-PROMPT_COMMAND='__nexterm_precmd'
+# First in PROMPT_COMMAND. Called with "$_" as its last argument, it leaves
+# $_ as the user's command left it, as every call leaves $_ holding its last
+# argument.
+__nexterm_prompt_begin() {
+  __nexterm_exit_status=$?
+  __nexterm_pending_preexec=0
+  return "$__nexterm_exit_status"
+}
+
+# Sets $? to $1, and — given a second argument — $_ to that.
+__nexterm_return() {
+  return "$1"
+}
+
+# The DEBUG trap. $? is still the command's own on entry; $_ is passed in,
+# because it was still the command's own where the trap called this.
+__nexterm_debug() {
+  local __nexterm_code=$? __nexterm_last=${1-} __nexterm_verdict=0
+  case "$BASH_COMMAND" in
+    __nexterm_*) return 0 ;;
+  esac
+  # extdebug traces into functions, ours included; nothing in them is the
+  # user's, or the start of a command.
+  case "${FUNCNAME[1]-}" in
+    __nexterm_*) return 0 ;;
+  esac
+  if [[ -n "${__nexterm_user_debug_trap-}" ]]; then
+    __nexterm_return "$__nexterm_code" "$__nexterm_last"
+    builtin eval -- "$__nexterm_user_debug_trap"
+    __nexterm_verdict=$?
+  fi
+  __nexterm_preexec
+  return "$__nexterm_verdict"
+}
+
+# The DEBUG trap set before ours. `trap -p` prints it quoted for reuse, and
+# reading that back as words gives the action exactly. If it is ours (this
+# file read twice), the one ours already runs is the answer: ours running
+# ours would never end.
+__nexterm_debug_trap_before() {
+  local -a __nexterm_words
+  builtin eval "__nexterm_words=( $(builtin trap -p DEBUG) )"
+  if [[ "${__nexterm_words[2]-}" == '__nexterm_debug "$_"' ]]; then
+    builtin printf '%s' "${__nexterm_user_debug_trap-}"
+  else
+    builtin printf '%s' "${__nexterm_words[2]-}"
+  fi
+}
+
+# The user's PROMPT_COMMAND between ours. An array stays one on bash 5.1+,
+# which runs every element; anywhere else it is the string bash runs (an
+# older bash only ever ran an array's first element). The `;` after ours
+# keeps `;_direnv_hook;` findable for direnv's installed-already check, and
+# the newline before the last one ends any trailing comment.
+__nexterm_wrap_prompt_command() {
+  if [[ "${PROMPT_COMMAND[*]-}" == *__nexterm_precmd* ]]; then
+    return 0
+  fi
+  if [[ "$(builtin declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]] &&
+    (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+    PROMPT_COMMAND=('__nexterm_prompt_begin "$_"' "${PROMPT_COMMAND[@]}" __nexterm_precmd)
+  else
+    PROMPT_COMMAND="__nexterm_prompt_begin \"\$_\";${PROMPT_COMMAND-}"$'\n'"__nexterm_precmd"
+  fi
+}
+
+if [[ -n "${bash_preexec_imported-}${__bp_imported-}" ]]; then
+  if [[ " ${precmd_functions[*]-} " != *" __nexterm_precmd "* ]]; then
+    precmd_functions+=(__nexterm_precmd)
+  fi
+  if [[ " ${preexec_functions[*]-} " != *" __nexterm_preexec "* ]]; then
+    preexec_functions+=(__nexterm_preexec)
+  fi
+else
+  # Read and set out here: bash 3.2 puts back, as a function returns, the
+  # DEBUG trap it was called with, undoing one the function set.
+  __nexterm_user_debug_trap=$(__nexterm_debug_trap_before)
+  builtin trap '__nexterm_debug "$_"' DEBUG
+  __nexterm_wrap_prompt_command
+fi
 "#;
 
 fn bash_integration() -> ShellIntegration {
@@ -659,28 +751,32 @@ mod tests {
         assert!(contents.contains("PROMPT_COMMAND"));
     }
 
-    /// Runs a real bash with the generated rcfile and checks that the DEBUG
-    /// trap / PROMPT_COMMAND pair emits the C and D markers around a
-    /// command. Skipped when bash is not installed.
+    /// What a real bash prints, stdout and stderr together, when started with
+    /// `args` in an isolated fake HOME holding `files` and given `input` to
+    /// run. `None` when bash is not installed.
     #[cfg(unix)]
-    #[test]
-    fn real_bash_emits_markers_around_commands() {
+    fn run_real_bash(args: &[String], files: &[(&str, &str)], input: &str) -> Option<String> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
         if Command::new("bash").arg("--version").output().is_err() {
-            eprintln!("bash not installed; skipping");
-            return;
+            return None;
         }
-        let integration = bash_integration();
-        assert!(!integration.args.is_empty(), "bash integration produced no args");
-
-        // Isolated fake HOME so the developer's real .bashrc is not sourced.
-        let home = std::env::temp_dir().join(format!("nexterm-si-bash-home-{}", std::process::id()));
+        // Isolated fake HOME so the developer's real dotfiles are not sourced;
+        // one per call, since these cases run in parallel.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "nexterm-si-bash-home-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&home).unwrap();
+        for (name, body) in files {
+            fs::write(home.join(name), body).unwrap();
+        }
 
         let mut child = Command::new("bash")
-            .args(&integration.args)
+            .args(args)
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &home)
@@ -690,25 +786,208 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn bash");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"echo x\nfalse\nexit\n")
-            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
         let out = child.wait_with_output().expect("bash output");
-        let combined = format!(
+        let _ = fs::remove_dir_all(&home);
+        Some(format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
-        );
-        let _ = fs::remove_dir_all(&home);
+        ))
+    }
+
+    /// The prompt hook and the DEBUG trap a user's ~/.bashrc sets up — where
+    /// direnv, zoxide, starship and `history -a` live — each reporting the
+    /// exit status it saw.
+    #[cfg(unix)]
+    const USER_BASHRC: &str = r#"
+__user_prompt() { builtin printf 'user-prompt-command:%s\n' "$?"; }
+PROMPT_COMMAND=__user_prompt
+__user_trap() {
+  case "$BASH_COMMAND" in
+    "echo x") builtin printf 'user-debug-trap:%s\n' "$?" ;;
+  esac
+}
+trap '__user_trap' DEBUG
+"#;
+
+    /// Runs a real bash with the generated rcfile and checks that the DEBUG
+    /// trap / PROMPT_COMMAND pair emits the C and D markers around a
+    /// command — and that the PROMPT_COMMAND and DEBUG trap ~/.bashrc set
+    /// up still run, seeing the exit status they always saw. Assigning ours
+    /// over them used to switch direnv, zoxide and shared history off
+    /// without a word. Skipped when bash is not installed.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_emits_markers_around_commands() {
+        let integration = bash_integration();
+        assert!(!integration.args.is_empty(), "bash integration produced no args");
+        let Some(combined) = run_real_bash(
+            &integration.args,
+            &[(".bashrc", USER_BASHRC)],
+            "false\necho x\necho lastarg foo\necho \"dollar-underscore:[$_]\"\nfalse\nexit\n",
+        ) else {
+            eprintln!("bash not installed; skipping");
+            return;
+        };
 
         assert!(combined.contains("\x1b]133;C\x07"), "no C marker: {combined:?}");
         assert!(combined.contains("\x1b]133;D;0\x07"), "no D;0 marker: {combined:?}");
         assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
         assert!(combined.contains("\x1b]133;A\x07"), "no A marker: {combined:?}");
         assert!(combined.contains("\x1b]7;file://"), "no OSC 7 cwd marker: {combined:?}");
+
+        assert!(
+            combined.contains("user-prompt-command:1\n") && combined.contains("user-prompt-command:0\n"),
+            "the PROMPT_COMMAND ~/.bashrc set no longer runs, or not with the command's exit status: {combined:?}"
+        );
+        assert!(
+            combined.contains("user-debug-trap:1\n"),
+            "the DEBUG trap ~/.bashrc set no longer runs, or not with the exit status before it: {combined:?}"
+        );
+        // A DEBUG trap leaves $_ holding the last word it ran, and the
+        // command it fired for sees that unless the trap puts $_ back.
+        assert!(
+            combined.contains("dollar-underscore:[foo]"),
+            "the trap changed what $_ holds for the command after it: {combined:?}"
+        );
+    }
+
+    /// bash 5.1 runs every element of an array PROMPT_COMMAND, and an older
+    /// bash only the first. Either way the user's elements run as they did,
+    /// and the markers still come out.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_keeps_an_array_prompt_command() {
+        use std::process::Command;
+
+        let bashrc = r#"
+__first() { builtin printf 'first-element:%s\n' "$?"; }
+__second() { builtin printf 'second-element\n'; }
+PROMPT_COMMAND=(__first __second)
+"#;
+        let integration = bash_integration();
+        let Some(combined) = run_real_bash(&integration.args, &[(".bashrc", bashrc)], "false\nexit\n") else {
+            eprintln!("bash not installed; skipping");
+            return;
+        };
+        let version = Command::new("bash")
+            .args(["-c", "echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] ))"])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok())
+            .expect("bash says its version");
+
+        assert!(combined.contains("first-element:1\n"), "the first element no longer runs: {combined:?}");
+        assert_eq!(
+            combined.contains("second-element\n"),
+            version >= 501,
+            "bash {version}: the second element must run exactly when this bash runs arrays: {combined:?}"
+        );
+        assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
+        assert!(combined.contains("\x1b]133;C\x07"), "no C marker: {combined:?}");
+    }
+
+    /// bash-preexec (atuin, bash-it) owns PROMPT_COMMAND and the DEBUG trap
+    /// and calls hook functions from two arrays. Ours join those arrays and
+    /// leave both primitives to it. This stands in for it with the same
+    /// contract.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_joins_bash_preexec_instead_of_replacing_it() {
+        let bashrc = r#"
+bash_preexec_imported=defined
+precmd_functions=()
+preexec_functions=()
+__bp_ret() { return "$1"; }
+__bp_precmd() {
+  local status=$? f
+  for f in "${precmd_functions[@]}"; do __bp_ret "$status"; "$f"; done
+  __bp_ready=1
+}
+__bp_preexec() {
+  [[ -n "${__bp_ready-}" && "$BASH_COMMAND" != "$PROMPT_COMMAND" ]] || return 0
+  __bp_ready=
+  local f
+  for f in "${preexec_functions[@]}"; do "$f" "$BASH_COMMAND"; done
+}
+trap '__bp_preexec' DEBUG
+PROMPT_COMMAND=__bp_precmd
+__user_precmd() { builtin printf 'precmd-function:%s\n' "$?"; }
+__user_preexec() { builtin printf 'preexec-function:%s\n' "$1"; }
+precmd_functions+=(__user_precmd)
+preexec_functions+=(__user_preexec)
+"#;
+        let integration = bash_integration();
+        let Some(combined) = run_real_bash(
+            &integration.args,
+            &[(".bashrc", bashrc)],
+            "false\necho x\necho \"[$PROMPT_COMMAND][$(trap -p DEBUG)]\"\nexit\n",
+        ) else {
+            eprintln!("bash not installed; skipping");
+            return;
+        };
+
+        assert!(combined.contains("precmd-function:1\n"), "bash-preexec's precmd functions stopped: {combined:?}");
+        assert!(combined.contains("preexec-function:echo x\n"), "bash-preexec's preexec functions stopped: {combined:?}");
+        assert!(
+            combined.contains("[__bp_precmd][trap -- '__bp_preexec' DEBUG]"),
+            "bash-preexec's own PROMPT_COMMAND and DEBUG trap were replaced: {combined:?}"
+        );
+        assert!(combined.contains("\x1b]133;C\x07"), "no C marker: {combined:?}");
+        assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
+        assert!(combined.contains("\x1b]133;D;0\x07"), "no D;0 marker: {combined:?}");
+        assert!(combined.contains("\x1b]133;A\x07"), "no A marker: {combined:?}");
+    }
+
+    /// ~/.bashrc read a second time — `source ~/.bashrc` after editing it —
+    /// runs every installer in it again. starship's, finding its hook gone
+    /// from PROMPT_COMMAND, keeps whatever is there and runs it from its own
+    /// hook; had ours run a saved copy of the user's PROMPT_COMMAND (which
+    /// holds starship's hook), each would have run the other forever. direnv's
+    /// only checks for `;_direnv_hook;`.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_survives_bashrc_being_read_again() {
+        let bashrc = r#"
+starship_precmd() {
+  local status=$?
+  builtin printf 'starship-precmd:%s\n' "$status"
+  __ret "$status"
+  eval "${_PRESERVED_PROMPT_COMMAND-}"
+}
+__ret() { return "$1"; }
+if [[ -z "${PROMPT_COMMAND-}" ]]; then
+  PROMPT_COMMAND="starship_precmd"
+elif [[ "${PROMPT_COMMAND-}" != *"starship_precmd"* ]]; then
+  _PRESERVED_PROMPT_COMMAND="$PROMPT_COMMAND"
+  PROMPT_COMMAND="starship_precmd"
+fi
+_direnv_hook() { local previous_exit_status=$?; builtin printf 'direnv-hook\n'; return $previous_exit_status; }
+if [[ ";${PROMPT_COMMAND[*]:-};" != *";_direnv_hook;"* ]]; then
+  PROMPT_COMMAND="_direnv_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+fi
+"#;
+        let integration = bash_integration();
+        let Some(combined) = run_real_bash(
+            &integration.args,
+            &[(".bashrc", bashrc)],
+            "source ~/.bashrc\nfalse\nexit\n",
+        ) else {
+            eprintln!("bash not installed; skipping");
+            return;
+        };
+
+        assert!(
+            combined.contains("\x1b]133;D;1\x07"),
+            "the shell did not live to report `false` — the prompt hooks ran each other forever?: {combined:?}"
+        );
+        // Every prompt ran each hook once: not lost, not doubled, not looping.
+        let prompts = combined.matches("\x1b]133;A\x07").count();
+        assert_eq!(prompts, 3, "startup, after `source`, after `false`: {combined:?}");
+        assert_eq!(combined.matches("direnv-hook\n").count(), prompts, "{combined:?}");
+        assert_eq!(combined.matches("starship-precmd:").count(), prompts, "{combined:?}");
+        assert!(combined.contains("starship-precmd:1\n"), "{combined:?}");
     }
 
     #[test]
