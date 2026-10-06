@@ -14,6 +14,7 @@ import { EditorTabs, EditorDragContext, markEditorDragEnded, stripSlotAt } from 
 import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
+import { segmentsBelow } from '../../lib/paths.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
@@ -371,12 +372,21 @@ function DragPreview({ drag }) {
   );
 }
 
-/** Breadcrumb segments = file path relative to the workspace root. */
-function relativeSegments(filePath, rootPath) {
-  const base = (rootPath || '').replace(/\/+$/, '');
-  let relativePath = base && filePath.startsWith(base) ? filePath.slice(base.length) : filePath;
-  relativePath = relativePath.replace(/^\/+/, '');
-  return relativePath ? relativePath.split('/').filter(Boolean) : [];
+/**
+ * What the Save / Don't Save / Cancel prompt says. Opening another folder
+ * also says why it is asking: nothing about choosing a folder suggests that
+ * every editor tab is about to close.
+ */
+function unsavedPromptText({ kind, names }) {
+  const many = names.length > 1;
+  const reason = kind === 'root' ? 'Opening another folder closes every editor tab. ' : '';
+  return {
+    title: many ? 'Unsaved Changes' : `Save ${names[0]}?`,
+    message: many
+      ? `${names.join(', ')} have unsaved changes. ${reason}Your changes will be lost if you don't save them.`
+      : `${reason}Your changes to ${names[0]} will be lost if you don't save them.`,
+    confirmLabel: many ? 'Save All' : 'Save',
+  };
 }
 
 /**
@@ -436,7 +446,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
 
-  const segments = activeTab ? relativeSegments(activeTab.filePath, rootPath) : [];
+  const segments = activeTab ? segmentsBelow(rootPath, activeTab.filePath) : [];
 
   // Clicking a second link into a file that is already open remounts nothing,
   // so `onMount` never fires again and this is the only thing that moves.
@@ -620,25 +630,26 @@ export function EditorPanel() {
     requestCloseEditorPane(paneId);
   }, [requestCloseEditorPane]);
 
+  const unsavedText = pendingClose ? unsavedPromptText(pendingClose) : null;
   const unsavedPrompt = pendingClose ? (
     <ConfirmDialog
       open
-      title={pendingClose.names.length > 1 ? 'Unsaved Changes' : `Save ${pendingClose.names[0]}?`}
-      message={
-        pendingClose.names.length > 1
-          ? `${pendingClose.names.join(', ')} have unsaved changes. Your changes will be lost if you don't save them.`
-          : `Your changes to ${pendingClose.names[0]} will be lost if you don't save them.`
-      }
-      confirmLabel="Save"
+      title={unsavedText.title}
+      message={unsavedText.message}
+      confirmLabel={unsavedText.confirmLabel}
       altLabel="Don't Save"
       altDanger
       cancelLabel="Cancel"
       onConfirm={() => {
         savePendingClose().catch((err) =>
-          console.error('[EditorPanel] Save before close failed; keeping the tab open:', err)
+          console.error('[EditorPanel] Save before closing failed; nothing was closed:', err)
         );
       }}
-      onAlt={discardPendingClose}
+      onAlt={() => {
+        discardPendingClose().catch((err) =>
+          console.error('[EditorPanel] Closing without saving failed:', err)
+        );
+      }}
       onCancel={cancelPendingClose}
     />
   ) : null;
@@ -666,8 +677,30 @@ export function EditorPanel() {
     />
   ) : null;
 
+  // Onto <body>, for the reason DragPreview is: inside this panel's
+  // transformed ancestor a `fixed` overlay is confined to the editor's own
+  // box. Closing the window and opening a folder ask here too, and with the
+  // terminal panel maximised that box is zero high: a prompt nobody can see
+  // is a window that will not close. The diff view replaces the editor, not
+  // the question, so the prompts are drawn over it as well.
+  const prompts =
+    unsavedPrompt || overwritePrompt
+      ? createPortal(
+          <>
+            {unsavedPrompt}
+            {overwritePrompt}
+          </>,
+          document.body
+        )
+      : null;
+
   if (diffView && diffView.open) {
-    return <DiffViewer />;
+    return (
+      <>
+        <DiffViewer />
+        {prompts}
+      </>
+    );
   }
 
   if (!editorSplitTree) return null;
@@ -682,8 +715,7 @@ export function EditorPanel() {
         </div>
         <DragPreview drag={drag} />
       </div>
-      {unsavedPrompt}
-      {overwritePrompt}
+      {prompts}
     </EditorDragContext.Provider>
   );
 }

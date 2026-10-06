@@ -48,6 +48,9 @@ export function dirname(path) {
   const idx = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
   if (idx === -1) return clean;
   if (idx === 0) return clean.slice(0, 1); // "/a" -> "/"
+  // "C:\a" -> "C:\", not "C:", which Windows reads as "wherever that drive's
+  // current directory is", and which `join` then glued back with a '/'.
+  if (idx === 2 && /^[A-Za-z]:$/.test(clean.slice(0, 2))) return clean.slice(0, 3);
   return clean.slice(0, idx);
 }
 
@@ -96,6 +99,30 @@ export function relativeTo(root, path) {
   if (!isInside(root, path)) return path;
   const base = stripTrailingSep(root);
   return stripTrailingSep(path).slice(base.length + 1);
+}
+
+/**
+ * The names leading from `root` down to `path` — every name in `path` when it
+ * is not under `root` — split on either separator. What the editor's
+ * breadcrumb shows: split on '/' alone, a Windows path was one long segment.
+ */
+export function segmentsBelow(root, path) {
+  if (typeof path !== 'string') return [];
+  const rest = root && isInside(root, path) ? relativeTo(root, path) : path;
+  return rest.split(/[\\/]/).filter(Boolean);
+}
+
+/**
+ * `path` written with the separator `like` uses, when that is '\'.
+ *
+ * Only ever turns '/' into '\', never the other way: Windows reads both as
+ * separators, but on unix '\' can be part of a name. A link printed in a
+ * terminal resolves to `C:\proj\src/App.jsx`, where the backend and the
+ * Explorer say `C:\proj\src\App.jsx`; spelled alike, they are one tab.
+ */
+export function withSepOf(path, like) {
+  if (typeof path !== 'string' || sepOf(like) !== '\\') return path;
+  return path.replace(/\//g, '\\');
 }
 
 /** Re-root `path` from `fromPath` onto `toPath` (used when a folder is renamed). */

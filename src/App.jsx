@@ -8,6 +8,7 @@ import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useTheme } from './hooks/useTheme.js';
+import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
@@ -25,6 +26,8 @@ export default function App() {
   useTheme();
   useKeybindings();
   useMenuEvents();
+  // Closing the window or quitting asks about unsaved editor tabs first.
+  useUnsavedGuard();
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);

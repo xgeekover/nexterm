@@ -3,13 +3,13 @@ import { invoke, listen } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
 import {
   basename,
-  depthOf,
   dirname,
   isInside,
   join,
   reparent,
   samePath,
   stripTrailingSep,
+  withSepOf,
 } from '../lib/paths.js';
 import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
@@ -162,60 +162,173 @@ function remapAfterMove(state, fromPath, toPath) {
   return { expandedFolders: nextExpanded, tabs: nextTabs, selectedPath: nextSelected };
 }
 
-// There is no native rename/move/copy IPC command, so a directory is
-// duplicated by re-creating its structure and re-writing every file
-// underneath it one at a time via the existing fs_read_dir/fs_read_file/
-// fs_write_file/fs_create_dir surface.
-/** Depth-first flatten of the nested FileNode[] that `fs_read_dir` returns. */
-function flattenNodes(nodes, acc = []) {
-  for (const node of nodes || []) {
-    acc.push(node);
-    if (node.children && node.children.length) flattenNodes(node.children, acc);
-  }
-  return acc;
-}
-
-/** Names of everything that already lives directly inside `dirPath`. */
-function siblingNamesIn(nodes, dirPath) {
-  return new Set(
-    flattenNodes(nodes)
-      .filter((n) => samePath(parentDirOf(n.path), dirPath))
-      .map((n) => n.name)
-  );
-}
-
-async function copyDirRecursive(srcPath, destPath) {
-  await invoke('fs_create_dir', { path: destPath });
-  const tree = (await invoke('fs_read_dir', { path: srcPath, max_depth: 1000 })) || [];
-  // `fs_read_dir` nests its results; walking only the top level would copy
-  // one layer and — where the caller then deletes the source — lose the rest.
-  const nodes = flattenNodes(tree);
-
-  const dirs = [];
-  const files = [];
-  for (const node of nodes) {
-    if (!isInside(srcPath, node.path)) continue;
-    const newPath = reparent(node.path, srcPath, destPath);
-    if (node.is_dir) dirs.push(newPath);
-    else files.push({ from: node.path, to: newPath });
-  }
-
-  // Parents before children so a nested fs_create_dir never races ahead of
-  // the directory it is supposed to live inside.
-  dirs.sort((a, b) => depthOf(a) - depthOf(b));
-  for (const dirPath of dirs) {
-    await invoke('fs_create_dir', { path: dirPath });
-  }
-  for (const file of files) {
-    const content = await invoke('fs_read_file', { path: file.from });
-    await invoke('fs_write_file', { path: file.to, content });
-  }
-}
-
 function splitBaseExt(name, isDir) {
   const dotIndex = name.lastIndexOf('.');
   if (isDir || dotIndex <= 0) return [name, ''];
   return [name.slice(0, dotIndex), name.slice(dotIndex)];
+}
+
+/**
+ * The name a paste of `name` into `dirPath` should take: `name` itself when
+ * nothing there has it (and `mustDiffer` is false), else "<base> copy<ext>",
+ * then "<base> copy 2<ext>" and so on, as VS Code does.
+ *
+ * The folder is listed afresh. The tree in memory is only a few levels deep
+ * and as old as its last refresh, and a name missing from it is not a free
+ * name: a paste into a folder the tree had not read kept the name and wrote
+ * straight over the file of that name.
+ *
+ * Names are compared without case, because NTFS and APFS treat `Note.txt` and
+ * `note.txt` as one file. The listing leaves out the folders the Explorer
+ * hides (.git, node_modules, dist…), so a pasted folder of one of those names
+ * can still meet one; `fs_copy_path` and `fs_rename_path` both refuse an
+ * existing destination, so that ends in an error, never in a merge.
+ */
+async function freeNameIn(dirPath, name, isDir, mustDiffer) {
+  const listing = (await invoke('fs_read_dir', { path: dirPath, max_depth: 1 })) || [];
+  const taken = new Set(listing.map((node) => node.name.toLowerCase()));
+  if (!mustDiffer && !taken.has(name.toLowerCase())) return name;
+
+  const [base, ext] = splitBaseExt(name, isDir);
+  let candidate = `${base} copy${ext}`;
+  for (let attempt = 2; taken.has(candidate.toLowerCase()); attempt += 1) {
+    candidate = `${base} copy ${attempt}${ext}`;
+  }
+  return candidate;
+}
+
+// --- Unsaved edits ---------------------------------------------------------
+
+/**
+ * Each tab's latest save, so that the next one waits for it.
+ *
+ * A save reads the file back first to see whether something else changed it,
+ * and compares what it reads with what the tab last saved. A second Ctrl+S
+ * that started while the first was still on its way compared against the
+ * text from BEFORE the first, found the first save's own bytes on disk, and
+ * called them an external change.
+ */
+const savesInFlight = new Map(); // tabId -> promise of its last save
+
+/** The prompt whose Save is writing files right now — see `savePendingClose`. */
+let savingClose = null;
+
+/**
+ * Hold `proceed` behind the Save / Don't Save / Cancel prompt for `dirty`.
+ *
+ * Returns a promise of how it ended: what `proceed` resolved to once the user
+ * saved the edits or gave them up, or null when they cancelled. It never
+ * rejects: a failure belongs to whoever answered (`savePendingClose`,
+ * `discardPendingClose`), and the code that asked has nothing to do with it.
+ */
+function holdForAnswer(set, get, { kind, id = null, dirty, proceed }) {
+  // A newer question replaces an older one: the window closing covers the
+  // tab that was closing.
+  get().pendingClose?.abandon?.();
+  return new Promise((resolve) => {
+    set({
+      pendingClose: {
+        kind,
+        id,
+        tabIds: dirty.map((t) => t.id),
+        names: dirty.map((t) => t.fileName),
+        proceed: async () => {
+          try {
+            const result = await proceed();
+            resolve(result ?? null);
+            return result;
+          } catch (err) {
+            resolve(null);
+            throw err;
+          }
+        },
+        abandon: () => resolve(null),
+      },
+    });
+  });
+}
+
+/**
+ * Write one tab to disk. The body of `saveFile`, which queues it.
+ *
+ * What reaches the disk is the text as it stands when this starts, and that
+ * is what counts as saved afterwards. Monaco reports every keystroke, and
+ * typing goes on during the two round trips below: marking the text as it
+ * stood at the END as saved hid whatever was typed in between, so the tab
+ * closed without asking and the next save saw its own last write as an
+ * external change.
+ */
+async function writeTab(set, get, targetId, { force = false } = {}) {
+  const tab = get().tabs.find((t) => t.id === targetId);
+  if (!tab) return;
+  const written = tab.content;
+
+  // The bytes on disk may not be the ones this tab read. git, a formatter,
+  // or a command in the app's own terminal can all move them, and writing
+  // `tab.content` over that silently destroys the newer version.
+  if (!force) {
+    let onDisk = null;
+    try {
+      onDisk = await invoke('fs_read_file', { path: tab.filePath });
+    } catch {
+      // Gone or unreadable — writing recreates it, which is the expected
+      // outcome of saving, so fall through.
+    }
+    if (onDisk !== null && onDisk !== tab.savedContent) {
+      set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk } });
+      const err = new Error(
+        `${tab.fileName} has changed on disk since it was opened.`
+      );
+      err.code = 'EXTERNAL_CHANGE';
+      throw err;
+    }
+  }
+
+  try {
+    await invoke('fs_write_file', {
+      path: tab.filePath,
+      content: written,
+    });
+
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === targetId
+          ? { ...t, savedContent: written, isDirty: t.content !== written }
+          : t
+      ),
+    }));
+  } catch (err) {
+    console.error(`[EditorStore] Failed to save file ${tab.filePath}:`, err);
+    throw err;
+  }
+}
+
+/**
+ * Point the workspace at `root`, which the backend has already opened.
+ *
+ * Another folder closes every editor tab — they belong to the folder being
+ * left, and the callers have asked about unsaved ones first. The folder that
+ * is already open keeps them: it is the first entry in Open Recent, and
+ * choosing it again used to throw every tab away.
+ */
+async function enterRoot(set, get, root) {
+  if (samePath(root, get().rootPath)) {
+    set({ rootPath: root });
+  } else {
+    set({
+      rootPath: root,
+      expandedFolders: new Set([root]),
+      tabs: [],
+      activeTabId: null,
+      diffView: null,
+      editorSplitTree: emptyEditorTree(),
+      activeEditorPaneId: 'editor-pane-root',
+    });
+  }
+  get().rememberRoot(root);
+  await get().refreshExplorer();
+  useGitStore.getState().refreshNow();
+  return root;
 }
 
 export const useEditorStore = create((set, get) => ({
@@ -243,8 +356,11 @@ export const useEditorStore = create((set, get) => ({
   creatingEntry: null,  // { parentPath, type: 'file' | 'folder' } | null
   // A close the user asked for that would throw away unsaved edits, held
   // until they answer. `closeTab`/`closeEditorPane` stay unconditional; the
-  // UI goes through `requestClose*` so nothing is dropped silently.
-  pendingClose: null,   // { kind: 'tab' | 'pane', id, tabIds: [], names: [] } | null
+  // UI goes through `requestClose*`, and opening another folder, closing the
+  // window and quitting go through `askBeforeLeaving`, so nothing is dropped
+  // silently. `proceed` does what was asked once the edits are saved or
+  // given up; `abandon` settles the asker's promise when nothing will be.
+  pendingClose: null,   // { kind: 'tab' | 'pane' | 'root' | 'window' | 'quit', id, tabIds: [], names: [], proceed, abandon } | null
   // A save refused because the file changed on disk after this tab read it.
   pendingOverwrite: null, // { tabId, fileName, diskContent } | null
   renamingPath: null,   // path currently rendered as an inline rename input
@@ -383,50 +499,48 @@ export const useEditorStore = create((set, get) => ({
    * backend refuses it (`set_root` canonicalises and checks it is a
    * directory), and rather than leaving a row that fails every time it is
    * clicked, the entry comes out of the list.
+   *
+   * Another folder closes every editor tab, so unsaved ones are asked about
+   * first — before `fs_set_root`, which moves the backend's root for good.
+   * Resolves to the folder opened, or null when none was (refused, or the
+   * user cancelled).
    */
   openRoot: async (rootPath) => {
-    try {
-      const resolved = await invoke('fs_set_root', { path: rootPath });
-      set({
-        rootPath: resolved,
-        expandedFolders: new Set([resolved]),
-        tabs: [],
-        activeTabId: null,
-        diffView: null,
-        editorSplitTree: emptyEditorTree(),
-        activeEditorPaneId: 'editor-pane-root',
-      });
-      get().rememberRoot(resolved);
-      await get().refreshExplorer();
-      return resolved;
-    } catch (err) {
-      console.error(`[EditorStore] Could not open ${rootPath}:`, err);
-      get().forgetRoot(rootPath);
-      return null;
-    }
+    const open = async () => {
+      try {
+        const resolved = await invoke('fs_set_root', { path: rootPath });
+        return await enterRoot(set, get, resolved);
+      } catch (err) {
+        console.error(`[EditorStore] Could not open ${rootPath}:`, err);
+        get().forgetRoot(rootPath);
+        return null;
+      }
+    };
+    // The folder already open keeps its tabs (see `enterRoot`): nothing to ask.
+    if (samePath(rootPath, get().rootPath)) return open();
+    return get().askBeforeLeaving('root', open) ?? open();
   },
 
+  /**
+   * Open a folder through the native picker.
+   *
+   * Unsaved tabs are asked about BEFORE the picker opens, not once a folder
+   * has been chosen: `fs_pick_root` moves the backend's root as it returns,
+   * and the tabs would by then belong to a folder that is no longer open.
+   * Cancelling the picker after "Don't Save" gives nothing up — the tabs are
+   * only closed when another folder actually opens.
+   */
   pickRoot: async () => {
-    try {
-      const rootPath = await invoke('fs_pick_root');
-      if (!rootPath) return null;
-      set({
-        rootPath,
-        expandedFolders: new Set([rootPath]),
-        tabs: [],
-        activeTabId: null,
-        diffView: null,
-        editorSplitTree: emptyEditorTree(),
-        activeEditorPaneId: 'editor-pane-root',
-      });
-      get().rememberRoot(rootPath);
-      await get().refreshExplorer();
-      useGitStore.getState().refreshNow();
-      return rootPath;
-    } catch (err) {
-      console.error('[EditorStore] Failed to change workspace root:', err);
-      return null;
-    }
+    const pick = async () => {
+      try {
+        const rootPath = await invoke('fs_pick_root');
+        return rootPath ? await enterRoot(set, get, rootPath) : null;
+      } catch (err) {
+        console.error('[EditorStore] Failed to change workspace root:', err);
+        return null;
+      }
+    };
+    return get().askBeforeLeaving('root', pick) ?? pick();
   },
 
   /**
@@ -485,7 +599,9 @@ export const useEditorStore = create((set, get) => ({
   openFileAt: async (filePath, line, column = null) => {
     const tab = await get().openFile(filePath);
     if (Number.isFinite(line) && line > 0) {
-      set({ pendingReveal: { filePath, line, column: Number.isFinite(column) ? column : 1 } });
+      // The tab's own spelling, which is what the editor compares against:
+      // a link's `C:\proj\src/App.jsx` lands on the tab of `C:\proj\src\App.jsx`.
+      set({ pendingReveal: { filePath: tab.filePath, line, column: Number.isFinite(column) ? column : 1 } });
     }
     return tab;
   },
@@ -493,11 +609,18 @@ export const useEditorStore = create((set, get) => ({
   /** Applied — or abandoned, if nothing could show it. */
   clearReveal: () => set({ pendingReveal: null }),
 
-  openFile: async (filePath) => {
+  openFile: async (requestedPath) => {
+    // Written the way the backend writes the open folder, so that a link
+    // printed in a terminal and a click in the Explorer name the same file
+    // the same way (see `withSepOf`).
+    const filePath = withSepOf(requestedPath, get().rootPath);
     // Check if already open — reveal it in whichever group already shows it
     // (VS Code's "revealIfOpen") rather than yanking it into the active
     // group, which would be surprising if the user deliberately split panes.
-    const existing = get().tabs.find((t) => t.filePath === filePath);
+    // Compared separator-blind: on Windows `C:\p\a.js` and `C:\p/a.js` are
+    // one file, and two tabs on it were two buffers of it, each taking the
+    // other's saves for changes made on disk.
+    const existing = get().tabs.find((t) => samePath(t.filePath, filePath));
     if (existing) {
       set((state) => {
         const holder = leafHoldingTab(state.editorSplitTree, existing.id);
@@ -555,49 +678,20 @@ export const useEditorStore = create((set, get) => ({
     }));
   },
 
-  saveFile: async (tabId = null, { force = false } = {}) => {
+  /** Save a tab (the active one by default), after any save of it still under way. */
+  saveFile: (tabId = null, options = {}) => {
     const targetId = tabId || get().activeTabId;
-    const tab = get().tabs.find((t) => t.id === targetId);
-    if (!tab) return;
-
-    // The bytes on disk may not be the ones this tab read. git, a formatter,
-    // or a command in the app's own terminal can all move them, and writing
-    // `tab.content` over that silently destroys the newer version.
-    if (!force) {
-      let onDisk = null;
-      try {
-        onDisk = await invoke('fs_read_file', { path: tab.filePath });
-      } catch {
-        // Gone or unreadable — writing recreates it, which is the expected
-        // outcome of saving, so fall through.
-      }
-      if (onDisk !== null && onDisk !== tab.savedContent) {
-        set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk } });
-        const err = new Error(
-          `${tab.fileName} has changed on disk since it was opened.`
-        );
-        err.code = 'EXTERNAL_CHANGE';
-        throw err;
-      }
-    }
-
-    try {
-      await invoke('fs_write_file', {
-        path: tab.filePath,
-        content: tab.content,
-      });
-
-      set((state) => ({
-        tabs: state.tabs.map((t) =>
-          t.id === targetId
-            ? { ...t, savedContent: t.content, isDirty: false }
-            : t
-        ),
-      }));
-    } catch (err) {
-      console.error(`[EditorStore] Failed to save file ${tab.filePath}:`, err);
-      throw err;
-    }
+    const previous = savesInFlight.get(targetId);
+    // The previous save's failure is its own caller's to report.
+    const run = (previous ? previous.catch(() => {}) : Promise.resolve()).then(() =>
+      writeTab(set, get, targetId, options)
+    );
+    savesInFlight.set(targetId, run);
+    const forget = () => {
+      if (savesInFlight.get(targetId) === run) savesInFlight.delete(targetId);
+    };
+    run.then(forget, forget);
+    return run;
   },
 
   saveAll: async () => {
@@ -614,7 +708,12 @@ export const useEditorStore = create((set, get) => ({
       get().closeTab(tabId);
       return;
     }
-    set({ pendingClose: { kind: 'tab', id: tabId, tabIds: [tabId], names: [tab.fileName] } });
+    holdForAnswer(set, get, {
+      kind: 'tab',
+      id: tabId,
+      dirty: [tab],
+      proceed: () => get().closeTab(tabId),
+    });
   },
 
   /** Close a whole editor group, asking first about any unsaved tab in it. */
@@ -627,17 +726,34 @@ export const useEditorStore = create((set, get) => ({
       get().closeEditorPane(paneId);
       return;
     }
-    set({
-      pendingClose: {
-        kind: 'pane',
-        id: paneId,
-        tabIds: dirty.map((t) => t.id),
-        names: dirty.map((t) => t.fileName),
-      },
+    holdForAnswer(set, get, {
+      kind: 'pane',
+      id: paneId,
+      dirty,
+      proceed: () => get().closeEditorPane(paneId),
     });
   },
 
-  cancelPendingClose: () => set({ pendingClose: null }),
+  /**
+   * Ask about every unsaved tab before something that closes them all:
+   * opening another folder (`kind` 'root'), closing the window ('window'),
+   * quitting ('quit').
+   *
+   * Returns null when nothing is unsaved, and the caller goes ahead itself.
+   * Otherwise `proceed` waits for the answer, and what is returned is the
+   * promise of how it ended — `proceed`'s result, or null when cancelled.
+   */
+  askBeforeLeaving: (kind, proceed) => {
+    const dirty = get().tabs.filter((t) => t.isDirty);
+    if (dirty.length === 0) return null;
+    return holdForAnswer(set, get, { kind, dirty, proceed });
+  },
+
+  cancelPendingClose: () => {
+    const pending = get().pendingClose;
+    set({ pendingClose: null });
+    pending?.abandon?.();
+  },
 
   cancelPendingOverwrite: () => set({ pendingOverwrite: null }),
 
@@ -662,26 +778,50 @@ export const useEditorStore = create((set, get) => ({
     }));
   },
 
-  /** Close without saving. */
-  discardPendingClose: () => {
+  /** Go ahead without saving. */
+  discardPendingClose: async () => {
     const pending = get().pendingClose;
-    if (!pending) return;
+    // Not while Save is still writing: closing the window over a write that
+    // has not finished can leave the file cut short.
+    if (!pending || savingClose === pending) return;
     set({ pendingClose: null });
-    if (pending.kind === 'tab') get().closeTab(pending.id);
-    else get().closeEditorPane(pending.id);
+    await pending.proceed();
   },
 
-  /** Save every unsaved tab involved, then close. A failed save keeps the
-   *  prompt open rather than closing over an edit that never reached disk. */
+  /**
+   * Save every unsaved tab involved, then go ahead. A failed save keeps the
+   * prompt open rather than closing over an edit that never reached disk.
+   *
+   * Except when the file changed on disk: `saveFile` has then asked its own
+   * question (`pendingOverwrite`), and that one takes this one's place. Left
+   * open together, one Enter answered both — a plain save and a forced
+   * overwrite of the same file, racing.
+   */
   savePendingClose: async () => {
     const pending = get().pendingClose;
-    if (!pending) return;
-    for (const id of pending.tabIds) {
-      await get().saveFile(id);
+    // A second click on Save while the first is still writing.
+    if (!pending || savingClose === pending) return;
+    savingClose = pending;
+    try {
+      for (const id of pending.tabIds) {
+        // A tab closed some other way meanwhile has nothing left to save.
+        if (!get().tabs.some((t) => t.id === id)) continue;
+        await get().saveFile(id);
+      }
+    } catch (err) {
+      if (err?.code === 'EXTERNAL_CHANGE' && get().pendingClose === pending) {
+        set({ pendingClose: null });
+        pending.abandon();
+      }
+      throw err;
+    } finally {
+      if (savingClose === pending) savingClose = null;
     }
+    // Cancelled, or replaced by a newer question, while the files were being
+    // written: the saves stand, and nothing else happens.
+    if (get().pendingClose !== pending) return;
     set({ pendingClose: null });
-    if (pending.kind === 'tab') get().closeTab(pending.id);
-    else get().closeEditorPane(pending.id);
+    await pending.proceed();
   },
 
   closeTab: (tabId) => {
@@ -955,10 +1095,11 @@ export const useEditorStore = create((set, get) => ({
       await get().refreshExplorer();
       // Close every tab the delete removed. Matching only the exact path
       // left a deleted folder's files open, and saving one of those
-      // recreated the directory the user had just deleted.
-      const prefix = `${path}/`;
+      // recreated the directory the user had just deleted. Separator-blind:
+      // a `${path}/` prefix never matched a Windows path, so on Windows,
+      // where this app is mostly used, that still happened.
       const orphaned = get().tabs.filter(
-        (t) => t.filePath === path || t.filePath.startsWith(prefix)
+        (t) => samePath(t.filePath, path) || isInside(path, t.filePath)
       );
       orphaned.forEach((t) => get().closeTab(t.id));
     } catch (err) {
@@ -1001,13 +1142,18 @@ export const useEditorStore = create((set, get) => ({
   // refuses to clobber an existing file instead of merging two into one.
   renamePath: async (oldPath, rawName) => {
     const trimmed = (rawName || '').trim();
-    if (!trimmed || trimmed.includes('/')) {
-      throw new Error('Name cannot be empty or contain "/"');
+    // A separator would make this a move into a folder, which the backend
+    // creates on the way. '\' is one on Windows only, and a name that means a
+    // different thing on each platform is refused on both.
+    if (!trimmed || /[\\/]/.test(trimmed)) {
+      throw new Error('Name cannot be empty or contain "/" or "\\"');
     }
 
-    const parent = parentDirOf(oldPath);
-    const newPath = parent === '/' ? `/${trimmed}` : `${parent}/${trimmed}`;
-    if (newPath === oldPath) return;
+    // In the separator the folder already uses: `${parent}/${name}` gave
+    // `C:\proj\src/b.js`, which no Explorer click matched, so the file opened
+    // a second time in a second tab.
+    const newPath = join(parentDirOf(oldPath), trimmed);
+    if (samePath(newPath, oldPath)) return;
 
     try {
       await invoke('fs_rename_path', { from: oldPath, to: newPath });
@@ -1019,9 +1165,10 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
-  // Copy+Paste duplicates a file/folder; Cut+Paste moves it. Both are built
-  // from fs_read_file/fs_write_file/fs_delete_path (and fs_create_dir for
-  // folders) since there is no dedicated copy or move IPC command.
+  // Copy+Paste duplicates a file/folder; Cut+Paste moves it. Neither ever
+  // writes over something already in the destination: the name comes from a
+  // fresh listing of it (see `freeNameIn`), and both backend commands refuse
+  // an existing destination.
   pasteClipboard: async (targetFolderPathRaw) => {
     const clip = get().clipboard;
     if (!clip) return;
@@ -1040,34 +1187,22 @@ export const useEditorStore = create((set, get) => ({
       return;
     }
 
-    const siblingNames = siblingNamesIn(get().fileTree, targetBase);
-
-    let destName = name;
-    if (siblingNames.has(destName) || (mode === 'copy' && sameLocation)) {
-      const [base, ext] = splitBaseExt(name, isDir);
-      let attempt = 1;
-      let candidate = `${base} copy${ext}`;
-      while (siblingNames.has(candidate)) {
-        attempt += 1;
-        candidate = `${base} copy ${attempt}${ext}`;
-      }
-      destName = candidate;
-    }
-
-    const destPath = join(targetBase, destName);
-
     try {
+      const destName = await freeNameIn(targetBase, name, isDir, mode === 'copy' && sameLocation);
+      const destPath = join(targetBase, destName);
+
       if (mode === 'cut') {
         // A move is a rename: atomic, and it cannot drop part of a subtree
         // the way copy-then-delete does.
         await invoke('fs_rename_path', { from: srcPath, to: destPath });
         set((state) => remapAfterMove(state, srcPath, destPath));
         set({ clipboard: null });
-      } else if (isDir) {
-        await copyDirRecursive(srcPath, destPath);
       } else {
-        const content = await invoke('fs_read_file', { path: srcPath });
-        await invoke('fs_write_file', { path: destPath, content });
+        // One backend command, for a file or a whole folder, copying bytes.
+        // Copying through fs_read_dir/fs_read_file lost what the Explorer
+        // hides (.git, node_modules, dist…) and stopped at the first file
+        // that is not UTF-8 text, with half the folder already written.
+        await invoke('fs_copy_path', { from: srcPath, to: destPath });
       }
 
       await get().refreshExplorer();
