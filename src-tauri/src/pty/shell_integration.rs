@@ -54,11 +54,35 @@ impl ShellIntegration {
     }
 }
 
+/// Whether zsh and bash start as login shells: on macOS they do, as
+/// Terminal.app, iTerm2 and VS Code start them.
+///
+/// That is where a Mac's PATH comes from. /etc/zprofile runs path_helper,
+/// which adds /usr/local/bin and everything in /etc/paths.d (Homebrew's entry
+/// among them), and ~/.zprofile is where Homebrew's installer puts
+/// `brew shellenv` — and only a login shell reads either. An app opened from
+/// the Finder or the Dock inherits launchd's bare PATH
+/// (/usr/bin:/bin:/usr/sbin:/sbin), so `brew`, `node`, `opencode` and
+/// `claude` were "command not found" in every terminal unless ~/.zshrc
+/// happened to add them. `tauri dev`, started from a terminal, inherits a
+/// full PATH, which is why development never showed it.
+///
+/// Linux terminals start non-login shells, the desktop session having set the
+/// PATH up already, and Windows shells have no login files at all; neither
+/// changes.
+const LOGIN_SHELLS: bool = cfg!(target_os = "macos");
+
 /// Build the integration payload for the shell at `shell_path`. Matches on
 /// the executable's file name (case-insensitively, `.exe` suffix ignored)
 /// so it works the same whether the caller passed a bare name or a full
 /// path.
 pub fn for_shell(shell_path: &str) -> ShellIntegration {
+    for_shell_as(shell_path, LOGIN_SHELLS)
+}
+
+/// `for_shell`, told whether zsh and bash start as login shells instead of
+/// asking the platform — so that both kinds can be tested on any machine.
+fn for_shell_as(shell_path: &str, login: bool) -> ShellIntegration {
     let file_name = Path::new(shell_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -66,8 +90,8 @@ pub fn for_shell(shell_path: &str) -> ShellIntegration {
     let stem = file_name.strip_suffix(".exe").unwrap_or(&file_name);
 
     match stem {
-        "zsh" => zsh_integration(),
-        "bash" => bash_integration(),
+        "zsh" => zsh_integration(login),
+        "bash" => bash_integration(login),
         "pwsh" | "powershell" => pwsh_integration(),
         "cmd" => cmd_integration(),
         _ => ShellIntegration::none(),
@@ -192,7 +216,12 @@ fn integration_dir(shell: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn zsh_integration() -> ShellIntegration {
+fn zsh_integration(login: bool) -> ShellIntegration {
+    // A login zsh also reads .zprofile and .zlogin from ZDOTDIR, and the
+    // generated ones hand each to the user's own, like the other two. zsh
+    // reads the four in order — .zshenv, .zprofile, .zshrc, .zlogin — so the
+    // user's run once each, in the order they always did.
+    let args = if login { vec!["-l".to_string()] } else { Vec::new() };
     match prepare_zsh_dir() {
         Ok(dir) => {
             let dir_str = dir.to_string_lossy().to_string();
@@ -207,11 +236,12 @@ fn zsh_integration() -> ShellIntegration {
                     ("NEXTERM_ZDOTDIR".to_string(), dir_str),
                     ("NEXTERM_USER_ZDOTDIR".to_string(), user_zdotdir),
                 ],
-                args: Vec::new(),
+                args,
             }
         }
-        // If we cannot write the rc files, spawn the shell plainly rather than fail.
-        Err(_) => ShellIntegration::none(),
+        // If we cannot write the rc files, spawn the shell plainly rather than
+        // fail — still a login shell where it should be one.
+        Err(_) => ShellIntegration { env: Vec::new(), args },
     }
 }
 
@@ -237,14 +267,40 @@ pub fn prepare_zsh_dir() -> Result<PathBuf, String> {
 }
 
 // ---------------------------------------------------------------------
-// bash (Linux / Git Bash / macOS fallback)
+// bash (Linux / Git Bash / macOS)
 // ---------------------------------------------------------------------
 
-const BASHRC: &str = r#"# NexTerm shell integration (bash) — generated file, do not edit.
+/// The start of the generated rcfile for an interactive non-login bash: what
+/// bash itself would have read in its place.
+const BASH_STARTUP: &str = r#"# NexTerm shell integration (bash) — generated file, do not edit.
 if [[ -f "$HOME/.bashrc" ]]; then
   source "$HOME/.bashrc"
 fi
+"#;
 
+/// The start of the generated rcfile for a login bash (see `LOGIN_SHELLS`).
+/// bash reads no --rcfile as a login shell, so it is started as an
+/// interactive one and this reads what a login shell would have — /etc/profile,
+/// then the first of the three profile files there is — and not ~/.bashrc,
+/// which a login shell leaves to ~/.bash_profile. VS Code does the same.
+const BASH_LOGIN_STARTUP: &str = r#"# NexTerm shell integration (bash) — generated file, do not edit.
+# A login shell's startup files, read here because bash reads no --rcfile in
+# a login shell: /etc/profile (on macOS, path_helper builds PATH there), then
+# the first of the user's three that is there.
+if [[ -r /etc/profile ]]; then
+  source /etc/profile
+fi
+if [[ -r "$HOME/.bash_profile" ]]; then
+  source "$HOME/.bash_profile"
+elif [[ -r "$HOME/.bash_login" ]]; then
+  source "$HOME/.bash_login"
+elif [[ -r "$HOME/.profile" ]]; then
+  source "$HOME/.profile"
+fi
+"#;
+
+/// The rest of the generated rcfile, the same for both.
+const BASH_HOOKS: &str = r#"
 # OSC 133: A = prompt start, C = command output starts, D;<code> = command done
 #
 # bash has no preexec/precmd hooks, so we build them out of two primitives:
@@ -383,8 +439,8 @@ else
 fi
 "#;
 
-fn bash_integration() -> ShellIntegration {
-    match prepare_bash_rcfile() {
+fn bash_integration(login: bool) -> ShellIntegration {
+    match prepare_bash_rcfile(login) {
         Ok(path) => ShellIntegration {
             env: Vec::new(),
             args: vec![
@@ -393,19 +449,28 @@ fn bash_integration() -> ShellIntegration {
                 "-i".to_string(),
             ],
         },
+        // Without the rcfile, a plain login shell still reads the profile.
+        Err(_) if login => ShellIntegration { env: Vec::new(), args: vec!["-l".to_string()] },
         Err(_) => ShellIntegration::none(),
     }
 }
 
+/// The generated bash rcfile: the user's startup files as this kind of shell
+/// reads them, then the hooks.
+fn bash_rcfile(login: bool) -> String {
+    [if login { BASH_LOGIN_STARTUP } else { BASH_STARTUP }, BASH_HOOKS].concat()
+}
+
 /// Write (or refresh) the generated bash rc file and return its path.
-pub fn prepare_bash_rcfile() -> Result<PathBuf, String> {
+pub fn prepare_bash_rcfile(login: bool) -> Result<PathBuf, String> {
     let dir = integration_dir("bash")?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = dir.join("bashrc");
-    if fs::read_to_string(&path).map(|cur| cur == BASHRC).unwrap_or(false) {
+    let body = bash_rcfile(login);
+    if fs::read_to_string(&path).map(|cur| cur == body).unwrap_or(false) {
         return Ok(path);
     }
-    fs::write(&path, BASHRC).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -677,7 +742,8 @@ mod tests {
         let zsh = for_shell("/bin/zsh");
         assert!(zsh.env.iter().any(|(k, _)| k == "ZDOTDIR"));
         assert!(zsh.env.iter().any(|(k, _)| k == "NEXTERM_USER_ZDOTDIR"));
-        assert!(zsh.args.is_empty());
+        // Nothing but the login flag, and that only on macOS.
+        assert!(zsh.args.iter().all(|a| a == "-l") && zsh.args.len() <= 1, "{:?}", zsh.args);
     }
 
     /// Runs a real interactive zsh with the generated ZDOTDIR and checks that
@@ -735,6 +801,152 @@ mod tests {
         assert!(combined.contains("\x1b]7;file://"), "no OSC 7 cwd marker: {combined:?}");
     }
 
+    /// On macOS, zsh and bash start as login shells, as Terminal.app, iTerm2
+    /// and VS Code start them; nowhere else does anything change. bash reads
+    /// no --rcfile as a login shell, so for bash it is the rcfile that reads
+    /// what a login shell would.
+    #[test]
+    fn zsh_and_bash_are_login_shells_on_macos_and_nowhere_else() {
+        let zsh = for_shell("/bin/zsh");
+        let bash = for_shell("/bin/bash");
+        let bashrc = fs::read_to_string(&bash.args[1]).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(zsh.args, ["-l"], "zsh on macOS must be a login shell");
+            assert!(
+                bashrc.contains("source /etc/profile") && bashrc.contains("source \"$HOME/.bash_profile\""),
+                "bash on macOS must read what a login shell reads:\n{bashrc}"
+            );
+            assert!(!bashrc.contains("source \"$HOME/.bashrc\""), "a login shell does not read ~/.bashrc itself");
+        } else {
+            assert!(zsh.args.is_empty(), "zsh off macOS starts as it always did: {:?}", zsh.args);
+            assert!(bashrc.contains("source \"$HOME/.bashrc\""), "{bashrc}");
+            assert!(!bashrc.contains("/etc/profile"), "bash off macOS is not a login shell:\n{bashrc}");
+        }
+    }
+
+    /// A zsh started the way NexTerm starts one on macOS, from an app opened in
+    /// the Finder — that is, with launchd's PATH and nothing else. It has to
+    /// end up with the PATH /etc/zprofile's path_helper builds, and read the
+    /// user's own four files once each, in zsh's order, through the
+    /// generated ZDOTDIR. Skipped when zsh is not installed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn real_zsh_on_macos_gets_the_login_path() {
+        let integration = for_shell("/bin/zsh");
+        let Some(combined) = run_real_zsh(&integration, "/usr/bin:/bin:/usr/sbin:/sbin") else {
+            eprintln!("zsh not installed; skipping");
+            return;
+        };
+        assert_eq!(
+            startup_files_read(&combined),
+            [".zshenv", ".zprofile", ".zshrc", ".zlogin"],
+            "{combined:?}"
+        );
+        let path = printed_path(&combined);
+        assert!(
+            path.split(':').any(|dir| dir == "/usr/local/bin"),
+            "/etc/zprofile never ran: a Finder-launched terminal is left with PATH={path}"
+        );
+        assert!(combined.contains("\x1b]133;D;0\x07"), "no D marker: {combined:?}");
+    }
+
+    /// The value a `PATH=$PATH` line in `output` gave, after the C marker
+    /// that comes ahead of it on the same line.
+    #[cfg(target_os = "macos")]
+    fn printed_path(output: &str) -> &str {
+        let start = output.find("PATH=").unwrap_or_else(|| panic!("no PATH printed: {output:?}")) + 5;
+        let rest = &output[start..];
+        &rest[..rest.find('\n').unwrap_or(rest.len())]
+    }
+
+    /// The generated ZDOTDIR on any machine with zsh, whatever its platform
+    /// starts: a login zsh reads .zshenv, .zprofile, .zshrc and .zlogin in
+    /// that order, and the generated ones must hand each to the user's own
+    /// exactly once; a non-login zsh reads only the two it always read.
+    /// Skipped when zsh is not installed.
+    #[cfg(unix)]
+    #[test]
+    fn real_zsh_reads_each_user_file_once_in_order() {
+        let path = std::env::var("PATH").unwrap_or_default();
+        for (login, expected) in [
+            (true, &[".zshenv", ".zprofile", ".zshrc", ".zlogin"][..]),
+            (false, &[".zshenv", ".zshrc"][..]),
+        ] {
+            let integration = for_shell_as("/bin/zsh", login);
+            let Some(combined) = run_real_zsh(&integration, &path) else {
+                eprintln!("zsh not installed; skipping");
+                return;
+            };
+            assert_eq!(startup_files_read(&combined), expected, "login={login}: {combined:?}");
+            assert!(combined.contains("\x1b]133;C\x07"), "login={login}: no C marker: {combined:?}");
+            assert!(combined.contains("\x1b]133;D;0\x07"), "login={login}: no D marker: {combined:?}");
+            assert!(combined.contains("\x1b]133;A\x07"), "login={login}: no A marker: {combined:?}");
+        }
+    }
+
+    /// What `print -r -- startup-file:<name>` lines in the user's startup
+    /// files reported, in order.
+    #[cfg(unix)]
+    fn startup_files_read(output: &str) -> Vec<&str> {
+        output.lines().filter_map(|l| l.strip_prefix("startup-file:")).collect()
+    }
+
+    /// A real zsh started with `integration` and `path`, its user dotfiles in
+    /// an isolated fake HOME, each saying when it is read. `None` when zsh is
+    /// not installed.
+    #[cfg(unix)]
+    fn run_real_zsh(integration: &ShellIntegration, path: &str) -> Option<String> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let zsh = ["/bin/zsh", "/usr/bin/zsh"].into_iter().find(|p| Path::new(p).exists())?;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "nexterm-si-zsh-home-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&home).unwrap();
+        for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            fs::write(home.join(name), format!("print -r -- startup-file:{name}\n")).unwrap();
+        }
+
+        let mut command = Command::new(zsh);
+        // A pty makes NexTerm's zsh interactive; pipes do not.
+        command.args(&integration.args).arg("-i").env_clear();
+        for (key, value) in &integration.env {
+            // for_shell named this machine's real home as the user's; the
+            // fake one stands in for it.
+            if key == "NEXTERM_USER_ZDOTDIR" {
+                command.env(key, &home);
+            } else {
+                command.env(key, value);
+            }
+        }
+        let mut child = command
+            .env("PATH", path)
+            .env("HOME", &home)
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn zsh");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"print -r -- \"PATH=$PATH\"\nexit\n")
+            .unwrap();
+        let out = child.wait_with_output().expect("zsh output");
+        let _ = fs::remove_dir_all(&home);
+        Some(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+
     #[test]
     fn for_shell_bash_has_expected_arg_shape_and_generates_rcfile() {
         let result = for_shell("/bin/bash");
@@ -751,17 +963,35 @@ mod tests {
         assert!(contents.contains("PROMPT_COMMAND"));
     }
 
-    /// What a real bash prints, stdout and stderr together, when started with
-    /// `args` in an isolated fake HOME holding `files` and given `input` to
-    /// run. `None` when bash is not installed.
+    /// What a real bash prints, stdout and stderr together, started the way
+    /// NexTerm starts one — as a login shell or not — in an isolated fake
+    /// HOME holding `files`, and given `input` to run. `None` when bash is
+    /// not installed.
+    ///
+    /// Unless `files` brings a login file of its own, the fake HOME gets a
+    /// ~/.bash_profile that sources ~/.bashrc, as a Mac user's does: a login
+    /// shell reads only the former.
     #[cfg(unix)]
-    fn run_real_bash(args: &[String], files: &[(&str, &str)], input: &str) -> Option<String> {
+    fn run_real_bash(login: bool, files: &[(&str, &str)], input: &str) -> Option<String> {
+        run_real_bash_with_path(login, files, input, &std::env::var("PATH").unwrap_or_default())
+    }
+
+    #[cfg(unix)]
+    fn run_real_bash_with_path(
+        login: bool,
+        files: &[(&str, &str)],
+        input: &str,
+        path: &str,
+    ) -> Option<String> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
         if Command::new("bash").arg("--version").output().is_err() {
             return None;
         }
+        let integration = bash_integration(login);
+        assert!(!integration.args.is_empty(), "bash integration produced no args");
+
         // Isolated fake HOME so the developer's real dotfiles are not sourced;
         // one per call, since these cases run in parallel.
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -771,14 +1001,19 @@ mod tests {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&home).unwrap();
+        let login_files = [".bash_profile", ".bash_login", ".profile"];
+        if !files.iter().any(|(name, _)| login_files.contains(name)) {
+            let sources_bashrc = "if [[ -f \"$HOME/.bashrc\" ]]; then source \"$HOME/.bashrc\"; fi\n";
+            fs::write(home.join(".bash_profile"), sources_bashrc).unwrap();
+        }
         for (name, body) in files {
             fs::write(home.join(name), body).unwrap();
         }
 
         let mut child = Command::new("bash")
-            .args(args)
+            .args(&integration.args)
             .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("PATH", path)
             .env("HOME", &home)
             .env("TERM", "xterm-256color")
             .stdin(Stdio::piped())
@@ -816,41 +1051,47 @@ trap '__user_trap' DEBUG
     /// command — and that the PROMPT_COMMAND and DEBUG trap ~/.bashrc set
     /// up still run, seeing the exit status they always saw. Assigning ours
     /// over them used to switch direnv, zoxide and shared history off
-    /// without a word. Skipped when bash is not installed.
+    /// without a word. Both kinds of shell, whichever this platform starts.
+    /// Skipped when bash is not installed.
     #[cfg(unix)]
     #[test]
     fn real_bash_emits_markers_around_commands() {
-        let integration = bash_integration();
-        assert!(!integration.args.is_empty(), "bash integration produced no args");
-        let Some(combined) = run_real_bash(
-            &integration.args,
-            &[(".bashrc", USER_BASHRC)],
-            "false\necho x\necho lastarg foo\necho \"dollar-underscore:[$_]\"\nfalse\nexit\n",
-        ) else {
-            eprintln!("bash not installed; skipping");
-            return;
-        };
+        for login in [false, true] {
+            let Some(combined) = run_real_bash(
+                login,
+                &[(".bashrc", USER_BASHRC)],
+                "false\necho x\necho lastarg foo\necho \"dollar-underscore:[$_]\"\nfalse\nexit\n",
+            ) else {
+                eprintln!("bash not installed; skipping");
+                return;
+            };
 
-        assert!(combined.contains("\x1b]133;C\x07"), "no C marker: {combined:?}");
-        assert!(combined.contains("\x1b]133;D;0\x07"), "no D;0 marker: {combined:?}");
-        assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
-        assert!(combined.contains("\x1b]133;A\x07"), "no A marker: {combined:?}");
-        assert!(combined.contains("\x1b]7;file://"), "no OSC 7 cwd marker: {combined:?}");
+            assert!(combined.contains("\x1b]133;C\x07"), "login={login}: no C marker: {combined:?}");
+            assert!(combined.contains("\x1b]133;D;0\x07"), "login={login}: no D;0 marker: {combined:?}");
+            assert!(
+                combined.contains("\x1b]133;D;1\x07"),
+                "login={login}: no D;1 marker after `false`: {combined:?}"
+            );
+            assert!(combined.contains("\x1b]133;A\x07"), "login={login}: no A marker: {combined:?}");
+            assert!(combined.contains("\x1b]7;file://"), "login={login}: no OSC 7 cwd marker: {combined:?}");
 
-        assert!(
-            combined.contains("user-prompt-command:1\n") && combined.contains("user-prompt-command:0\n"),
-            "the PROMPT_COMMAND ~/.bashrc set no longer runs, or not with the command's exit status: {combined:?}"
-        );
-        assert!(
-            combined.contains("user-debug-trap:1\n"),
-            "the DEBUG trap ~/.bashrc set no longer runs, or not with the exit status before it: {combined:?}"
-        );
-        // A DEBUG trap leaves $_ holding the last word it ran, and the
-        // command it fired for sees that unless the trap puts $_ back.
-        assert!(
-            combined.contains("dollar-underscore:[foo]"),
-            "the trap changed what $_ holds for the command after it: {combined:?}"
-        );
+            assert!(
+                combined.contains("user-prompt-command:1\n") && combined.contains("user-prompt-command:0\n"),
+                "login={login}: the PROMPT_COMMAND ~/.bashrc set no longer runs, or not with the \
+                 command's exit status: {combined:?}"
+            );
+            assert!(
+                combined.contains("user-debug-trap:1\n"),
+                "login={login}: the DEBUG trap ~/.bashrc set no longer runs, or not with the exit \
+                 status before it: {combined:?}"
+            );
+            // A DEBUG trap leaves $_ holding the last word it ran, and the
+            // command it fired for sees that unless the trap puts $_ back.
+            assert!(
+                combined.contains("dollar-underscore:[foo]"),
+                "login={login}: the trap changed what $_ holds for the command after it: {combined:?}"
+            );
+        }
     }
 
     /// bash 5.1 runs every element of an array PROMPT_COMMAND, and an older
@@ -866,26 +1107,34 @@ __first() { builtin printf 'first-element:%s\n' "$?"; }
 __second() { builtin printf 'second-element\n'; }
 PROMPT_COMMAND=(__first __second)
 "#;
-        let integration = bash_integration();
-        let Some(combined) = run_real_bash(&integration.args, &[(".bashrc", bashrc)], "false\nexit\n") else {
-            eprintln!("bash not installed; skipping");
-            return;
-        };
-        let version = Command::new("bash")
-            .args(["-c", "echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] ))"])
-            .output()
-            .ok()
-            .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok())
-            .expect("bash says its version");
+        for login in [false, true] {
+            let Some(combined) = run_real_bash(login, &[(".bashrc", bashrc)], "false\nexit\n") else {
+                eprintln!("bash not installed; skipping");
+                return;
+            };
+            let version = Command::new("bash")
+                .args(["-c", "echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] ))"])
+                .output()
+                .ok()
+                .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok())
+                .expect("bash says its version");
 
-        assert!(combined.contains("first-element:1\n"), "the first element no longer runs: {combined:?}");
-        assert_eq!(
-            combined.contains("second-element\n"),
-            version >= 501,
-            "bash {version}: the second element must run exactly when this bash runs arrays: {combined:?}"
-        );
-        assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
-        assert!(combined.contains("\x1b]133;C\x07"), "no C marker: {combined:?}");
+            assert!(
+                combined.contains("first-element:1\n"),
+                "login={login}: the first element no longer runs: {combined:?}"
+            );
+            assert_eq!(
+                combined.contains("second-element\n"),
+                version >= 501,
+                "login={login}, bash {version}: the second element must run exactly when this bash \
+                 runs arrays: {combined:?}"
+            );
+            assert!(
+                combined.contains("\x1b]133;D;1\x07"),
+                "login={login}: no D;1 marker after `false`: {combined:?}"
+            );
+            assert!(combined.contains("\x1b]133;C\x07"), "login={login}: no C marker: {combined:?}");
+        }
     }
 
     /// bash-preexec (atuin, bash-it) owns PROMPT_COMMAND and the DEBUG trap
@@ -918,26 +1167,36 @@ __user_preexec() { builtin printf 'preexec-function:%s\n' "$1"; }
 precmd_functions+=(__user_precmd)
 preexec_functions+=(__user_preexec)
 "#;
-        let integration = bash_integration();
-        let Some(combined) = run_real_bash(
-            &integration.args,
-            &[(".bashrc", bashrc)],
-            "false\necho x\necho \"[$PROMPT_COMMAND][$(trap -p DEBUG)]\"\nexit\n",
-        ) else {
-            eprintln!("bash not installed; skipping");
-            return;
-        };
+        for login in [false, true] {
+            let Some(combined) = run_real_bash(
+                login,
+                &[(".bashrc", bashrc)],
+                "false\necho x\necho \"[$PROMPT_COMMAND][$(trap -p DEBUG)]\"\nexit\n",
+            ) else {
+                eprintln!("bash not installed; skipping");
+                return;
+            };
 
-        assert!(combined.contains("precmd-function:1\n"), "bash-preexec's precmd functions stopped: {combined:?}");
-        assert!(combined.contains("preexec-function:echo x\n"), "bash-preexec's preexec functions stopped: {combined:?}");
-        assert!(
-            combined.contains("[__bp_precmd][trap -- '__bp_preexec' DEBUG]"),
-            "bash-preexec's own PROMPT_COMMAND and DEBUG trap were replaced: {combined:?}"
-        );
-        assert!(combined.contains("\x1b]133;C\x07"), "no C marker: {combined:?}");
-        assert!(combined.contains("\x1b]133;D;1\x07"), "no D;1 marker after `false`: {combined:?}");
-        assert!(combined.contains("\x1b]133;D;0\x07"), "no D;0 marker: {combined:?}");
-        assert!(combined.contains("\x1b]133;A\x07"), "no A marker: {combined:?}");
+            assert!(
+                combined.contains("precmd-function:1\n"),
+                "login={login}: bash-preexec's precmd functions stopped: {combined:?}"
+            );
+            assert!(
+                combined.contains("preexec-function:echo x\n"),
+                "login={login}: bash-preexec's preexec functions stopped: {combined:?}"
+            );
+            assert!(
+                combined.contains("[__bp_precmd][trap -- '__bp_preexec' DEBUG]"),
+                "login={login}: bash-preexec's own PROMPT_COMMAND and DEBUG trap were replaced: {combined:?}"
+            );
+            assert!(combined.contains("\x1b]133;C\x07"), "login={login}: no C marker: {combined:?}");
+            assert!(
+                combined.contains("\x1b]133;D;1\x07"),
+                "login={login}: no D;1 marker after `false`: {combined:?}"
+            );
+            assert!(combined.contains("\x1b]133;D;0\x07"), "login={login}: no D;0 marker: {combined:?}");
+            assert!(combined.contains("\x1b]133;A\x07"), "login={login}: no A marker: {combined:?}");
+        }
     }
 
     /// ~/.bashrc read a second time — `source ~/.bashrc` after editing it —
@@ -968,26 +1227,83 @@ if [[ ";${PROMPT_COMMAND[*]:-};" != *";_direnv_hook;"* ]]; then
   PROMPT_COMMAND="_direnv_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi
 "#;
-        let integration = bash_integration();
-        let Some(combined) = run_real_bash(
-            &integration.args,
-            &[(".bashrc", bashrc)],
-            "source ~/.bashrc\nfalse\nexit\n",
+        for login in [false, true] {
+            let Some(combined) =
+                run_real_bash(login, &[(".bashrc", bashrc)], "source ~/.bashrc\nfalse\nexit\n")
+            else {
+                eprintln!("bash not installed; skipping");
+                return;
+            };
+
+            assert!(
+                combined.contains("\x1b]133;D;1\x07"),
+                "login={login}: the shell did not live to report `false` — the prompt hooks ran \
+                 each other forever?: {combined:?}"
+            );
+            // Every prompt ran each hook once: not lost, not doubled, not looping.
+            let prompts = combined.matches("\x1b]133;A\x07").count();
+            assert_eq!(prompts, 3, "login={login}: startup, after `source`, after `false`: {combined:?}");
+            assert_eq!(combined.matches("direnv-hook\n").count(), prompts, "login={login}: {combined:?}");
+            assert_eq!(combined.matches("starship-precmd:").count(), prompts, "login={login}: {combined:?}");
+            assert!(combined.contains("starship-precmd:1\n"), "login={login}: {combined:?}");
+        }
+    }
+
+    /// A login bash reads /etc/profile, then the first of ~/.bash_profile,
+    /// ~/.bash_login and ~/.profile that is there — and not ~/.bashrc, unless
+    /// that file sources it. bash reads no --rcfile as a login shell, so the
+    /// generated rcfile does that reading, and has to pick the same one.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_as_a_login_shell_reads_the_first_profile_file() {
+        let say = |name: &str, more: &str| format!("echo startup-file:{name}\n{more}");
+        let bash_profile = say(".bash_profile", "source \"$HOME/.bashrc\"\n");
+        let bash_login = say(".bash_login", "");
+        let profile = say(".profile", "");
+        let bashrc = say(".bashrc", "");
+        let all = [
+            (".bash_profile", bash_profile.as_str()),
+            (".bash_login", bash_login.as_str()),
+            (".profile", profile.as_str()),
+            (".bashrc", bashrc.as_str()),
+        ];
+
+        let Some(combined) = run_real_bash(true, &all, "exit\n") else {
+            eprintln!("bash not installed; skipping");
+            return;
+        };
+        assert_eq!(startup_files_read(&combined), [".bash_profile", ".bashrc"], "{combined:?}");
+
+        // No ~/.bash_profile or ~/.bash_login: ~/.profile is the one.
+        let only_profile = [(".profile", profile.as_str()), (".bashrc", bashrc.as_str())];
+        let combined = run_real_bash(true, &only_profile, "exit\n").unwrap();
+        assert_eq!(startup_files_read(&combined), [".profile"], "{combined:?}");
+
+        // Not a login shell: ~/.bashrc, as before.
+        let combined = run_real_bash(false, &all, "exit\n").unwrap();
+        assert_eq!(startup_files_read(&combined), [".bashrc"], "{combined:?}");
+    }
+
+    /// bash on macOS, started from an app opened in the Finder — launchd's
+    /// PATH and nothing else — still ends up with the PATH /etc/profile's
+    /// path_helper builds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn real_bash_on_macos_gets_the_login_path() {
+        let Some(combined) = run_real_bash_with_path(
+            LOGIN_SHELLS,
+            &[],
+            "echo \"PATH=$PATH\"\nexit\n",
+            "/usr/bin:/bin:/usr/sbin:/sbin",
         ) else {
             eprintln!("bash not installed; skipping");
             return;
         };
-
+        let path = printed_path(&combined);
         assert!(
-            combined.contains("\x1b]133;D;1\x07"),
-            "the shell did not live to report `false` — the prompt hooks ran each other forever?: {combined:?}"
+            path.split(':').any(|dir| dir == "/usr/local/bin"),
+            "/etc/profile never ran: a Finder-launched terminal is left with PATH={path}"
         );
-        // Every prompt ran each hook once: not lost, not doubled, not looping.
-        let prompts = combined.matches("\x1b]133;A\x07").count();
-        assert_eq!(prompts, 3, "startup, after `source`, after `false`: {combined:?}");
-        assert_eq!(combined.matches("direnv-hook\n").count(), prompts, "{combined:?}");
-        assert_eq!(combined.matches("starship-precmd:").count(), prompts, "{combined:?}");
-        assert!(combined.contains("starship-precmd:1\n"), "{combined:?}");
     }
 
     #[test]
