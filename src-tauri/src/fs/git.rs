@@ -61,11 +61,6 @@ pub struct GitStatus {
     pub truncated: bool,
 }
 
-/// Run `git` in `dir`, or `None` when it could not be run at all.
-///
-/// A missing `git`, a folder that is not a repository, and a git that returned
-/// an error are all the same answer here: nothing to say. None of them is
-/// worth an error dialog over a status bar decoration.
 /// `CREATE_NO_WINDOW`. Windows gives a console-subsystem child its own console
 /// window unless told not to, and `git` is one — so every call flashed a black
 /// window over the app. `git_status` runs when a folder is opened AND again,
@@ -80,12 +75,41 @@ pub struct GitStatus {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
+/// What every call here passes before its subcommand. Nobody asked for any of
+/// these calls: they run when a folder is opened or restored, and again after
+/// every burst of file changes, so they must leave the repository exactly as
+/// they found it and run nothing it names.
+///
+/// - `--no-optional-locks`: a status otherwise refreshes the index and writes
+///   it back, holding `.git/index.lock` while it collects the status. A
+///   `git commit` or a rebase step in a terminal that needs the lock at that
+///   moment fails with "index.lock: File exists" — and an agent in one of
+///   these terminals commits right after writing files, which is exactly when
+///   the status runs. git-status(1) recommends this flag for background use.
+/// - `core.fsmonitor=false`: `core.fsmonitor` may name a program, which git
+///   runs on every status, and a folder from an archive or a shared drive can
+///   carry one in its `.git/config`. Given on the command line, this wins over
+///   the repository's own setting. A git older than 2.36 reads the value only
+///   as a path, so there it names the `false` command, which fails, and git
+///   falls back to checking every file itself.
+const BACKGROUND_OPTIONS: [&str; 3] = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+
+/// `git` run in `dir` with `BACKGROUND_OPTIONS`, and without a console window.
+fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
-    command.arg("-C").arg(dir).args(args);
+    command.args(BACKGROUND_OPTIONS).arg("-C").arg(dir).args(args);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().ok()?;
+    command
+}
+
+/// Run `git` in `dir`, or `None` when it could not be run at all.
+///
+/// A missing `git`, a folder that is not a repository, and a git that returned
+/// an error are all the same answer here: nothing to say. None of them is
+/// worth an error dialog over a status bar decoration.
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = git_command(dir, args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -399,6 +423,154 @@ mod tests {
         let status = parse_status(&z(&refs), &root());
         assert_eq!(status.files.len(), MAX_FILES);
         assert!(status.truncated, "what was cut has to be reported");
+    }
+
+    /// Both calls `status_of` makes, as the arguments git is actually given:
+    /// the options belong to git itself, so they have to come before the
+    /// subcommand, and none of them may be lost on the way.
+    #[test]
+    fn every_background_call_takes_no_lock_and_runs_no_fsmonitor() {
+        for subcommand in [
+            &["rev-parse", "--show-toplevel"][..],
+            &["status", "--porcelain=v2", "--branch", "-z"][..],
+        ] {
+            let command = git_command(Path::new("/w/proj"), subcommand);
+            assert_eq!(command.get_program(), "git");
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let at = args
+                .iter()
+                .position(|a| a == subcommand[0])
+                .unwrap_or_else(|| panic!("no subcommand in {args:?}"));
+            let (global, rest) = args.split_at(at);
+            assert!(
+                global.iter().any(|a| a == "--no-optional-locks"),
+                "a background {} may take .git/index.lock: {args:?}",
+                subcommand[0]
+            );
+            assert!(
+                global.windows(2).any(|w| w[0] == "-c" && w[1] == "core.fsmonitor=false"),
+                "a background {} runs whatever core.fsmonitor names: {args:?}",
+                subcommand[0]
+            );
+            assert!(global.windows(2).any(|w| w[0] == "-C" && w[1] == "/w/proj"), "{args:?}");
+            assert_eq!(rest, subcommand, "the subcommand's own arguments changed: {args:?}");
+        }
+    }
+
+    /// A throwaway repository holding one committed file, or `None` when this
+    /// machine cannot make one (no git, or one too old for `GIT_CONFIG_GLOBAL`).
+    ///
+    /// It is set up by a git that reads none of this machine's configuration,
+    /// so a developer's `commit.gpgsign` or hooks path cannot get in the way.
+    /// What is under test is run the way the app runs it, through `status_of`.
+    fn scratch_repo(tag: &str) -> Option<PathBuf> {
+        let base = std::env::temp_dir().join(format!("nexterm-git-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).ok()?;
+        let no_config = base.join("empty.gitconfig");
+        std::fs::write(&no_config, "").ok()?;
+        std::fs::write(repo.join("tracked.txt"), "unchanged\n").ok()?;
+
+        for args in [
+            &["init", "-q"][..],
+            &["add", "tracked.txt"][..],
+            &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "one file"][..],
+        ] {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", &no_config)
+                .env("GIT_AUTHOR_NAME", "NexTerm")
+                .env("GIT_AUTHOR_EMAIL", "nexterm@example.invalid")
+                .env("GIT_COMMITTER_NAME", "NexTerm")
+                .env("GIT_COMMITTER_EMAIL", "nexterm@example.invalid")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            if !ok {
+                let _ = std::fs::remove_dir_all(&base);
+                return None;
+            }
+        }
+        Some(repo)
+    }
+
+    /// The status runs in the background — on opening a folder and after every
+    /// burst of file changes — while an agent or the user runs git in a
+    /// terminal. A status allowed to take locks refreshes the index and writes
+    /// it back, holding `.git/index.lock` meanwhile, and a `git commit` or a
+    /// rebase step that needs the lock at that moment fails with "index.lock:
+    /// File exists". Writing the index is exactly what taking that lock is for,
+    /// so an index that comes through byte for byte is the observable proof.
+    #[test]
+    fn a_background_status_never_writes_the_index() {
+        let Some(repo) = scratch_repo("index") else {
+            eprintln!("git unavailable or too old; skipping");
+            return;
+        };
+        // The same content with a different mtime: the stat data the index
+        // caches for the file is stale, so a status that may write refreshes
+        // it and writes the index back.
+        let file = std::fs::File::options()
+            .write(true)
+            .open(repo.join("tracked.txt"))
+            .expect("open the tracked file");
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .expect("age the tracked file");
+        drop(file);
+
+        let index = repo.join(".git").join("index");
+        let before = std::fs::read(&index).expect("the index");
+        let status = status_of(&repo);
+        let after = std::fs::read(&index).expect("the index");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+
+        let status = status.expect("a repository answers");
+        assert!(status.files.is_empty(), "nothing changed, but git said {:?}", status.files);
+        assert!(
+            before == after,
+            "the background status rewrote .git/index, so it held .git/index.lock while it \
+             ran — a `git commit` in a terminal at that moment fails"
+        );
+    }
+
+    /// `core.fsmonitor` may name a program, and git runs it on every status.
+    /// A folder from an archive or a shared drive can carry that in
+    /// `.git/config`, and the status here runs on its own when the folder is
+    /// opened or restored — the user never typed a git command. On Windows,
+    /// where cmd.exe has no git prompt, nothing else would have run it.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_cannot_make_the_background_status_run_a_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(repo) = scratch_repo("fsmonitor") else {
+            eprintln!("git unavailable or too old; skipping");
+            return;
+        };
+        let base = repo.parent().unwrap().to_path_buf();
+        let ran = base.join("the-hook-ran");
+        let hook = repo.join(".git").join("fsmonitor-hook");
+        std::fs::write(&hook, format!("#!/bin/sh\necho ran >> '{}'\n", ran.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Written into the repository's own config, the way it would arrive.
+        let config = repo.join(".git").join("config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str(&format!("[core]\n\tfsmonitor = {}\n", hook.display()));
+        std::fs::write(&config, text).unwrap();
+
+        let status = status_of(&repo);
+        let hook_ran = ran.exists();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(status.is_some(), "the repository still answers");
+        assert!(!hook_ran, "opening the folder ran the program its .git/config names as core.fsmonitor");
     }
 
     #[test]

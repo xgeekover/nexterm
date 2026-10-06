@@ -574,8 +574,9 @@ impl PtyManager {
             // Close the input queue first so the writer thread is not left
             // blocked on a write to a shell that is about to die.
             *session.input.lock() = None;
-            let mut child = session.child.lock();
-            let _ = child.kill();
+            let _ = session.child.lock().kill();
+            #[cfg(unix)]
+            reap(session);
         }
         Ok(())
     }
@@ -625,6 +626,36 @@ impl PtyManager {
             })
             .collect()
     }
+}
+
+/// Wait for a shell `kill` has just killed, so that it does not stay behind
+/// as a zombie.
+///
+/// portable-pty's kill sends SIGHUP, gives the shell 200 ms to go, then sends
+/// SIGKILL and returns without waiting. A shell slower than that to die — a
+/// HUP trap, a slow zshexit hook — was never waited for: `kill` drops the
+/// session, and the reader thread, the only other thing that waits, reaches
+/// the child through the session. So it stayed <defunct> until NexTerm
+/// exited, one per such tab closed, and `retain_only` did the same on reload.
+///
+/// After SIGKILL the end comes promptly, but not for a process stuck in the
+/// kernel, and `kill` must return regardless — closing a group kills its
+/// terminals one after another — so the waiting is done on a thread of its
+/// own, holding the session until the shell is gone. A shell that was gone
+/// within the grace period has been waited for already, and needs no thread.
+///
+/// unix-only: Windows has no zombies, and closing the process handle is all
+/// a killed process needs there.
+#[cfg(unix)]
+fn reap(session: Arc<PtySession>) {
+    if matches!(session.child.lock().try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name(format!("pty-reaper-{}", session.id))
+        .spawn(move || {
+            let _ = session.child.lock().wait();
+        });
 }
 
 #[cfg(test)]
@@ -1216,6 +1247,95 @@ mod canonical_limit_tests {
         let child = pair.slave.spawn_command(cmd).expect("spawn");
         drop(pair.slave);
         child
+    }
+}
+
+/// What `kill` leaves behind. A shell that is killed has to be waited for, or
+/// it stays in the process table as a zombie until NexTerm exits.
+#[cfg(all(test, unix))]
+mod kill_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::time::{Duration, Instant};
+
+    /// Whether `pid` is in the process table at all — running, or dead and
+    /// never waited for.
+    fn in_process_table(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 delivers nothing; it only asks whether the
+        // process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// portable-pty's kill sends SIGHUP, gives the shell 200 ms, then sends
+    /// SIGKILL and returns without waiting. A shell slower than that to die
+    /// — a HUP trap, a slow zshexit — was never waited for: `kill` dropped
+    /// the session, so the reader thread could no longer reach the child to
+    /// wait on it either.
+    #[test]
+    fn a_shell_that_outlives_the_hangup_is_still_reaped() {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        // Ignores the hangup, then becomes `sleep`, which keeps ignoring it:
+        // only the SIGKILL after the grace period ends it.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "trap '' HUP; echo hangup-ignored; exec sleep 30"]);
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        drop(pair.slave);
+        let pid = child.process_id().expect("a pid") as libc::pid_t;
+
+        // A hangup that arrived before the trap was set would end the shell
+        // at once, and prove nothing.
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let (ready_tx, ready) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut seen = String::new();
+            let mut buf = [0u8; 256];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if seen.contains("hangup-ignored") {
+                    let _ = ready_tx.send(());
+                    seen.clear();
+                }
+            }
+        });
+        ready.recv_timeout(Duration::from_secs(10)).expect("the shell never got going");
+
+        let writer = pair.master.take_writer().expect("writer");
+        let manager = PtyManager::new();
+        manager.sessions.lock().insert(
+            "slow".into(),
+            Arc::new(PtySession {
+                id: "slow".into(),
+                shell: "/bin/sh".into(),
+                created_at: Utc::now(),
+                master: Mutex::new(pair.master),
+                input: Mutex::new(Some(spawn_writer_thread(writer, "slow").unwrap())),
+                child: Mutex::new(child),
+            }),
+        );
+
+        let started = Instant::now();
+        manager.kill("slow").unwrap();
+        // `pty_kill` is off the IPC thread, but closing a group kills its
+        // terminals one after another: the wait must not be `kill`'s.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "kill took {:?} — it waited for the shell itself",
+            started.elapsed()
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while in_process_table(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !in_process_table(pid),
+            "pid {pid} is still in the process table: killed, but never waited for"
+        );
     }
 }
 
