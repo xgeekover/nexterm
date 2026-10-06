@@ -138,6 +138,7 @@ fn main() {
             commands::fs::fs_create_dir,
             commands::fs::fs_rename_path,
             commands::fs::fs_delete_path,
+            commands::fs::fs_copy_path,
             commands::fs::fs_set_root,
             commands::fs::git_status,
             commands::fs::fs_search,

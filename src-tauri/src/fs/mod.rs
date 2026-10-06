@@ -391,12 +391,140 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to rename '{from_str}' to '{to_str}': {e}"))
 }
 
+/// Copy a file or a folder to a name nothing has yet: the Explorer's paste.
+///
+/// `from` is where the source leads (`Workspace::confine`), so a link is
+/// copied as what it points at, the way reading it would be. `to` names the
+/// new entry (`Workspace::confine_entry`) and must not exist — as a file, a
+/// folder or a dangling link — which is checked before anything is written,
+/// so a paste can neither overwrite a file nor merge into a folder. Its
+/// folder must exist as well: creating that would bring back a folder deleted
+/// since the Explorer last looked.
+///
+/// A file is copied as bytes, permissions included, by `fs::copy`. A folder
+/// is copied with everything in it — nothing hidden the way the Explorer
+/// hides `.git` or `node_modules`, and nothing decoded, so a PNG is a file
+/// like any other. The paste this replaces walked the Explorer's listing and
+/// copied each file as text: it left those folders out, and the first binary
+/// file stopped it with half the copy written.
+///
+/// Links inside the folder are copied as links (`copy_link`) and never
+/// followed. Following one that leads to a folder above it would copy the
+/// tree into itself again at every level, as deep as the system lets a path
+/// go, and one that leads out of the open folder would copy what is out there
+/// in. A relative link keeps its
+/// spelling, so one pointing within the folder points within the copy.
+/// Sockets, FIFOs and devices are left out: they have no bytes of their own,
+/// and opening a FIFO waits for a writer that may never come. The one a
+/// project realistically holds is git's fsmonitor socket in `.git`, which
+/// means nothing without the daemon that made it.
+///
+/// A folder copy that fails part-way is removed again, so a paste either
+/// happens or leaves nothing behind.
+pub fn copy_path(from: &Path, to: &Path) -> Result<(), String> {
+    let source = from
+        .metadata()
+        .map_err(|_| format!("Path does not exist: {}", from.display()))?;
+    if to.symlink_metadata().is_ok() {
+        return Err(already_exists(to));
+    }
+    if !to.parent().is_some_and(Path::is_dir) {
+        return Err(format!("Cannot copy to '{}': its folder does not exist", to.display()));
+    }
+
+    if source.is_dir() {
+        if to.starts_with(from) {
+            return Err(format!("Cannot copy '{}' inside itself", from.display()));
+        }
+        copy_folder(from, to)
+    } else if source.is_file() {
+        fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy '{}' to '{}': {e}", from.display(), to.display()))
+    } else {
+        Err(format!("Cannot copy '{}': it is not a file or a folder", from.display()))
+    }
+}
+
 fn already_exists(path: &Path) -> String {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string());
     format!("A file or folder named '{name}' already exists")
+}
+
+/// `copy_path` for a folder: create `to`, fill it, and remove it again if
+/// filling it fails. `to` did not exist before (`copy_path` checked, and
+/// `create_dir` would refuse one that appeared since), so everything under it
+/// is this copy's own; `remove_dir_all` removes the links it meets as links,
+/// so the clean-up never reaches past the copy either.
+fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir(to).map_err(|e| format!("Failed to create '{}': {e}", to.display()))?;
+    let Err(error) = fill_folder(from, to) else {
+        return Ok(());
+    };
+    match fs::remove_dir_all(to) {
+        Ok(()) => Err(error),
+        Err(e) => Err(format!("{error} (and the partial copy at '{}' could not be removed: {e})", to.display())),
+    }
+}
+
+fn fill_folder(from: &Path, to: &Path) -> Result<(), String> {
+    // Folders still to copy, as (source, copy). A list rather than recursion:
+    // a deep tree would be a deep stack, on a blocking-pool thread with a
+    // small one.
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source, copy)) = pending.pop() {
+        let unreadable = |e: std::io::Error| format!("Failed to read '{}': {e}", source.display());
+        for entry in fs::read_dir(&source).map_err(unreadable)? {
+            let entry = entry.map_err(unreadable)?;
+            let (from_entry, to_entry) = (entry.path(), copy.join(entry.file_name()));
+            // The entry itself: a link is not followed.
+            let file_type = entry.file_type().map_err(unreadable)?;
+            if file_type.is_symlink() {
+                copy_link(&from_entry, &to_entry, file_type)
+                    .map_err(|e| format!("Failed to copy the link '{}': {e}", from_entry.display()))?;
+            } else if file_type.is_dir() {
+                fs::create_dir(&to_entry)
+                    .map_err(|e| format!("Failed to create '{}': {e}", to_entry.display()))?;
+                pending.push((from_entry, to_entry));
+            } else if file_type.is_file() {
+                fs::copy(&from_entry, &to_entry)
+                    .map_err(|e| format!("Failed to copy '{}': {e}", from_entry.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Make `to` a link spelled exactly like the link `from`.
+#[cfg(unix)]
+fn copy_link(from: &Path, to: &Path, _: fs::FileType) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(fs::read_link(from)?, to)
+}
+
+/// Windows makes a link to a folder and a link to a file differently, and
+/// only in Developer Mode or for an administrator; without that the copy
+/// fails and says why. A junction is copied as a directory symlink to the
+/// same folder — std can read a junction but not make one.
+#[cfg(windows)]
+fn copy_link(from: &Path, to: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+    /// ERROR_PRIVILEGE_NOT_HELD
+    const NO_PRIVILEGE: i32 = 1314;
+    let target = fs::read_link(from)?;
+    let made = if is_folder_link(file_type) {
+        std::os::windows::fs::symlink_dir(target, to)
+    } else {
+        std::os::windows::fs::symlink_file(target, to)
+    };
+    made.map_err(|e| match e.raw_os_error() {
+        Some(NO_PRIVILEGE) => std::io::Error::new(
+            e.kind(),
+            format!("{e}; Windows creates links only in Developer Mode or for an administrator"),
+        ),
+        _ => e,
+    })
 }
 
 

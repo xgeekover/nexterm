@@ -221,6 +221,31 @@ fn delete_in(workspace: &fs::Workspace, path: &str, recursive: bool) -> Result<(
     fs::delete_path(&target.to_string_lossy(), recursive)
 }
 
+/// Copy a file or a folder to a new name — the Explorer's paste. `from` is
+/// confined like a read, so a link is copied as what it points at; `to` is
+/// confined as the new entry, and an existing one is refused before anything
+/// is written. `fs::copy_path` has the rest.
+///
+/// Not `#[tauri::command(async)]` like its neighbours. That attribute takes a
+/// body off the event-loop thread but runs it on one of the async runtime's
+/// worker threads (tauri's `respond_async_serialized` hands it to
+/// `tokio::spawn`), which every other async command shares. A stat or a
+/// read is over before that matters; a copy takes as long as the folder is
+/// big, so it goes to the blocking pool, which grows for this.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fs_copy_path(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
+    let workspace = state.workspace.clone();
+    tauri::async_runtime::spawn_blocking(move || copy_in(&workspace, &from, &to))
+        .await
+        .map_err(|e| format!("The copy stopped unexpectedly: {e}"))?
+}
+
+fn copy_in(workspace: &fs::Workspace, from: &str, to: &str) -> Result<(), String> {
+    let from_abs = workspace.confine(from)?;
+    let to_abs = workspace.confine_entry(to)?;
+    fs::copy_path(&from_abs, &to_abs)
+}
+
 
 /// The dispatch these commands are compiled with, which nothing at runtime
 /// can observe.
@@ -243,6 +268,7 @@ mod dispatch_tests {
         "fs_create_dir",
         "fs_rename_path",
         "fs_delete_path",
+        "fs_copy_path",
         "fs_set_root",
         "fs_pick_root",
         "fs_dir_exists",
@@ -324,6 +350,29 @@ mod dispatch_tests {
         }
     }
 
+    /// `async` in the attribute moves a body onto the async runtime's worker
+    /// threads, not the blocking pool. A copy runs for as long as the folder
+    /// is big, so `fs_copy_path` hands it to the blocking pool itself, and
+    /// turning it into an attribute-`async` command would quietly undo that.
+    #[test]
+    fn the_copy_runs_on_the_blocking_pool() {
+        let src = source();
+        // By line, so a checkout with CRLF endings reads the same, and from a
+        // line that starts with the signature, so this test's own text is
+        // never taken for it.
+        let body: Vec<&str> = src
+            .lines()
+            .skip_while(|line| !line.starts_with("pub async fn fs_copy_path"))
+            .take_while(|line| line.trim_end() != "}")
+            .collect();
+        assert!(!body.is_empty(), "fs_copy_path is gone, or no longer an async fn");
+        assert!(
+            body.iter().any(|line| line.contains("spawn_blocking")),
+            "fs_copy_path must run the copy through spawn_blocking:\n{}",
+            body.join("\n")
+        );
+    }
+
     /// v0.5.2 and earlier used the dialog plugin's blocking picker from a
     /// blocking command. The plugin's own documentation says not to: "This is
     /// a blocking operation, and should *NOT* be used when running on the main
@@ -350,8 +399,8 @@ mod dispatch_tests {
     }
 }
 
-/// Delete and rename as the commands run them — confinement included — on
-/// real folders.
+/// Delete, rename and copy as the commands run them — confinement included —
+/// on real folders.
 ///
 /// The functions in `crate::fs` were tested on their own, with paths handed
 /// straight to them. That missed both ways confinement used to change what
@@ -360,10 +409,14 @@ mod dispatch_tests {
 /// entry's spelling before `rename_path` saw it.
 #[cfg(test)]
 mod entry_tests {
-    use super::{delete_in, rename_in};
+    use super::{copy_in, delete_in, rename_in};
     use crate::fs::Workspace;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    /// Bytes that are not UTF-8. The paste `fs_copy_path` replaces decoded
+    /// every file as text and stopped at the first of these.
+    const PNG: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00];
 
     /// A folder of its own, opened as the workspace. Sharing one fixed path
     /// between tests is what made the shell-integration suite flaky under
@@ -401,6 +454,37 @@ mod entry_tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// Every entry under `dir` by relative path, with a file's bytes, a link's
+    /// target, or nothing more for a folder — enough to tell a copy from its
+    /// original by anything but timestamps.
+    fn tree_of(dir: &Path) -> Vec<(PathBuf, String)> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(folder) = pending.pop() {
+            for entry in fs::read_dir(&folder).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let kind = entry.file_type().unwrap();
+                let what = if kind.is_symlink() {
+                    format!("link to {}", fs::read_link(&path).unwrap().display())
+                } else if kind.is_dir() {
+                    pending.push(path.clone());
+                    "folder".to_string()
+                } else {
+                    format!("file {:?}", fs::read(&path).unwrap())
+                };
+                found.push((path.strip_prefix(dir).unwrap().to_path_buf(), what));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn write_at(path: &Path, bytes: &[u8]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
     }
 
     #[cfg(unix)]
@@ -495,10 +579,14 @@ mod entry_tests {
         assert!(delete_in(&workspace, "ext/secret.txt", false).is_err(), "delete through it");
         assert!(rename_in(&workspace, "ext/secret.txt", "stolen.txt").is_err(), "rename out through it");
         assert!(rename_in(&workspace, "mine.txt", "ext/mine.txt").is_err(), "rename in through it");
+        assert!(copy_in(&workspace, "ext/secret.txt", "stolen.txt").is_err(), "copy out through it");
+        assert!(copy_in(&workspace, "ext", "stolen").is_err(), "copy what it leads to");
+        assert!(copy_in(&workspace, "mine.txt", "ext/mine.txt").is_err(), "copy in through it");
 
         assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
         assert!(outside.join("mine.txt").symlink_metadata().is_err());
         assert!(root.join("stolen.txt").symlink_metadata().is_err());
+        assert!(root.join("stolen").symlink_metadata().is_err());
         assert_eq!(fs::read_to_string(root.join("mine.txt")).unwrap(), "mine");
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
@@ -516,9 +604,14 @@ mod entry_tests {
         assert!(delete_in(&workspace, &format!("inner/../{escape}"), false).is_err());
         assert!(rename_in(&workspace, &escape, "stolen.txt").is_err());
         assert!(rename_in(&workspace, "mine.txt", "../nexterm-entry-escaped.txt").is_err());
+        assert!(copy_in(&workspace, &escape, "stolen.txt").is_err());
+        assert!(copy_in(&workspace, "mine.txt", "../nexterm-entry-escaped.txt").is_err());
+        assert!(copy_in(&workspace, "mine.txt", &s(&outside.join("mine.txt"))).is_err());
 
         assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
         assert!(root.parent().unwrap().join("nexterm-entry-escaped.txt").symlink_metadata().is_err());
+        assert!(outside.join("mine.txt").symlink_metadata().is_err());
+        assert!(root.join("stolen.txt").symlink_metadata().is_err());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
     }
@@ -664,6 +757,227 @@ mod entry_tests {
         assert_eq!(names_in(&root), vec!["LINK", "target.txt"]);
         assert!(is_link(&root.join("LINK")));
         assert_eq!(fs::read_to_string(root.join("target.txt")).unwrap(), "target");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_a_file_copies_its_bytes() {
+        let (workspace, root) = open_folder("copy-file");
+        fs::write(root.join("logo.png"), PNG).unwrap();
+
+        copy_in(&workspace, "logo.png", "logo copy.png").unwrap();
+
+        assert_eq!(fs::read(root.join("logo copy.png")).unwrap(), PNG);
+        assert_eq!(fs::read(root.join("logo.png")).unwrap(), PNG, "the original stays");
+
+        // The old paste wrote the text out afresh, so a script lost its
+        // executable bit.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+            fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+            copy_in(&workspace, "run.sh", "run copy.sh").unwrap();
+            let mode = fs::metadata(root.join("run copy.sh")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Everything the Explorer hides, deeper than it lists, binary files
+    /// included.
+    #[test]
+    fn copying_a_folder_copies_everything_in_it() {
+        let (workspace, root) = open_folder("copy-folder");
+        let proj = root.join("proj");
+        for (rel, bytes) in [
+            ("top.txt", b"top".as_slice()),
+            (".git/config", b"[core]"),
+            ("node_modules/pkg/index.js", b"module.exports = 1"),
+            ("target/debug/app", b"\x7fELF\x02\x01"),
+            ("dist/bundle.js", b"bundle"),
+            (".agents/notes.md", b"notes"),
+            ("a/b/c/d/e/f/g/deep.txt", b"deep"),
+            ("assets/logo.png", PNG),
+        ] {
+            write_at(&proj.join(rel), bytes);
+        }
+        fs::create_dir_all(proj.join("empty")).unwrap();
+
+        copy_in(&workspace, &s(&proj), &s(&root.join("proj copy"))).unwrap();
+
+        let copied = tree_of(&root.join("proj copy"));
+        assert_eq!(copied, tree_of(&proj));
+        assert!(copied.iter().any(|(rel, _)| rel == Path::new("empty")), "an empty folder too");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Checked before anything is written: a paste can neither overwrite a
+    /// file nor merge into a folder.
+    #[test]
+    fn a_copy_never_lands_on_something_already_there() {
+        let (workspace, root) = open_folder("copy-taken");
+        fs::write(root.join("a.txt"), "new").unwrap();
+        fs::write(root.join("b.txt"), "KEEP").unwrap();
+        write_at(&root.join("src").join("a.txt"), b"src");
+        write_at(&root.join("dest").join("keep.txt"), b"KEEP");
+
+        let err = copy_in(&workspace, "a.txt", "b.txt").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        let err = copy_in(&workspace, "src", "dest").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        if root.join("B.TXT").symlink_metadata().is_ok() {
+            let err = copy_in(&workspace, "a.txt", "B.TXT").unwrap_err();
+            assert!(err.contains("already exists"), "B.TXT is b.txt on this volume: {err}");
+        }
+
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "KEEP");
+        assert_eq!(names_in(&root.join("dest")), vec!["keep.txt"], "nothing merged in");
+        assert_eq!(fs::read_to_string(root.join("dest").join("keep.txt")).unwrap(), "KEEP");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A dangling link is a name already taken; writing through it would
+    /// create whatever it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_never_lands_on_a_dangling_link() {
+        let (workspace, root) = open_folder("copy-dangling");
+        fs::write(root.join("a.txt"), "a").unwrap();
+        link("made-through-the-link.txt", &root.join("taken"));
+
+        let err = copy_in(&workspace, "a.txt", "taken").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(root.join("made-through-the-link.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_copy_needs_a_source_and_a_folder_to_land_in() {
+        let (workspace, root) = open_folder("copy-missing");
+        fs::write(root.join("a.txt"), "a").unwrap();
+
+        let err = copy_in(&workspace, "nope.txt", "copy.txt").unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        // A folder deleted since the Explorer looked must not come back.
+        assert!(copy_in(&workspace, "a.txt", "gone/a.txt").is_err());
+        assert!(root.join("gone").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_is_never_copied_into_itself() {
+        let (workspace, root) = open_folder("copy-into-self");
+        write_at(&root.join("proj").join("a.txt"), b"a");
+        fs::create_dir_all(root.join("proj").join("sub")).unwrap();
+        let before = tree_of(&root);
+
+        for to in ["proj/proj copy", "proj/sub/proj copy"] {
+            let err = copy_in(&workspace, "proj", to).unwrap_err();
+            assert!(err.contains("inside itself"), "{to}: {err}");
+        }
+        let err = copy_in(&workspace, "", "proj/everything").unwrap_err();
+        assert!(err.contains("inside itself"), "the open folder into one of its own: {err}");
+
+        assert_eq!(tree_of(&root), before, "nothing was written");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link the copy starts from is read through, as opening it would be.
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_link_copies_what_it_points_at() {
+        let (workspace, root) = open_folder("copy-link-itself");
+        fs::write(root.join("CLAUDE.md"), "notes").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+        write_at(&root.join("packages").join("shared").join("a.txt"), b"a");
+        link(Path::new("packages").join("shared"), &root.join("shared"));
+
+        copy_in(&workspace, "AGENTS.md", "AGENTS copy.md").unwrap();
+        copy_in(&workspace, "shared", "shared copy").unwrap();
+
+        assert!(!is_link(&root.join("AGENTS copy.md")));
+        assert_eq!(fs::read_to_string(root.join("AGENTS copy.md")).unwrap(), "notes");
+        assert!(!is_link(&root.join("shared copy")));
+        assert_eq!(fs::read_to_string(root.join("shared copy").join("a.txt")).unwrap(), "a");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Inside a copied folder links are copied as links: a loop does not copy
+    /// forever, and a link out of the folder does not copy what is out there.
+    #[cfg(unix)]
+    #[test]
+    fn links_inside_a_copied_folder_are_copied_as_links() {
+        let (workspace, root) = open_folder("copy-links");
+        let outside = outside_folder("copy-links");
+        let proj = root.join("proj");
+        write_at(&proj.join("CLAUDE.md"), b"notes");
+        link("CLAUDE.md", &proj.join("AGENTS.md"));
+        fs::create_dir_all(proj.join("docs")).unwrap();
+        link(".", &proj.join("docs").join("loop"));
+        link("..", &proj.join("docs").join("up"));
+        link(&outside, &proj.join("ext"));
+        link("nowhere", &proj.join("dangling"));
+
+        copy_in(&workspace, "proj", "proj copy").unwrap();
+
+        let copy = root.join("proj copy");
+        assert_eq!(tree_of(&copy), tree_of(&proj), "the same shape, links as links");
+        assert_eq!(
+            copy.join("AGENTS.md").canonicalize().unwrap(),
+            copy.join("CLAUDE.md").canonicalize().unwrap(),
+            "a relative link points within the copy"
+        );
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_fails_part_way_leaves_nothing_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let (workspace, root) = open_folder("copy-fails");
+        let proj = root.join("proj");
+        write_at(&proj.join("a").join("fine.txt"), b"fine");
+        write_at(&proj.join("locked.txt"), b"locked");
+        fs::set_permissions(proj.join("locked.txt"), fs::Permissions::from_mode(0o000)).unwrap();
+
+        // root reads anything, so there is nothing to fail on there.
+        if fs::read(proj.join("locked.txt")).is_err() {
+            let err = copy_in(&workspace, "proj", "proj copy").unwrap_err();
+            assert!(err.contains("locked.txt"), "{err}");
+            assert!(root.join("proj copy").symlink_metadata().is_err(), "the partial copy was left");
+        }
+
+        fs::set_permissions(proj.join("locked.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A FIFO has no bytes of its own and opening one waits for a writer, so
+    /// a copy that tried would hang the paste for good. The copy runs on a
+    /// thread with a deadline, so that comes out as a failure rather than a
+    /// suite that never finishes.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_a_copied_folder_is_left_out_and_never_waited_on() {
+        use std::os::unix::ffi::OsStrExt;
+        let (workspace, root) = open_folder("copy-fifo");
+        write_at(&root.join("proj").join("a.txt"), b"a");
+        let fifo = std::ffi::CString::new(root.join("proj").join("pipe").as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0, "premise: a FIFO to copy past");
+
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(copy_in(&workspace, "proj", "proj copy"));
+        });
+        let copied = finished
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the copy is still waiting on the FIFO");
+
+        copied.unwrap();
+        assert_eq!(names_in(&root.join("proj copy")), vec!["a.txt"]);
         let _ = fs::remove_dir_all(&root);
     }
 }
