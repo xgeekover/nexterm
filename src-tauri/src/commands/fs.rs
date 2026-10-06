@@ -25,11 +25,8 @@ fn confined(state: &State<AppState>, path: &str) -> Result<String, String> {
 }
 
 /// Whether `path` is the open folder itself.
-fn is_root(state: &State<AppState>, path: &str) -> bool {
-    state
-        .workspace
-        .root()
-        .is_some_and(|root| root.to_string_lossy() == path)
+fn is_root_of(workspace: &fs::Workspace, path: &std::path::Path) -> bool {
+    workspace.root().is_some_and(|root| root == path)
 }
 
 /// What git says about the open folder, or `null` when it has nothing to say.
@@ -184,28 +181,44 @@ pub fn fs_create_dir(state: State<AppState>, path: String) -> Result<(), String>
 
 /// Rename or move a path. Both ends are confined, so this cannot be used to
 /// lift a file out of the workspace or pull one in.
+///
+/// Both are confined as entries (`confine_entry`): renaming a link renames
+/// the link, and a new name that differs only in case or Unicode
+/// normalization reaches `rename_path` as typed rather than as the spelling
+/// already on disk.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_rename_path(state: State<AppState>, from: String, to: String) -> Result<(), String> {
-    let from_abs = confined(&state, &from)?;
-    let to_abs = confined(&state, &to)?;
-    if is_root(&state, &from_abs) || is_root(&state, &to_abs) {
-        return Err("Refusing to rename the workspace root".to_string());
-    }
-    fs::rename_path(&from_abs, &to_abs)
+    rename_in(&state.workspace, &from, &to)
 }
 
+fn rename_in(workspace: &fs::Workspace, from: &str, to: &str) -> Result<(), String> {
+    let from_abs = workspace.confine_entry(from)?;
+    let to_abs = workspace.confine_entry(to)?;
+    if is_root_of(workspace, &from_abs) || is_root_of(workspace, &to_abs) {
+        return Err("Refusing to rename the workspace root".to_string());
+    }
+    fs::rename_path(&from_abs.to_string_lossy(), &to_abs.to_string_lossy())
+}
+
+/// Delete a file, a folder or a link. Confined as an entry, so deleting a
+/// link removes the link — including one that leads out of the open folder —
+/// and never what it leads to.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_delete_path(
     state: State<AppState>,
     path: String,
     recursive: Option<bool>,
 ) -> Result<(), String> {
-    let target = confined(&state, &path)?;
+    delete_in(&state.workspace, &path, recursive.unwrap_or(false))
+}
+
+fn delete_in(workspace: &fs::Workspace, path: &str, recursive: bool) -> Result<(), String> {
+    let target = workspace.confine_entry(path)?;
     // Never allow the root itself to be deleted through the IPC surface.
-    if is_root(&state, &target) {
+    if is_root_of(workspace, &target) {
         return Err("Refusing to delete the workspace root".to_string());
     }
-    fs::delete_path(&target, recursive.unwrap_or(false))
+    fs::delete_path(&target.to_string_lossy(), recursive)
 }
 
 
@@ -334,5 +347,323 @@ mod dispatch_tests {
             src.contains("pub async fn fs_pick_root"),
             "fs_pick_root has to be async to await the picker's answer"
         );
+    }
+}
+
+/// Delete and rename as the commands run them — confinement included — on
+/// real folders.
+///
+/// The functions in `crate::fs` were tested on their own, with paths handed
+/// straight to them. That missed both ways confinement used to change what
+/// they were given: a link was resolved to the file it points at before
+/// `delete_path` ever saw it, and a new name was resolved to the existing
+/// entry's spelling before `rename_path` saw it.
+#[cfg(test)]
+mod entry_tests {
+    use super::{delete_in, rename_in};
+    use crate::fs::Workspace;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// A folder of its own, opened as the workspace. Sharing one fixed path
+    /// between tests is what made the shell-integration suite flaky under
+    /// cargo's parallel harness.
+    fn open_folder(tag: &str) -> (Workspace, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nexterm-entry-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let workspace = Workspace::new();
+        let root = workspace.set_root(&dir).unwrap();
+        (workspace, root)
+    }
+
+    /// A folder beside the workspace, holding one file the tests must never
+    /// be able to reach.
+    fn outside_folder(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-entry-outside-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("secret.txt"), "secret").unwrap();
+        // The spelling `Workspace` uses: no `\\?\` on Windows.
+        dunce::canonicalize(&dir).unwrap()
+    }
+
+    fn s(path: &Path) -> String {
+        path.to_string_lossy().to_string()
+    }
+
+    /// The names a folder lists, exactly as stored: an NFC and an NFD
+    /// spelling of one name are different strings here.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    fn is_link(path: &Path) -> bool {
+        path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    #[cfg(unix)]
+    fn link(target: impl AsRef<Path>, at: &Path) {
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    /// `AGENTS.md -> CLAUDE.md`, the usual agent-docs layout. Deleting
+    /// AGENTS.md used to delete CLAUDE.md and leave AGENTS.md dangling.
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_link_to_a_file_deletes_the_link_and_not_the_file() {
+        let (workspace, root) = open_folder("del-file-link");
+        fs::write(root.join("CLAUDE.md"), "the real notes").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+
+        delete_in(&workspace, &s(&root.join("AGENTS.md")), false).unwrap();
+
+        assert!(root.join("AGENTS.md").symlink_metadata().is_err(), "the link is still there");
+        assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "the real notes");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The Explorer shows a link to a folder as a folder and so asks for a
+    /// recursive delete. That used to be `remove_dir_all` on the real tree.
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_link_to_a_folder_never_touches_the_folder() {
+        let (workspace, root) = open_folder("del-dir-link");
+        let real = root.join("packages").join("shared");
+        fs::create_dir_all(real.join("sub")).unwrap();
+        fs::write(real.join("a.txt"), "a").unwrap();
+        fs::write(real.join("sub").join("b.txt"), "b").unwrap();
+
+        for (name, recursive) in [("shared", true), ("shared-too", false)] {
+            link(Path::new("packages").join("shared"), &root.join(name));
+            delete_in(&workspace, name, recursive)
+                .unwrap_or_else(|e| panic!("deleting the link {name} (recursive: {recursive}): {e}"));
+            assert!(root.join(name).symlink_metadata().is_err(), "the link {name} is still there");
+            assert_eq!(fs::read_to_string(real.join("a.txt")).unwrap(), "a", "after deleting {name}");
+            assert_eq!(fs::read_to_string(real.join("sub").join("b.txt")).unwrap(), "b", "after deleting {name}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `exists()` follows the link, so a link whose target is gone used to
+    /// be reported missing and could not be deleted at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_can_be_deleted() {
+        let (workspace, root) = open_folder("del-dangling");
+        link("no-such-file", &root.join("dangling"));
+
+        delete_in(&workspace, "dangling", false).unwrap();
+
+        assert!(root.join("dangling").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The link is inside the folder even when what it points at is not, so
+    /// deleting it is allowed — and must leave what it points at alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_leads_out_of_the_folder_can_be_deleted_and_what_it_leads_to_stays() {
+        let (workspace, root) = open_folder("del-out-link");
+        let outside = outside_folder("del-out-link");
+        link(&outside, &root.join("ext"));
+
+        delete_in(&workspace, "ext", true).unwrap();
+
+        assert!(root.join("ext").symlink_metadata().is_err());
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// Only the last component is taken as named. A link earlier in the path
+    /// is still resolved, so it is still no way out of the folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_link_that_leads_out_is_still_no_way_out() {
+        let (workspace, root) = open_folder("out-parent");
+        let outside = outside_folder("out-parent");
+        link(&outside, &root.join("ext"));
+        fs::write(root.join("mine.txt"), "mine").unwrap();
+
+        assert!(delete_in(&workspace, "ext/secret.txt", false).is_err(), "delete through it");
+        assert!(rename_in(&workspace, "ext/secret.txt", "stolen.txt").is_err(), "rename out through it");
+        assert!(rename_in(&workspace, "mine.txt", "ext/mine.txt").is_err(), "rename in through it");
+
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        assert!(outside.join("mine.txt").symlink_metadata().is_err());
+        assert!(root.join("stolen.txt").symlink_metadata().is_err());
+        assert_eq!(fs::read_to_string(root.join("mine.txt")).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn dot_dot_is_still_no_way_out() {
+        let (workspace, root) = open_folder("dotdot");
+        let outside = outside_folder("dotdot");
+        fs::create_dir_all(root.join("inner")).unwrap();
+        fs::write(root.join("mine.txt"), "mine").unwrap();
+        let escape = format!("../{}/secret.txt", outside.file_name().unwrap().to_string_lossy());
+
+        assert!(delete_in(&workspace, &escape, false).is_err());
+        assert!(delete_in(&workspace, &format!("inner/../{escape}"), false).is_err());
+        assert!(rename_in(&workspace, &escape, "stolen.txt").is_err());
+        assert!(rename_in(&workspace, "mine.txt", "../nexterm-entry-escaped.txt").is_err());
+
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        assert!(root.parent().unwrap().join("nexterm-entry-escaped.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn the_open_folder_itself_is_still_refused() {
+        let (workspace, root) = open_folder("root-itself");
+        fs::create_dir_all(root.join("inner")).unwrap();
+
+        for spelling in [s(&root), String::new(), ".".to_string(), "inner/..".to_string()] {
+            let err = delete_in(&workspace, &spelling, true).unwrap_err();
+            assert!(err.contains("workspace root"), "delete {spelling:?}: {err}");
+            let err = rename_in(&workspace, &spelling, "elsewhere").unwrap_err();
+            assert!(err.contains("workspace root"), "rename {spelling:?}: {err}");
+        }
+        assert!(root.join("inner").is_dir());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Renaming AGENTS.md used to rename CLAUDE.md, leaving AGENTS.md
+    /// dangling under its old name.
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_link_renames_the_link() {
+        let (workspace, root) = open_folder("ren-link");
+        fs::write(root.join("CLAUDE.md"), "notes").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+
+        rename_in(&workspace, &s(&root.join("AGENTS.md")), &s(&root.join("AGENT.md"))).unwrap();
+
+        assert!(is_link(&root.join("AGENT.md")), "the link itself moved");
+        assert_eq!(fs::read_link(root.join("AGENT.md")).unwrap(), Path::new("CLAUDE.md"));
+        assert!(root.join("AGENTS.md").symlink_metadata().is_err());
+        assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "notes");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Cut and paste is a rename into another folder; it used to move the
+    /// folder the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn moving_a_link_to_a_folder_moves_the_link() {
+        let (workspace, root) = open_folder("mv-dir-link");
+        let real = root.join("packages").join("shared");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("a.txt"), "a").unwrap();
+        fs::create_dir_all(root.join("dest")).unwrap();
+        link(&real, &root.join("shared"));
+
+        rename_in(&workspace, "shared", "dest/shared").unwrap();
+
+        assert!(is_link(&root.join("dest").join("shared")), "the link moved");
+        assert!(root.join("shared").symlink_metadata().is_err());
+        assert_eq!(fs::read_to_string(real.join("a.txt")).unwrap(), "a", "the folder stayed where it was");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link and the file it points at are two entries. Comparing them by
+    /// where they lead calls them one, and a rename of one onto the other's
+    /// name then replaces the file with the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_and_the_file_it_points_at_never_rename_onto_each_other() {
+        let (workspace, root) = open_folder("ren-onto-target");
+        fs::write(root.join("CLAUDE.md"), "notes").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+
+        let err = rename_in(&workspace, "AGENTS.md", "CLAUDE.md").unwrap_err();
+        assert!(err.contains("already exists"), "link onto its file: {err}");
+        let err = rename_in(&workspace, "CLAUDE.md", "AGENTS.md").unwrap_err();
+        assert!(err.contains("already exists"), "file onto its link: {err}");
+
+        assert!(root.join("CLAUDE.md").symlink_metadata().unwrap().is_file());
+        assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "notes");
+        assert!(is_link(&root.join("AGENTS.md")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The new name used to be resolved to the existing entry's spelling, so
+    /// the rename was `rename(x, x)`: it succeeded and changed nothing.
+    #[test]
+    fn a_case_only_rename_changes_the_name() {
+        let (workspace, root) = open_folder("ren-case");
+        fs::write(root.join("Readme.md"), "readme").unwrap();
+
+        rename_in(&workspace, &s(&root.join("Readme.md")), &s(&root.join("README.md"))).unwrap();
+
+        assert_eq!(names_in(&root), vec!["README.md"]);
+        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "readme");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// macOS folds the precomposed and decomposed spellings of 한 into one
+    /// name, the same way it folds case.
+    #[test]
+    fn a_normalization_only_rename_changes_the_name() {
+        let (workspace, root) = open_folder("ren-nfd");
+        let nfc = "\u{d55c}.txt";
+        let nfd = "\u{1112}\u{1161}\u{11ab}.txt";
+        fs::write(root.join(nfc), "korean").unwrap();
+
+        rename_in(&workspace, nfc, nfd).unwrap();
+
+        assert_eq!(names_in(&root), vec![nfd.to_string()]);
+        assert_eq!(fs::read_to_string(root.join(nfd)).unwrap(), "korean");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Keeping the new name as typed must not let it land on a DIFFERENT
+    /// entry the folder files under that name.
+    #[test]
+    fn a_rename_onto_another_entry_spelled_in_another_case_is_refused() {
+        let (workspace, root) = open_folder("ren-case-other");
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        let folds_case = root.join("B.TXT").symlink_metadata().is_ok();
+
+        let result = rename_in(&workspace, "a.txt", "B.TXT");
+
+        if folds_case {
+            let err = result.unwrap_err();
+            assert!(err.contains("already exists"), "{err}");
+            assert_eq!(names_in(&root), vec!["a.txt", "b.txt"]);
+            assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b");
+        } else {
+            // On a volume that tells case apart, B.TXT is simply a new name.
+            result.unwrap();
+            assert_eq!(names_in(&root), vec!["B.TXT", "b.txt"]);
+        }
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_case_only_rename_of_a_link_renames_the_link() {
+        let (workspace, root) = open_folder("ren-link-case");
+        fs::write(root.join("target.txt"), "target").unwrap();
+        link("target.txt", &root.join("Link"));
+
+        rename_in(&workspace, "Link", "LINK").unwrap();
+
+        assert_eq!(names_in(&root), vec!["LINK", "target.txt"]);
+        assert!(is_link(&root.join("LINK")));
+        assert_eq!(fs::read_to_string(root.join("target.txt")).unwrap(), "target");
+        let _ = fs::remove_dir_all(&root);
     }
 }

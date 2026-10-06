@@ -4,7 +4,7 @@ pub mod search;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -65,10 +65,25 @@ pub fn read_dir_hierarchy(root_str: &str, max_depth: Option<usize>) -> Result<Ve
     }
 
     let depth_limit = max_depth.unwrap_or(3);
-    read_dir_recursive(&root, 0, depth_limit)
+    let mut listing = vec![canonical_or(&root)];
+    read_dir_recursive(&root, 0, depth_limit, &mut listing)
 }
 
-fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Result<Vec<FileNode>, String> {
+/// `listing` holds where each folder from the top of this listing down to
+/// `dir` really is, in the filesystem's own spelling.
+///
+/// A link to a folder is reported as a folder (`is_dir`), because that is
+/// what it opens as and a linked `packages/shared` should show what is in it,
+/// and as a link (`is_symlink`), because deleting or renaming it acts on the
+/// link alone. It is walked like any folder unless it leads back to one of
+/// the folders in `listing`: that would repeat the listing inside itself at
+/// every level down to the depth limit, which the caller chooses.
+fn read_dir_recursive(
+    dir: &Path,
+    current_depth: usize,
+    max_depth: usize,
+    listing: &mut Vec<PathBuf>,
+) -> Result<Vec<FileNode>, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read directory '{}': {e}", dir.display()))?;
 
     let mut nodes = Vec::new();
@@ -77,6 +92,8 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
+        // `file_type` describes the entry itself; `is_dir` follows a link.
+        let is_symlink = entry.file_type().is_ok_and(|t| t.is_symlink());
         let is_dir = path.is_dir();
         if is_dir && SKIPPED_FOLDERS.contains(&name.as_str()) {
             continue;
@@ -86,13 +103,19 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
         let path_str = id.clone();
 
         if is_dir {
-            let children = if current_depth + 1 < max_depth {
-                match read_dir_recursive(&path, current_depth + 1, max_depth) {
-                    Ok(ch) => Some(ch),
-                    Err(_) => Some(Vec::new()),
-                }
+            let walk_to = if current_depth + 1 < max_depth {
+                folder_to_walk(&path, &entry.file_name(), is_symlink, listing)
             } else {
-                Some(Vec::new())
+                None
+            };
+            let children = match walk_to {
+                Some(real) => {
+                    listing.push(real);
+                    let children = read_dir_recursive(&path, current_depth + 1, max_depth, listing);
+                    listing.pop();
+                    children.unwrap_or_default()
+                }
+                None => Vec::new(),
             };
 
             nodes.push(FileNode {
@@ -101,8 +124,9 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
                 path: path_str,
                 is_dir: true,
                 size: Some(0),
-                children,
+                children: Some(children),
                 extension: None,
+                is_symlink,
             });
         } else {
             let size = entry.metadata().ok().map(|m| m.len());
@@ -116,6 +140,7 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
                 size,
                 children: None,
                 extension,
+                is_symlink,
             });
         }
     }
@@ -129,6 +154,18 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
     });
 
     Ok(nodes)
+}
+
+/// Where the folder entry `name` in the last folder of `listing` really is,
+/// or `None` when it is a link leading back to a folder `listing` is inside.
+fn folder_to_walk(path: &Path, name: &OsStr, is_symlink: bool, listing: &[PathBuf]) -> Option<PathBuf> {
+    if !is_symlink {
+        // Not a link, so it is where its name says: no need to ask the disk.
+        return listing.last().map(|parent| parent.join(name));
+    }
+    let target = path.canonical().ok()?;
+    let loops_back = listing.iter().any(|open| open.starts_with(&target));
+    (!loops_back).then_some(target)
 }
 
 pub fn read_file(path_str: &str) -> Result<String, String> {
@@ -167,13 +204,29 @@ pub fn create_dir(path_str: &str) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|e| format!("Failed to create directory '{path_str}': {e}"))
 }
 
+/// Delete a file, a folder or a link.
+///
+/// `path` must name the entry itself — `Workspace::confine_entry` — not where
+/// it leads. What kind of entry it is comes from `symlink_metadata`, which
+/// does not follow a link: `exists()` and `is_dir()` do, so a dangling link
+/// could not be deleted at all, and a link to a folder was taken for the
+/// folder. A link is removed as a link whatever `recursive` says; the
+/// Explorer shows a link to a folder as a folder and asks for a recursive
+/// delete of it.
 pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
     let path = resolve_path(path_str);
-    if !path.exists() {
-        return Err(format!("Path does not exist: {path_str}"));
+    let file_type = path
+        .symlink_metadata()
+        .map_err(|_| format!("Path does not exist: {path_str}"))?
+        .file_type();
+    if file_type.is_symlink() {
+        return remove_link(&path, file_type)
+            .map_err(|e| format!("Failed to delete link '{path_str}': {e}"));
     }
-    if path.is_dir() {
+    if file_type.is_dir() {
         if recursive {
+            // Does not follow links inside the folder either: std removes
+            // each one as a link.
             fs::remove_dir_all(&path).map_err(|e| format!("Failed to delete directory recursively '{path_str}': {e}"))
         } else {
             fs::remove_dir(&path).map_err(|e| format!("Failed to delete directory '{path_str}': {e}"))
@@ -183,17 +236,102 @@ pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
     }
 }
 
+/// Remove a link, never what it leads to.
+///
+/// On unix a link is one directory entry whatever it points at, and unlink
+/// removes it. Windows files a link to a folder — a directory symlink or a
+/// junction — as a directory: `DeleteFileW` refuses it, and `RemoveDirectoryW`
+/// removes the link and leaves the folder it leads to alone.
+fn remove_link(path: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+    if is_folder_link(file_type) {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+/// A link Windows files as a directory: a directory symlink or a junction.
+#[cfg(windows)]
+fn is_folder_link(file_type: fs::FileType) -> bool {
+    use std::os::windows::fs::FileTypeExt;
+    file_type.is_symlink_dir()
+}
+
+/// Unix has no such thing: a link to a folder is not a folder.
+#[cfg(not(windows))]
+fn is_folder_link(_: fs::FileType) -> bool {
+    false
+}
+
 /// True when both paths name the same on-disk entry.
 ///
 /// String comparison cannot answer this: on a case-insensitive volume (APFS
 /// and NTFS by default) `Foo.txt` and `foo.txt` are one file, and macOS also
 /// folds NFC and NFD spellings of the same name together. `canonicalize`
-/// returns the filesystem's own spelling, so comparing those answers it.
+/// returns the filesystem's own spelling, so comparing those answers it — for
+/// anything but a link, which `canonicalize` follows. Asked about a link and
+/// the file it points at, it said "the same entry", and a rename of one onto
+/// the other's name then replaced the file with the link. So a link is never
+/// the same entry as something that is not a link, and two links are compared
+/// as links.
 fn is_same_entry(a: &Path, b: &Path) -> bool {
-    match (a.canonical(), b.canonical()) {
-        (Ok(a), Ok(b)) => a == b,
+    let (Ok(meta_a), Ok(meta_b)) = (a.symlink_metadata(), b.symlink_metadata()) else {
+        return false;
+    };
+    match (meta_a.file_type().is_symlink(), meta_b.file_type().is_symlink()) {
+        (false, false) => matches!((a.canonical(), b.canonical()), (Ok(a), Ok(b)) if a == b),
+        (true, true) => is_same_link(a, b, &meta_a, &meta_b),
         _ => false,
     }
+}
+
+/// Whether two links are one link spelled two ways: both in the same folder,
+/// under two names that folder files as one entry.
+fn is_same_link(a: &Path, b: &Path, meta_a: &fs::Metadata, meta_b: &fs::Metadata) -> bool {
+    let (Some(name_a), Some(name_b)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let folder = match (a.parent().map(Path::canonical), b.parent().map(Path::canonical)) {
+        (Some(Ok(x)), Some(Ok(y))) if x == y => x,
+        _ => return false,
+    };
+    if name_a == name_b {
+        return true;
+    }
+    // When the folder lists both names they are two entries — hard links to
+    // one link, or a folder that tells case apart — whatever the test below
+    // would say about them.
+    let listed = fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    name == name_a || name == name_b
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    listed < 2 && names_one_entry(name_a, name_b, meta_a, meta_b)
+}
+
+/// The kernel has already looked both names up: two that led to one inode
+/// are one entry.
+#[cfg(unix)]
+fn names_one_entry(_: &OsStr, _: &OsStr, a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// std has no stable file id on Windows (`MetadataExt::file_index` is
+/// nightly-only). NTFS folds case and nothing else, so two names in one
+/// folder are one entry when they differ only in case. Only ASCII case is
+/// counted: NTFS certainly folds that, and taking a name it would NOT fold for
+/// the same entry is the mistake that overwrites a file, while missing one it
+/// would fold only refuses a rename.
+#[cfg(windows)]
+fn names_one_entry(a: &OsStr, b: &OsStr, _: &fs::Metadata, _: &fs::Metadata) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 /// Rename or move a path in one filesystem operation.
@@ -210,6 +348,11 @@ fn is_same_entry(a: &Path, b: &Path) -> bool {
 ///
 /// `fs::rename` has none of those failure modes: it is atomic, it never looks
 /// inside the entry, and the kernel resolves same-entry questions.
+///
+/// Both paths must name entries, not where they lead — `Workspace::
+/// confine_entry`. Resolving a link here moves the file it points at, and
+/// resolving the new name gives it the existing entry's spelling, so a
+/// case-only rename becomes `rename(x, x)` and changes nothing.
 pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
     let from = resolve_path(from_str);
     let to = resolve_path(to_str);
@@ -225,11 +368,7 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
     // A pure case or Unicode-normalization change resolves to the same entry;
     // that is a rename to allow, not a collision to refuse.
     if to.symlink_metadata().is_ok() && !same {
-        let name = to
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| to_str.to_string());
-        return Err(format!("A file or folder named '{name}' already exists"));
+        return Err(already_exists(&to));
     }
 
     // `rename` reports this as a bare EINVAL; say what actually happened.
@@ -252,14 +391,23 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to rename '{from_str}' to '{to_str}': {e}"))
 }
 
+fn already_exists(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    format!("A file or folder named '{name}' already exists")
+}
+
 
 // ---------------------------------------------------------------------------
 // Workspace root confinement
 //
-// Every fs_* command resolves its path through `Workspace::confine`, which
-// rejects anything that escapes the active root. The root itself can only be
-// changed by `fs_pick_root`, which goes through a native folder dialog, so the
-// webview cannot widen its own access by calling a command.
+// Every fs_* command resolves its path through `Workspace::confine` — or
+// `confine_entry`, when it acts on the entry itself — which rejects anything
+// that escapes the active root. The root itself can only be changed by
+// `fs_pick_root`, which goes through a native folder dialog, so the webview
+// cannot widen its own access by calling a command.
 // ---------------------------------------------------------------------------
 
 /// The file inside the app config directory that remembers the open folder,
@@ -355,6 +503,13 @@ impl Workspace {
         confine_to(&root, path_str)
     }
 
+    /// `confine`, for an operation on the entry the path names rather than on
+    /// what it leads to — see `confine_entry_to`.
+    pub fn confine_entry(&self, path_str: &str) -> Result<PathBuf, String> {
+        let root = self.root().ok_or_else(|| "No folder is open".to_string())?;
+        confine_entry_to(&root, path_str)
+    }
+
     /// Where a new terminal starts: the requested directory when it is one,
     /// else the open folder, else — no folder open — the home directory, which
     /// is where VS Code starts one too.
@@ -429,10 +584,56 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Resolve a webview-supplied path to what it leads to, refusing anything
+/// outside `root`. This is the confinement for reading and writing: a link
+/// inside the folder is followed to its file, as opening a file through a
+/// link should be, and one that leads out of the folder is refused.
 pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
+    match spelled_in(root, path_str) {
+        None => Ok(root.to_path_buf()),
+        Some(path) => resolve_inside(root, &path, path_str),
+    }
+}
+
+/// Resolve a webview-supplied path to the entry it names, refusing anything
+/// outside `root`: the confinement for acting on an entry itself — delete,
+/// rename, move, the destination of a copy.
+///
+/// Only the folder the entry sits in is resolved; its own name is kept as
+/// given. `confine_to` resolves the whole path, and an entry operation handed
+/// that acts on the wrong thing. A link resolves to what it points at, so
+/// deleting `AGENTS.md -> CLAUDE.md` deleted CLAUDE.md, and deleting a link to
+/// a folder deleted the folder's whole tree. A new name resolves to the
+/// spelling of the entry it folds onto, so renaming `Readme.md` to
+/// `README.md` asked for `rename(Readme.md, Readme.md)`.
+///
+/// The folder goes through exactly what `confine_to` does, so a `..` or a
+/// folder link that leads out of the root is refused the same way. The name
+/// is a single component after `..` has been worked out, so on its own it
+/// leads nowhere but that folder.
+pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
+    let Some(path) = spelled_in(root, path_str) else {
+        return Ok(root.to_path_buf());
+    };
+    // The open folder itself, spelled the way the backend hands it out. Every
+    // caller refuses to act on it, and says so, rather than calling it outside.
+    if path == root {
+        return Ok(path);
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(folder), Some(name)) => Ok(resolve_inside(root, folder, path_str)?.join(name)),
+        // `/` or `C:\`: no folder above it and no name of its own.
+        _ => resolve_inside(root, &path, path_str),
+    }
+}
+
+/// The path the webview named, made absolute against `root`, with `.` and
+/// `..` worked out by spelling alone. `None` for a blank path or `.`, which
+/// both mean the open folder.
+fn spelled_in(root: &Path, path_str: &str) -> Option<PathBuf> {
     let trimmed = path_str.trim();
     if trimmed.is_empty() || trimmed == "." {
-        return Ok(root.to_path_buf());
+        return None;
     }
 
     let expanded = match trimmed.strip_prefix("~/") {
@@ -444,11 +645,15 @@ pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
     } else {
         root.join(expanded)
     };
-    let normalized = lexical_normalize(&joined);
+    Some(lexical_normalize(&joined))
+}
 
+/// `path` with every link in it resolved, refused unless that lands inside
+/// `root`.
+fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, String> {
     // Canonicalize the deepest part that exists so a symlink cannot point out
     // of the root; segments that do not exist yet are re-appended afterwards.
-    let mut cursor = normalized.as_path();
+    let mut cursor = path;
     let mut pending: Vec<OsString> = Vec::new();
     let resolved = loop {
         match cursor.canonical() {
@@ -1102,6 +1307,59 @@ mod explorer_contract_tests {
             }
         }
         walk(root.to_string_lossy().as_ref(), &nodes, sep);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// What the Explorer is told about links: a link to a folder still opens
+    /// as a folder and shows what is in it, under the link's own path, and
+    /// every link says it is one, so a delete of it can be worded for a link.
+    #[cfg(unix)]
+    #[test]
+    fn links_are_reported_as_links_and_a_folder_link_still_opens_as_a_folder() {
+        let root = build_tree("links");
+        std::os::unix::fs::symlink("src", root.join("shared")).unwrap();
+        std::os::unix::fs::symlink("package.json", root.join("alias.json")).unwrap();
+        std::os::unix::fs::symlink("gone", root.join("dangling")).unwrap();
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+
+        let shared = child(&nodes, "shared");
+        assert!(shared.is_dir && shared.is_symlink);
+        let inside = shared.children.as_ref().expect("a folder link lists its folder");
+        let index = child(inside, "index.js");
+        assert_eq!(Path::new(&index.path), root.join("shared").join("index.js"), "under the link's own path");
+        assert!(!index.is_symlink, "what is inside a linked folder is not itself a link");
+
+        let alias = child(&nodes, "alias.json");
+        assert!(!alias.is_dir && alias.is_symlink);
+        let dangling = child(&nodes, "dangling");
+        assert!(!dangling.is_dir && dangling.is_symlink, "a link to nothing is still listed, as a link");
+
+        let src = child(&nodes, "src");
+        assert!(src.is_dir && !src.is_symlink, "the real folder is not a link");
+        assert!(!child(&nodes, "package.json").is_symlink);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link back up the tree used to be followed for as many levels as the
+    /// caller asked for, repeating the whole listing under it at every level.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_back_up_the_tree_is_listed_but_not_followed() {
+        let root = build_tree("loop");
+        std::os::unix::fs::symlink(".", root.join("here")).unwrap();
+        std::os::unix::fs::symlink("..", root.join("src").join("up")).unwrap();
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+
+        let here = child(&nodes, "here");
+        assert!(here.is_dir, "a link to a folder still shows as a folder");
+        assert_eq!(here.children.as_ref().map(Vec::len), Some(0), "but the loop is not walked");
+
+        let src = child(&nodes, "src");
+        let up = child(src.children.as_ref().unwrap(), "up");
+        assert!(up.is_dir);
+        assert_eq!(up.children.as_ref().map(Vec::len), Some(0), "nor one two levels down");
 
         let _ = fs::remove_dir_all(&root);
     }
