@@ -48,7 +48,8 @@ import {
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
-import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
+import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
+import { trackCommandMarks } from '../../lib/stickyCommand.js';
 import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
@@ -598,44 +599,17 @@ useSystemStore.subscribe((state, prev) => {
 });
 
 /**
- * The whole logical line a rendered row belongs to.
- *
- * xterm hands a link provider ONE row at a time, but a terminal wraps: in an
- * 80-column pane `at Object.<anonymous> (/very/long/path/app.test.js:42:13)`
- * is split across two rows, and a provider that only ever sees one row finds
- * no link in either. So walk back to the row that started the wrap, join the
- * group, and remember where it began — offsets map back to (x, y) from there.
- */
-function logicalLineAt(term, row) {
-  const buffer = term.buffer.active;
-  let start = row;
-  while (start > 1 && buffer.getLine(start - 1)?.isWrapped) start -= 1;
-
-  let text = '';
-  for (let i = start; i <= buffer.length; i += 1) {
-    const line = buffer.getLine(i - 1);
-    if (!line) break;
-    if (i > start && !line.isWrapped) break;
-    // No trimming: every wrapped row is exactly `cols` wide, and that is what
-    // makes `positionOf` arithmetic rather than a search.
-    text += line.translateToString(false);
-  }
-  return { text, start };
-}
-
-/** An offset into the joined text, as xterm's 1-based (x, y). */
-function positionOf(offset, startRow, cols) {
-  return { x: (offset % cols) + 1, y: startRow + Math.floor(offset / cols) };
-}
-
-/**
  * Make paths and URLs in the output clickable.
  *
  * A stack trace names a file and a line, and this app has that file's editor
  * in the same window — having to retype the path to reach it was most of the
- * reason that pairing did not pay off. What counts as a link is decided by
- * `src/lib/terminalLinks.js`, which is pure and tested; this maps the matches
- * onto the screen and says what a click does.
+ * reason that pairing did not pay off. What counts as a link, and where on
+ * screen it sits, is decided by `src/lib/terminalLinks.js`, which is pure and
+ * tested; this says what a click does.
+ *
+ * xterm asks again every time the pointer moves onto another row, so what it
+ * asks has to stay cheap however long the line under the pointer is — see
+ * `linksAtRow`, which reads a bounded stretch of a wrapped line, not all of it.
  *
  * A relative path is resolved against the TAB'S live cwd, read at click time
  * rather than captured here — the shell may have `cd`'d twenty times since
@@ -644,20 +618,14 @@ function positionOf(offset, startRow, cols) {
 function registerLinks(term, tabId) {
   return term.registerLinkProvider({
     provideLinks(row, callback) {
-      const { text, start } = logicalLineAt(term, row);
-      const matches = findLinks(text);
+      const matches = linksAtRow(term.buffer.active, row);
       if (matches.length === 0) {
         callback(undefined);
         return;
       }
-      const cols = term.cols || 80;
       callback(
         matches.map((match) => ({
-          range: {
-            start: positionOf(match.start, start, cols),
-            // xterm's ranges are inclusive at both ends, hence the -1.
-            end: positionOf(match.start + match.length - 1, start, cols),
-          },
+          range: match.range,
           text: match.text,
           decorations: { pointerCursor: true, underline: true },
           activate: (event) => {
@@ -668,6 +636,9 @@ function registerLinks(term, tabId) {
             }
             const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
             const editor = useEditorStore.getState();
+            // Null when there is nothing to resolve against, or when the path
+            // is on another machine: opening one signs in to that machine,
+            // and the backend would do so before it refused the read.
             const resolved = resolveLinkPath(match.path, tab?.cwd || editor.rootPath);
             if (!resolved) return;
             // A path a tool printed may not exist, may sit outside the
@@ -892,6 +863,10 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     drawPending: false,
     refitPending: false,
     disposed: false,
+    // Where each command's output began, for the sticky header: TerminalView
+    // marks each command as it starts and asks what to show. Disposed with
+    // the terminal. See stickyCommand.js.
+    commandMarks: trackCommandMarks(term),
   };
   const drawn = entry;
   entry.renderDisposable = term.onRender(() => {
@@ -1006,6 +981,7 @@ export function disposeTerminal(tabId) {
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.searchAddon?.dispose();
+  entry.commandMarks.dispose();
   entry.term.dispose();
   instances.delete(tabId);
   // The context just freed may be the one a terminal on screen is waiting for.
