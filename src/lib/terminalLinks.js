@@ -24,6 +24,7 @@
  * the caller's problem, and deliberately so — the link provider runs on every
  * rendered line and must not touch the disk.
  */
+import { withoutVerbatimPrefix } from './terminalCompat.js';
 
 /**
  * path:line[:column]
@@ -38,9 +39,10 @@
  * of a long run of such characters, tried again one character in, and again,
  * each try reading to the end of the run before failing — 1.5 s for 32,000
  * characters of `a.a.a…` and 3 s for 131,000 of base64, measured, on the UI
- * thread, for a hover. With it a run is read once, from its start. A drive
- * letter may still follow a separator, for the verbatim `\\?\C:\…` Windows
- * tools print.
+ * thread, for a hover. With it a run is read once, from its start. It also
+ * keeps the second slash of `//host/share/x.py:1` from being a start, which
+ * read a network path as a local `/host/share/x.py`. A drive letter may still
+ * follow a separator, for the verbatim `\\?\C:\…` Windows tools print.
  */
 const PATH_WITH_POSITION =
   /(?:(?<![\w.@~+-])[A-Za-z]:|(?<![\w.@~+\-\\/]))[\\/]?(?:[\w.@~+-]+[\\/])*[\w.@~+-]+\.[A-Za-z]\w{0,9}:\d+(?::\d+)?/g;
@@ -80,6 +82,24 @@ function trimUrlTail(url) {
 }
 
 /**
+ * Does `path` name another machine?
+ *
+ * Two separators first, of either kind — `\\host\share\x.py`, `//host/share/x.py`
+ * — is a network path, and Windows opens one by connecting to the host and
+ * signing in to it with the user's credentials, before anything has the
+ * chance to refuse the read: the backend's `canonicalize` does exactly that on
+ * its way to saying no. What a terminal prints is not trusted — any program,
+ * any file `cat`ed, any agent can print a path — so a link to another machine
+ * is never offered and never resolved. The device namespaces go with it
+ * (`\\.\`, and `\??\`, which reaches the same shares by another name); only
+ * the verbatim spelling of a local drive, `\\?\C:\…`, is a local path.
+ */
+export function isNetworkPath(path) {
+  if (typeof path !== 'string') return false;
+  return /^(?:[\\/]{2}|[\\/]\?\?[\\/])/.test(withoutVerbatimPrefix(path));
+}
+
+/**
  * Is this match sitting inside a URL that was already matched?
  *
  * `https://host:8080/app.js:3` contains something shaped exactly like a
@@ -111,19 +131,26 @@ export function findLinks(text) {
   if (typeof text !== 'string' || !text) return [];
 
   const found = [];
+  // Everything matched, offered or not: a path refused for naming another
+  // machine must not have a piece of it claimed as some other link instead.
+  const taken = [];
 
   // URLs first, so a path-shaped tail inside one cannot be claimed separately.
   URL_PATTERN.lastIndex = 0;
   for (const match of text.matchAll(URL_PATTERN)) {
     const href = trimUrlTail(match[0]);
     if (!href) continue;
-    found.push({ start: match.index, length: href.length, kind: 'url', text: href, href });
+    const link = { start: match.index, length: href.length, kind: 'url', text: href, href };
+    found.push(link);
+    taken.push(link);
   }
 
   PYTHON_TRACEBACK.lastIndex = 0;
-  let overlaps = overlapsAny(found);
+  let overlaps = overlapsAny(taken);
   for (const match of text.matchAll(PYTHON_TRACEBACK)) {
     if (overlaps(match.index, match[0].length)) continue;
+    taken.push({ start: match.index, length: match[0].length });
+    if (isNetworkPath(match[1])) continue;
     found.push({
       start: match.index,
       length: match[0].length,
@@ -136,7 +163,7 @@ export function findLinks(text) {
   }
 
   PATH_WITH_POSITION.lastIndex = 0;
-  overlaps = overlapsAny(found);
+  overlaps = overlapsAny(taken);
   for (const match of text.matchAll(PATH_WITH_POSITION)) {
     if (overlaps(match.index, match[0].length)) continue;
     const parts = match[0].split(':');
@@ -147,7 +174,7 @@ export function findLinks(text) {
       : null;
     const line = Number(parts.pop());
     const path = parts.join(':');
-    if (!path || !Number.isFinite(line)) continue;
+    if (!path || !Number.isFinite(line) || isNetworkPath(path)) continue;
     found.push({
       start: match.index,
       length: match[0].length,
@@ -170,23 +197,29 @@ export function findLinks(text) {
  * `cargo` run inside `src-tauri/` prints `src/main.rs`, and resolving that
  * against the workspace root opens the wrong file, or nothing at all.
  *
- * Returns null when there is nothing to resolve against, rather than guessing.
+ * Returns null when there is nothing to resolve against, rather than guessing,
+ * and when the answer is on another machine (`isNetworkPath`) — whether the
+ * link named one or the cwd is one. The cwd is no safer than the link: the
+ * shell reports it with OSC 7, and anything printed can print an OSC 7.
  */
 export function resolveLinkPath(path, cwd) {
   if (typeof path !== 'string' || !path) return null;
+  const target = withoutVerbatimPrefix(path);
+  const dir = typeof cwd === 'string' ? withoutVerbatimPrefix(cwd) : null;
 
-  const windows = /^[A-Za-z]:[\\/]/.test(path) || (typeof cwd === 'string' && /^[A-Za-z]:[\\/]/.test(cwd));
+  const windows = /^[A-Za-z]:[\\/]/.test(target) || (typeof dir === 'string' && /^[A-Za-z]:[\\/]/.test(dir));
   const sep = windows ? '\\' : '/';
 
   // Already absolute: a drive letter, or a leading separator.
-  if (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('\\')) {
-    return path;
+  if (/^[A-Za-z]:[\\/]/.test(target) || target.startsWith('/') || target.startsWith('\\')) {
+    return isNetworkPath(target) ? null : target;
   }
-  if (typeof cwd !== 'string' || !cwd) return null;
+  if (typeof dir !== 'string' || !dir) return null;
 
-  const base = cwd.replace(/[\\/]+$/, '');
-  const cleaned = path.replace(/^\.[\\/]/, '');
-  return `${base}${sep}${cleaned}`;
+  const base = dir.replace(/[\\/]+$/, '');
+  const cleaned = target.replace(/^\.[\\/]/, '');
+  const resolved = `${base}${sep}${cleaned}`;
+  return isNetworkPath(resolved) ? null : resolved;
 }
 
 /**
@@ -268,4 +301,4 @@ export function linksAtRow(buffer, row) {
     }));
 }
 
-export default { findLinks, resolveLinkPath, linksAtRow };
+export default { findLinks, resolveLinkPath, isNetworkPath, linksAtRow };

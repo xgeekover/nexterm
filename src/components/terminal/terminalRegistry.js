@@ -635,6 +635,9 @@ function registerLinks(term, tabId) {
             }
             const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
             const editor = useEditorStore.getState();
+            // Null when there is nothing to resolve against, or when the path
+            // is on another machine: opening one signs in to that machine,
+            // and the backend would do so before it refused the read.
             const resolved = resolveLinkPath(match.path, tab?.cwd || editor.rootPath);
             if (!resolved) return;
             // A path a tool printed may not exist, may sit outside the

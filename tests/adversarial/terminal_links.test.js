@@ -17,6 +17,7 @@ import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import {
   MAX_LINK_LENGTH,
   findLinks,
+  isNetworkPath,
   linksAtRow,
   resolveLinkPath,
 } from '../../src/lib/terminalLinks.js';
@@ -341,5 +342,67 @@ describe('Terminal links: a long line costs what a short one does', () => {
     const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
     assert.match(registry, /linksAtRow\(term\.buffer\.active, row\)/);
     assert.doesNotMatch(registry, /logicalLineAt|findLinks\(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Opening `\\host\share\x.py` on Windows connects to `host` and signs in with
+// the user's credentials — and the backend's canonicalize does that on its way
+// to refusing a path outside the workspace. Terminal output is not trusted.
+
+describe('Terminal links: never a path on another machine', () => {
+  test('LK-24: a network path is not offered, however it is spelled', () => {
+    for (const path of [
+      '\\\\host.example\\share\\x.py',
+      '//host.example/share/x.py',
+      '/\\host\\share\\x.py',
+      '\\/host/share/x.py',
+      '\\\\?\\UNC\\host\\share\\x.py',
+      '\\??\\UNC\\host\\share\\x.py',
+      '\\\\.\\pipe\\x.py',
+    ]) {
+      assert.deepEqual(findLinks(`  File "${path}", line 1, in <module>`), [], `a traceback naming ${path}`);
+      for (const link of findLinks(`${path}:1:2`)) {
+        assert.ok(!isNetworkPath(link.path), `${path}:1:2 offered ${link.path}`);
+      }
+    }
+    // Nor its tail, read as a local path: `//host/share/x.py:1` used to give
+    // `/host/share/x.py`.
+    assert.deepEqual(findLinks('//host/share/x.py:1'), []);
+    assert.deepEqual(findLinks('\\\\host\\share\\x.py:1'), []);
+  });
+
+  test('LK-25: local paths are offered as before, the verbatim spelling of a drive included', () => {
+    assert.equal(only('  File "C:\\work\\app.py", line 3').path, 'C:\\work\\app.py');
+    assert.equal(only('  File "/home/me/app.py", line 3').path, '/home/me/app.py');
+    assert.equal(only('  File "\\\\?\\C:\\work\\app.py", line 3').path, '\\\\?\\C:\\work\\app.py');
+    // Rust's canonicalize prints this spelling; the drive letter starts the path.
+    assert.equal(only('error at \\\\?\\C:\\work\\src\\main.rs:10:5').path, 'C:\\work\\src\\main.rs');
+  });
+
+  test('LK-26: resolving never answers with a network path — from the link, or from the cwd', () => {
+    assert.equal(resolveLinkPath('\\\\host\\share\\x.py', '/work'), null);
+    assert.equal(resolveLinkPath('//host/share/x.py', '/work'), null);
+    assert.equal(resolveLinkPath('/\\host\\share\\x.py', 'C:\\work'), null);
+    assert.equal(resolveLinkPath('\\\\?\\UNC\\host\\share\\x.py', 'C:\\work'), null);
+    assert.equal(resolveLinkPath('\\??\\UNC\\host\\share\\x.py', 'C:\\work'), null);
+    // The cwd is reported by the shell with OSC 7, and anything printed can
+    // print an OSC 7.
+    assert.equal(resolveLinkPath('src\\x.py', '\\\\host\\share\\proj'), null);
+    assert.equal(resolveLinkPath('src/x.py', '//host/share/proj'), null);
+    assert.equal(resolveLinkPath('./x.py', '\\\\?\\UNC\\host\\share'), null);
+
+    assert.equal(resolveLinkPath('\\\\?\\C:\\work\\a.py', null), 'C:\\work\\a.py', 'a verbatim local path is local');
+    assert.equal(resolveLinkPath('src\\a.py', '\\\\?\\C:\\work'), 'C:\\work\\src\\a.py');
+    assert.equal(resolveLinkPath('\\work\\a.py', 'C:\\x'), '\\work\\a.py', 'rooted on the current drive is local');
+  });
+
+  test('LK-27: what counts as another machine', () => {
+    for (const path of ['\\\\h\\s', '//h/s', '\\/h/s', '/\\h\\s', '\\\\?\\UNC\\h\\s', '\\\\.\\pipe\\p', '\\??\\C:\\x', '/??/x']) {
+      assert.equal(isNetworkPath(path), true, path);
+    }
+    for (const path of ['C:\\x', 'C:/x', '/x', '\\x', 'x\\\\y', '\\\\?\\C:\\x', 'src/a.py', '', null, undefined]) {
+      assert.equal(isNetworkPath(path), false, String(path));
+    }
   });
 });
