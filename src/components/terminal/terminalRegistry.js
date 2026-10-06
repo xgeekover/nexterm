@@ -49,6 +49,7 @@ import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
+import { trackCommandMarks } from '../../lib/stickyCommand.js';
 import { openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
@@ -862,6 +863,10 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     drawPending: false,
     refitPending: false,
     disposed: false,
+    // Where each command's output began, for the sticky header: TerminalView
+    // marks each command as it starts and asks what to show. Disposed with
+    // the terminal. See stickyCommand.js.
+    commandMarks: trackCommandMarks(term),
   };
   const drawn = entry;
   entry.renderDisposable = term.onRender(() => {
@@ -976,6 +981,7 @@ export function disposeTerminal(tabId) {
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.searchAddon?.dispose();
+  entry.commandMarks.dispose();
   entry.term.dispose();
   instances.delete(tabId);
   // The context just freed may be the one a terminal on screen is waiting for.

@@ -20,7 +20,6 @@ import { handleClipboardKey } from '../../lib/terminalClipboard.js';
 import { isFailure } from '../../lib/tabActivity.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
-import { addCommandMark, stickyCommandFor } from '../../lib/stickyCommand.js';
 
 // Re-exported so `terminalStore.js` can dispose a tab's terminal on close
 // without ever eagerly importing this component module (see the guarded
@@ -110,16 +109,12 @@ export function TerminalView({ tabId, active = false }) {
   const lastSubmittedRef = useRef('');
 
   /**
-   * Where each command's output began, so a scrolled-back viewport can say
-   * which command produced what is on screen.
-   *
-   * `{ line, command }` with `line` an ABSOLUTE buffer row (`baseY + cursorY`
-   * at the moment the shell reported the command starting), oldest first.
-   * Warp's sticky header, built on the OSC 133 "C" marker the backend already
-   * emits — scrolling up through a long build and losing track of which
-   * command you are inside is the thing it fixes.
+   * Which command produced what a scrolled-back viewport shows: Warp's sticky
+   * header, built on the OSC 133 "C" marker the backend already emits —
+   * scrolling up through a long build and losing track of which command you
+   * are inside is the thing it fixes. Where each command's output began is
+   * kept with the terminal (`entry.commandMarks`); this marks and asks.
    */
-  const commandMarksRef = useRef([]);
   const [stickyCommand, setStickyCommand] = useState('');
   const [, forceRender] = useReducer((c) => c + 1, 0);
   const setSuggestState = (next) => {
@@ -473,22 +468,13 @@ export function TerminalView({ tabId, active = false }) {
     const stickyEnabled = () => useSettingsStore.getState().terminalStickyHeader ?? true;
 
     const updateSticky = () => {
-      if (!stickyEnabled()) {
-        setStickyCommand('');
-        return;
-      }
-      const buffer = entry.term.buffer.active;
-      setStickyCommand(
-        stickyCommandFor({
-          marks: commandMarksRef.current,
-          viewportY: buffer.viewportY,
-          baseY: buffer.baseY,
-          alternate: buffer.type === 'alternate',
-        })
-      );
+      setStickyCommand(stickyEnabled() ? entry.commandMarks.current() : '');
     };
 
     const scrollDisposable = entry.term.onScroll(updateSticky);
+    // The pane may have been showing another terminal, scrolled back under a
+    // header of its own, and that header is not this terminal's.
+    updateSticky();
 
     // OSC 133 "C": output is about to begin, so this row is where this
     // command's output starts. The text comes from what was submitted, which
@@ -497,14 +483,7 @@ export function TerminalView({ tabId, active = false }) {
     let startedCancelled = false;
     listen('pty-command-started', (payload) => {
       if (payload?.session_id !== sessionId) return;
-      const buffer = entry.term.buffer.active;
-      commandMarksRef.current = addCommandMark(commandMarksRef.current, {
-        line: buffer.baseY + buffer.cursorY,
-        command: lastSubmittedRef.current,
-        // What has scrolled out of the buffer entirely: keeping those would
-        // grow this for the life of the session.
-        oldestLine: buffer.baseY - (entry.term.options.scrollback || 0),
-      });
+      entry.commandMarks.mark(lastSubmittedRef.current);
     }).then((off) => {
       if (startedCancelled) off();
       else startedUnlisten = off;
