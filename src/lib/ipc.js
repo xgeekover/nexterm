@@ -588,6 +588,36 @@ class BrowserMockBridge {
         return null;
       }
 
+      // fs_copy_path — a file, or a folder and everything in it, copied as it
+      // is: the folders the Explorer hides (.git, node_modules, dist…) come
+      // along, and the backend copies bytes, so a binary file is no
+      // different. A destination that exists is refused before anything is
+      // written, never merged into or overwritten.
+      case 'fs_copy_path': {
+        const { from, to } = args;
+        const within = (key, dir) => key === dir || key.startsWith(`${dir}/`);
+        const known = () => [...this.files.keys(), ...this.directories];
+        const isDir = !this.files.has(from) && known().some((key) => within(key, from));
+        if (!this.files.has(from) && !isDir) {
+          throw new Error(`Path does not exist: ${from}`);
+        }
+        if (known().some((key) => within(key, to))) {
+          throw new Error(`A file or folder named '${to.split('/').pop()}' already exists`);
+        }
+        if (isDir && to.startsWith(`${from}/`)) {
+          throw new Error(`Cannot copy '${from}' into itself`);
+        }
+        if (isDir) this.directories.add(to);
+        for (const dir of [...this.directories]) {
+          if (within(dir, from)) this.directories.add(to + dir.slice(from.length));
+        }
+        for (const [key, value] of [...this.files]) {
+          if (within(key, from)) this.files.set(to + key.slice(from.length), value);
+        }
+        await this.emit('fs-change', { path: to, kind: 'create' });
+        return null;
+      }
+
       // 11. fs_delete_path
       case 'fs_delete_path': {
         const { path, recursive = false } = args;

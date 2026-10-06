@@ -3,7 +3,6 @@ import { invoke, listen } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
 import {
   basename,
-  depthOf,
   dirname,
   isInside,
   join,
@@ -163,60 +162,39 @@ function remapAfterMove(state, fromPath, toPath) {
   return { expandedFolders: nextExpanded, tabs: nextTabs, selectedPath: nextSelected };
 }
 
-// There is no native rename/move/copy IPC command, so a directory is
-// duplicated by re-creating its structure and re-writing every file
-// underneath it one at a time via the existing fs_read_dir/fs_read_file/
-// fs_write_file/fs_create_dir surface.
-/** Depth-first flatten of the nested FileNode[] that `fs_read_dir` returns. */
-function flattenNodes(nodes, acc = []) {
-  for (const node of nodes || []) {
-    acc.push(node);
-    if (node.children && node.children.length) flattenNodes(node.children, acc);
-  }
-  return acc;
-}
-
-/** Names of everything that already lives directly inside `dirPath`. */
-function siblingNamesIn(nodes, dirPath) {
-  return new Set(
-    flattenNodes(nodes)
-      .filter((n) => samePath(parentDirOf(n.path), dirPath))
-      .map((n) => n.name)
-  );
-}
-
-async function copyDirRecursive(srcPath, destPath) {
-  await invoke('fs_create_dir', { path: destPath });
-  const tree = (await invoke('fs_read_dir', { path: srcPath, max_depth: 1000 })) || [];
-  // `fs_read_dir` nests its results; walking only the top level would copy
-  // one layer and — where the caller then deletes the source — lose the rest.
-  const nodes = flattenNodes(tree);
-
-  const dirs = [];
-  const files = [];
-  for (const node of nodes) {
-    if (!isInside(srcPath, node.path)) continue;
-    const newPath = reparent(node.path, srcPath, destPath);
-    if (node.is_dir) dirs.push(newPath);
-    else files.push({ from: node.path, to: newPath });
-  }
-
-  // Parents before children so a nested fs_create_dir never races ahead of
-  // the directory it is supposed to live inside.
-  dirs.sort((a, b) => depthOf(a) - depthOf(b));
-  for (const dirPath of dirs) {
-    await invoke('fs_create_dir', { path: dirPath });
-  }
-  for (const file of files) {
-    const content = await invoke('fs_read_file', { path: file.from });
-    await invoke('fs_write_file', { path: file.to, content });
-  }
-}
-
 function splitBaseExt(name, isDir) {
   const dotIndex = name.lastIndexOf('.');
   if (isDir || dotIndex <= 0) return [name, ''];
   return [name.slice(0, dotIndex), name.slice(dotIndex)];
+}
+
+/**
+ * The name a paste of `name` into `dirPath` should take: `name` itself when
+ * nothing there has it (and `mustDiffer` is false), else "<base> copy<ext>",
+ * then "<base> copy 2<ext>" and so on, as VS Code does.
+ *
+ * The folder is listed afresh. The tree in memory is only a few levels deep
+ * and as old as its last refresh, and a name missing from it is not a free
+ * name: a paste into a folder the tree had not read kept the name and wrote
+ * straight over the file of that name.
+ *
+ * Names are compared without case, because NTFS and APFS treat `Note.txt` and
+ * `note.txt` as one file. The listing leaves out the folders the Explorer
+ * hides (.git, node_modules, dist…), so a pasted folder of one of those names
+ * can still meet one; `fs_copy_path` and `fs_rename_path` both refuse an
+ * existing destination, so that ends in an error, never in a merge.
+ */
+async function freeNameIn(dirPath, name, isDir, mustDiffer) {
+  const listing = (await invoke('fs_read_dir', { path: dirPath, max_depth: 1 })) || [];
+  const taken = new Set(listing.map((node) => node.name.toLowerCase()));
+  if (!mustDiffer && !taken.has(name.toLowerCase())) return name;
+
+  const [base, ext] = splitBaseExt(name, isDir);
+  let candidate = `${base} copy${ext}`;
+  for (let attempt = 2; taken.has(candidate.toLowerCase()); attempt += 1) {
+    candidate = `${base} copy ${attempt}${ext}`;
+  }
+  return candidate;
 }
 
 export const useEditorStore = create((set, get) => ({
@@ -1035,9 +1013,10 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
-  // Copy+Paste duplicates a file/folder; Cut+Paste moves it. Both are built
-  // from fs_read_file/fs_write_file/fs_delete_path (and fs_create_dir for
-  // folders) since there is no dedicated copy or move IPC command.
+  // Copy+Paste duplicates a file/folder; Cut+Paste moves it. Neither ever
+  // writes over something already in the destination: the name comes from a
+  // fresh listing of it (see `freeNameIn`), and both backend commands refuse
+  // an existing destination.
   pasteClipboard: async (targetFolderPathRaw) => {
     const clip = get().clipboard;
     if (!clip) return;
@@ -1056,34 +1035,22 @@ export const useEditorStore = create((set, get) => ({
       return;
     }
 
-    const siblingNames = siblingNamesIn(get().fileTree, targetBase);
-
-    let destName = name;
-    if (siblingNames.has(destName) || (mode === 'copy' && sameLocation)) {
-      const [base, ext] = splitBaseExt(name, isDir);
-      let attempt = 1;
-      let candidate = `${base} copy${ext}`;
-      while (siblingNames.has(candidate)) {
-        attempt += 1;
-        candidate = `${base} copy ${attempt}${ext}`;
-      }
-      destName = candidate;
-    }
-
-    const destPath = join(targetBase, destName);
-
     try {
+      const destName = await freeNameIn(targetBase, name, isDir, mode === 'copy' && sameLocation);
+      const destPath = join(targetBase, destName);
+
       if (mode === 'cut') {
         // A move is a rename: atomic, and it cannot drop part of a subtree
         // the way copy-then-delete does.
         await invoke('fs_rename_path', { from: srcPath, to: destPath });
         set((state) => remapAfterMove(state, srcPath, destPath));
         set({ clipboard: null });
-      } else if (isDir) {
-        await copyDirRecursive(srcPath, destPath);
       } else {
-        const content = await invoke('fs_read_file', { path: srcPath });
-        await invoke('fs_write_file', { path: destPath, content });
+        // One backend command, for a file or a whole folder, copying bytes.
+        // Copying through fs_read_dir/fs_read_file lost what the Explorer
+        // hides (.git, node_modules, dist…) and stopped at the first file
+        // that is not UTF-8 text, with half the folder already written.
+        await invoke('fs_copy_path', { from: srcPath, to: destPath });
       }
 
       await get().refreshExplorer();
