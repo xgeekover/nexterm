@@ -183,37 +183,116 @@ fi
 ///     two tests generating the same rc file at once, under cargo's parallel
 ///     harness, read a file another was halfway through writing.
 ///
-/// Both go away with a directory that belongs to this user AND this process.
+/// Both go away with a directory that belongs to this user AND this process —
+/// on unix, one this process made itself (see `process_dir`).
 fn integration_dir(shell: &str) -> Result<PathBuf, String> {
-    // Unique per user, per process, and per call: the uid keeps another local
-    // account out, the pid keeps two running copies apart, and the counter
-    // keeps two threads of one process (cargo's test harness) from writing the
-    // same file at once.
+    // Unique per call: the counter keeps two threads of one process (cargo's
+    // test harness) from writing the same file at once.
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let mut dir = std::env::temp_dir();
-    #[cfg(unix)]
-    {
-        // SAFETY: `getuid` only reads this process's own uid and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        dir.push(format!("nexterm-{uid}-{}", std::process::id()));
-    }
-    #[cfg(not(unix))]
-    {
-        dir.push(format!("nexterm-{}", std::process::id()));
-    }
-    dir.push(format!("{shell}-{}", SEQ.fetch_add(1, Ordering::Relaxed)));
+    let name = format!("{shell}-{}", SEQ.fetch_add(1, Ordering::Relaxed));
 
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("cannot create the shell-integration directory {}: {e}", dir.display()))?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Owner-only, so nothing else can drop a file in even when the parent
-        // is a shared /tmp. Best effort — a failure here must not stop a
-        // terminal from opening.
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-    }
+    let dir = {
+        let dir = process_dir()?.join(name);
+        create_private_dir(&dir)
+            .map_err(|e| format!("cannot create the shell-integration directory {}: {e}", dir.display()))?;
+        dir
+    };
+    #[cfg(not(unix))]
+    let dir = {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("nexterm-{}", std::process::id()));
+        dir.push(name);
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("cannot create the shell-integration directory {}: {e}", dir.display()))?;
+        dir
+    };
     Ok(dir)
+}
+
+/// This process's own directory in the temp directory, made the first time
+/// it is needed.
+///
+/// It used to be `nexterm-<uid>-<pid>`, made with `create_dir_all`, and on
+/// Linux that was not enough. The uid is public and pids are handed out in
+/// order, so another user of a shared /tmp could make that directory first —
+/// or a symlink to one of theirs — and `create_dir_all` took whatever was
+/// there; the chmod after it failed quietly on a directory that was not
+/// ours. Their files were then sourced as this user. So the name now ends in
+/// a random part nobody can make first, the directory is made by a mkdir that
+/// refuses to take over anything already there, and what was made is checked
+/// before anything goes in it.
+///
+/// Checked again on every use, too: a temp cleaner may remove it during a
+/// long session, and then another is made.
+#[cfg(unix)]
+fn process_dir() -> Result<PathBuf, String> {
+    static DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    let mut dir = DIR.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = dir.as_ref() {
+        if check_private_dir(existing).is_ok() {
+            return Ok(existing.clone());
+        }
+    }
+    let made = make_process_dir(&std::env::temp_dir())?;
+    *dir = Some(made.clone());
+    Ok(made)
+}
+
+/// A new directory of this process's own in `parent`, named
+/// `nexterm-<uid>-<pid>-<random>`.
+#[cfg(unix)]
+fn make_process_dir(parent: &Path) -> Result<PathBuf, String> {
+    // SAFETY: `getuid` only reads this process's own uid and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let pid = std::process::id();
+    // A random name that is taken is someone else's; another one is tried
+    // rather than spawning shells without their integration.
+    let mut taken = Vec::new();
+    for _ in 0..8 {
+        let random = uuid::Uuid::new_v4().simple().to_string();
+        let dir = parent.join(format!("nexterm-{uid}-{pid}-{}", &random[..12]));
+        match create_private_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => taken.push(dir),
+            Err(e) => return Err(format!("cannot create {}: {e}", dir.display())),
+        }
+    }
+    Err(format!("every directory name tried in {} was taken: {taken:?}", parent.display()))
+}
+
+/// Make `dir`, which must not exist yet, as a directory only this user can
+/// enter — and check that this is what is there now.
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    // Fails, rather than taking it over, on anything already at `dir`: a
+    // directory, or a symlink to one.
+    fs::DirBuilder::new().mode(0o700).create(dir)?;
+    // The umask can take our own bits away from 0700, though never add any.
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    check_private_dir(dir)
+}
+
+/// Whether `dir` is a real directory, not a symlink to one, that belongs to
+/// this user and lets nobody else in.
+#[cfg(unix)]
+fn check_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::symlink_metadata(dir)?;
+    // SAFETY: as in `make_process_dir`.
+    let uid = unsafe { libc::getuid() };
+    let refuse = |why: String| Err(std::io::Error::other(format!("{}: {why}", dir.display())));
+    if !meta.file_type().is_dir() {
+        return refuse("not a directory".to_string());
+    }
+    if meta.uid() != uid {
+        return refuse(format!("owned by uid {}, not {uid}", meta.uid()));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return refuse(format!("mode {:o} lets other users in", meta.mode() & 0o777));
+    }
+    Ok(())
 }
 
 fn zsh_integration(login: bool) -> ShellIntegration {
@@ -248,7 +327,6 @@ fn zsh_integration(login: bool) -> ShellIntegration {
 /// Write (or refresh) the generated zsh rc directory and return its path.
 pub fn prepare_zsh_dir() -> Result<PathBuf, String> {
     let dir = integration_dir("zsh")?;
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     for (name, body) in [
         (".zshenv", ZSHENV),
         (".zprofile", ZPROFILE),
@@ -464,7 +542,6 @@ fn bash_rcfile(login: bool) -> String {
 /// Write (or refresh) the generated bash rc file and return its path.
 pub fn prepare_bash_rcfile(login: bool) -> Result<PathBuf, String> {
     let dir = integration_dir("bash")?;
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = dir.join("bashrc");
     let body = bash_rcfile(login);
     if fs::read_to_string(&path).map(|cur| cur == body).unwrap_or(false) {
@@ -609,7 +686,6 @@ fn pwsh_integration() -> ShellIntegration {
 /// return its path.
 pub fn prepare_pwsh_integration() -> Result<PathBuf, String> {
     let dir = integration_dir("pwsh")?;
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = dir.join("integration.ps1");
     if fs::read_to_string(&path).map(|cur| cur == PWSH_INTEGRATION).unwrap_or(false) {
         return Ok(path);
@@ -1361,20 +1437,32 @@ fi
         for dir in [&a, &b] {
             let parent = dir.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
             assert!(parent.starts_with("nexterm-"), "unexpected parent: {parent}");
-            assert!(parent.ends_with(&pid), "the directory is not per-process: {parent}");
+            // Followed, on unix, by a random part (see `process_dir`).
+            assert!(
+                parent.ends_with(&pid) || parent.contains(&format!("-{pid}-")),
+                "the directory is not per-process: {parent}"
+            );
         }
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            // Owner-only: nothing else may read the rc files or drop one in.
-            let mode = fs::metadata(&a).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o700, "shell-integration directory is {mode:o}, not 700");
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // Owner-only, and this user's own real directory — at BOTH
+            // levels. The per-process one sits in a shared /tmp on Linux, and
+            // whoever can write in it can swap a whole <shell>-N directory,
+            // rc files and all, before the shell reads them.
+            let uid = unsafe { libc::getuid() };
+            for dir in [&a, a.parent().unwrap()] {
+                let meta = fs::symlink_metadata(dir).unwrap();
+                assert!(meta.file_type().is_dir(), "{} is not a directory of its own", dir.display());
+                assert_eq!(meta.uid(), uid, "{} belongs to someone else", dir.display());
+                let mode = meta.permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700, "{} is {mode:o}, not 700", dir.display());
+            }
 
             // and it really is per-user
-            let uid = unsafe { libc::getuid() }.to_string();
             let parent = a.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
-            assert!(parent.contains(&uid), "the directory is not per-user: {parent}");
+            assert!(parent.contains(&uid.to_string()), "the directory is not per-user: {parent}");
         }
 
         // Clean up only the two directories this case made. `a.parent()` is
@@ -1384,5 +1472,79 @@ fi
         // `generates_all_four_rc_files`.
         let _ = fs::remove_dir_all(&a);
         let _ = fs::remove_dir_all(&b);
+    }
+
+    /// What another user of a shared /tmp could have put where the directory
+    /// goes is refused: something already there is never taken over, and
+    /// nothing passes that is not this user's own real directory with
+    /// nobody else let in.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_is_not_ours_alone_is_never_used() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("nexterm-si-private-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        create_private_dir(&base).expect("a new directory is made");
+        check_private_dir(&base).expect("and passes the check");
+
+        // Made by this call or not at all: one already there is refused, even
+        // a private one of this user's. `create_dir_all` accepted any.
+        let again = create_private_dir(&base).expect_err("an existing directory was taken over");
+        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists, "{again}");
+
+        // A symlink to a private directory — what would be planted — is
+        // neither made through nor accepted.
+        let target = base.join("target");
+        create_private_dir(&target).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(create_private_dir(&link).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(check_private_dir(&link).is_err(), "a symlink passed for a directory");
+
+        // Open to other users.
+        let open = base.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(check_private_dir(&open).is_err(), "a directory others can enter passed");
+
+        // Not a directory.
+        let file = base.join("file");
+        fs::write(&file, "").unwrap();
+        assert!(check_private_dir(&file).is_err(), "a file passed for a directory");
+
+        // Someone else's: `/` is root's.
+        if unsafe { libc::getuid() } != 0 {
+            let err = check_private_dir(Path::new("/")).unwrap_err();
+            assert!(err.to_string().contains("owned by"), "{err}");
+        }
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The per-process directory's name cannot be worked out in advance: uid
+    /// and pid, for whoever looks, and then a part that is new every time.
+    #[cfg(unix)]
+    #[test]
+    fn the_per_process_directory_has_a_name_nobody_can_make_first() {
+        let base = std::env::temp_dir().join(format!("nexterm-si-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        create_private_dir(&base).unwrap();
+
+        let a = make_process_dir(&base).unwrap();
+        let b = make_process_dir(&base).unwrap();
+        assert_ne!(a, b);
+        let prefix = format!("nexterm-{}-{}-", unsafe { libc::getuid() }, std::process::id());
+        for dir in [&a, &b] {
+            assert_eq!(dir.parent(), Some(base.as_path()));
+            check_private_dir(dir).expect("made private");
+            let name = dir.file_name().unwrap().to_string_lossy().to_string();
+            let random = name.strip_prefix(&prefix).unwrap_or_else(|| panic!("unexpected name {name}"));
+            assert!(
+                random.len() >= 12 && random.chars().all(|c| c.is_ascii_hexdigit()),
+                "no random part in {name}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 }
