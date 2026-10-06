@@ -119,6 +119,12 @@ fn main() {
                     menu::forward_to_webview(handle, event.id().as_ref());
                 });
             }
+
+            // ⌘Q, the Dock's Quit and logging out end a macOS app without
+            // closing its window, so the webview's guard on the window close
+            // never hears of them. See commands/app.rs.
+            #[cfg(target_os = "macos")]
+            commands::app::ask_before_quitting(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -147,6 +153,8 @@ fn main() {
             commands::notification::show_desktop_notification,
             commands::clipboard::clipboard_read,
             commands::agent::agent_sessions,
+            commands::app::app_set_unsaved,
+            commands::app::app_quit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");

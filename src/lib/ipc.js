@@ -76,6 +76,10 @@ class BrowserMockBridge {
     // `opencode session list --format json` prints — `directory` included,
     // which the backend narrows by and does not hand back.
     this.agentSessions = [];
+    // What `app_set_unsaved` was last told, and how often `app_quit` was
+    // asked for. Nothing quits here; the suites read these.
+    this.unsaved = false;
+    this.quitRequests = 0;
   }
 
   listen(event, callback) {
@@ -687,6 +691,19 @@ class BrowserMockBridge {
           .filter((s) => trim(s.directory) === trim(cwd))
           .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
           .map(({ id, title, updated, created }) => ({ id, title, updated, created }));
+      }
+
+      // 22. app_set_unsaved / app_quit — the backend keeps whether an editor
+      // tab is unsaved, so that a macOS quit can stop to ask
+      // (src-tauri/src/commands/app.rs), and quits once the user has
+      // answered.
+      case 'app_set_unsaved': {
+        this.unsaved = args?.unsaved === true;
+        return null;
+      }
+      case 'app_quit': {
+        this.quitRequests += 1;
+        return null;
       }
 
       default:
