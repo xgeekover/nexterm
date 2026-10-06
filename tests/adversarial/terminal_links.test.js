@@ -10,9 +10,19 @@
  * relative path is read against. The samples are real output shapes — rustc,
  * node, python, eslint, tsc, cmd.exe — rather than invented ones.
  */
+import { readFileSync } from 'node:fs';
+// Static import, resolved before any other file's module hooks can stand in.
+import headless from '@xterm/headless';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { findLinks, resolveLinkPath } from '../../src/lib/terminalLinks.js';
+import {
+  MAX_LINK_LENGTH,
+  findLinks,
+  linksAtRow,
+  resolveLinkPath,
+} from '../../src/lib/terminalLinks.js';
 import { isOpenable } from '../../src/lib/openExternal.js';
+
+const { Terminal: HeadlessTerminal } = headless;
 
 const only = (text) => {
   const links = findLinks(text);
@@ -185,5 +195,151 @@ describe('Terminal links: what may be handed to the system browser', () => {
     assert.equal(isOpenable(42), false);
     // A scheme-relative address has no scheme to check, so it is refused.
     assert.equal(isOpenable('//example.com'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The link provider runs when the pointer moves onto another row, on the UI
+// thread. One long line without a newline — a base64 blob, a hex dump, an
+// inline source map — took seconds per row: the provider joined every row of
+// the wrapped line, and the path pattern was quadratic on such text (1.5 s for
+// 32,000 characters of `a.a.a…`, 3 s for 131,000 of base64, measured).
+
+/** Milliseconds `fn` takes, the best of a few runs — the first compiles the patterns. */
+function timed(fn) {
+  let best = Infinity;
+  for (let i = 0; i < 3; i += 1) {
+    const t0 = performance.now();
+    fn();
+    best = Math.min(best, performance.now() - t0);
+  }
+  return best;
+}
+
+/** Bytes that look random to a regex, the same every run. */
+function noise(n) {
+  const out = Buffer.alloc(n);
+  let x = 2463534242;
+  for (let i = 0; i < n; i += 1) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    out[i] = x & 0xff;
+  }
+  return out;
+}
+
+/** An xterm-shaped buffer of one line wrapped over `rows` rows, counting the rows read. */
+function wrappedBuffer(text, cols) {
+  const rows = [];
+  for (let i = 0; i < text.length; i += cols) rows.push(text.slice(i, i + cols).padEnd(cols, ' '));
+  const buffer = {
+    reads: 0,
+    length: rows.length,
+    getLine(y) {
+      if (y < 0 || y >= rows.length) return undefined;
+      buffer.reads += 1;
+      return { isWrapped: y > 0, translateToString: () => rows[y] };
+    },
+  };
+  return buffer;
+}
+
+const write = (term, data) => new Promise((resolve) => term.write(data, resolve));
+
+describe('Terminal links: a long line costs what a short one does', () => {
+  test('LK-18: path-like runs of 64,000 characters are scanned in a few milliseconds', () => {
+    const N = 64000;
+    const fill = (unit) => unit.repeat(Math.ceil(N / unit.length)).slice(0, N);
+    const shapes = {
+      'a.a.a…': fill('a.'),
+      base64: noise((N * 3) / 4).toString('base64'),
+      hex: noise(N / 2).toString('hex'),
+      'ab/ab/…': fill('ab/'),
+      'src/a.b/…': fill('src/a.b/'),
+      'dots (a test reporter)': '.'.repeat(N),
+      'a URL and a run of `)`': `https://example.com/${')'.repeat(N)}`,
+      'a.b:1 a.b:1 … (thousands of links)': fill('a.b:1 '),
+    };
+    for (const [name, text] of Object.entries(shapes)) {
+      const ms = timed(() => findLinks(text));
+      assert.ok(ms < 30, `${name}: ${ms.toFixed(1)} ms for ${text.length} characters`);
+    }
+  });
+
+  test('LK-19: a row of a wrapped line 20,000 rows long reads a bounded stretch of it', () => {
+    const cols = 80;
+    const buffer = wrappedBuffer(noise(1_200_000).toString('base64').slice(0, 1_600_000), cols);
+    assert.equal(buffer.length, 20000);
+    let links;
+    const ms = timed(() => {
+      buffer.reads = 0;
+      links = linksAtRow(buffer, 10000);
+    });
+    assert.deepEqual(links, []);
+    const bound = 2 * (Math.ceil(MAX_LINK_LENGTH / cols) + 1) + 1;
+    assert.ok(buffer.reads <= bound, `${buffer.reads} rows read for one row, at most ${bound} expected`);
+    assert.ok(ms < 10, `${ms.toFixed(1)} ms for a hover`);
+  });
+
+  test('LK-20: a link across the edge of two rows is found from either, with xterm’s ranges', async () => {
+    const term = new HeadlessTerminal({ cols: 40, rows: 10, allowProposedApi: true });
+    await write(term, `${'x'.repeat(30)} src/components/terminal/Thing.jsx:42:7 tail\r\n`);
+    const buffer = term.buffer.active;
+    assert.equal(buffer.getLine(1).isWrapped, true, 'the line wrapped');
+    for (const row of [1, 2]) {
+      const [link, extra] = linksAtRow(buffer, row);
+      assert.equal(extra, undefined, `one link from row ${row}`);
+      assert.equal(link.path, 'src/components/terminal/Thing.jsx');
+      assert.equal(link.line, 42);
+      assert.equal(link.column, 7);
+      // 1-based, inclusive at both ends.
+      assert.deepEqual(link.range, { start: { x: 32, y: 1 }, end: { x: 29, y: 2 } });
+    }
+    assert.deepEqual(linksAtRow(buffer, 3), [], 'nothing on the row after');
+    assert.deepEqual(linksAtRow(buffer, 99), [], 'nor past the end of the buffer');
+    term.dispose();
+  });
+
+  test('LK-21: only the links touching the row asked about, and never a piece of a longer one', () => {
+    const cols = 40;
+    // Row 1 has a link, row 2 none, row 3 another.
+    const text = `see a.js:1${' '.repeat(30)}${'-'.repeat(40)}and b.js:2${' '.repeat(30)}`;
+    const buffer = wrappedBuffer(text, cols);
+    assert.deepEqual(linksAtRow(buffer, 1).map((l) => l.path), ['a.js']);
+    assert.deepEqual(linksAtRow(buffer, 2), []);
+    assert.deepEqual(linksAtRow(buffer, 3).map((l) => l.path), ['b.js']);
+
+    // A path longer than MAX_LINK_LENGTH, ending on the row asked about: what
+    // was read starts in the middle of it, and that piece must not be offered
+    // as a path of its own. A short link on the same row still is.
+    const huge = `${'segment/'.repeat(600)}deep.js:12 ok.js:3`;
+    const long = wrappedBuffer(huge, cols);
+    const last = Math.ceil(huge.length / cols);
+    assert.deepEqual(linksAtRow(long, last).map((l) => l.path), ['ok.js']);
+    const whole = findLinks(huge);
+    assert.equal(whole.length, 2, 'the whole line, read at once, has both');
+    assert.ok(whole[0].path.endsWith('segment/deep.js') && whole[0].path.startsWith('segment/'));
+  });
+
+  test('LK-22: a real terminal holding a 200,000-character base64 line answers a hover at once', async () => {
+    const term = new HeadlessTerminal({ cols: 80, rows: 24, scrollback: 5000, allowProposedApi: true });
+    const blob = noise(150000).toString('base64');
+    await write(term, `${blob} src/after/the/blob.ts:7\r\n`);
+    const buffer = term.buffer.active;
+    let lastRow = buffer.length;
+    while (lastRow > 1 && !buffer.getLine(lastRow - 1).translateToString(true)) lastRow -= 1;
+    const middle = Math.floor(lastRow / 2);
+    assert.ok(buffer.getLine(middle - 1).isWrapped, 'the middle row is part of the wrapped line');
+    const ms = timed(() => linksAtRow(buffer, middle));
+    assert.ok(ms < 10, `${ms.toFixed(1)} ms for a hover in the middle of the line`);
+    assert.deepEqual(linksAtRow(buffer, lastRow).map((l) => l.path), ['src/after/the/blob.ts']);
+    term.dispose();
+  });
+
+  test('LK-23: wired — the provider asks linksAtRow, and joins no whole line of its own', () => {
+    const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
+    assert.match(registry, /linksAtRow\(term\.buffer\.active, row\)/);
+    assert.doesNotMatch(registry, /logicalLineAt|findLinks\(/);
   });
 });
