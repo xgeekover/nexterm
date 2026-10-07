@@ -17,18 +17,24 @@
  * that knows the canonical root, and duplicating the fallback in the frontend
  * is how the two ends drift apart.
  *
- * A directory on another machine is taken only from the setting, which the
- * user typed. The one asked for and the active terminal's come from what a
- * shell reported (OSC 7) — saved with the session, or live — and anything a
- * program prints can report one. Starting a shell in `\\host\share`, or only
- * resolving it, has Windows connect to the host and sign in with the user's
- * credentials; such a directory falls through to the next step instead.
+ * A directory on another machine is never asked for: starting a shell in
+ * `\\host\share`, or only resolving it, has Windows connect to the host and
+ * sign in with the user's credentials. The one asked for and the active
+ * terminal's come from what a shell reported (OSC 7) — saved with the
+ * session, or live — and anything a program prints can report one. Such a
+ * directory falls through to the next step; the backend refuses one too
+ * (`Workspace::start_dir`), the setting's included, and Settings says so
+ * where it is typed (`NETWORK_START_DIR`).
  */
 import { expandHome } from './paths.js';
 import { isNetworkPath } from './terminalLinks.js';
 
 /** The values `terminal.integrated.cwd` may hold. */
 export const CWD_MODES = ['workspace', 'home', 'active', 'custom'];
+
+/** What Settings says about a custom directory on another machine. */
+export const NETWORK_START_DIR =
+  'That directory is on another machine, and a terminal never starts in one: opening it signs in to that machine. Map it to a drive letter to use it. New terminals will fall back to the workspace root, or your home directory if no folder is open.';
 
 /**
  * @param {object} input
@@ -63,7 +69,8 @@ export function resolveStartDir({
     case 'custom': {
       const typed = typeof customPath === 'string' ? customPath.trim() : '';
       if (!typed) return null;
-      return expandHome(typed, homeDir);
+      const path = expandHome(typed, homeDir);
+      return isNetworkPath(path) ? null : path;
     }
     case 'workspace':
     default:

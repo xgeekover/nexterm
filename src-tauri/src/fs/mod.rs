@@ -763,7 +763,13 @@ impl Workspace {
     /// thing it can mean — so it keeps going through `confine`.
     fn start_dir(&self, requested: &str) -> Option<PathBuf> {
         let trimmed = requested.trim();
-        if trimmed.is_empty() {
+        // A directory on another machine is nowhere to start: starting a
+        // shell there, or only resolving the path to see whether it is a
+        // directory, connects to the host and signs in with the user's
+        // credentials (see `is_network_path`). What asks for one is a
+        // directory a shell reported (OSC 7, which anything a program prints
+        // can fake), saved with a session or live, or the setting.
+        if trimmed.is_empty() || is_network_path(trimmed) {
             return None;
         }
         let path = Path::new(trimmed);
@@ -1275,6 +1281,29 @@ mod confine_tests {
         assert!(!workspace.can_start_in("inner/file.txt"), "nor a relative one");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Found in review: Enter after a shell exited started the new one in the
+    /// directory the old one last reported, and a program can report one on
+    /// another machine. Refused before anything resolves it — on Unix `//dir`
+    /// is `/dir`, which is there, so the refusal is what is seen here.
+    #[test]
+    fn a_directory_on_another_machine_is_nowhere_to_start() {
+        let root = temp_root("check-network");
+        let elsewhere = temp_root("check-network-elsewhere");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        let plain = elsewhere.to_string_lossy().to_string();
+        assert!(workspace.can_start_in(&plain), "premise: the directory itself is somewhere to start");
+        let doubled = format!("//{}", plain.trim_start_matches(['/', '\\']));
+        for path in [doubled, r"\\host\share".to_string(), r"\\?\UNC\host\share".to_string()] {
+            assert!(!workspace.can_start_in(&path), "{path} passed the check");
+            assert_eq!(workspace.spawn_dir(Some(&path)), root, "{path}: a terminal falls back");
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
     }
 
     /// With no folder open a relative path has nothing to be relative to, so

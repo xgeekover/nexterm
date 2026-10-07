@@ -6,6 +6,8 @@ import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
 import { isWindows } from '../../lib/platform.js';
 import { expandHome } from '../../lib/paths.js';
+import { isNetworkPath } from '../../lib/terminalLinks.js';
+import { NETWORK_START_DIR } from '../../lib/terminalCwd.js';
 import { invoke } from '../../lib/ipc.js';
 
 /**
@@ -255,8 +257,10 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       validate: async (value) => {
         const wanted = String(value ?? '').trim();
         if (!wanted) return 'Type a directory, or choose another option above.';
+        const path = expandHome(wanted, homeDir);
+        if (isNetworkPath(path)) return NETWORK_START_DIR;
         try {
-          const ok = await invoke('fs_dir_exists', { path: expandHome(wanted, homeDir) });
+          const ok = await invoke('fs_dir_exists', { path });
           return ok ? null : 'No directory there. New terminals will fall back to the workspace root, or your home directory if no folder is open.';
         } catch {
           return null; // cannot check right now; do not cry wolf

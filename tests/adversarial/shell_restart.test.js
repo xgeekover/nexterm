@@ -456,14 +456,18 @@ describe('Where a new shell starts', () => {
   // (OSC 7), and the one a terminal reported is where Enter starts its new
   // shell and where a session restores it. On Windows, starting in — or only
   // resolving — `\\host\share` connects to the host and signs in.
-  test('SR-17: a directory on another machine is never asked for on a shell\'s word', () => {
+  test('SR-17: a directory on another machine is never asked for', () => {
     for (const net of ['//attacker/share/proj', '\\\\attacker\\share', '\\\\?\\UNC\\attacker\\share', '/??/UNC/attacker/share']) {
       assert.equal(resolveStartDir({ requested: net, mode: 'workspace' }), null, `asked: ${net}`);
       assert.equal(resolveStartDir({ requested: net, mode: 'home', homeDir: '/Users/dev' }), '/Users/dev', `asked: ${net}`);
       assert.equal(resolveStartDir({ mode: 'active', activeCwd: net }), null, `active: ${net}`);
     }
-    // The setting is the user's own, typed: honoured as it was.
-    assert.equal(resolveStartDir({ mode: 'custom', customPath: '//nas/projects' }), '//nas/projects');
+    // Nor from the setting: the backend would refuse it all the same, and
+    // Settings says why where it is typed.
+    assert.equal(resolveStartDir({ mode: 'custom', customPath: '//nas/projects' }), null);
+    assert.equal(resolveStartDir({ mode: 'custom', customPath: '~/work', homeDir: '//nas/home' }), null);
+    const settings = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8');
+    assert.match(settings, /if \(isNetworkPath\(path\)\) return NETWORK_START_DIR;\s*try \{\s*const ok = await invoke\('fs_dir_exists', \{ path \}\)/, 'before the backend is asked');
     // This machine's directories, as before — a verbatim drive path included.
     assert.equal(resolveStartDir({ requested: 'C:\\Users\\dev' }), 'C:\\Users\\dev');
     assert.equal(resolveStartDir({ requested: '\\\\?\\C:\\Users\\dev' }), '\\\\?\\C:\\Users\\dev');
