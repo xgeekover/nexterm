@@ -595,9 +595,7 @@ export function FileExplorer() {
                 const target = deleteConfirm;
                 setDeleteConfirm(null);
                 if (!target) return;
-                deletePath(target.path, target.isDir && !target.isLink, { keepUnsaved: target.isLink }).catch((err) =>
-                  setExplorerError(err.message)
-                );
+                deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(err.message));
               }}
               onCancel={() => setDeleteConfirm(null)}
               // Chosen from the context menu, which has gone by the time

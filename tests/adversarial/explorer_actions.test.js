@@ -552,14 +552,13 @@ describe('Explorer paste never writes over anything', () => {
     assert.match(explorer, /\{pasting && \(\s*<div role="status"[^>]*>\s*Copying '\{pasting\}'…/);
   });
 
-  test('EP-08: deleting a folder names its unsaved files first; deleting a link keeps them open', async () => {
-    // Found in review: deleting closed every tab under the path, unsaved
-    // ones included, with nothing said — and a link's too, though the file
-    // it was opened through is still there.
+  test('EP-08: a delete names the unsaved files it will close first — a link\'s too', async () => {
+    // Found in review: deleting closed every tab under the path, unsaved ones
+    // included, with nothing said. Then (last review) keeping a link's
+    // unsaved tabs open made Save put a new folder where the link had been.
     const { deletePromptMessage } = await import('../../src/components/explorer/treeRows.js');
     const store = useEditorStore.getState();
     await invoke('fs_create_dir', { path: `${scratchDir}/src` });
-    await invoke('fs_create_dir', { path: `${scratchDir}/other` });
     await invoke('fs_write_file', { path: `${scratchDir}/src/a.js`, content: 'a' });
     await invoke('fs_write_file', { path: `${scratchDir}/src/b.js`, content: 'b' });
     await invoke('fs_write_file', { path: `${scratchDir}/src/c.js`, content: 'c' });
@@ -577,27 +576,18 @@ describe('Explorer paste never writes over anything', () => {
     );
     assert.equal(
       deletePromptMessage({ name: 'shared', isDir: true, isLink: true }, ['index.js']),
-      "Are you sure you want to delete the link 'shared'? What it points to is not touched. Unsaved changes in index.js stay open."
+      "Are you sure you want to delete the link 'shared'? What it points to is not touched. Unsaved changes in index.js will be lost; save them first to keep them in what it points to."
     );
     assert.equal(deletePromptMessage({ name: 'x.txt', isDir: false, isLink: false }), "Are you sure you want to delete 'x.txt'?");
     assert.match(deletePromptMessage({ name: 'src', isDir: true }, ['a', 'b', 'c', 'd', 'e']), /in a, b and 3 other files will be lost\.$/);
 
-    // A link delete closes only what has nothing unsaved.
-    await useEditorStore.getState().deletePath(`${scratchDir}/src`, true, { keepUnsaved: true });
-    assert.deepEqual(
-      useEditorStore.getState().tabs.filter((t) => t.filePath.startsWith(`${scratchDir}/src`)).map((t) => t.fileName).sort(),
-      ['a.js', 'b.js']
-    );
-    // Any other delete closes them all, as the prompt said it would.
-    await invoke('fs_write_file', { path: `${scratchDir}/other/d.js`, content: 'd' });
-    const d = await useEditorStore.getState().openFile(`${scratchDir}/other/d.js`);
-    useEditorStore.getState().editBuffer(d.id, 'd edited');
-    await useEditorStore.getState().deletePath(`${scratchDir}/other`, true);
-    assert.equal(useEditorStore.getState().tabs.some((t) => t.id === d.id), false);
+    // Every tab under what was deleted closes, as the prompt said.
+    await useEditorStore.getState().deletePath(`${scratchDir}/src`, true);
+    assert.equal(useEditorStore.getState().tabs.some((t) => t.filePath.startsWith(`${scratchDir}/src`)), false);
 
     const explorer = readFileSync(new URL('../../src/components/explorer/FileExplorer.jsx', import.meta.url), 'utf8');
     assert.match(explorer, /message=\{deletePromptMessage\(deleteConfirm, deleteConfirm\.unsaved\)\}/);
-    assert.match(explorer, /deletePath\(target\.path, target\.isDir && !target\.isLink, \{ keepUnsaved: target\.isLink \}\)/);
+    assert.doesNotMatch(explorer, /keepUnsaved/, 'no delete keeps a tab whose path is gone');
   });
 
   test('EP-06: fs_copy_path refuses a destination that exists, and writes nothing (the mock keeps the contract)', async () => {

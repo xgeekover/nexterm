@@ -244,15 +244,19 @@ export function navigate(rows, index, key) {
  * Deleting closes the tabs of everything deleted, and their unsaved changes
  * went with them without a word — nothing said so, and on Windows they had
  * survived until paths were matched there too. So the prompt says so, and
- * Cancel keeps them. A link is deleted as a link: what it points to is still
- * there, and a file opened through it with unsaved changes stays open
- * (`deletePath`'s `keepUnsaved`).
+ * Cancel keeps them.
+ *
+ * A link is deleted as a link, and what it points to is still there — but a
+ * tab opened through it names its file by the link's path, which is gone. Kept
+ * open, its Save made a new folder or file where the link had been, and the
+ * file the user meant to edit never got the edits. So those tabs close too,
+ * and the prompt says to save first to keep the edits where the link leads.
  */
 export function deletePromptMessage(target, unsavedNames = []) {
   const unsaved = unsavedChangesIn(unsavedNames);
   if (target.isLink) {
-    const kept = unsaved ? ` Unsaved changes in ${unsaved} stay open.` : '';
-    return `Are you sure you want to delete the link '${target.name}'? What it points to is not touched.${kept}`;
+    const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost; save them first to keep them in what it points to.` : '';
+    return `Are you sure you want to delete the link '${target.name}'? What it points to is not touched.${lost}`;
   }
   const contents = target.isDir ? ' Its contents will be deleted too.' : '';
   const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost.` : '';
