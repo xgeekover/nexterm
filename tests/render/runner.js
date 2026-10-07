@@ -724,6 +724,28 @@ scenario(
   }
 );
 
+const { COMMANDS, configurableCommands } = await import('../../src/lib/keybindings.js');
+
+scenario(
+  'RN-61',
+  'Settings names every shortcut a focused terminal never sees, and only those',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    // It said only the two side-bar toggles were claimed over a terminal,
+    // while ten commands were.
+    const note = visibleText(html).split('\n').find((line) => line.startsWith('Over a focused terminal'));
+    expectThat(note, 'no note about what a focused terminal never sees');
+    for (const { id, title } of configurableCommands()) {
+      const named = note.includes(title);
+      if (COMMANDS[id].overTerminal) expectThat(named, `${title} is taken ahead of the terminal, and the note does not say so`);
+      else expectThat(!named, `the note says ${title} is taken ahead of the terminal; it is not`);
+    }
+  }
+);
+
 // ---- Dragging an editor tab over a tab strip ---------------------------------
 
 /**

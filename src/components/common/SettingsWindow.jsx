@@ -19,7 +19,26 @@ function readInheritedMonoStack() {
   return cs.getPropertyValue('--font-mono').trim() || 'monospace';
 }
 
-import { KeybindingSettings } from './KeybindingSettings.jsx';
+import { KeybindingSettings, CHORD_RECORDER } from './KeybindingSettings.jsx';
+
+/**
+ * What a key does to the Settings window as a whole, decided by the listener
+ * that sees every key before anything inside the window does:
+ *
+ *   'close'  Escape
+ *   'trap'   Tab: kept going round inside the window
+ *   null     not the window's to handle
+ *
+ * Escape on the field recording a shortcut belongs to that field: it ends the
+ * recording, and the window stays. This listener runs in the capture phase,
+ * ahead of the field's own, so it used to take that Escape and close the
+ * whole window.
+ */
+export function settingsWindowKey(e) {
+  if (e.key === 'Escape') return e.target?.closest?.(`[${CHORD_RECORDER}]`) ? null : 'close';
+  if (e.key === 'Tab') return 'trap';
+  return null;
+}
 
 const SECTIONS = [
   { id: 'keyboard', label: 'Keyboard Shortcuts' },
@@ -559,12 +578,13 @@ export function SettingsWindow() {
     };
 
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') {
+      const action = settingsWindowKey(e);
+      if (action === 'close') {
         e.preventDefault();
         setOpen(false);
         return;
       }
-      if (e.key === 'Tab') {
+      if (action === 'trap') {
         const focusable = getFocusable();
         if (focusable.length === 0) return;
         const first = focusable[0];

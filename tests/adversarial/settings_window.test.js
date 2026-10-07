@@ -18,7 +18,12 @@
 import { build } from 'esbuild';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import React from 'react';
+import { renderToString } from 'react-dom/server';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
+import { COMMANDS, configurableCommands } from '../../src/lib/keybindings.js';
+
+const h = React.createElement;
 
 const SRC_DIR = fileURLToPath(new URL('../../src/', import.meta.url));
 
@@ -103,5 +108,100 @@ describe('Settings: a number field commits only a number that was typed', () => 
     const numberToCommit = await exported('numberToCommit');
     assert.equal(numberToCommit('0', NOTIFY_AFTER, 10), 0);
     assert.equal(numberToCommit('0', SCROLLBACK, 5000), 100, 'and where it is not, the minimum, as for any number too small');
+  });
+});
+
+/** The attributes of the first element in some markup, by name. */
+function attributesOf(html) {
+  const tag = /^<[a-z]+([^>]*)>/.exec(html);
+  assert.ok(tag, `no element in ${html}`);
+  return new Map([...tag[1].matchAll(/\s([a-zA-Z-]+)(?:="([^"]*)")?/g)].map(([, name, value]) => [name, value ?? '']));
+}
+
+/**
+ * An element as far as `closest` goes: its attributes and its parent. Only
+ * `[name]` selectors are understood; anything else throws, so a window that
+ * starts asking for more fails loudly rather than matching nothing.
+ */
+function element(attributes = new Map(), parent = null) {
+  return {
+    attributes,
+    parent,
+    closest(selector) {
+      const match = /^\[([a-zA-Z-]+)\]$/.exec(selector);
+      if (!match) throw new Error(`the test element knows [attribute] selectors only, not ${selector}`);
+      for (let node = this; node; node = node.parent) if (node.attributes.has(match[1])) return node;
+      return null;
+    },
+  };
+}
+
+const key = (k, target, fields = {}) => ({ key: k, target, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, ...fields });
+
+describe('Settings: Escape while a shortcut is being recorded', () => {
+  test('SW-05: Escape on the field recording a shortcut is that field\'s; anywhere else it closes the window', async () => {
+    // The window's listener runs in the capture phase, ahead of the field's
+    // own, and used to close the whole window for an Escape that only meant
+    // "stop recording".
+    const settingsWindowKey = await exported('settingsWindowKey');
+    const ChordRecorder = await exported('ChordRecorder');
+    const recorder = element(attributesOf(renderToString(
+      h(ChordRecorder, { title: 'Find in Terminal', refusal: null, onKeyDown() {}, onBlur() {} })
+    )));
+    assert.equal(settingsWindowKey(key('Escape', recorder)), null, 'Escape while recording must not close the window');
+
+    const searchBox = element(new Map([['type', 'text']]), element(new Map([['role', 'dialog']])));
+    assert.equal(settingsWindowKey(key('Escape', searchBox)), 'close');
+    assert.equal(settingsWindowKey(key('Escape', element())), 'close');
+  });
+
+  test('SW-06: the rest of the window\'s keys are as they were', async () => {
+    const settingsWindowKey = await exported('settingsWindowKey');
+    const ChordRecorder = await exported('ChordRecorder');
+    const recorder = element(attributesOf(renderToString(
+      h(ChordRecorder, { title: 'Save File', refusal: null, onKeyDown() {}, onBlur() {} })
+    )));
+    for (const target of [element(), recorder]) {
+      assert.equal(settingsWindowKey(key('Tab', target)), 'trap', 'Tab goes round inside the window');
+      assert.equal(settingsWindowKey(key('Tab', target, { shiftKey: true })), 'trap');
+      for (const other of ['a', 'Enter', ' ', 'ArrowDown']) assert.equal(settingsWindowKey(key(other, target)), null, other);
+    }
+  });
+
+  test('SW-07: a refused key is said in words, on the field itself too', async () => {
+    const ChordRecorder = await exported('ChordRecorder');
+    const refusal = 'A shortcut needs Ctrl or Alt, or an F-key.';
+    const html = renderToString(h(ChordRecorder, { title: 'Save File', refusal, refusalId: 'why-1', onKeyDown() {}, onBlur() {} }));
+    const attributes = attributesOf(html);
+    assert.equal(attributes.get('aria-invalid'), 'true');
+    assert.equal(attributes.get('aria-describedby'), 'why-1', 'the field points at the reason');
+    assert.equal(attributes.get('aria-label'), 'Press the keys for Save File');
+
+    const calm = attributesOf(renderToString(h(ChordRecorder, { title: 'Save File', refusal: null, refusalId: 'why-1', onKeyDown() {}, onBlur() {} })));
+    assert.equal(calm.has('aria-invalid'), false, 'nothing refused yet, nothing invalid');
+    assert.equal(calm.has('aria-describedby'), false);
+  });
+});
+
+describe('Settings: what a focused terminal never sees', () => {
+  test('SW-10: the note above the shortcuts names every command claimed over a terminal, and no other', async () => {
+    // It said "only the two side-bar toggles are claimed" while ten were —
+    // the wrong answer for someone looking for what took a key from their
+    // shell.
+    const overTerminalNote = await exported('overTerminalNote');
+    const note = overTerminalNote();
+    for (const { id, title } of configurableCommands()) {
+      if (COMMANDS[id].overTerminal) assert.ok(note.includes(title), `${title} is claimed over a terminal and not named`);
+      else assert.ok(!note.includes(title), `${title} is not claimed over a terminal, yet named`);
+    }
+    assert.ok(!/only the two side-bar toggles/.test(note));
+  });
+
+  test('SW-11: the Keyboard Shortcuts section draws that note', async () => {
+    const KeybindingSettings = await exported('KeybindingSettings');
+    const overTerminalNote = await exported('overTerminalNote');
+    const html = renderToString(h(KeybindingSettings));
+    const text = html.replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
+    assert.ok(text.includes(overTerminalNote()), 'the section does not draw the generated note');
   });
 });

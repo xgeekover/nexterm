@@ -32,6 +32,8 @@ import {
   findBinding,
   dispatchKeydown,
   dispatchKeydownOverTerminal,
+  recordKeydown,
+  commandsOverTerminal,
 } from '../../src/lib/keybindings.js';
 
 const ev = (o = {}) => ({ ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, key: '', code: '', ...o });
@@ -366,5 +368,143 @@ describe('Conflicts are found by the keys pressed, not by how a chord is spelled
         }
       }
     }
+  });
+});
+
+describe('Recording a shortcut takes only something that can be one', () => {
+  const MAC = { isMac: true };
+  const WIN = { isMac: false };
+
+  test('CK-20: Tab and Shift+Tab are never bound — they move focus on', () => {
+    // Change on Find in Terminal, then Tab to move on: Tab was bound, and
+    // since that command is claimed ahead of a focused terminal, Tab
+    // completion stopped working in every shell and agent.
+    for (const platform of [MAC, WIN]) {
+      assert.deepEqual(recordKeydown(ev({ key: 'Tab', code: 'Tab' }), platform), { action: 'leave' });
+      assert.deepEqual(recordKeydown(ev({ key: 'Tab', code: 'Tab', shiftKey: true }), platform), { action: 'leave' });
+    }
+    // With Ctrl it is a chord like any other.
+    assert.deepEqual(recordKeydown(ev({ key: 'Tab', code: 'Tab', ctrlKey: true }), WIN), { action: 'bind', key: 'mod+tab' });
+    assert.deepEqual(recordKeydown(ev({ key: 'Tab', code: 'Tab', ctrlKey: true }), MAC), { action: 'bind', key: 'ctrl+tab' });
+  });
+
+  test('CK-21: Escape stops recording, with or without modifiers, and binds nothing', () => {
+    for (const fields of [{}, { shiftKey: true }, { ctrlKey: true }, { metaKey: true }]) {
+      for (const platform of [MAC, WIN]) {
+        assert.deepEqual(recordKeydown(ev({ key: 'Escape', code: 'Escape', ...fields }), platform), { action: 'cancel' });
+      }
+    }
+  });
+
+  test('CK-22: a key on its own is refused, F-keys apart, and Shift alone does not make a shortcut', () => {
+    const typing = [
+      ev({ key: 'a', code: 'KeyA' }),
+      ev({ key: 'A', code: 'KeyA', shiftKey: true }),
+      ev({ key: '7', code: 'Digit7' }),
+      ev({ key: ',', code: 'Comma' }),
+      ev({ key: '~', code: 'Backquote', shiftKey: true }),
+      ev({ key: ' ', code: 'Space' }),
+      ev({ key: 'Enter', code: 'Enter' }),
+      ev({ key: 'Enter', code: 'Enter', shiftKey: true }),
+      ev({ key: 'Backspace', code: 'Backspace' }),
+      ev({ key: 'Delete', code: 'Delete' }),
+      ev({ key: 'ArrowLeft', code: 'ArrowLeft' }),
+      ev({ key: 'Home', code: 'Home' }),
+    ];
+    for (const e of typing) {
+      for (const platform of [MAC, WIN]) {
+        const outcome = recordKeydown(e, platform);
+        assert.equal(outcome.action, 'refuse', `${JSON.stringify(e.key)}${e.shiftKey ? ' with Shift' : ''} must not be bound`);
+        assert.match(outcome.reason, platform.isMac ? /⌘, ⌃ or ⌥/ : /Ctrl or Alt/, 'and the refusal says what would do');
+      }
+    }
+    assert.deepEqual(recordKeydown(ev({ key: 'F2', code: 'F2' }), WIN), { action: 'bind', key: 'f2' });
+    assert.deepEqual(recordKeydown(ev({ key: 'F5', code: 'F5', shiftKey: true }), WIN), { action: 'bind', key: 'shift+f5' });
+    assert.deepEqual(recordKeydown(ev({ key: 'a', code: 'KeyA', altKey: true }), WIN), { action: 'bind', key: 'alt+a' });
+    assert.deepEqual(recordKeydown(ev({ key: 'A', code: 'KeyA', ctrlKey: true, shiftKey: true }), WIN), { action: 'bind', key: 'mod+shift+a' });
+    assert.deepEqual(recordKeydown(ev({ key: 'a', code: 'KeyA', metaKey: true }), MAC), { action: 'bind', key: 'mod+a' });
+    assert.deepEqual(recordKeydown(ev({ key: 'a', code: 'KeyA', ctrlKey: true }), MAC), { action: 'bind', key: 'ctrl+a' });
+  });
+
+  test('CK-23: every modifier held is kept, so the chord bound is the chord pressed', () => {
+    // macOS: Ctrl+⌘+J was recorded as ⌘J, and plain ⌘J then ran it.
+    const ctrlCmdJ = ev({ key: 'j', code: 'KeyJ', ctrlKey: true, metaKey: true });
+    const recorded = recordKeydown(ctrlCmdJ, MAC);
+    assert.deepEqual(recorded, { action: 'bind', key: 'mod+ctrl+j' });
+    const { bindings } = resolveKeybindings({ 'toggle-panel': recorded.key });
+    assert.equal(findBinding(ctrlCmdJ, ctx(ctrlCmdJ, 'macos', { bindings }))?.command, 'toggle-panel');
+    const cmdJ = ev({ key: 'j', code: 'KeyJ', metaKey: true });
+    assert.equal(findBinding(cmdJ, ctx(cmdJ, 'macos', { bindings })), null, 'plain ⌘J is another chord');
+
+    // And off macOS the Windows key is not dropped either.
+    const ctrlWinJ = ev({ key: 'j', code: 'KeyJ', ctrlKey: true, metaKey: true });
+    const windows = recordKeydown(ctrlWinJ, WIN);
+    assert.deepEqual(windows, { action: 'bind', key: 'mod+cmd+j' });
+    const plainCtrlJ = ev({ key: 'j', code: 'KeyJ', ctrlKey: true });
+    const onWindows = resolveKeybindings({ 'toggle-panel': windows.key }).bindings;
+    assert.equal(findBinding(plainCtrlJ, ctx(plainCtrlJ, 'windows', { bindings: onWindows })), null, 'Ctrl+J is another chord');
+  });
+
+  test('CK-24: a key the chord grammar cannot name is refused, not saved as text that unbinds', () => {
+    // `mod+capslock` does not parse: saved, it would leave the command with
+    // no chord at all (CK-09), which is not what pressing a key asked for.
+    for (const e of [
+      ev({ key: 'CapsLock', code: 'CapsLock', ctrlKey: true }),
+      ev({ key: 'Insert', code: 'Insert', ctrlKey: true }),
+      ev({ key: 'ContextMenu', code: 'ContextMenu', altKey: true }),
+    ]) {
+      const outcome = recordKeydown(e, WIN);
+      assert.equal(outcome.action, 'refuse', `${e.key}`);
+      assert.match(outcome.reason, /cannot be part of a shortcut/);
+    }
+  });
+
+  test('CK-25: nothing is decided while only modifiers are down, or while an IME composes', () => {
+    for (const key of ['Control', 'Shift', 'Alt', 'AltGraph', 'Meta', 'Dead', 'Process']) {
+      assert.deepEqual(recordKeydown(ev({ key, ctrlKey: key === 'Control' }), WIN), { action: 'wait' }, key);
+    }
+    assert.deepEqual(recordKeydown(ev({ key: 'ㅁ', code: 'KeyA', isComposing: true }), MAC), { action: 'wait' });
+    assert.deepEqual(recordKeydown(ev({ key: 'Process', code: 'KeyA', keyCode: 229 }), WIN), { action: 'wait' });
+  });
+
+  test('CK-26: recording for a command claimed over the terminal leaves Tab and typing to the shell', () => {
+    // The whole sequence a user goes through: Change on Find in Terminal,
+    // Tab (meant to move on), a letter (meant to type), then a real chord.
+    // Only the chord is ever bound, and afterwards a focused terminal still
+    // gets Tab and the letter.
+    assert.ok(COMMANDS['find-in-terminal'].overTerminal, 'the premise: it is claimed over a terminal');
+    let bound = null;
+    for (const e of [
+      ev({ key: 'Tab', code: 'Tab' }),
+      ev({ key: 'g', code: 'KeyG' }),
+      ev({ key: 'G', code: 'KeyG', shiftKey: true }),
+      ev({ key: 'g', code: 'KeyG', ctrlKey: true, altKey: true }),
+    ]) {
+      const outcome = recordKeydown(e, WIN);
+      if (outcome.action === 'bind') {
+        bound = outcome.key;
+        break;
+      }
+    }
+    assert.equal(bound, 'mod+alt+g');
+    const { bindings } = resolveKeybindings({ 'find-in-terminal': bound });
+    for (const e of [ev({ key: 'Tab', code: 'Tab' }), ev({ key: 'g', code: 'KeyG' })]) {
+      const shell = {
+        ...e,
+        preventDefault: () => assert.fail(`${e.key} was swallowed`),
+        stopPropagation: () => assert.fail(`${e.key} never reached xterm`),
+      };
+      assert.equal(dispatchKeydownOverTerminal(shell, ctx(shell, 'windows', { bindings })), null, `${e.key} reaches the shell`);
+    }
+  });
+
+  test('CK-27: the commands claimed over a terminal are read from the flags', () => {
+    const ids = commandsOverTerminal().map((c) => c.id);
+    const flagged = Object.entries(COMMANDS)
+      .filter(([, spec]) => spec.overTerminal && spec.configurable !== false)
+      .map(([id]) => id);
+    assert.deepEqual(ids, flagged);
+    assert.ok(ids.length > 2, 'more than the two side-bar toggles, which is what Settings used to say');
+    for (const { id, title } of commandsOverTerminal()) assert.equal(title, COMMANDS[id].title);
   });
 });
