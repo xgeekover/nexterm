@@ -746,6 +746,47 @@ scenario(
   }
 );
 
+// ---- The activity bar ---------------------------------------------------------
+
+/** Whether the activity bar draws its icon called `title` lit. */
+function activityLit(html, title) {
+  const icon = new RegExp(`<button\\b[^>]*\\stitle="${title}"[^>]*\\sclass="([^"]*)"`).exec(html);
+  expectThat(icon, `no activity-bar icon called ${title}`);
+  return !icon[1].includes('text-vsc-activitybar-muted');
+}
+
+const SEARCH_VIEW = /\saria-label="Search across files"/;
+
+scenario(
+  'RN-62',
+  'with Search on screen, the activity bar lights Search and not the Explorer',
+  () => {
+    reset();
+    useSettingsStore.getState().showView('search');
+    // What the layout does once it has drawn the request. The activity bar
+    // used to read the request, so from here on it lit the Explorer.
+    useSettingsStore.getState().clearRequestedView();
+  },
+  (html) => {
+    expectThat(!activityLit(html, 'Explorer'), 'the Explorer is lit while Search is on screen');
+    expectThat(activityLit(html, 'Search'), 'Search is on screen and its icon is not lit');
+    expectThat(SEARCH_VIEW.test(html), 'the side bar does not draw Search');
+  }
+);
+
+scenario(
+  'RN-63',
+  'with the Explorer on screen, the Explorer is lit and not Search',
+  () => {
+    reset();
+  },
+  (html) => {
+    expectThat(!SEARCH_VIEW.test(html), 'the side bar draws Search');
+    expectThat(activityLit(html, 'Explorer'), 'the Explorer is on screen and its icon is not lit');
+    expectThat(!activityLit(html, 'Search'), 'Search is lit while the Explorer is on screen');
+  }
+);
+
 // ---- Dragging an editor tab over a tab strip ---------------------------------
 
 /**

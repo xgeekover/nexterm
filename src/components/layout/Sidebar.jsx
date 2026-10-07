@@ -5,7 +5,7 @@ import {
   SquareTerminal,
   Settings,
 } from 'lucide-react';
-import { useSettingsStore } from '../../stores/settingsStore.js';
+import { useSettingsStore, isViewShown } from '../../stores/settingsStore.js';
 import { cn } from '../../lib/utils.js';
 
 function ActivityBarButton({ icon: Icon, label, isActive, onClick }) {
@@ -30,16 +30,13 @@ function ActivityBarButton({ icon: Icon, label, isActive, onClick }) {
 }
 
 export function Sidebar() {
-  const sidebarVisible = useSettingsStore((s) => s.sidebarVisible);
-  const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const panelVisible = useSettingsStore((s) => s.panelVisible);
   const togglePanel = useSettingsStore((s) => s.togglePanel);
   const showView = useSettingsStore((s) => s.showView);
-  const requestedView = useSettingsStore((s) => s.requestedView);
-  // Best-effort: the layout owns which tab of a region is showing, so this
-  // only reflects a request still in flight. Getting the highlight slightly
-  // late is a far smaller problem than a button that does the wrong thing.
-  const requestedOrActiveLeftView = requestedView?.region === 'left' ? requestedView.view : null;
+  const toggleView = useSettingsStore((s) => s.toggleView);
+  // Lit for the view on screen — the same answer the layout draws from.
+  const explorerShown = useSettingsStore((s) => isViewShown(s, 'explorer'));
+  const searchShown = useSettingsStore((s) => isViewShown(s, 'search'));
   const setSettingsModalOpen = useSettingsStore((s) => s.setSettingsModalOpen);
 
   // Order: 1) Terminal, 2) Explorer, 3) Search.
@@ -55,12 +52,11 @@ export function Sidebar() {
       id: 'explorer',
       label: 'Explorer',
       icon: Files,
-      isActive: sidebarVisible && requestedOrActiveLeftView !== 'search',
+      isActive: explorerShown,
       // Now that the left region hosts two views, "Explorer" has to mean the
-      // Explorer rather than "toggle whatever is over there".
-      onClick: () => (sidebarVisible && requestedOrActiveLeftView !== 'search'
-        ? toggleSidebar()
-        : showView('explorer')),
+      // Explorer rather than "toggle whatever is over there": hidden again
+      // only when it is the view on screen, brought on screen otherwise.
+      onClick: () => toggleView('explorer'),
     },
     {
       id: 'search',
@@ -71,7 +67,7 @@ export function Sidebar() {
       // and it opened the command palette. A control that says one thing and
       // does another is the same family as the notifications bell with no
       // handler and the status bar's invented git branch. It searches now.
-      isActive: sidebarVisible && requestedOrActiveLeftView === 'search',
+      isActive: searchShown,
       onClick: () => showView('search'),
     },
   ];
