@@ -165,6 +165,35 @@ describe('Hyperlinks: what a terminal does with one', () => {
     });
   });
 
+  test('HY-09: what is opened is the address the tooltip shows, not the text the program printed', async () => {
+    // Found in review: xterm keeps an OSC 8 URI as printed, and the opener
+    // passed it on as it came — quotes and spaces to the Windows shell, and
+    // `HTTPS://…` or a leading space to a scope that refused it after the
+    // tooltip had promised it.
+    await inBrowser(async (opened) => {
+      const { handler } = realHandler();
+      for (const uri of [
+        'https://example.com/" --gpu-launcher="cmd /c calc" "',
+        'HTTPS://example.com/x',
+        ' https://example.com/x',
+        'https://user@example.com/x',
+      ]) {
+        handler.activate(clickEvent(), uri);
+      }
+      await Promise.resolve();
+      assert.deepEqual(
+        opened.map(([url]) => url),
+        [
+          'https://example.com/%22%20--gpu-launcher=%22cmd%20/c%20calc%22%20%22',
+          'https://example.com/x',
+          'https://example.com/x',
+          'https://example.com/x',
+        ]
+      );
+      for (const [url] of opened) assert.equal(url, external.hyperlinkTitle(url), 'what was opened is what the tooltip said');
+    });
+  });
+
   test('HY-06: the pointer on one shows where it goes, and taking it off clears that', () => {
     const { handler, container } = realHandler();
     handler.hover({}, 'https://example.com@evil.example/login');

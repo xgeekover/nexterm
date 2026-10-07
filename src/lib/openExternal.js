@@ -65,17 +65,36 @@ export function hyperlinkTitle(uri) {
 }
 
 /**
- * Open `url` in the user's browser. Returns whether it was handed over.
+ * The address `openExternal` hands over for `url`: the one its tooltip shows
+ * (`hyperlinkTitle`), whole — parsed, without a user name, a space or a quote
+ * in it percent-encoded, the scheme in lower case.
+ *
+ * A program's OSC 8 hyperlink reaches here as the program spelled it, and the
+ * opener does not parse it. `https://example.com/" --flag "` went to the
+ * Windows shell with its quotes and spaces in it, and `HTTPS://example.com`
+ * or one with a space in front was underlined, shown in the tooltip, and
+ * then refused by the backend's scope, which matches the raw text — a click
+ * that did nothing.
+ */
+export function addressToOpen(url) {
+  const parsed = new URL(url);
+  return `${parsed.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+/**
+ * Open `url` in the user's browser — as `addressToOpen` spells it. Returns
+ * whether it was handed over.
  *
  * A refusal is not an error worth a dialog — the link simply does nothing,
  * which is the right outcome for output that asked for something it should not
  * have.
  */
-export async function openExternal(url) {
-  if (!isOpenable(url)) {
-    console.warn('[openExternal] refused a URL that is not http(s):', url);
+export async function openExternal(raw) {
+  if (!isOpenable(raw)) {
+    console.warn('[openExternal] refused a URL that is not http(s):', raw);
     return false;
   }
+  const url = addressToOpen(raw);
 
   if (!isTauri()) {
     // Browser QA and the mock: `noopener` so the opened page cannot reach back
@@ -96,4 +115,4 @@ export async function openExternal(url) {
   }
 }
 
-export default { openExternal, isOpenable, hyperlinkTitle };
+export default { openExternal, isOpenable, hyperlinkTitle, addressToOpen };
