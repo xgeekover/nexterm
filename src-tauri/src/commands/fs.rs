@@ -65,6 +65,28 @@ pub fn fs_search(
     )
 }
 
+/// Every file in the open folder, for Quick Open: at most `limit` of them
+/// (`DEFAULT_LIST_LIMIT` when not given), sorted, with `truncated` saying
+/// whether there were more. Confined by construction, like `fs_search`: the
+/// walk starts at the open folder, skips what the Explorer hides and never
+/// follows a link into a folder.
+///
+/// Not `#[tauri::command(async)]`, for the reason `fs_copy_path` gives: a
+/// walk takes as long as the tree is big, so it goes to the blocking pool
+/// rather than holding one of the async runtime's worker threads, which
+/// every other async command shares.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fs_list_files(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<fs::search::FileList, String> {
+    let root = fs::search::root_of(state.workspace.root())?;
+    let limit = limit.unwrap_or(fs::search::DEFAULT_LIST_LIMIT);
+    tauri::async_runtime::spawn_blocking(move || fs::search::list_files(&root, limit))
+        .await
+        .map_err(|e| format!("Listing the folder stopped unexpectedly: {e}"))
+}
+
 /// Whether a terminal asked to start in `path` would start there — the one
 /// question the Settings field for a custom directory needs answered. It goes
 /// through `Workspace::can_start_in`, which asks `start_dir`: the same
@@ -294,6 +316,7 @@ mod dispatch_tests {
     const MUST_BE_ASYNC: &[&str] = &[
         "git_status",
         "fs_search",
+        "fs_list_files",
         "fs_read_dir",
         "fs_read_file",
         "fs_write_file",
@@ -385,25 +408,30 @@ mod dispatch_tests {
 
     /// `async` in the attribute moves a body onto the async runtime's worker
     /// threads, not the blocking pool. A copy runs for as long as the folder
-    /// is big, so `fs_copy_path` hands it to the blocking pool itself, and
-    /// turning it into an attribute-`async` command would quietly undo that.
+    /// is big, and so does listing every file in it, so `fs_copy_path` and
+    /// `fs_list_files` hand their work to the blocking pool themselves, and
+    /// turning either into an attribute-`async` command would quietly undo
+    /// that.
     #[test]
-    fn the_copy_runs_on_the_blocking_pool() {
+    fn the_copy_and_the_listing_run_on_the_blocking_pool() {
         let src = source();
-        // By line, so a checkout with CRLF endings reads the same, and from a
-        // line that starts with the signature, so this test's own text is
-        // never taken for it.
-        let body: Vec<&str> = src
-            .lines()
-            .skip_while(|line| !line.starts_with("pub async fn fs_copy_path"))
-            .take_while(|line| line.trim_end() != "}")
-            .collect();
-        assert!(!body.is_empty(), "fs_copy_path is gone, or no longer an async fn");
-        assert!(
-            body.iter().any(|line| line.contains("spawn_blocking")),
-            "fs_copy_path must run the copy through spawn_blocking:\n{}",
-            body.join("\n")
-        );
+        for name in ["fs_copy_path", "fs_list_files"] {
+            // By line, so a checkout with CRLF endings reads the same, and
+            // from a line that starts with the signature, so this test's own
+            // text is never taken for it.
+            let signature = format!("pub async fn {name}");
+            let body: Vec<&str> = src
+                .lines()
+                .skip_while(|line| !line.starts_with(&signature))
+                .take_while(|line| line.trim_end() != "}")
+                .collect();
+            assert!(!body.is_empty(), "{name} is gone, or no longer an async fn");
+            assert!(
+                body.iter().any(|line| line.contains("spawn_blocking")),
+                "{name} must run its work through spawn_blocking:\n{}",
+                body.join("\n")
+            );
+        }
     }
 
     /// v0.5.2 and earlier used the dialog plugin's blocking picker from a
