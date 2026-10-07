@@ -1128,6 +1128,12 @@ function nextDefaultTitle(tabs, preferred = null) {
  * A group already called "Group N" keeps N when nothing else uses it, so
  * clearing a default name leaves it as it was; otherwise it gets the lowest
  * number nobody uses.
+ *
+ * A group being made has no id yet (`null`), so every group there is counts
+ * and it gets the lowest free number. New groups were numbered by how many
+ * groups there were, which reused a number the moment one in the middle
+ * closed: with Group 1, 2 and 3, close Group 2, make a new one, and there
+ * were two "Group 3"s.
  */
 function nextDefaultGroupName(groups, groupId) {
   const numberIn = (name) => {
@@ -1997,7 +2003,7 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = await spawnTab(null, cwd);
       if (!tab) return null;
       const group = makeGroup({
-        name: (typeof name === 'string' && name.trim()) || `Group ${get().groups.length + 1}`,
+        name: (typeof name === 'string' && name.trim()) || nextDefaultGroupName(get().groups, null),
         tabIds: [tab.id],
       });
       set((state) =>
@@ -2174,7 +2180,7 @@ export const useTerminalStore = create((set, get, api) => {
         if (leaves.length === 1 && leaves[0].tabIds.length === 1) return null;
       }
       const group = makeGroup({
-        name: (typeof name === 'string' && name.trim()) || `Group ${state.groups.length + 1}`,
+        name: (typeof name === 'string' && name.trim()) || nextDefaultGroupName(state.groups, null),
         tabIds: [tabId],
       });
       set((s) => {
