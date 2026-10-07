@@ -16,16 +16,9 @@ import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
+import { copyText } from '../../lib/copyText.js';
 import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
-
-async function writeToSystemClipboard(text) {
-  try {
-    await navigator?.clipboard?.writeText?.(text);
-  } catch (err) {
-    console.error('[FileExplorer] Failed to write to the system clipboard:', err);
-  }
-}
 
 export function FileExplorer() {
   const fileTree = useEditorStore((s) => s.fileTree);
@@ -167,14 +160,14 @@ export function FileExplorer() {
       label: 'Copy Path',
       disabled: isEmpty,
       disabledReason: noSelectionReason,
-      onSelect: () => writeToSystemClipboard(target.path),
+      onSelect: () => copyText(target.path),
     });
     items.push({
       key: 'copy-relative-path',
       label: 'Copy Relative Path',
       disabled: isEmpty,
       disabledReason: noSelectionReason,
-      onSelect: () => writeToSystemClipboard(relativeTo(rootPath, target.path)),
+      onSelect: () => copyText(relativeTo(rootPath, target.path)),
     });
 
     pushSeparator();
