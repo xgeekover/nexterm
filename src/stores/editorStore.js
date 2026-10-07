@@ -1292,6 +1292,13 @@ export const useEditorStore = create((set, get) => ({
   cancelRename: () => set({ renamingPath: null }),
 
   copyToClipboard: (path, isDir) => set({ clipboard: { mode: 'copy', path, isDir: Boolean(isDir) } }),
+
+  /**
+   * The name a paste is copying, while it copies; null otherwise. A big
+   * folder takes minutes, with no sign of it, and the clipboard stays
+   * armed — a second Paste started a second whole copy beside the first.
+   */
+  pasting: null,
   cutToClipboard: (path, isDir) => set({ clipboard: { mode: 'cut', path, isDir: Boolean(isDir) } }),
   clearClipboard: () => set({ clipboard: null }),
 
@@ -1331,6 +1338,7 @@ export const useEditorStore = create((set, get) => ({
   pasteClipboard: async (targetFolderPathRaw) => {
     const clip = get().clipboard;
     if (!clip) return;
+    if (get().pasting) throw new Error(`Still copying '${get().pasting}'.`);
     const { mode, path: srcPath, isDir } = clip;
     const targetBase = stripTrailingSep(targetFolderPathRaw);
     const name = basename(srcPath);
@@ -1361,7 +1369,12 @@ export const useEditorStore = create((set, get) => ({
         // Copying through fs_read_dir/fs_read_file lost what the Explorer
         // hides (.git, node_modules, dist…) and stopped at the first file
         // that is not UTF-8 text, with half the folder already written.
-        await invoke('fs_copy_path', { from: srcPath, to: destPath });
+        set({ pasting: name });
+        try {
+          await invoke('fs_copy_path', { from: srcPath, to: destPath });
+        } finally {
+          set({ pasting: null });
+        }
       }
 
       await get().refreshExplorer();

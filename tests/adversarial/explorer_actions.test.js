@@ -11,6 +11,7 @@
  * only changed capitalisation deleted the file outright.
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
 import { invoke, mockBridge } from '../../src/lib/ipc.js';
@@ -495,6 +496,60 @@ describe('Explorer paste never writes over anything', () => {
 
     assert.equal(await invoke('fs_read_file', { path: `${dest}/a.txt` }), 'PRECIOUS');
     assert.equal(await invoke('fs_read_file', { path: `${dest}/a copy.txt` }), 'the copy');
+  });
+
+  test('EP-07: while a paste copies, a second Paste is refused and the Explorer says what is copying', async () => {
+    // Found in review: a big folder takes minutes with no sign of it, the
+    // clipboard stays armed, and a second Paste started a second whole copy.
+    await invoke('fs_write_file', { path: `${scratchDir}/big/a.txt`, content: 'a' });
+    const dest = `${scratchDir}/into`;
+    await invoke('fs_create_dir', { path: dest });
+    await useEditorStore.getState().refreshExplorer();
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/big`, true);
+
+    const real = Object.getPrototypeOf(mockBridge).invoke;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let copies = 0;
+    mockBridge.invoke = async (command, args) => {
+      if (command === 'fs_copy_path') {
+        copies += 1;
+        await held;
+      }
+      return real.call(mockBridge, command, args);
+    };
+    try {
+      const first = useEditorStore.getState().pasteClipboard(dest);
+      for (let i = 0; i < 20 && useEditorStore.getState().pasting === null; i += 1) await new Promise((r) => setTimeout(r, 1));
+      assert.equal(useEditorStore.getState().pasting, 'big', 'what is copying is known while it copies');
+      // Refused at once — not a second copy waiting behind the first.
+      const second = useEditorStore.getState().pasteClipboard(dest).then(() => 'a second copy', (err) => err);
+      const outcome = await Promise.race([second, new Promise((r) => setTimeout(() => r('still waiting'), 50))]);
+      release();
+      await first;
+      await second;
+      assert.ok(outcome instanceof Error && /Still copying 'big'/.test(outcome.message), String(outcome));
+    } finally {
+      release();
+      delete mockBridge.invoke;
+    }
+    assert.equal(copies, 1, 'one copy, not two');
+    assert.equal(useEditorStore.getState().pasting, null, 'and it is over');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/big/a.txt` }), 'a');
+
+    // A copy that fails is over too.
+    mockBridge.invoke = async (command, args) =>
+      command === 'fs_copy_path' ? Promise.reject(new Error('Failed to copy: disk full')) : real.call(mockBridge, command, args);
+    try {
+      await assert.rejects(() => useEditorStore.getState().pasteClipboard(`${scratchDir}`), /disk full/);
+    } finally {
+      delete mockBridge.invoke;
+    }
+    assert.equal(useEditorStore.getState().pasting, null);
+
+    const explorer = readFileSync(new URL('../../src/components/explorer/FileExplorer.jsx', import.meta.url), 'utf8');
+    assert.match(explorer, /const canPaste = Boolean\(clipboard\) && isFolderish && !pasting;/);
+    assert.match(explorer, /\{pasting && \(\s*<div role="status"[^>]*>\s*Copying '\{pasting\}'…/);
   });
 
   test('EP-06: fs_copy_path refuses a destination that exists, and writes nothing (the mock keeps the contract)', async () => {

@@ -52,6 +52,7 @@ export function FileExplorer() {
   const copyToClipboard = useEditorStore((s) => s.copyToClipboard);
   const cutToClipboard = useEditorStore((s) => s.cutToClipboard);
   const pasteClipboard = useEditorStore((s) => s.pasteClipboard);
+  const pasting = useEditorStore((s) => s.pasting);
 
   const [explorerError, setExplorerError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
@@ -139,7 +140,7 @@ export function FileExplorer() {
       disabledReason: noSelectionReason,
       onSelect: () => copyToClipboard(target.path, target.isDir),
     });
-    const canPaste = Boolean(clipboard) && isFolderish;
+    const canPaste = Boolean(clipboard) && isFolderish && !pasting;
     items.push({
       key: 'paste',
       label: 'Paste',
@@ -148,7 +149,9 @@ export function FileExplorer() {
         ? 'Nothing to cut or copy yet'
         : !isFolderish
           ? 'Cannot paste into a file'
-          : undefined,
+          : pasting
+            ? `Still copying '${pasting}'`
+            : undefined,
       onSelect: () => {
         pasteClipboard(target.path).catch((err) => setExplorerError(err.message));
       },
@@ -502,6 +505,11 @@ export function FileExplorer() {
           {explorerError && (
             <div role="alert" className="px-3 py-1 text-ui-sm text-vsc-error border-b border-vsc-border">
               {explorerError}
+            </div>
+          )}
+          {pasting && (
+            <div role="status" className="px-3 py-1 text-ui-sm text-vsc-muted border-b border-vsc-border">
+              Copying '{pasting}'…
             </div>
           )}
 
