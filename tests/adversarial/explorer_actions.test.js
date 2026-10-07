@@ -11,9 +11,10 @@
  * only changed capitalisation deleted the file outright.
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
-import { invoke } from '../../src/lib/ipc.js';
+import { invoke, mockBridge } from '../../src/lib/ipc.js';
 
 let scratchCounter = 0;
 let scratchDir;
@@ -378,5 +379,262 @@ describe('Explorer context menu — Reveal in Finder/Explorer (documented no-op)
     // own children, or the suffix never triggers and the destination is lost.
     assert.equal(await invoke('fs_read_file', { path: `${sub}/keep.txt` }), 'SUB PRECIOUS');
     assert.equal(await invoke('fs_read_file', { path: `${sub}/keep copy.txt` }), 'ROOT COPY');
+  });
+});
+
+/** Every IPC command `fn` sends, in order, answered by the mock as usual. */
+async function commandsSentBy(fn) {
+  const real = Object.getPrototypeOf(mockBridge).invoke;
+  const sent = [];
+  mockBridge.invoke = (command, args) => {
+    sent.push(command);
+    return real.call(mockBridge, command, args);
+  };
+  try {
+    await fn();
+  } finally {
+    delete mockBridge.invoke;
+  }
+  return sent;
+}
+
+/**
+ * Paste picked its " copy" name from the tree in memory, which is a few
+ * levels deep and as old as its last refresh. A folder at the depth limit
+ * comes back with no children, so a paste into it — src/main/java/com/acme in
+ * any Java project — kept the name and wrote over the file there. And a copy
+ * was rebuilt from fs_read_dir and fs_read_file: what the Explorer hides was
+ * left out, and the first file that is not UTF-8 text stopped it half-way.
+ */
+describe('Explorer paste never writes over anything', () => {
+  beforeEach(async () => {
+    resetMenuState();
+    scratchDir = await makeScratchDir();
+    await useEditorStore.getState().refreshExplorer();
+  });
+
+  test('EP-01: a folder too deep for the tree in memory keeps its file; the copy gets its own name', async () => {
+    // Four levels under the scratch folder, five under the root: refreshExplorer
+    // reads five deep, so this folder is in the tree with no children.
+    const deep = `${scratchDir}/main/java/com/acme`;
+    for (const dir of [`${scratchDir}/main`, `${scratchDir}/main/java`, `${scratchDir}/main/java/com`, deep]) {
+      await invoke('fs_create_dir', { path: dir });
+    }
+    await invoke('fs_write_file', { path: `${deep}/Util.java`, content: 'PRECIOUS' });
+    await invoke('fs_write_file', { path: `${scratchDir}/Util.java`, content: 'the copy' });
+    await useEditorStore.getState().refreshExplorer();
+
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/Util.java`, false);
+    await useEditorStore.getState().pasteClipboard(deep);
+
+    assert.equal(await invoke('fs_read_file', { path: `${deep}/Util.java` }), 'PRECIOUS', 'overwritten');
+    assert.equal(await invoke('fs_read_file', { path: `${deep}/Util copy.java` }), 'the copy');
+  });
+
+  test('EP-02: a name that differs only in case is taken — NTFS and APFS call them one file', async () => {
+    const dest = `${scratchDir}/dest`;
+    await invoke('fs_create_dir', { path: dest });
+    await invoke('fs_write_file', { path: `${dest}/Note.txt`, content: 'PRECIOUS' });
+    await invoke('fs_write_file', { path: `${scratchDir}/note.txt`, content: 'the copy' });
+    await useEditorStore.getState().refreshExplorer();
+
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/note.txt`, false);
+    await useEditorStore.getState().pasteClipboard(dest);
+
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/note copy.txt` }), 'the copy');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/Note.txt` }), 'PRECIOUS');
+  });
+
+  test('EP-03: a copied folder takes along what the Explorer hides', async () => {
+    const src = `${scratchDir}/app`;
+    const dest = `${scratchDir}/dest`;
+    for (const dir of [src, `${src}/.git`, `${src}/node_modules`, `${src}/node_modules/left-pad`, `${src}/dist`, dest]) {
+      await invoke('fs_create_dir', { path: dir });
+    }
+    await invoke('fs_write_file', { path: `${src}/index.js`, content: 'i' });
+    await invoke('fs_write_file', { path: `${src}/.git/HEAD`, content: 'ref: refs/heads/main' });
+    await invoke('fs_write_file', { path: `${src}/node_modules/left-pad/index.js`, content: 'pad' });
+    await invoke('fs_write_file', { path: `${src}/dist/bundle.js`, content: 'bundle' });
+    await useEditorStore.getState().refreshExplorer();
+
+    useEditorStore.getState().copyToClipboard(src, true);
+    await useEditorStore.getState().pasteClipboard(dest);
+
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/app/index.js` }), 'i');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/app/.git/HEAD` }), 'ref: refs/heads/main');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/app/node_modules/left-pad/index.js` }), 'pad');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/app/dist/bundle.js` }), 'bundle');
+  });
+
+  test('EP-04: a copy is one fs_copy_path — nothing is read as text and written back', async () => {
+    // fs_read_file is read_to_string: a PNG or a font could not be copied at
+    // all, and in a folder the first one stopped the copy half-way through.
+    await invoke('fs_write_file', { path: `${scratchDir}/logo.png`, content: 'not really a png' });
+    const dest = `${scratchDir}/dest`;
+    await invoke('fs_create_dir', { path: dest });
+    await useEditorStore.getState().refreshExplorer();
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/logo.png`, false);
+
+    const sent = await commandsSentBy(() => useEditorStore.getState().pasteClipboard(dest));
+
+    assert.ok(sent.includes('fs_copy_path'), `sent: ${sent.join(', ')}`);
+    assert.equal(sent.includes('fs_read_file'), false, 'the file was read as text');
+    assert.equal(sent.includes('fs_write_file'), false, 'the file was written back as text');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/logo.png` }), 'not really a png');
+  });
+
+  test('EP-05: the destination is listed afresh, not looked up in the tree', async () => {
+    // Made after the last refresh, so the tree in memory knows nothing of it.
+    const dest = `${scratchDir}/fresh`;
+    await invoke('fs_create_dir', { path: dest });
+    await invoke('fs_write_file', { path: `${dest}/a.txt`, content: 'PRECIOUS' });
+    await invoke('fs_write_file', { path: `${scratchDir}/a.txt`, content: 'the copy' });
+    useEditorStore.setState({ fileTree: [] });
+
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/a.txt`, false);
+    await useEditorStore.getState().pasteClipboard(dest);
+
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/a.txt` }), 'PRECIOUS');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/a copy.txt` }), 'the copy');
+  });
+
+  test('EP-07: while a paste copies, a second Paste is refused and the Explorer says what is copying', async () => {
+    // Found in review: a big folder takes minutes with no sign of it, the
+    // clipboard stays armed, and a second Paste started a second whole copy.
+    await invoke('fs_write_file', { path: `${scratchDir}/big/a.txt`, content: 'a' });
+    const dest = `${scratchDir}/into`;
+    await invoke('fs_create_dir', { path: dest });
+    await useEditorStore.getState().refreshExplorer();
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/big`, true);
+
+    const real = Object.getPrototypeOf(mockBridge).invoke;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let copies = 0;
+    mockBridge.invoke = async (command, args) => {
+      if (command === 'fs_copy_path') {
+        copies += 1;
+        await held;
+      }
+      return real.call(mockBridge, command, args);
+    };
+    try {
+      const first = useEditorStore.getState().pasteClipboard(dest);
+      for (let i = 0; i < 20 && useEditorStore.getState().pasting === null; i += 1) await new Promise((r) => setTimeout(r, 1));
+      assert.equal(useEditorStore.getState().pasting, 'big', 'what is copying is known while it copies');
+      // Refused at once — not a second copy waiting behind the first.
+      const second = useEditorStore.getState().pasteClipboard(dest).then(() => 'a second copy', (err) => err);
+      const outcome = await Promise.race([second, new Promise((r) => setTimeout(() => r('still waiting'), 50))]);
+      release();
+      await first;
+      await second;
+      assert.ok(outcome instanceof Error && /Still copying 'big'/.test(outcome.message), String(outcome));
+    } finally {
+      release();
+      delete mockBridge.invoke;
+    }
+    assert.equal(copies, 1, 'one copy, not two');
+    assert.equal(useEditorStore.getState().pasting, null, 'and it is over');
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/big/a.txt` }), 'a');
+
+    // A copy that fails is over too.
+    mockBridge.invoke = async (command, args) =>
+      command === 'fs_copy_path' ? Promise.reject(new Error('Failed to copy: disk full')) : real.call(mockBridge, command, args);
+    try {
+      await assert.rejects(() => useEditorStore.getState().pasteClipboard(`${scratchDir}`), /disk full/);
+    } finally {
+      delete mockBridge.invoke;
+    }
+    assert.equal(useEditorStore.getState().pasting, null);
+
+    const explorer = readFileSync(new URL('../../src/components/explorer/FileExplorer.jsx', import.meta.url), 'utf8');
+    assert.match(explorer, /const canPaste = Boolean\(clipboard\) && isFolderish && !pasting;/);
+    assert.match(explorer, /\{pasting && \(\s*<div role="status"[^>]*>\s*Copying '\{pasting\}'…/);
+  });
+
+  test('EP-08: a delete names the unsaved files it will close first — a link\'s too', async () => {
+    // Found in review: deleting closed every tab under the path, unsaved ones
+    // included, with nothing said. Then (last review) keeping a link's
+    // unsaved tabs open made Save put a new folder where the link had been.
+    const { deletePromptMessage } = await import('../../src/components/explorer/treeRows.js');
+    const store = useEditorStore.getState();
+    await invoke('fs_create_dir', { path: `${scratchDir}/src` });
+    await invoke('fs_write_file', { path: `${scratchDir}/src/a.js`, content: 'a' });
+    await invoke('fs_write_file', { path: `${scratchDir}/src/b.js`, content: 'b' });
+    await invoke('fs_write_file', { path: `${scratchDir}/src/c.js`, content: 'c' });
+    const a = await store.openFile(`${scratchDir}/src/a.js`);
+    const b = await store.openFile(`${scratchDir}/src/b.js`);
+    await store.openFile(`${scratchDir}/src/c.js`);
+    store.editBuffer(a.id, 'a edited');
+    store.editBuffer(b.id, 'b edited');
+
+    const unsaved = useEditorStore.getState().tabsUnder(`${scratchDir}/src`).filter((t) => t.isDirty).map((t) => t.fileName);
+    assert.deepEqual(unsaved.sort(), ['a.js', 'b.js']);
+    assert.equal(
+      deletePromptMessage({ name: 'src', isDir: true, isLink: false }, ['a.js', 'b.js']),
+      "Are you sure you want to delete 'src'? Its contents will be deleted too. Unsaved changes in a.js and b.js will be lost."
+    );
+    assert.equal(
+      deletePromptMessage({ name: 'shared', isDir: true, isLink: true }, ['index.js']),
+      "Are you sure you want to delete the link 'shared'? What it points to is not touched. Unsaved changes in index.js will be lost; save them first to keep them in what it points to."
+    );
+    assert.equal(deletePromptMessage({ name: 'x.txt', isDir: false, isLink: false }), "Are you sure you want to delete 'x.txt'?");
+    assert.match(deletePromptMessage({ name: 'src', isDir: true }, ['a', 'b', 'c', 'd', 'e']), /in a, b and 3 other files will be lost\.$/);
+
+    // Every tab under what was deleted closes, as the prompt said.
+    await useEditorStore.getState().deletePath(`${scratchDir}/src`, true);
+    assert.equal(useEditorStore.getState().tabs.some((t) => t.filePath.startsWith(`${scratchDir}/src`)), false);
+
+    const explorer = readFileSync(new URL('../../src/components/explorer/FileExplorer.jsx', import.meta.url), 'utf8');
+    assert.match(explorer, /message=\{deletePromptMessage\(deleteConfirm, deleteConfirm\.unsaved\)\}/);
+    assert.doesNotMatch(explorer, /keepUnsaved/, 'no delete keeps a tab whose path is gone');
+  });
+
+  test('EP-09: a Paste is taken before the folder is even listed — a second one in that moment starts nothing', async () => {
+    // Found in the last review: `pasting` was set only once a free name had
+    // been found, which lists the destination first — slow on a big or
+    // network folder — and a second Paste then started a second whole copy.
+    await invoke('fs_write_file', { path: `${scratchDir}/big2/a.txt`, content: 'a' });
+    const dest = `${scratchDir}/into2`;
+    await invoke('fs_create_dir', { path: dest });
+    await useEditorStore.getState().refreshExplorer();
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/big2`, true);
+
+    const real = Object.getPrototypeOf(mockBridge).invoke;
+    let release;
+    const listing = new Promise((resolve) => { release = resolve; });
+    let copies = 0;
+    mockBridge.invoke = async (command, args) => {
+      if (command === 'fs_read_dir' && args?.path === dest) await listing;
+      if (command === 'fs_copy_path') copies += 1;
+      return real.call(mockBridge, command, args);
+    };
+    try {
+      const first = useEditorStore.getState().pasteClipboard(dest);
+      assert.equal(useEditorStore.getState().pasting, 'big2', 'taken before the listing answers');
+      const second = await useEditorStore.getState().pasteClipboard(dest).then(() => 'a second paste', (err) => err);
+      assert.ok(second instanceof Error && /Still copying 'big2'/.test(second.message), String(second));
+      release();
+      await first;
+    } finally {
+      release();
+      delete mockBridge.invoke;
+    }
+    assert.equal(copies, 1);
+    assert.equal(useEditorStore.getState().pasting, null);
+  });
+
+  test('EP-06: fs_copy_path refuses a destination that exists, and writes nothing (the mock keeps the contract)', async () => {
+    const src = `${scratchDir}/src`;
+    const dest = `${scratchDir}/dest`;
+    await invoke('fs_create_dir', { path: src });
+    await invoke('fs_create_dir', { path: dest });
+    await invoke('fs_write_file', { path: `${src}/a.txt`, content: 'new' });
+    await invoke('fs_write_file', { path: `${dest}/a.txt`, content: 'PRECIOUS' });
+
+    await assert.rejects(() => invoke('fs_copy_path', { from: `${src}/a.txt`, to: `${dest}/a.txt` }), /already exists/);
+    await assert.rejects(() => invoke('fs_copy_path', { from: src, to: dest }), /already exists/);
+    assert.equal(await invoke('fs_read_file', { path: `${dest}/a.txt` }), 'PRECIOUS');
+    await assert.rejects(() => invoke('fs_read_file', { path: `${dest}/src/a.txt` }), /File not found/);
   });
 });

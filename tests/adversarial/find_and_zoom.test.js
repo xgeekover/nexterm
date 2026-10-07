@@ -254,3 +254,35 @@ describe('Find: which terminal, and which keys', () => {
     assert.deepEqual(steps, [1, 1, -1, -1, 'reset', 'reset']);
   });
 });
+
+describe('Clear Terminal', () => {
+  // Found in the audit (B6): the palette's Clear Terminal Output, the Terminal
+  // menu's Clear Unpinned Blocks and ⌘L / Ctrl+L outside a terminal all
+  // cleared "unpinned blocks", which nothing has shown since the block view
+  // went — every way in did nothing at all.
+  test('FZ-17: every way in clears the active terminal itself', async () => {
+    const { readFileSync } = await import('node:fs');
+    const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+
+    assert.equal(COMMANDS['clear-terminal'].title, 'Clear Terminal');
+    const ran = [];
+    COMMANDS['clear-terminal'].run({ clearTerminal: () => ran.push('key') });
+    const real = T.getState().clearTerminal;
+    T.setState({ clearTerminal: () => ran.push('menu') });
+    try {
+      runMenuAction('clear-terminal');
+    } finally {
+      T.setState({ clearTerminal: real });
+    }
+    assert.deepEqual(ran, ['key', 'menu']);
+
+    // The store's action reaches the registry, which clears the xterm.
+    const store = read('../../src/stores/terminalStore.js');
+    assert.match(store, /clearTerminal: async \(tabId = null\) => \{\s*const targetId = tabId \|\| get\(\)\.activeTabId;\s*return targetId \? clearTerminalView\(targetId\) : false;/);
+    assert.match(store, /const \{ clearTerminal \} = await import\('\.\.\/components\/terminal\/terminalRegistry\.js'\);\s*return clearTerminal\(tabId\);/);
+    const registry = read('../../src/components/terminal/terminalRegistry.js');
+    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*const entry = instances\.get\(tabId\);\s*if \(!entry \|\| entry\.disposed\) return false;\s*entry\.term\.clear\(\);/);
+    assert.match(read('../../src-tauri/src/menu.rs'), /terminal_safe\("clear-terminal", "Clear Terminal", "CmdOrCtrl\+L"\)/);
+    assert.match(read('../../src/components/command/CommandPalette.jsx'), /case 'clear_terminal':\s*clearTerminal\(\);/);
+  });
+});

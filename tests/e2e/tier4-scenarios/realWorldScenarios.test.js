@@ -27,18 +27,16 @@ describe('Tier 4: Real-World Scenarios (End-to-End User Journeys)', () => {
     const buildTab = await app.createTerminalTab('Build & Lint');
     assert.equal(app.activeTerminalTabId, buildTab.id);
 
-    // Step 4: Execute build commands
-    const b1 = await app.executeTerminalCommand('echo building');
-    const b2 = await app.executeTerminalCommand('echo linting');
-    assert.equal(buildTab.blocks.length, 2);
+    // Step 4: Execute build commands — in the build terminal, the one on screen
+    const build = await app.runTerminalCommand('echo building');
+    const lint = await app.runTerminalCommand('echo linting');
+    assert.equal(build.exitCode, 0);
+    assert.equal(lint.exitCode, 0);
+    const buildOutput = app.terminalOutput(buildTab.id);
+    assert.ok(buildOutput.includes('building') && buildOutput.includes('linting'), 'Both must run in the build terminal');
+    assert.equal(app.terminalOutput(firstTerminalId).includes('building'), false, 'and not in the first one');
 
-    // Step 5: Pin the important build block and clear others
-    app.pinBlock(b1.id);
-    app.clearTerminalBlocks(buildTab.id);
-    assert.equal(buildTab.blocks.length, 1);
-    assert.equal(buildTab.blocks[0].id, b1.id);
-
-    // Step 6: Switch back to default terminal tab
+    // Step 5: Switch back to default terminal tab
     app.switchTerminalTab(firstTerminalId);
     assert.equal(app.activeTerminalTabId, firstTerminalId);
   });

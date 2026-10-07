@@ -335,3 +335,67 @@ describe('Clipboard keys: nothing else claims them', () => {
     assert.match(body, /if \(clipboard !== undefined\) return clipboard;/);
   });
 });
+
+describe('Copy Path (copyText)', () => {
+  // Found in the audit (A4): the Explorer, the terminal list and the tab chip
+  // each copied a path their own way; the terminal list's had no fallback and
+  // no error handling. One helper now does it for all three.
+  const set = (name, value) => Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  async function withPage({ writeText, execCommand }, fn) {
+    const saved = { navigator: globalThis.navigator, document: globalThis.document };
+    const focused = [];
+    const made = [];
+    const editorBox = { focus: (opts) => focused.push(['editor', opts]) };
+    const doc = {
+      activeElement: editorBox,
+      body: { appendChild: (el) => made.push(el) },
+      createElement: () => {
+        const el = { style: {}, focus: () => focused.push(['area']), select() {}, remove() { el.removed = true; } };
+        return el;
+      },
+      execCommand,
+    };
+    set('navigator', writeText === undefined ? {} : { clipboard: { writeText } });
+    set('document', doc);
+    try {
+      return await fn({ focused, made });
+    } finally {
+      set('navigator', saved.navigator);
+      set('document', saved.document);
+    }
+  }
+
+  test('KC-10: the Clipboard API first; where it refuses, the old copy, and the focus goes back', async () => {
+    const { copyText } = await import('../../src/lib/copyText.js');
+    const written = [];
+    await withPage({ writeText: async (t) => written.push(t), execCommand: () => assert.fail('no fallback needed') }, async () => {
+      assert.equal(await copyText('/Users/me/proj'), true);
+    });
+    assert.deepEqual(written, ['/Users/me/proj']);
+
+    const commands = [];
+    await withPage(
+      { writeText: async () => { throw new Error('denied'); }, execCommand: (c) => (commands.push(c), true) },
+      async ({ focused, made }) => {
+        assert.equal(await copyText('C:\\Users\\me'), true);
+        assert.equal(made.length, 1);
+        assert.equal(made[0].value, 'C:\\Users\\me');
+        assert.equal(made[0].removed, true, 'the textarea goes again');
+        assert.deepEqual(focused.at(-1), ['editor', { preventScroll: true }], 'what had the focus has it back');
+      }
+    );
+    assert.deepEqual(commands, ['copy']);
+
+    await withPage({ writeText: undefined, execCommand: () => { throw new Error('no'); } }, async () => {
+      assert.equal(await copyText('x'), false, 'nothing copied, nothing thrown');
+    });
+    assert.equal(await copyText(''), false);
+    assert.equal(await copyText(null), false);
+
+    for (const file of ['../../src/components/terminal/TerminalsPanel.jsx', '../../src/components/terminal/TerminalSplitContainer.jsx', '../../src/components/explorer/FileExplorer.jsx']) {
+      const src = readFileSync(new URL(file, import.meta.url), 'utf8');
+      assert.match(src, /import \{ copyText \} from '\.\.\/\.\.\/lib\/copyText\.js';/, file);
+      assert.doesNotMatch(src, /navigator\.clipboard|execCommand/, `${file} copies on its own`);
+    }
+  });
+});

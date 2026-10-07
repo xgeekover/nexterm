@@ -63,28 +63,4 @@ monaco.editor.defineTheme('nexterm-dark', {
   },
 });
 
-monaco.editor.defineTheme('nexterm-light', {
-  base: 'vs',
-  inherit: true,
-  rules: [],
-  colors: {
-    'editor.background': '#ffffff',
-    'editor.foreground': '#3b3b3b',
-    'editorLineNumber.foreground': '#6e7681',
-    'editorLineNumber.activeForeground': '#171184',
-    'editor.lineHighlightBorder': '#eeeeee',
-    'editor.selectionBackground': '#add6ff',
-    'editorIndentGuide.background1': '#d3d3d3',
-    'editorIndentGuide.activeBackground1': '#939393',
-    'editorGutter.background': '#ffffff',
-    'editorWidget.background': '#f8f8f8',
-    'editorWidget.border': '#e5e5e5',
-    'focusBorder': '#005fb8',
-    'input.background': '#ffffff',
-    'input.border': '#cecece',
-    'list.hoverBackground': '#f2f2f2',
-    'list.activeSelectionBackground': '#e8e8e8',
-  },
-});
-
 loader.config({ monaco });

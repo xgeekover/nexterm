@@ -181,3 +181,114 @@ describe('Editor layout: tab groups and drag-drop placement', () => {
     );
   });
 });
+
+/**
+ * Ctrl/Cmd+S, File → Save and the Explorer's highlight all read the store's
+ * `activeTabId`. Clicking or typing into a group only told the store which
+ * GROUP was active, so after opening a file in a second group and going back
+ * to type in the first, Ctrl+S wrote the untouched file in the other group
+ * and left the edited one unsaved.
+ */
+describe('Editor layout: the group being typed in is the one Save writes', () => {
+  beforeEach(async () => {
+    S.setState({
+      tabs: [],
+      activeTabId: null,
+      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
+      activeEditorPaneId: 'editor-pane-root',
+    });
+    files = await makeScratchFiles(3);
+  });
+
+  /** What Ctrl/Cmd+S and File → Save do: save the store's active tab. */
+  const pressSave = () => S.getState().saveFile(S.getState().activeTabId);
+
+  test('EL-12: focusing the other group makes its tab the one Ctrl+S saves — and the Explorer marks', async () => {
+    const app = (await S.getState().openFile(files[0])).id;
+    S.getState().splitEditorPane('editor-pane-root', 'horizontal');
+    const utils = (await S.getState().openFile(files[1])).id;
+    const left = leafOf(app).id;
+    assert.notEqual(leafOf(utils).id, left, 'precondition: utils opened in the new group');
+    assert.equal(S.getState().activeTabId, utils, 'precondition');
+
+    // A click into the left group's editor, then typing there.
+    S.getState().setActiveEditorPane(left);
+    S.getState().editBuffer(app, '// typed in the left group\n');
+    assert.equal(S.getState().activeTabId, app, 'the tab on screen in the focused group');
+
+    await pressSave();
+    assert.equal(await invoke('fs_read_file', { path: files[0] }), '// typed in the left group\n', 'the edit reached the disk');
+    assert.equal(S.getState().tabs.find((t) => t.id === app).isDirty, false, 'and the tab is clean');
+  });
+
+  test('EL-13: back to the first group, Save follows again; a group that shows no file saves nothing', async () => {
+    const a = (await S.getState().openFile(files[0])).id;
+    S.getState().splitEditorPane('editor-pane-root', 'horizontal');
+    const b = (await S.getState().openFile(files[1])).id;
+    const right = leafOf(b).id;
+    S.getState().setActiveEditorPane(leafOf(a).id);
+    S.getState().setActiveEditorPane(right);
+    assert.equal(S.getState().activeTabId, b);
+
+    // An empty group, just split off and focused: nothing in it to save.
+    const empty = S.getState().splitEditorPane(right, 'vertical');
+    S.getState().setActiveEditorPane(empty);
+    assert.equal(S.getState().activeEditorPaneId, empty);
+    assert.equal(S.getState().activeTabId, null, 'no file in the focused group, so none is active');
+    S.getState().editBuffer(a, 'unsaved');
+    await pressSave();
+    assert.equal(S.getState().tabs.find((t) => t.id === a).isDirty, true, 'Save in an empty group wrote another group\'s file');
+  });
+
+  test('EL-14: a group whose remembered tab is gone saves the one it shows; an unknown group changes nothing', async () => {
+    const a = (await S.getState().openFile(files[0])).id;
+    const b = (await S.getState().openFile(files[1])).id;
+    // The tab strip falls back to the first tab when its own is not there.
+    S.setState({
+      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [a, b], activeTabId: 'tab-gone' },
+      activeTabId: null,
+    });
+    S.getState().setActiveEditorPane('editor-pane-root');
+    assert.equal(S.getState().activeTabId, a);
+
+    const before = S.getState();
+    S.getState().setActiveEditorPane('editor-pane-nope');
+    assert.equal(S.getState(), before, 'an unknown group is not made active');
+
+    // Focusing the group that is already active, with its tab already the
+    // active one, is no change at all — a click in the editor does it on
+    // every mousedown.
+    S.getState().setActiveEditorPane('editor-pane-root');
+    assert.equal(S.getState(), before, 'a click that changes nothing still replaced the state');
+  });
+
+  test('EL-15: closing the active tab makes the tab its group now shows active — not the first file of all', async () => {
+    // Found in review: closeTab took the first tab of the whole list. With
+    // two groups that was the other group's file, which Save then wrote and
+    // the keyboard went to after "Save X?" was answered.
+    const a = (await S.getState().openFile(files[0])).id;
+    const b1 = (await S.getState().openFile(files[1])).id;
+    S.getState().dropEditorTabOnPane(b1, 'editor-pane-root', 'right');
+    const right = leafOf(b1).id;
+    S.getState().setActiveEditorPane(right);
+    const b2 = (await S.getState().openFile(files[2])).id;
+    assert.deepEqual([leafOf(a).id, leafOf(b2).id], ['editor-pane-root', right], 'setup: a on the left, b1 and b2 on the right');
+    assert.equal(S.getState().activeTabId, b2);
+
+    S.getState().closeTab(b2);
+    assert.equal(S.getState().activeEditorPaneId, right);
+    assert.equal(S.getState().activeTabId, b1, 'the right group shows b1 now, and b1 is what Save writes');
+
+    // Open again and closed again: the one active is the one the group draws.
+    const again = (await S.getState().openFile(files[2])).id;
+    S.getState().closeTab(again);
+    assert.equal(S.getState().activeTabId, leafOf(b1).activeTabId);
+
+    // The last tab of a group: the group goes, and the other group's shown tab is active.
+    S.getState().closeTab(b1);
+    assert.equal(leaves().length, 1);
+    assert.equal(S.getState().activeTabId, a);
+    S.getState().closeTab(a);
+    assert.equal(S.getState().activeTabId, null);
+  });
+});

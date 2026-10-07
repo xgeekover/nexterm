@@ -62,8 +62,6 @@ class BrowserMockBridge {
       default_shell: '/bin/zsh',
       home_dir: '/Users/developer',
       app_version: '0.1.5',
-      tauri_version: '2.0.0',
-      rust_version: '1.80.0',
     };
     // What `show_desktop_notification` was asked to show, oldest first. There
     // is no desktop here; the suites read this instead.
@@ -76,6 +74,13 @@ class BrowserMockBridge {
     // `opencode session list --format json` prints — `directory` included,
     // which the backend narrows by and does not hand back.
     this.agentSessions = [];
+    // What `app_set_unsaved` was last told, the questions `app_close_ack`
+    // said were heard, and how often `app_close_window` and `app_quit` were
+    // asked for. Nothing closes or quits here; the suites read these.
+    this.unsaved = false;
+    this.closeAcks = [];
+    this.windowCloses = 0;
+    this.quitRequests = 0;
   }
 
   listen(event, callback) {
@@ -488,6 +493,14 @@ class BrowserMockBridge {
         return this.files.get(path);
       }
 
+      case 'fs_file_size': {
+        const { path } = args;
+        if (!this.files.has(path)) {
+          throw new Error(`Failed to read the size of '${path}': No such file or directory`);
+        }
+        return new TextEncoder().encode(this.files.get(path)).length;
+      }
+
       // 8. fs_write_file
       // The real one walks the disk in Rust (src-tauri/src/fs/search.rs) with
       // caps and the Explorer's ignore list. This searches the virtual files
@@ -527,6 +540,22 @@ class BrowserMockBridge {
           if (matches.length) files.push({ path, matches, truncated: false });
         }
         return { files, total_matches: total, files_searched: searched, truncated: false };
+      }
+
+      // Every file under the open folder, for Go to File — which used to list
+      // only the Explorer's tree, five levels deep. The real one walks the
+      // disk (src-tauri) and answers in this shape: paths in path order,
+      // without the folders the Explorer skips, at most `limit` of them, and
+      // `truncated` when there were more. The mock's folder is always open.
+      case 'fs_list_files': {
+        const root = (this.root ?? '/workspace').replace(/\/+$/, '');
+        const limit = Number.isInteger(args?.limit) && args.limit > 0 ? args.limit : 20000;
+        const SKIPPED = ['.git', 'node_modules', 'target', '.agents', 'dist'];
+        const all = [...this.files.keys()]
+          .filter((path) => path.startsWith(`${root}/`))
+          .filter((path) => !path.slice(root.length + 1).split('/').slice(0, -1).some((dir) => SKIPPED.includes(dir)))
+          .sort();
+        return { files: all.slice(0, limit), truncated: all.length > limit };
       }
 
       case 'fs_write_file': {
@@ -585,6 +614,36 @@ class BrowserMockBridge {
         move(this.files, false);
         move(this.directories, true);
         await this.emit('fs-change', { path: to, kind: 'rename' });
+        return null;
+      }
+
+      // fs_copy_path — a file, or a folder and everything in it, copied as it
+      // is: the folders the Explorer hides (.git, node_modules, dist…) come
+      // along, and the backend copies bytes, so a binary file is no
+      // different. A destination that exists is refused before anything is
+      // written, never merged into or overwritten.
+      case 'fs_copy_path': {
+        const { from, to } = args;
+        const within = (key, dir) => key === dir || key.startsWith(`${dir}/`);
+        const known = () => [...this.files.keys(), ...this.directories];
+        const isDir = !this.files.has(from) && known().some((key) => within(key, from));
+        if (!this.files.has(from) && !isDir) {
+          throw new Error(`Path does not exist: ${from}`);
+        }
+        if (known().some((key) => within(key, to))) {
+          throw new Error(`A file or folder named '${to.split('/').pop()}' already exists`);
+        }
+        if (isDir && to.startsWith(`${from}/`)) {
+          throw new Error(`Cannot copy '${from}' into itself`);
+        }
+        if (isDir) this.directories.add(to);
+        for (const dir of [...this.directories]) {
+          if (within(dir, from)) this.directories.add(to + dir.slice(from.length));
+        }
+        for (const [key, value] of [...this.files]) {
+          if (within(key, from)) this.files.set(to + key.slice(from.length), value);
+        }
+        await this.emit('fs-change', { path: to, kind: 'create' });
         return null;
       }
 
@@ -657,6 +716,28 @@ class BrowserMockBridge {
           .filter((s) => trim(s.directory) === trim(cwd))
           .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
           .map(({ id, title, updated, created }) => ({ id, title, updated, created }));
+      }
+
+      // 22. app_set_unsaved / app_close_ack / app_close_window / app_quit —
+      // the backend keeps whether an editor tab is unsaved, holds a close or
+      // a quit while one is and asks the page, waits only for a page that
+      // says it heard, and closes or quits once the user has answered
+      // (src-tauri/src/commands/app.rs).
+      case 'app_set_unsaved': {
+        this.unsaved = args?.unsaved === true;
+        return null;
+      }
+      case 'app_close_ack': {
+        this.closeAcks.push(args?.id);
+        return null;
+      }
+      case 'app_close_window': {
+        this.windowCloses += 1;
+        return null;
+      }
+      case 'app_quit': {
+        this.quitRequests += 1;
+        return null;
       }
 
       default:

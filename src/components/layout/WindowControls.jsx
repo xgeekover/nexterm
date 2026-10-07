@@ -7,6 +7,16 @@ const button =
   'w-[46px] h-full flex items-center justify-center text-vsc-muted hover:text-vsc-fg transition-colors';
 
 /**
+ * A click leaves the keyboard where it was — the terminal or the editor —
+ * as Windows' own title bar buttons do. Chromium gives a clicked button the
+ * focus, and the question a close asks gives the focus back to what had it:
+ * after Cancel that was ✕ itself, so the next Enter asked to close again,
+ * with Save ready to press — and a second Enter closed the window and every
+ * shell in it.
+ */
+const keepFocus = (e) => e.preventDefault();
+
+/**
  * Minimise / maximise / close for the frameless window off macOS. macOS keeps
  * its native traffic lights, so this is not rendered there.
  */
@@ -33,12 +43,19 @@ export function WindowControls() {
   return (
     // Not a drag region: these must stay clickable.
     <div className="flex items-stretch h-full shrink-0 ml-1">
-      <button type="button" title="Minimize" onClick={() => windowControls.minimize()} className={cn(button, 'hover:bg-vsc-item-hover')}>
+      <button
+        type="button"
+        title="Minimize"
+        onMouseDown={keepFocus}
+        onClick={() => windowControls.minimize()}
+        className={cn(button, 'hover:bg-vsc-item-hover')}
+      >
         <Minus size={14} />
       </button>
       <button
         type="button"
         title={maximized ? 'Restore' : 'Maximize'}
+        onMouseDown={keepFocus}
         onClick={() => windowControls.toggleMaximize()}
         className={cn(button, 'hover:bg-vsc-item-hover')}
       >
@@ -47,6 +64,7 @@ export function WindowControls() {
       <button
         type="button"
         title="Close"
+        onMouseDown={keepFocus}
         onClick={() => windowControls.close()}
         className={cn(button, 'hover:bg-vsc-error hover:text-white')}
       >

@@ -39,7 +39,7 @@ export function useKeybindings() {
   const focusNextPane = useTerminalStore((s) => s.focusNextPane);
   const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
   const createTerminalTab = useTerminalStore((s) => s.createTab);
-  const clearBlocks = useTerminalStore((s) => s.clearBlocks);
+  const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const openFind = useTerminalStore((s) => s.openFind);
 
   // Defaults plus whatever the user changed. Re-resolved only when the
@@ -74,7 +74,7 @@ export function useKeybindings() {
       focusNextPane,
       togglePaneZoom,
       createTerminalTab,
-      clearBlocks,
+      clearTerminal,
       openFind,
       zoomFont,
       resetZoom,
@@ -122,7 +122,7 @@ export function useKeybindings() {
     focusNextPane,
     togglePaneZoom,
     createTerminalTab,
-    clearBlocks,
+    clearTerminal,
     openFind,
     zoomFont,
     resetZoom,

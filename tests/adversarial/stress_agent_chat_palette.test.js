@@ -9,7 +9,7 @@
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { AppEnvironment } from '../e2e/harness/appEnvironment.js';
 import { MockIpcBridge } from '../e2e/harness/mockIpc.js';
-import { fuzzyMatch, parseAnsiToSpans, formatBytes, formatDuration } from '../../src/lib/utils.js';
+import { fuzzyMatch } from '../../src/lib/utils.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 

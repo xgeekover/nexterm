@@ -11,9 +11,10 @@ import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs, EditorDragContext, markEditorDragEnded, stripSlotAt } from './EditorTabs.jsx';
-import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
+import { segmentsBelow } from '../../lib/paths.js';
+import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
@@ -371,12 +372,88 @@ function DragPreview({ drag }) {
   );
 }
 
-/** Breadcrumb segments = file path relative to the workspace root. */
-function relativeSegments(filePath, rootPath) {
-  const base = (rootPath || '').replace(/\/+$/, '');
-  let relativePath = base && filePath.startsWith(base) ? filePath.slice(base.length) : filePath;
-  relativePath = relativePath.replace(/^\/+/, '');
-  return relativePath ? relativePath.split('/').filter(Boolean) : [];
+/**
+ * Keep `editor`, a group's Monaco editor, in `ref` for as long as it lives.
+ *
+ * Each tab a group shows gets an editor of its own (the `key` on <Editor>
+ * below), and the one before is disposed. Left in the ref, it was handed the
+ * next request meant for the new one — Go to File asking for the keyboard, a
+ * terminal link's line — before the new one had mounted: a disposed editor
+ * moves no caret and takes no focus, and the request was spent on it.
+ * Let go, the request waits for the new editor's `onMount`.
+ */
+export function holdEditor(ref, editor) {
+  ref.current = editor;
+  editor.onDidDispose?.(() => {
+    if (ref.current === editor) ref.current = null;
+  });
+}
+
+/**
+ * What the Save / Don't Save / Cancel prompt says. Opening another folder
+ * also says why it is asking: nothing about choosing a folder suggests that
+ * every editor tab is about to close.
+ */
+function unsavedPromptText({ kind, names }) {
+  const many = names.length > 1;
+  const reason = kind === 'root' ? 'Opening another folder closes every editor tab. ' : '';
+  return {
+    title: many ? 'Unsaved Changes' : `Save ${names[0]}?`,
+    message: many
+      ? `${names.join(', ')} have unsaved changes. ${reason}Your changes will be lost if you don't save them.`
+      : `${reason}Your changes to ${names[0]} will be lost if you don't save them.`,
+    confirmLabel: many ? 'Save All' : 'Save',
+  };
+}
+
+/**
+ * What the prompt over a save that would replace the file on disk says.
+ *
+ * Usually the file has changed since the tab read it, and what is on disk
+ * can be taken instead. When it could not be read back at all (`unreadable`)
+ * — grown past the 50 MB the editor opens, a log appended to; no longer
+ * text; behind a link that leads nowhere — whether it changed cannot be
+ * known, and there is no version on disk to take: it says why, and offers
+ * only to overwrite or not.
+ */
+/**
+ * Whether a press makes the group it lands in the active one — and so its
+ * shown tab what Save writes. Only the main button: a middle-click closes a
+ * tab in another group without the focus leaving the one being typed in, and
+ * it made that group active all the same, so the next Ctrl+S saved a file the
+ * user was not editing and left the edited one unsaved.
+ */
+export function pressActivatesGroup(e) {
+  return e?.button === 0;
+}
+
+/**
+ * The editor's prompts in the order they opened — `previous`, the order last
+ * drawn, with those now closed dropped and those newly `open` added at the
+ * end.
+ *
+ * They share one portal, and the later in it is drawn on top. ConfirmDialog
+ * gives the keyboard to the newest; drawn in a fixed order, a window-close
+ * prompt that opened while "File Changed on Disk" was showing went under it
+ * and still took Enter, Escape and Tab.
+ */
+export function inOpenOrder(previous, open) {
+  return [...previous.filter((key) => open.includes(key)), ...open.filter((key) => !previous.includes(key))];
+}
+
+export function overwritePromptText({ fileName, unreadable = null }) {
+  if (unreadable == null) {
+    return {
+      title: 'File Changed on Disk',
+      message: `${fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`,
+      altLabel: 'Use Disk Version',
+    };
+  }
+  return {
+    title: 'File on Disk Could Not Be Read',
+    message: `${fileName} could not be read back to see whether it changed on disk since you opened it: ${String(unreadable).replace(/\.$/, '')}. Saving now would replace whatever is there with this tab's version.`,
+    altLabel: null,
+  };
 }
 
 /**
@@ -420,6 +497,12 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
     (editor, filePath) => {
       const reveal = useEditorStore.getState().pendingReveal;
       if (!editor || !reveal || reveal.filePath !== filePath) return;
+      // Only the keyboard was asked for (`focusEditor`): the caret stays.
+      if (reveal.line == null) {
+        editor.focus();
+        clearReveal();
+        return;
+      }
       const lineCount = editor.getModel()?.getLineCount?.() ?? reveal.line;
       // A stack trace can name a line past the end of a file that has since
       // been edited. Land on the last line rather than refusing to move.
@@ -436,7 +519,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
 
-  const segments = activeTab ? relativeSegments(activeTab.filePath, rootPath) : [];
+  const segments = activeTab ? segmentsBelow(rootPath, activeTab.filePath) : [];
 
   // Clicking a second link into a file that is already open remounts nothing,
   // so `onMount` never fires again and this is the only thing that moves.
@@ -447,7 +530,9 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
 
   return (
     <div
-      onMouseDown={() => setActiveEditorPane(paneId)}
+      onMouseDown={(e) => {
+        if (pressActivatesGroup(e)) setActiveEditorPane(paneId);
+      }}
       onFocusCapture={() => setActiveEditorPane(paneId)}
       className={cn(
         'flex flex-col h-full w-full bg-vsc-editor overflow-hidden',
@@ -499,7 +584,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               value={activeTab.content}
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
               onMount={(editor) => {
-                editorRef.current = editor;
+                holdEditor(editorRef, editor);
                 applyPendingReveal(editor, activeTab.filePath);
               }}
               options={monacoOptions}
@@ -569,7 +654,6 @@ function SplitNode({ node, onSplit, onClose, canClose }) {
  * WKWebView/pointer-events rationale).
  */
 export function EditorPanel() {
-  const diffView = useEditorStore((s) => s.diffView);
   const editorSplitTree = useEditorStore((s) => s.editorSplitTree);
   const splitEditorPane = useEditorStore((s) => s.splitEditorPane);
   const requestCloseEditorPane = useEditorStore((s) => s.requestCloseEditorPane);
@@ -620,37 +704,46 @@ export function EditorPanel() {
     requestCloseEditorPane(paneId);
   }, [requestCloseEditorPane]);
 
+  // Where the keyboard goes when a prompt closes and what had it is gone —
+  // the tab's own ✕, which Chromium focuses when it is clicked and which
+  // goes with the tab it closed: the file now in front, or the terminal
+  // when no file is left open.
+  const focusAfterPrompt = () => focusWorkspace('editor');
+
+  const unsavedText = pendingClose ? unsavedPromptText(pendingClose) : null;
   const unsavedPrompt = pendingClose ? (
     <ConfirmDialog
       open
-      title={pendingClose.names.length > 1 ? 'Unsaved Changes' : `Save ${pendingClose.names[0]}?`}
-      message={
-        pendingClose.names.length > 1
-          ? `${pendingClose.names.join(', ')} have unsaved changes. Your changes will be lost if you don't save them.`
-          : `Your changes to ${pendingClose.names[0]} will be lost if you don't save them.`
-      }
-      confirmLabel="Save"
+      title={unsavedText.title}
+      message={unsavedText.message}
+      confirmLabel={unsavedText.confirmLabel}
       altLabel="Don't Save"
       altDanger
       cancelLabel="Cancel"
       onConfirm={() => {
         savePendingClose().catch((err) =>
-          console.error('[EditorPanel] Save before close failed; keeping the tab open:', err)
+          console.error('[EditorPanel] Save before closing failed; nothing was closed:', err)
         );
       }}
-      onAlt={discardPendingClose}
+      onAlt={() => {
+        discardPendingClose().catch((err) =>
+          console.error('[EditorPanel] Closing without saving failed:', err)
+        );
+      }}
       onCancel={cancelPendingClose}
+      fallbackFocus={focusAfterPrompt}
     />
   ) : null;
 
+  const overwriteText = pendingOverwrite ? overwritePromptText(pendingOverwrite) : null;
   const overwritePrompt = pendingOverwrite ? (
     <ConfirmDialog
       open
-      title="File Changed on Disk"
-      message={`${pendingOverwrite.fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`}
+      title={overwriteText.title}
+      message={overwriteText.message}
       confirmLabel="Overwrite"
       danger
-      altLabel="Use Disk Version"
+      altLabel={overwriteText.altLabel}
       cancelLabel="Cancel"
       onConfirm={() => {
         confirmPendingOverwrite().catch((err) =>
@@ -663,12 +756,34 @@ export function EditorPanel() {
         );
       }}
       onCancel={cancelPendingOverwrite}
+      fallbackFocus={focusAfterPrompt}
     />
   ) : null;
 
-  if (diffView && diffView.open) {
-    return <DiffViewer />;
-  }
+  // Onto <body>, for the reason DragPreview is: inside this panel's
+  // transformed ancestor a `fixed` overlay is confined to the editor's own
+  // box. Closing the window and opening a folder ask here too, and with the
+  // terminal panel maximised that box is zero high: a prompt nobody can see
+  // is a window that will not close. The diff view replaces the editor, not
+  // the question, so the prompts are drawn over it as well.
+  // Drawn in the order they opened: see `inOpenOrder`.
+  const promptOrder = useRef([]);
+  promptOrder.current = inOpenOrder(
+    promptOrder.current,
+    [unsavedPrompt && 'unsaved', overwritePrompt && 'overwrite'].filter(Boolean)
+  );
+  const promptOf = { unsaved: unsavedPrompt, overwrite: overwritePrompt };
+  const prompts =
+    unsavedPrompt || overwritePrompt
+      ? createPortal(
+          <>
+            {promptOrder.current.map((key) => (
+              <React.Fragment key={key}>{promptOf[key]}</React.Fragment>
+            ))}
+          </>,
+          document.body
+        )
+      : null;
 
   if (!editorSplitTree) return null;
 
@@ -682,8 +797,7 @@ export function EditorPanel() {
         </div>
         <DragPreview drag={drag} />
       </div>
-      {unsavedPrompt}
-      {overwritePrompt}
+      {prompts}
     </EditorDragContext.Provider>
   );
 }

@@ -5,9 +5,10 @@ import { StatusBar } from './components/layout/StatusBar.jsx';
 import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { SettingsWindow } from './components/common/SettingsWindow.jsx';
+import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
-import { useTheme } from './hooks/useTheme.js';
+import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
@@ -22,9 +23,10 @@ if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debu
 
 export default function App() {
   // Initialize global theme and keyboard shortcuts
-  useTheme();
   useKeybindings();
   useMenuEvents();
+  // Closing the window or quitting asks about unsaved editor tabs first.
+  useUnsavedGuard();
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
@@ -62,6 +64,9 @@ export default function App() {
 
       {/* Persistent Bottom Status Bar */}
       <StatusBar />
+
+      {/* Why a file that was asked for did not open */}
+      <OpenFailureNotice />
 
       {/* Global ⌘K Command Palette */}
       <CommandPalette />

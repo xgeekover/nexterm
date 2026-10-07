@@ -269,6 +269,17 @@ says which by name. Before then, or if OpenCode cannot be found from NexTerm,
 it is `opencode --continue`: the folder's most recent. *Choose…* lists the
 folder's OpenCode conversations to resume another.
 
+**When a shell exits.** A terminal whose shell has ended says so once —
+`[process exited with code …]`, with Windows' crash and Ctrl+C codes also in
+hex (`0xC000013A, ended by Ctrl+C`) — and **Enter** starts a new shell in its
+place: same pane, its last directory, the shell it ran, at the top of the pane
+with what was on screen moved up into the scrollback. Other keys go nowhere
+instead of each printing an error, and whatever the last program had switched
+on (mouse reporting, the full-screen view) is switched off, so a drag selects
+text again. On Windows this is how a terminal comes back when quitting
+OpenCode with Ctrl+C took cmd down with it, as has been seen; the code it
+prints says how cmd ended.
+
 **Save the whole session.** The 💾 on the WORKSPACES section (or *Save All
 Groups…* from the empty-area menu) snapshots every group — layouts and
 directories included. Double-click a saved workspace to put the session back

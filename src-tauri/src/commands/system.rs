@@ -21,8 +21,6 @@ pub fn system_get_info() -> Result<SystemInfo, String> {
         home_dir,
         arch: Some(arch),
         app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        tauri_version: Some("2.11.5".to_string()),
-        rust_version: Some("1.97.1".to_string()),
         os_build: os_build(),
     })
 }

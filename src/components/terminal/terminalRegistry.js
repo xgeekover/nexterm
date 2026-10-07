@@ -48,8 +48,9 @@ import {
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
-import { findLinks, resolveLinkPath } from '../../lib/terminalLinks.js';
-import { openExternal } from '../../lib/openExternal.js';
+import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
+import { trackCommandMarks } from '../../lib/stickyCommand.js';
+import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installTerminalRightClick } from '../../lib/terminalRightClick.js';
@@ -57,6 +58,7 @@ import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { attachOutput, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
+import { exitNotice, freshScreen } from '../../lib/shellExit.js';
 
 const instances = new Map();
 
@@ -598,44 +600,17 @@ useSystemStore.subscribe((state, prev) => {
 });
 
 /**
- * The whole logical line a rendered row belongs to.
- *
- * xterm hands a link provider ONE row at a time, but a terminal wraps: in an
- * 80-column pane `at Object.<anonymous> (/very/long/path/app.test.js:42:13)`
- * is split across two rows, and a provider that only ever sees one row finds
- * no link in either. So walk back to the row that started the wrap, join the
- * group, and remember where it began — offsets map back to (x, y) from there.
- */
-function logicalLineAt(term, row) {
-  const buffer = term.buffer.active;
-  let start = row;
-  while (start > 1 && buffer.getLine(start - 1)?.isWrapped) start -= 1;
-
-  let text = '';
-  for (let i = start; i <= buffer.length; i += 1) {
-    const line = buffer.getLine(i - 1);
-    if (!line) break;
-    if (i > start && !line.isWrapped) break;
-    // No trimming: every wrapped row is exactly `cols` wide, and that is what
-    // makes `positionOf` arithmetic rather than a search.
-    text += line.translateToString(false);
-  }
-  return { text, start };
-}
-
-/** An offset into the joined text, as xterm's 1-based (x, y). */
-function positionOf(offset, startRow, cols) {
-  return { x: (offset % cols) + 1, y: startRow + Math.floor(offset / cols) };
-}
-
-/**
  * Make paths and URLs in the output clickable.
  *
  * A stack trace names a file and a line, and this app has that file's editor
  * in the same window — having to retype the path to reach it was most of the
- * reason that pairing did not pay off. What counts as a link is decided by
- * `src/lib/terminalLinks.js`, which is pure and tested; this maps the matches
- * onto the screen and says what a click does.
+ * reason that pairing did not pay off. What counts as a link, and where on
+ * screen it sits, is decided by `src/lib/terminalLinks.js`, which is pure and
+ * tested; this says what a click does.
+ *
+ * xterm asks again every time the pointer moves onto another row, so what it
+ * asks has to stay cheap however long the line under the pointer is — see
+ * `linksAtRow`, which reads a bounded stretch of a wrapped line, not all of it.
  *
  * A relative path is resolved against the TAB'S live cwd, read at click time
  * rather than captured here — the shell may have `cd`'d twenty times since
@@ -644,30 +619,27 @@ function positionOf(offset, startRow, cols) {
 function registerLinks(term, tabId) {
   return term.registerLinkProvider({
     provideLinks(row, callback) {
-      const { text, start } = logicalLineAt(term, row);
-      const matches = findLinks(text);
+      const matches = linksAtRow(term.buffer.active, row);
       if (matches.length === 0) {
         callback(undefined);
         return;
       }
-      const cols = term.cols || 80;
       callback(
         matches.map((match) => ({
-          range: {
-            start: positionOf(match.start, start, cols),
-            // xterm's ranges are inclusive at both ends, hence the -1.
-            end: positionOf(match.start + match.length - 1, start, cols),
-          },
+          range: match.range,
           text: match.text,
           decorations: { pointerCursor: true, underline: true },
           activate: (event) => {
-            event?.preventDefault?.();
             if (match.kind === 'url') {
-              openExternal(match.href);
+              openWebLink(event, match.href);
               return;
             }
+            event?.preventDefault?.();
             const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
             const editor = useEditorStore.getState();
+            // Null when there is nothing to resolve against, or when the path
+            // is on another machine: opening one signs in to that machine,
+            // and the backend would do so before it refused the read.
             const resolved = resolveLinkPath(match.path, tab?.cwd || editor.rootPath);
             if (!resolved) return;
             // A path a tool printed may not exist, may sit outside the
@@ -682,6 +654,48 @@ function registerLinks(term, tabId) {
       );
     },
   });
+}
+
+/**
+ * What a click on a web address in the output does — the same whichever way
+ * the output made it one: an address printed as text (`registerLinks`) or a
+ * program's OSC 8 hyperlink (`hyperlinkHandler`). xterm calls both on the
+ * same click, and both go to the browser through `openExternal`, which hands
+ * over http and https and refuses the rest.
+ */
+function openWebLink(event, href) {
+  event?.preventDefault?.();
+  openExternal(href);
+}
+
+/**
+ * xterm's handler for OSC 8 hyperlinks — text a program has made a link,
+ * `ESC ] 8 ; ; <address> ST <text> ESC ] 8 ; ; ST`: `ls --hyperlink`, gcc's
+ * diagnostics, delta, the links OpenCode and Claude Code print.
+ *
+ * With no handler xterm opens one itself, with `window.confirm` and then
+ * `window.open`: a dialog of the webview's, then the page handed to the
+ * webview rather than to the browser. Here it opens on the same click, and
+ * the same way, as every other link in the terminal (`openWebLink`).
+ *
+ * What a hyperlink shows is not where it goes, so while the pointer is on one
+ * the terminal's tooltip says where (`hyperlinkTitle`). And only http and
+ * https are links at all: xterm drops every other scheme before offering one
+ * — `allowNonHttpProtocols` is stated here rather than left to its default —
+ * so a `file://` hyperlink, which on Windows can name a share on another
+ * machine that opening would sign in to, stays plain text; `openExternal`
+ * would refuse it anyway.
+ */
+function hyperlinkHandler(container) {
+  return {
+    allowNonHttpProtocols: false,
+    activate: (event, uri) => openWebLink(event, uri),
+    hover: (_event, uri) => {
+      const title = hyperlinkTitle(uri);
+      if (title) container.title = title;
+    },
+    leave: () => container.removeAttribute('title'),
+  };
 }
 
 /**
@@ -701,9 +715,16 @@ function registerLinks(term, tabId) {
  */
 function bindSession(entry, sessionId) {
   entry.stopPtyListener?.();
-  // A shell this instance no longer shows is gone (a restore respawned it):
-  // nothing it left waiting will ever be written anywhere.
-  if (entry.sessionId && entry.sessionId !== sessionId) forgetOutput(entry.sessionId);
+  if (entry.sessionId && entry.sessionId !== sessionId) {
+    // A shell this instance no longer shows is gone (a restore respawned it,
+    // or Enter started a new one after it exited): nothing it left waiting
+    // will ever be written anywhere.
+    forgetOutput(entry.sessionId);
+    // Nor is what its programs left on the screen any business of the new
+    // one. Written before the new shell's output is attached, so before any
+    // of it. See `freshScreen`.
+    if (sessionId) entry.term.write(freshScreen(entry.term.rows));
+  }
   entry.sessionId = sessionId;
   entry.exited = false;
 
@@ -718,17 +739,16 @@ function bindSession(entry, sessionId) {
     startPtyOutputBus();
     ptyUnlisten = attachOutput(sessionId, (data) => entry.term.write(data));
 
-    // When the shell exits, say so. The pane used to keep a blinking cursor
-    // and simply swallow every keystroke, with no way to tell a dead terminal
-    // from a hung one — the failure only showed up in the devtools console.
+    // When the shell exits, say so — with the code as Windows documents it —
+    // and that Enter starts a new one (the store's `restartShell`). The pane
+    // used to keep a blinking cursor and swallow every keystroke, then print
+    // a failed write for each one. What its last program left switched on
+    // goes off first, so a drag selects text again (see `exitNotice`).
     listen('pty-exit', (payload) => {
       const { session_id, exit_code } = payload || {};
       if (session_id !== sessionId || entry.exited) return;
       entry.exited = true;
-      const code = typeof exit_code === 'number' ? exit_code : null;
-      entry.term.write(
-        `\r\n\x1b[90m[process exited${code === null ? '' : ` with code ${code}`}]\x1b[0m\r\n`
-      );
+      entry.term.write(exitNotice(typeof exit_code === 'number' ? exit_code : null));
     }).then((off) => {
       if (cancelled) off();
       else exitUnlisten = off;
@@ -776,6 +796,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     theme: resolveTerminalTheme(settingsState.terminalTheme),
     // `{}` off Windows: xterm's own "not set". See terminalCompat.js.
     windowsPty: windowsPtyFor(useSystemStore.getState()) ?? {},
+    // A program's OSC 8 hyperlinks open as the terminal's other links do.
+    linkHandler: hyperlinkHandler(container),
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -892,6 +914,10 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     drawPending: false,
     refitPending: false,
     disposed: false,
+    // Where each command's output began, for the sticky header: TerminalView
+    // marks each command as it starts and asks what to show. Disposed with
+    // the terminal. See stickyCommand.js.
+    commandMarks: trackCommandMarks(term),
   };
   const drawn = entry;
   entry.renderDisposable = term.onRender(() => {
@@ -899,6 +925,14 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
+  // A tab first shown after its shell already exited heard no exit event:
+  // what the shell printed comes from the output bus above, and the notice
+  // that it is gone — and how to get a new one — goes after it.
+  const exited = useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.exited;
+  if (exited && sessionId) {
+    entry.exited = true;
+    term.write(exitNotice(typeof exited.code === 'number' ? exited.code : null));
+  }
   return entry;
 }
 
@@ -992,6 +1026,19 @@ export function reportFocusOut(tabId) {
   }, 0);
 }
 
+/**
+ * Clear a terminal as VS Code's Terminal: Clear does: the scrollback and the
+ * screen go, and the line the cursor is on — the prompt being typed at —
+ * moves to the top. The shell is not told and loses nothing. Returns whether
+ * there was a terminal to clear.
+ */
+export function clearTerminal(tabId) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed) return false;
+  entry.term.clear();
+  return true;
+}
+
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;
@@ -1006,6 +1053,7 @@ export function disposeTerminal(tabId) {
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.searchAddon?.dispose();
+  entry.commandMarks.dispose();
   entry.term.dispose();
   instances.delete(tabId);
   // The context just freed may be the one a terminal on screen is waiting for.

@@ -69,10 +69,19 @@ pub struct FileNode {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// What the entry opens as. A link to a folder is `true` here, so it can
+    /// be expanded like the folder it leads to; `is_symlink` says it is a link.
     pub is_dir: bool,
     pub size: Option<u64>,
     pub children: Option<Vec<FileNode>>,
     pub extension: Option<String>,
+    /// The entry is a symlink (or, on Windows, a junction). Deleting one
+    /// removes the link and never what it leads to, whatever `recursive`
+    /// says, so the Explorer can word its prompt for a link rather than for
+    /// the folder's contents. Left out of the payload when false: most
+    /// entries are not links, and a deep tree has thousands of them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_symlink: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -90,10 +99,6 @@ pub struct SystemInfo {
     pub arch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tauri_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rust_version: Option<String>,
     /// The Windows build number (e.g. 19045). xterm.js needs it to tell a
     /// ConPTY that ends wrapped lines with a real line break (before 21376)
     /// from one that wraps natively.
@@ -147,12 +152,33 @@ mod tests {
             home_dir: "/Users/test".to_string(),
             arch: Some("aarch64".to_string()),
             app_version: Some("0.1.0".to_string()),
-            tauri_version: Some("2.11.5".to_string()),
-            rust_version: Some("1.97.1".to_string()),
             os_build: None,
         };
         let json = serde_json::to_string(&sys).unwrap();
         assert!(json.contains("\"os\":\"macos\""));
         assert!(json.contains("\"default_shell\":\"/bin/zsh\""));
+    }
+
+    #[test]
+    fn a_file_node_names_a_link_and_says_nothing_about_anything_else() {
+        let mut node = FileNode {
+            id: "/w/shared".to_string(),
+            name: "shared".to_string(),
+            path: "/w/shared".to_string(),
+            is_dir: true,
+            size: Some(0),
+            children: Some(Vec::new()),
+            extension: None,
+            is_symlink: false,
+        };
+        let plain = serde_json::to_string(&node).unwrap();
+        assert!(!plain.contains("is_symlink"), "{plain}");
+
+        node.is_symlink = true;
+        let link = serde_json::to_string(&node).unwrap();
+        assert!(link.contains("\"is_symlink\":true"), "{link}");
+
+        let read_back: FileNode = serde_json::from_str(&plain).unwrap();
+        assert!(!read_back.is_symlink, "absent reads as not a link");
     }
 }

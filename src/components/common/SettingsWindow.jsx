@@ -6,6 +6,8 @@ import { fuzzyMatch, cn } from '../../lib/utils.js';
 import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
 import { isWindows } from '../../lib/platform.js';
 import { expandHome } from '../../lib/paths.js';
+import { isNetworkPath } from '../../lib/terminalLinks.js';
+import { NETWORK_START_DIR } from '../../lib/terminalCwd.js';
 import { invoke } from '../../lib/ipc.js';
 
 /**
@@ -19,7 +21,58 @@ function readInheritedMonoStack() {
   return cs.getPropertyValue('--font-mono').trim() || 'monospace';
 }
 
-import { KeybindingSettings } from './KeybindingSettings.jsx';
+import { KeybindingSettings, CHORD_RECORDER } from './KeybindingSettings.jsx';
+
+/**
+ * What a key does to the Settings window as a whole, decided by the listener
+ * that sees every key before anything inside the window does:
+ *
+ *   'close'  Escape
+ *   'trap'   Tab: kept going round inside the window
+ *   null     not the window's to handle
+ *
+ * Escape on the field recording a shortcut belongs to that field: it ends the
+ * recording, and the window stays. This listener runs in the capture phase,
+ * ahead of the field's own, so it used to take that Escape and close the
+ * whole window.
+ */
+export function settingsWindowKey(e) {
+  if (e.key === 'Escape') return e.target?.closest?.(`[${CHORD_RECORDER}]`) ? null : 'close';
+  if (e.key === 'Tab') return 'trap';
+  return null;
+}
+
+/**
+ * Leave the field being typed in, if it is in `dialog`, so that it takes what
+ * was typed — a field does on leaving it (`TextLikeControl`), and closing the
+ * window is leaving it. Escape and a click beside the window closed it with
+ * the focus still in the field: the field never left, and a scrollback or a
+ * font size typed and not yet left was dropped without a word. Only ✕, by
+ * taking the focus first, kept it.
+ */
+export function leaveEditedField(dialog, doc) {
+  const active = doc?.activeElement;
+  if (!dialog || !active || active === doc.body || !dialog.contains(active)) return false;
+  active.blur?.();
+  return true;
+}
+
+/**
+ * Where focus goes once the Settings window has closed: back to `opener`,
+ * what had it when the window opened — the terminal or the editor, as a rule
+ * — if it is still on the page and nothing else has taken focus since.
+ * Otherwise null, and focus is left where it is.
+ *
+ * Left alone, focus fell to the page with the window's controls: the terminal
+ * behind got no keys until it was clicked, and off macOS a Ctrl+W meant for
+ * the shell reached the window's own Close Pane instead.
+ */
+export function focusAfterClose(opener, doc) {
+  if (!opener || !doc || opener === doc.body || opener === doc.documentElement) return null;
+  if (!doc.contains(opener)) return null;
+  if (doc.activeElement && doc.activeElement !== doc.body) return null;
+  return typeof opener.focus === 'function' ? opener : null;
+}
 
 const SECTIONS = [
   { id: 'keyboard', label: 'Keyboard Shortcuts' },
@@ -219,8 +272,10 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       validate: async (value) => {
         const wanted = String(value ?? '').trim();
         if (!wanted) return 'Type a directory, or choose another option above.';
+        const path = expandHome(wanted, homeDir);
+        if (isNetworkPath(path)) return NETWORK_START_DIR;
         try {
-          const ok = await invoke('fs_dir_exists', { path: expandHome(wanted, homeDir) });
+          const ok = await invoke('fs_dir_exists', { path });
           return ok ? null : 'No directory there. New terminals will fall back to the workspace root, or your home directory if no folder is open.';
         } catch {
           return null; // cannot check right now; do not cry wolf
@@ -309,6 +364,24 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
 const inputClass =
   'h-[26px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui px-2';
 
+/**
+ * What a number field commits when focus leaves it: the number typed, held
+ * to the field's range — or, when nothing readable was typed, the saved
+ * value, which commits nothing.
+ *
+ * A blank field is not 0. `Number('')` is, and it used to be clamped to the
+ * minimum and saved: clear Scrollback to type a new value, click anywhere,
+ * and it was 100 — applied live, so every open terminal dropped all but its
+ * last 100 lines, for good. Font sizes went to 8 the same way, and Notify
+ * After to 0, which turns it off. A type="number" input also reports '' for
+ * text it cannot read, so that arrives here as a blank too.
+ */
+export function numberToCommit(text, { min, max }, saved) {
+  const typed = String(text ?? '').trim();
+  const n = typed === '' ? NaN : Number(typed);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : saved;
+}
+
 /** Number/text controls commit on blur or Enter so mid-typing digits never
  * get clobbered by a live re-clamp — but there is still no Save button
  * anywhere in the window; every field takes effect the moment you leave it. */
@@ -321,10 +394,9 @@ function TextLikeControl({ item, value, onCommit }) {
 
   const commit = () => {
     if (item.control === 'number') {
-      const n = Number(text);
-      const clamped = Number.isFinite(n) ? Math.min(item.max, Math.max(item.min, n)) : value;
-      setText(String(clamped));
-      if (clamped !== value) onCommit(clamped);
+      const next = numberToCommit(text, item, value);
+      setText(String(next ?? ''));
+      if (next !== value) onCommit(next);
     } else {
       onCommit(text);
     }
@@ -482,6 +554,9 @@ export function SettingsWindow() {
   const sectionNodeRefs = useRef({});
   const titleId = useId();
 
+  // Read again each time the window opens rather than once: `isOpen` is the
+  // reason to look again, not something the reading uses.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const monoPlaceholder = useMemo(() => readInheritedMonoStack(), [isOpen]);
   const detectedShells = useSystemStore((s) => s.shells);
   const homeDir = useSystemStore((s) => s.homeDir);
@@ -526,6 +601,16 @@ export function SettingsWindow() {
     return () => cancelAnimationFrame(raf);
   }, [isOpen]);
 
+  // Note what has focus as the window opens — the search box takes it a frame
+  // later — and give it back when the window closes, however it closes.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const opener = document.activeElement;
+    return () => {
+      focusAfterClose(opener, document)?.focus();
+    };
+  }, [isOpen]);
+
   // Escape to close + a focus trap that keeps Tab cycling inside the window.
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -539,12 +624,14 @@ export function SettingsWindow() {
     };
 
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') {
+      const action = settingsWindowKey(e);
+      if (action === 'close') {
         e.preventDefault();
+        leaveEditedField(dialogRef.current, document);
         setOpen(false);
         return;
       }
-      if (e.key === 'Tab') {
+      if (action === 'trap') {
         const focusable = getFocusable();
         if (focusable.length === 0) return;
         const first = focusable[0];
@@ -621,7 +708,13 @@ export function SettingsWindow() {
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) setOpen(false);
+        if (e.target !== e.currentTarget) return;
+        // The window closes during this press and gives focus back; the
+        // press's own default would then move focus to what was clicked —
+        // nothing — and take it away again.
+        e.preventDefault();
+        leaveEditedField(dialogRef.current, document);
+        setOpen(false);
       }}
     >
       <div

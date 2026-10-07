@@ -166,7 +166,7 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       focusNextPane: stub('focusPane'),
       togglePaneZoom: stub('zoomPane'),
       createTerminalTab: stub('newTerminal'),
-      clearBlocks: stub('clear'),
+      clearTerminal: stub('clear'),
       openFind: stub('find'),
       showView: stub('showView'),
       zoomFont: stub('zoom'),

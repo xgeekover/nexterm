@@ -11,7 +11,10 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { MENU_BAR, runMenuAction } from '../../src/lib/menuActions.js';
+import { MENU_BAR, runMenuAction, windowControls } from '../../src/lib/menuActions.js';
+import { useSettingsStore } from '../../src/stores/settingsStore.js';
+import { useTerminalStore } from '../../src/stores/terminalStore.js';
+import { useEditorStore } from '../../src/stores/editorStore.js';
 
 const MENU_RS = readFileSync(fileURLToPath(new URL('../../src-tauri/src/menu.rs', import.meta.url)), 'utf8');
 const ACTIONS_JS = readFileSync(fileURLToPath(new URL('../../src/lib/menuActions.js', import.meta.url)), 'utf8');
@@ -71,5 +74,101 @@ describe('Native and in-app menus describe the same commands', () => {
 
   test('an unknown id is ignored rather than throwing', () => {
     assert.doesNotThrow(() => runMenuAction('no-such-menu-item'));
+  });
+});
+
+/**
+ * What each menu item runs, as `store.action(arguments)`.
+ *
+ * Every id either menu has needs a row, so a new item comes with a decision
+ * about what it does. The cases above only collect `case '…':` labels from
+ * the source, which is how Search in Files… came to fall through into Command
+ * History: both labels were there, and the `break` between them was not.
+ */
+const ACTION_OF = {
+  preferences: 'settings.setSettingsModalOpen(true)',
+  'open-folder': 'editor.pickRoot()',
+  'open-recent': 'settings.setCommandPaletteOpen(true,recent)',
+  'new-terminal': 'terminal.createTab()',
+  save: 'editor.saveFile(tab-1)',
+  'command-palette': 'settings.setCommandPaletteOpen(true,all)',
+  'quick-open': 'settings.setCommandPaletteOpen(true,files)',
+  'search-in-files': 'settings.showView(search)',
+  'toggle-sidebar': 'settings.toggleSidebar()',
+  'toggle-panel': 'settings.togglePanel()',
+  'toggle-secondary': 'settings.toggleSecondarySidebar()',
+  'zoom-in': 'settings.zoomFont(1)',
+  'zoom-out': 'settings.zoomFont(-1)',
+  'zoom-reset': 'settings.resetZoom()',
+  'split-right': 'terminal.splitActivePane(horizontal)',
+  'split-down': 'terminal.splitActivePane(vertical)',
+  'close-pane': 'terminal.closeActivePane()',
+  'toggle-pane-zoom': 'terminal.togglePaneZoom()',
+  'find-in-terminal': 'terminal.openFind()',
+  'command-history': 'settings.setCommandPaletteOpen(true,history)',
+  'clear-terminal': 'terminal.clearTerminal()',
+  'close-window': 'window.close()',
+};
+
+/**
+ * Run `fn` with every action of the three stores, and the window's close,
+ * swapped for one that only writes its call down, so that whatever a menu
+ * item runs — the action it should, or any other — is on the list. The
+ * stores get their own state back afterwards, whether or not `fn` threw.
+ */
+function recordingActions(fn) {
+  const calls = [];
+  const stores = { settings: useSettingsStore, terminal: useTerminalStore, editor: useEditorStore };
+  const saved = Object.fromEntries(Object.entries(stores).map(([name, store]) => [name, store.getState()]));
+  const savedClose = windowControls.close;
+  try {
+    for (const [name, store] of Object.entries(stores)) {
+      const stubs = {};
+      for (const [key, value] of Object.entries(store.getState())) {
+        if (typeof value === 'function') stubs[key] = (...args) => { calls.push(`${name}.${key}(${args.join(',')})`); };
+      }
+      store.setState(stubs);
+    }
+    // Save writes the file being edited, so there has to be one.
+    useEditorStore.setState({ activeTabId: 'tab-1' });
+    windowControls.close = (...args) => { calls.push(`window.close(${args.join(',')})`); };
+    return fn(calls);
+  } finally {
+    for (const [name, store] of Object.entries(stores)) store.setState(saved[name], true);
+    windowControls.close = savedClose;
+  }
+}
+
+describe('Each menu item does one thing', () => {
+  test('MC-01: every id either menu has says what it runs', () => {
+    const ids = [...new Set([...barIds, ...rustIds, ...handledIds])];
+    const unlisted = ids.filter((id) => !(id in ACTION_OF));
+    assert.deepEqual(unlisted, [], `menu ids with no expected action here: ${unlisted.join(', ')}`);
+  });
+
+  test('MC-02: every menu item runs exactly its own action, once, and nothing else', () => {
+    const ids = [...new Set([...barIds, ...rustIds, ...handledIds])];
+    recordingActions((calls) => {
+      for (const id of ids) {
+        calls.length = 0;
+        runMenuAction(id);
+        assert.deepEqual(
+          calls,
+          [ACTION_OF[id]],
+          `${id} must run ${ACTION_OF[id]} and nothing else; it ran [${calls.join(', ')}]`
+        );
+      }
+    });
+  });
+
+  test('MC-03: the stores are given back as they were', () => {
+    // MC-02 swaps every action out; a later suite in the same process must
+    // find the real ones.
+    for (const fn of [useSettingsStore.getState().showView, useTerminalStore.getState().openFind, windowControls.close]) {
+      assert.equal(String(fn).includes('calls.push'), false, 'a recorder was left in place');
+    }
+    useSettingsStore.getState().setCommandPaletteOpen(true, 'history');
+    assert.equal(useSettingsStore.getState().isCommandPaletteOpen, true);
+    useSettingsStore.getState().setCommandPaletteOpen(false);
   });
 });

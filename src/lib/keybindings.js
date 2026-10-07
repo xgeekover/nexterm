@@ -19,7 +19,7 @@
  * `e.shiftKey` at run time, and are two entries here.
  */
 
-import { chordMatches, displayChord, parseChord } from './chords.js';
+import { chordFromEvent, chordMatches, displayChord, parseChord, stringifyChord } from './chords.js';
 
 /**
  * Every command, by id. The ids match `src-tauri/src/menu.rs` and
@@ -159,8 +159,8 @@ export const COMMANDS = {
     run: (ctx) => ctx.toggleSidebar(),
   },
   'clear-terminal': {
-    title: 'Clear Unpinned Blocks',
-    run: (ctx) => ctx.clearBlocks?.(),
+    title: 'Clear Terminal',
+    run: (ctx) => ctx.clearTerminal?.(),
   },
   'search-in-files': {
     title: 'Search in Files',
@@ -245,9 +245,10 @@ export const COMMANDS = {
 /**
  * The chords each command answers to out of the box.
  *
- * Order decides nothing — every chord matches exactly, and `findConflicts`
- * refuses two commands on one chord — but reading order is kept roughly menu
- * order.
+ * Order decides nothing here — no two commands share a keypress, which
+ * CK-06 holds on both platforms — but reading order is kept roughly menu
+ * order. Once a user binds one keypress to two commands, the one whose
+ * defaults come first here runs it; `findConflicts` says which.
  */
 export const DEFAULT_KEYBINDINGS = [
   { command: 'quick-open', key: 'mod+p' },
@@ -313,6 +314,70 @@ export function configurableCommands() {
 }
 
 /**
+ * The rebindable commands whose keys a focused terminal never sees, because
+ * they are claimed ahead of it (`overTerminal`). Read from the flags, so what
+ * Settings tells someone hunting for a key their shell lost is what the code
+ * does.
+ */
+export function commandsOverTerminal() {
+  return configurableCommands().filter(({ id }) => COMMANDS[id].overTerminal);
+}
+
+/** Keys that only modify the next one, or are an input method at work. */
+const NOT_A_KEY_YET = new Set(['Control', 'Shift', 'Alt', 'AltGraph', 'Meta', 'OS', 'Dead', 'Process']);
+
+/**
+ * What the shortcut recorder in Settings does with a keydown:
+ *
+ *   { action: 'cancel' }          Escape: stop recording, bind nothing
+ *   { action: 'leave' }           Tab or Shift+Tab: focus moves on as it
+ *                                 always does, which ends the recording
+ *   { action: 'wait' }            only a modifier so far, or an IME composing
+ *   { action: 'refuse', reason }  no shortcut is made of that; say why
+ *   { action: 'bind', key }       the chord pressed, as `parseChord` reads it
+ *
+ * The recorder used to bind the first key that was not a modifier. Tab,
+ * pressed to move on, became Find in Terminal's chord, and as that command is
+ * claimed ahead of a focused terminal, Tab completion stopped working in every
+ * shell and agent. Escape, pressed to give up, closed the whole Settings
+ * window.
+ *
+ * A key on its own is no shortcut, F-keys apart. A letter, digit or
+ * punctuation mark, Space, Enter, Backspace, an arrow: each belongs to what is
+ * being typed in, and a command bound to one takes it from the editor and
+ * every text field — and from every terminal, for a command claimed over one.
+ * Shift alone does not change that; it types capitals. Ctrl, ⌘ or Alt does.
+ *
+ * Every modifier held is kept. `chordFromEvent` records the application
+ * modifier as `mod` and drops the other one — Ctrl on macOS, the Windows key
+ * elsewhere — so Ctrl+⌘+J was bound as ⌘J and plain ⌘J ran it. It is put back
+ * here.
+ */
+export function recordKeydown(e, { isMac = false } = {}) {
+  if (e.isComposing || e.keyCode === 229) return { action: 'wait' };
+  if (e.key === 'Escape') return { action: 'cancel' };
+  if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) return { action: 'leave' };
+  if (NOT_A_KEY_YET.has(e.key)) return { action: 'wait' };
+
+  const chord = chordFromEvent(e, { isMod: isMac ? e.metaKey : e.ctrlKey });
+  if (!chord) return { action: 'wait' };
+  if (isMac && e.ctrlKey && e.metaKey) chord.ctrl = true;
+  if (!isMac && e.metaKey) chord.cmd = true;
+
+  // A key the chord grammar has no name for (CapsLock, Insert) would be
+  // saved as text that does not parse, which unbinds the command.
+  const key = stringifyChord(chord);
+  if (!parseChord(key)) return { action: 'refuse', reason: 'That key cannot be part of a shortcut.' };
+
+  const held = chord.mod || chord.ctrl || chord.cmd || chord.alt;
+  if (!held && !/^F\d+$/.test(chord.key ?? '')) {
+    const hold = isMac ? '⌘, ⌃ or ⌥' : 'Ctrl or Alt';
+    return { action: 'refuse', reason: `A shortcut needs ${hold}, or an F-key.` };
+  }
+  return { action: 'bind', key };
+}
+
+/**
  * Turn the defaults plus a user's overrides into the list actually in force.
  *
  * `overrides` is `{ [commandId]: string | string[] | null }` — one chord,
@@ -323,6 +388,11 @@ export function configurableCommands() {
  * Returns `{ bindings, problems }`. Nothing here reads a store, so the settings
  * window can resolve a candidate and show its conflicts before saving anything.
  */
+/** Whether a chord holds Ctrl, ⌘ or Alt, or is an F-key — what a shortcut needs. */
+function heldOrFKey(chord) {
+  return Boolean(chord.mod || chord.ctrl || chord.cmd || chord.alt) || /^f\d+$/i.test(chord.key ?? '');
+}
+
 export function resolveKeybindings(overrides = {}) {
   const problems = [];
   const byCommand = new Map();
@@ -348,10 +418,24 @@ export function resolveKeybindings(overrides = {}) {
     }
     const keys = (Array.isArray(value) ? value : [value]).filter((k) => typeof k === 'string');
     const usable = [];
+    let bare = false;
     for (const key of keys) {
-      if (parseChord(key)) usable.push(key);
-      else problems.push({ command, key, reason: 'not a chord' });
+      const chord = parseChord(key);
+      if (!chord) {
+        problems.push({ command, key, reason: 'not a chord' });
+      } else if (!heldOrFKey(chord)) {
+        // What the recorder refuses (`recordKeydown`), and what it saved
+        // before it did: Tab or Enter recorded on the way out of the field.
+        // Bound, it took that key from every shell and agent for good.
+        bare = true;
+        problems.push({ command, key, reason: 'needs Ctrl, ⌘ or Alt, or an F-key' });
+      } else {
+        usable.push(key);
+      }
     }
+    // Nothing left but such keys: the command keeps its own shortcut rather
+    // than having none.
+    if (usable.length === 0 && bare) continue;
     byCommand.set(command, usable);
   }
 
@@ -366,23 +450,84 @@ export function resolveKeybindings(overrides = {}) {
 }
 
 /**
- * Chords claimed by more than one command.
+ * What `event.key` is for the punctuation keys a chord matches on `code`, as
+ * a US layout reports them — so that the press built from `mod+comma` also
+ * reaches a chord spelled `mod+,`.
+ */
+const PUNCTUATION_KEY = {
+  Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+};
+
+/**
+ * The keydown pressing `chord` produces on one platform: `mod` held as ⌘ on
+ * macOS and as Ctrl elsewhere, every other modifier as written.
+ */
+function pressOf(chord, isMac) {
+  return {
+    ctrlKey: Boolean(chord.ctrl || (chord.mod && !isMac)),
+    metaKey: Boolean(chord.cmd || (chord.mod && isMac)),
+    shiftKey: Boolean(chord.shift),
+    altKey: Boolean(chord.alt),
+    key: chord.code ? PUNCTUATION_KEY[chord.code] ?? '' : chord.key,
+    code: chord.code ?? '',
+  };
+}
+
+/**
+ * Bindings that never run on this platform, because the keypress that is
+ * their chord runs another command first.
+ *
+ * Asked of the keys pressed, not of the text: off macOS `mod+alt+d` and
+ * `ctrl+alt+d` are both Ctrl+Alt+D, and on macOS `mod+d` and `cmd+d` are both
+ * ⌘D. Compared as strings those never met, so recording Ctrl+Alt+D for Open
+ * Recent took Split Right's only chord off macOS with no warning. Each
+ * binding's own keypress goes to the matcher `findBinding` uses, in the order
+ * it uses them, and the first binding to match is the one that runs — so
+ * what this reports is what the keyboard does.
  *
  * Reported rather than resolved: letting whichever came first win is how a
  * shortcut silently changes meaning when an unrelated line moves.
+ *
+ * Each conflict is `{ key, command }`, the binding that never runs,
+ * `{ winner, winnerKey }`, the one that runs instead, and `commands`, the
+ * two of them with the winner first.
  */
-export function findConflicts(bindings) {
-  const seen = new Map();
+export function findConflicts(bindings, { isMac = false } = {}) {
   const conflicts = [];
   for (const binding of bindings) {
-    const existing = seen.get(binding.key);
-    if (existing && existing !== binding.command) {
-      conflicts.push({ key: binding.key, commands: [existing, binding.command] });
-    } else if (!existing) {
-      seen.set(binding.key, binding.command);
-    }
+    const press = pressOf(binding.chord, isMac);
+    const isMod = isMac ? press.metaKey : press.ctrlKey;
+    const first = bindings.find((b) => chordMatches(b.chord, press, isMod));
+    if (!first || first.command === binding.command) continue;
+    conflicts.push({
+      key: binding.key,
+      command: binding.command,
+      winner: first.command,
+      winnerKey: first.key,
+      commands: [first.command, binding.command],
+    });
   }
   return conflicts;
+}
+
+/**
+ * One conflict in words: the keypress, the command it runs and the one it
+ * never runs — "Ctrl+Alt+D runs Open Recent…, never Split Pane Right".
+ *
+ * The keypress is written as it is pressed, `mod` spelled out as the key it
+ * is here, so `mod+alt+d` and `ctrl+alt+d` read as the one chord they are.
+ */
+export function describeConflict(conflict, { isMac = false } = {}) {
+  const chord = parseChord(conflict.key);
+  const pressed = chord && {
+    ...chord,
+    mod: false,
+    ctrl: Boolean(chord.ctrl || (chord.mod && !isMac)),
+    cmd: Boolean(chord.cmd || (chord.mod && isMac)),
+  };
+  const title = (id) => COMMANDS[id]?.title ?? id;
+  return `${displayChord(pressed, { isMac })} runs ${title(conflict.winner)}, never ${title(conflict.command)}`;
 }
 
 /** The bindings in force when nobody has overridden anything. */
@@ -401,6 +546,14 @@ export function findBinding(e, ctx) {
   return null;
 }
 
+/** Whether the reload guard, enabled, would have claimed `e` (see `dispatchKeydown`). */
+function reloadGuardMatches(e, ctx) {
+  const guard = COMMANDS['reload-guard'];
+  if (guard.enabled && !guard.enabled(ctx)) return false;
+  const bindings = ctx?.bindings ?? DEFAULT_RESOLVED;
+  return bindings.some((b) => b.command === 'reload-guard' && chordMatches(b.chord, e, ctx?.isMod));
+}
+
 /**
  * Run whatever `e` maps to. Returns the command id when it acted, the id
  * prefixed with `pass:` when it deliberately let the key through, and null
@@ -410,7 +563,13 @@ export function dispatchKeydown(e, ctx) {
   const binding = findBinding(e, ctx);
   if (!binding) return null;
   const { spec } = binding;
-  if (spec.passThrough?.(ctx, binding)) return `pass:${binding.command}`;
+  if (spec.passThrough?.(ctx, binding)) {
+    // The key goes on to the editor, but not on to a reload: a command bound
+    // to F5 or Ctrl+Shift+R comes before the guard and let it through in the
+    // editor, and WebView2 reloaded the page — every shell reaped with it.
+    if (reloadGuardMatches(e, ctx)) e.preventDefault();
+    return `pass:${binding.command}`;
+  }
   if (spec.preventDefault !== false) e.preventDefault();
   spec.run(ctx);
   return binding.command;

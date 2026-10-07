@@ -6,7 +6,6 @@
 import assert from 'node:assert/strict';
 import { AppEnvironment } from '../e2e/harness/appEnvironment.js';
 import { MockIpcBridge } from '../e2e/harness/mockIpc.js';
-import { parseAnsiTokens, stripAnsi } from '../../src/lib/ansiParser.js';
 
 // Color formatting for console
 const c = {
@@ -47,208 +46,9 @@ console.log(`${c.bold}${c.cyan}  NexTerm Adversarial Stress & Bug Hunter Suite  
 console.log(`${c.bold}${c.cyan}====================================================${c.reset}\n`);
 
 // =========================================================================
-// SECTION 1: TERMINAL BLOCKS & RAPID SEQUENTIAL SUBMISSIONS
+// SECTION 1: PTY LIFECYCLE, MULTI-TAB & CONCURRENCY
 // =========================================================================
-console.log(`${c.bold}▶ SECTION 1: Terminal Blocks & Command Sequencing${c.reset}`);
-
-await runTest('TC-ADV-TERM-01: Sequential execution with await correctly isolates outputs', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b1 = await env.executeTerminalCommand('echo 1');
-  assert.equal(b1.status, 'completed');
-  assert.equal(b1.output.trim(), '1');
-
-  const b2 = await env.executeTerminalCommand('echo 2');
-  assert.equal(b2.status, 'completed');
-  assert.equal(b2.output.trim(), '2');
-
-  const b3 = await env.executeTerminalCommand('ls');
-  assert.equal(b3.status, 'completed');
-  assert.ok(b3.output.length > 0);
-  env.destroy();
-});
-
-await runTest('TC-ADV-TERM-02: Rapid sequential command submissions without waiting (BURST)', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const activeTab = env.getActiveTerminalTab();
-
-  // Rapid dispatch without awaiting each one sequentially
-  const p1 = env.executeTerminalCommand('echo 1');
-  const p2 = env.executeTerminalCommand('echo 2');
-  const p3 = env.executeTerminalCommand('ls');
-
-  await Promise.all([p1, p2, p3]);
-
-  // Check the state of all 3 blocks
-  const blocks = activeTab.blocks;
-  assert.equal(blocks.length, 3, 'Should have created 3 distinct blocks');
-
-  const b1 = blocks[0];
-  const b2 = blocks[1];
-  const b3 = blocks[2];
-
-  // BUG INVESTIGATION:
-  // In AppEnvironment and terminalStore, output listener updates:
-  // tab.blocks[tab.blocks.length - 1]
-  // Because all 3 blocks were pushed synchronously, tab.blocks.length - 1 was ALWAYS block 3!
-  const b1Finished = b1.status === 'completed';
-  const b2Finished = b2.status === 'completed';
-  const b3Finished = b3.status === 'completed';
-
-  const b1HasOutput = b1.output.trim() === '1';
-  const b2HasOutput = b2.output.trim() === '2';
-
-  if (!b1Finished || !b1HasOutput || !b2Finished || !b2HasOutput) {
-    recordFinding(
-      'CRITICAL',
-      'Rapid sequential terminal commands suffer from Block Output Collision & Orphaned Running State',
-      `When multiple commands are submitted rapidly in sequence before PTY output/exit events arrive, ` +
-      `the listener indexing logic (tab.blocks[tab.blocks.length - 1]) directs all output to the newest block ` +
-      `and leaves previous blocks permanently stuck in 'running' status with empty output. ` +
-      `Block 1 status: '${b1.status}', output: '${b1.output}'. Block 2 status: '${b2.status}', output: '${b2.output}'. ` +
-      `Block 3 status: '${b3.status}', output: '${b3.output.slice(0, 30)}...'`,
-      `Submit multiple commands without awaiting: Promise.all([execute('echo 1'), execute('echo 2'), execute('ls')])`
-    );
-    throw new Error(`Block output collision: B1 status=${b1.status}, B2 status=${b2.status}, B3 status=${b3.status}`);
-  }
-
-  env.destroy();
-});
-
-// =========================================================================
-// SECTION 2: COMMANDS WITH FAILURE EXIT CODES & UNKNOWN COMMANDS
-// =========================================================================
-console.log(`\n${c.bold}▶ SECTION 2: Terminal Failure Exit Codes & Error Handling${c.reset}`);
-
-await runTest('TC-ADV-TERM-03: Arbitrary non-existent command flags error and non-zero exit code', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b = await env.executeTerminalCommand('nonexistent_command_xyz');
-  
-  if (b.status !== 'failed' || b.exitCode !== 127) {
-    recordFinding(
-      'HIGH',
-      'Non-existent command "nonexistent_command_xyz" incorrectly marked as completed with exit code 0 in MockIpc',
-      `Executing an arbitrary non-existent command like 'nonexistent_command_xyz' emits exit_code: 0 and status: 'completed' ` +
-      `because MockIpc only checks for hardcoded 'invalid-command-404'. Any real shell returns 127 command not found. ` +
-      `Observed: status='${b.status}', exitCode=${b.exitCode}`,
-      `await env.executeTerminalCommand('nonexistent_command_xyz'); -> check block.status and block.exitCode`
-    );
-    throw new Error(`Command was not flagged as failed: status=${b.status}, exitCode=${b.exitCode}`);
-  }
-
-  env.destroy();
-});
-
-await runTest('TC-ADV-TERM-04: Hardcoded failing test command correctly flags failed status', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b = await env.executeTerminalCommand('npm test');
-  assert.equal(b.status, 'failed');
-  assert.equal(b.exitCode, 1);
-  assert.ok(b.output.includes('FAIL'));
-
-  env.destroy();
-});
-
-await runTest('TC-ADV-TERM-05: Known 404 command flags failed status and exit code 127', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b = await env.executeTerminalCommand('invalid-command-404');
-  assert.equal(b.status, 'failed');
-  assert.equal(b.exitCode, 127);
-  assert.ok(b.output.includes('command not found'));
-
-  env.destroy();
-});
-
-// =========================================================================
-// SECTION 3: ANSI ESCAPE PARSER ADVERSARIAL STRESS
-// =========================================================================
-console.log(`\n${c.bold}▶ SECTION 3: ANSI Color & Escape Sequence Parser Stress${c.reset}`);
-
-await runTest('TC-ADV-ANSI-01: Standard SGR color tokens and styling', async () => {
-  const raw = '\x1b[31mRed\x1b[0m \x1b[32mGreen\x1b[0m \x1b[1mBold\x1b[0m';
-  const tokens = parseAnsiTokens(raw);
-  assert.ok(tokens.length >= 3);
-  assert.ok(tokens[0].className.includes('text-ansi-red'));
-  assert.equal(tokens[0].text, 'Red');
-  assert.ok(tokens[2].className.includes('text-ansi-green'));
-  assert.equal(tokens[2].text, 'Green');
-});
-
-await runTest('TC-ADV-ANSI-02: Non-SGR escape sequences (Cursor & Clear Screen) leakage check', async () => {
-  // \x1b[2J is clear screen, \x1b[H is cursor home, \x1b[K is clear line
-  const raw = '\x1b[2J\x1b[HHello World\x1b[K\nNext line';
-  const tokens = parseAnsiTokens(raw);
-
-  // Check if any token text contains raw ESC (\x1b) bytes
-  const containsRawEsc = tokens.some((t) => t.text.includes('\x1b'));
-  if (containsRawEsc) {
-    recordFinding(
-      'HIGH',
-      'ANSI parser outputs raw escape bytes for non-SGR sequences (cursor moves, screen clears)',
-      `parseAnsiTokens uses regex /\\x1b\\[([0-9;]*)m/g which only matches 'm' (SGR sequences). ` +
-      `Non-SGR sequences such as \\x1b[2J (clear screen), \\x1b[H (cursor home), \\x1b[K (clear line), ` +
-      `and \\x1b[?25h (show cursor) are NOT stripped or parsed, leaving raw '\\x1b[' escape control bytes ` +
-      `in the output text rendered to users. Tokens: ${JSON.stringify(tokens)}`,
-      `parseAnsiTokens('\\x1b[2J\\x1b[HHello World\\x1b[K')`
-    );
-    throw new Error(`Raw escape bytes found in token text: ${JSON.stringify(tokens)}`);
-  }
-});
-
-await runTest('TC-ADV-ANSI-03: 256-color and 24-bit TrueColor sequences handling', async () => {
-  const raw = '\x1b[38;5;196m256-Red\x1b[0m \x1b[38;2;255;128;0mTrueColor-Orange\x1b[0m';
-  const tokens = parseAnsiTokens(raw);
-  // Parser shouldn't crash or output raw escape bytes
-  assert.ok(tokens.length >= 2);
-  for (const t of tokens) {
-    assert.ok(!t.text.includes('\x1b'), 'Tokens must not contain raw escape bytes');
-  }
-});
-
-await runTest('TC-ADV-ANSI-04: Malformed / partial escape sequences resilience', async () => {
-  const malformedInputs = [
-    '\x1b[31',             // unclosed
-    '\x1b',               // solitary ESC
-    '\x1b[m',             // missing code
-    '\x1b[;;;m',          // empty parameters
-    '\x1b[9999999m',      // out of range code
-    null,
-    undefined,
-    '',
-    12345,
-  ];
-
-  for (const input of malformedInputs) {
-    const tokens = parseAnsiTokens(input);
-    assert.ok(Array.isArray(tokens), `Must return array for input: ${input}`);
-  }
-});
-
-await runTest('TC-ADV-ANSI-05: Massive ANSI payload stress (10,000 colored tokens)', async () => {
-  let largeAnsi = '';
-  for (let i = 0; i < 5000; i++) {
-    largeAnsi += `\x1b[3${i % 8}mtoken_${i}\x1b[0m `;
-  }
-  const t0 = Date.now();
-  const tokens = parseAnsiTokens(largeAnsi);
-  const duration = Date.now() - t0;
-  assert.ok(tokens.length > 5000);
-  assert.ok(duration < 1000, `Parsing 10,000 tokens took ${duration}ms, must be < 1000ms`);
-});
-
-// =========================================================================
-// SECTION 4: PTY LIFECYCLE, MULTI-TAB & CONCURRENCY
-// =========================================================================
-console.log(`\n${c.bold}▶ SECTION 4: PTY Lifecycle, Multi-Tab & Concurrency${c.reset}`);
+console.log(`${c.bold}▶ SECTION 1: PTY Lifecycle, Multi-Tab & Concurrency${c.reset}`);
 
 await runTest('TC-ADV-PTY-01: High tab churn (create and close 20 tabs rapidly)', async () => {
   const env = new AppEnvironment();
@@ -321,9 +121,9 @@ await runTest('TC-ADV-PTY-04: pty_resize bounds clamping', async () => {
 });
 
 // =========================================================================
-// SECTION 5: FILE EXPLORER & MONACO EDITOR STRESS
+// SECTION 2: FILE EXPLORER & MONACO EDITOR STRESS
 // =========================================================================
-console.log(`\n${c.bold}▶ SECTION 5: File Explorer & Monaco Editor Stress${c.reset}`);
+console.log(`\n${c.bold}▶ SECTION 2: File Explorer & Monaco Editor Stress${c.reset}`);
 
 await runTest('TC-ADV-FS-01: Reading non-existent file cleanly throws error', async () => {
   const env = new AppEnvironment();

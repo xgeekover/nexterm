@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for NexTerm. Off macOS the app draws its own title bar (decorations: false), so the webview must be able to drag, minimise, maximise and close its window. The notification plugin's start-up script asks whether notifications are allowed (on macOS and Linux), and that question alone is granted: NexTerm shows its notifications from its own command, show_desktop_notification, and the webview cannot post one through the plugin.",
+  "description": "Default permissions for NexTerm. Off macOS the app draws its own title bar (decorations: false), so the webview must be able to drag, minimise, maximise and close its window. Closing is only ever a request: the backend decides whether it goes ahead, asks the webview about unsaved editor tabs first when there are any, and closes the window itself once that is answered (src-tauri/src/commands/app.rs). So the webview is not granted destroy, which would skip that question. The notification plugin's start-up script asks whether notifications are allowed (on macOS and Linux), and that question alone is granted: NexTerm shows its notifications from its own command, show_desktop_notification, and the webview cannot post one through the plugin.",
   "windows": [
     "main"
   ],

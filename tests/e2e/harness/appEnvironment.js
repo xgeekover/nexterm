@@ -11,9 +11,9 @@
  * Two shapes have to be bridged:
  *
  *  - The stores update immutably (`set(state => ...)` hands back new objects),
- *    while the tests hold a reference and read it after awaiting. So tabs and
- *    blocks are handed out as LIVE VIEWS that re-read the store by id on every
- *    property access — see `liveView`.
+ *    while the tests hold a reference and read it after awaiting. So tabs are
+ *    handed out as LIVE VIEWS that re-read the store by id on every property
+ *    access — see `liveView`.
  *  - The stores are module singletons, but each test builds a fresh
  *    `AppEnvironment`. The constructor resets all three stores and the mock
  *    backend, so cases stay independent.
@@ -23,6 +23,7 @@ import { useTerminalStore } from '../../../src/stores/terminalStore.js';
 import { useEditorStore } from '../../../src/stores/editorStore.js';
 import { useSettingsStore } from '../../../src/stores/settingsStore.js';
 import { mockBridge } from '../../../src/lib/ipc.js';
+import { attachOutput, resetPtyOutputBus } from '../../../src/lib/ptyOutputBus.js';
 import { buildPaletteGroups } from '../../../src/lib/paletteItems.js';
 import { DEFAULT_PROJECT_FILES } from '../../../src/lib/constants.js';
 import { getLanguageFromPath } from '../../../src/lib/utils.js';
@@ -44,10 +45,10 @@ if (typeof globalThis.localStorage === 'undefined' || globalThis.localStorage ==
 }
 
 /**
- * A stand-in for one store-owned object (a tab, a block) that always reflects
- * the store's CURRENT copy of it. `read()` re-resolves it by id on each access,
- * so `const tab = app.getActiveTerminalTab()` stays correct after the store has
- * replaced `tab` several times over.
+ * A stand-in for one store-owned object (a terminal or editor tab) that
+ * always reflects the store's CURRENT copy of it. `read()` re-resolves it by
+ * id on each access, so `const tab = app.getActiveTerminalTab()` stays correct
+ * after the store has replaced `tab` several times over.
  */
 function liveView(read) {
   return new Proxy(
@@ -149,6 +150,9 @@ function resetBridge(bridge) {
 }
 
 export class AppEnvironment {
+  /** session id -> everything its terminal has been handed (see `terminalOutput`). */
+  #screens = new Map();
+
   constructor() {
     // Drop the previous case's listeners and pending persist timer before the
     // backend forgets the sessions those listeners were about.
@@ -164,8 +168,6 @@ export class AppEnvironment {
     useTerminalStore.setState({
       tabs: [],
       activeTabId: null,
-      history: [],
-      historyIndex: -1,
       cwd: '/workspace',
       isInitialized: false,
       savedGroups: [],
@@ -178,14 +180,16 @@ export class AppEnvironment {
       fileTree: [],
       rootPath: '/workspace',
       expandedFolders: new Set(['/workspace']),
-      diffView: null,
       pendingClose: null,
       pendingOverwrite: null,
+      // The groups too: left as they were, they held the last case's tab ids,
+      // and a tab closed here could hand its place to one that is not open.
+      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
+      activeEditorPaneId: 'editor-pane-root',
     });
     useSettingsStore.setState({
       isCommandPaletteOpen: false,
       commandPaletteMode: 'all',
-      activeView: 'terminal',
     });
 
     this.ipc = new RecordingBridge(mockBridge);
@@ -205,6 +209,11 @@ export class AppEnvironment {
   }
 
   async initialize() {
+    // The output bus is a module singleton as well, and `resetBridge` took
+    // its `pty-output` listener away with every other one: left alone it
+    // stayed "started" and heard nothing from the second case on. Reset, it
+    // is started again by the store's bootstrap, as it is when the app starts.
+    await resetPtyOutputBus();
     await this.terminal.init();
     await this.editor.init();
   }
@@ -229,13 +238,6 @@ export class AppEnvironment {
     return liveView(() => useTerminalStore.getState().tabs.find((t) => t.id === tabId) || null);
   }
 
-  #liveBlock(tabId, blockId) {
-    return liveView(() => {
-      const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
-      return tab ? tab.blocks.find((b) => b.id === blockId) || null : null;
-    });
-  }
-
   getActiveTerminalTab() {
     const tab = this.terminal.getActiveTab();
     return tab ? this.#liveTab(tab.id) : null;
@@ -257,20 +259,62 @@ export class AppEnvironment {
     await this.terminal.closeTab(tabId);
   }
 
-  async executeTerminalCommand(commandText, tabId = null) {
+  #terminalTab(tabId) {
     const targetId = tabId || this.terminal.activeTabId;
-    const block = await this.terminal.executeCommand(commandText, tabId);
-    return block ? this.#liveBlock(targetId, block.id) : null;
+    const tab = this.terminal.tabs.find((t) => t.id === targetId);
+    if (!tab) throw new Error(`Terminal tab not found: ${targetId}`);
+    return tab;
   }
 
-  pinBlock(blockId) {
-    const found = this.terminal.tabs.some((t) => t.blocks.some((b) => b.id === blockId));
-    if (!found) throw new Error(`Block not found: ${blockId}`);
-    return this.terminal.pinBlock(blockId);
+  /**
+   * Everything a terminal's shell has printed, as the terminal is handed it:
+   * through the output bus (src/lib/ptyOutputBus.js), the way a TerminalView
+   * gets it. The first read attaches, which hands over what the bus kept
+   * while nothing showed the tab, as showing it for the first time does;
+   * from then on the harness is that terminal's screen. Raw, escape
+   * sequences and all — there is no terminal emulator here.
+   */
+  terminalOutput(tabId = null) {
+    const { sessionId } = this.#terminalTab(tabId);
+    let screen = this.#screens.get(sessionId);
+    if (!screen) {
+      screen = { text: '' };
+      this.#screens.set(sessionId, screen);
+      attachOutput(sessionId, (data) => {
+        screen.text += data;
+      });
+    }
+    return screen.text;
   }
 
-  clearTerminalBlocks(tabId = null) {
-    this.terminal.clearBlocks(tabId);
+  /**
+   * Type a command at a terminal's prompt and press Enter, the way the user
+   * does: through `writeRaw`, as every key goes. The mock shell runs a line
+   * inside the write that sends it, so once that write is done its start
+   * (OSC 133 "C"), its output and its end ("D") have all arrived.
+   *
+   * Returns what there is to see of it: `output`, what the shell printed for
+   * it (see `terminalOutput`); `exitCode`, the verdict the tab now carries —
+   * what the tab strip and the status bar read; and `sawRunning`, whether
+   * the tab read as running while the command ran.
+   */
+  async runTerminalCommand(commandText, tabId = null) {
+    const { id } = this.#terminalTab(tabId);
+    const shownBefore = this.terminalOutput(id).length;
+    let sawRunning = false;
+    const stop = useTerminalStore.subscribe((state) => {
+      if (state.tabs.find((t) => t.id === id)?.running) sawRunning = true;
+    });
+    try {
+      await this.terminal.writeRaw(id, `${commandText}\r`);
+    } finally {
+      stop();
+    }
+    return {
+      output: this.terminalOutput(id).slice(shownBefore),
+      exitCode: this.terminal.tabs.find((t) => t.id === id)?.lastExitCode ?? null,
+      sawRunning,
+    };
   }
 
   // --- MONACO EDITOR -------------------------------------------------------
@@ -400,7 +444,7 @@ export class AppEnvironment {
         return tab ? this.#liveTab(tab.id) : null;
       }
       case 'clear_terminal':
-        this.terminal.clearBlocks();
+        this.terminal.clearTerminal();
         return null;
       case 'toggle_pane_zoom':
         this.terminal.togglePaneZoom();

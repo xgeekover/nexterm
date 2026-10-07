@@ -9,7 +9,7 @@
  * Pure functions only: no React, no store.
  */
 
-import { samePath } from '../../lib/paths.js';
+import { samePath, stripTrailingSep } from '../../lib/paths.js';
 
 /**
  * The rows to render, top to bottom.
@@ -122,6 +122,74 @@ export function findNode(nodes, path) {
 }
 
 /**
+ * The folders a read `levels` deep left unread: those on its last level.
+ *
+ * The backend stops at the depth it is asked for and hands each folder there
+ * back with `children: []`, whether or not it has anything in it, so the
+ * tree cannot tell them from empty folders by looking. Their paths, in tree
+ * order. A folder on a shallower level was read, empty or not.
+ */
+export function frontierOf(nodes, levels) {
+  const unread = [];
+  const walk = (list, level) => {
+    if (!Array.isArray(list)) return;
+    for (const node of list) {
+      if (!node?.is_dir) continue;
+      if (level >= levels) unread.push(node.path);
+      else walk(node.children, level + 1);
+    }
+  };
+  if (levels >= 1) walk(nodes, 1);
+  return unread;
+}
+
+/**
+ * A listing read from the folder at `folderPath`, with every entry named
+ * under `folderPath`.
+ *
+ * The backend resolves the folder it is asked to read, links included, and
+ * names what it finds by where that really is. For a folder reached through
+ * a link — `packages/shared` leading to `libs/shared` — that is the link's
+ * target, so `libs/shared/src` landed in the tree under `packages/shared`:
+ * a path the tree had never shown, which it could not find again to open,
+ * keep open or refresh. Each entry is named by the path the tree reached it
+ * by instead. For any other folder that is the path the backend gave, and
+ * the listing comes back as it was.
+ *
+ * Only the part before the folder is swapped; each name stays exactly as the
+ * backend spelled it. Rebuilding the path from the name with `join` dropped a
+ * leading `\` — a legal character in a name off Windows — so a folder named
+ * `\..` became `<folder>/..`, and deleting it removed the folder above.
+ */
+export function placeUnder(nodes, folderPath) {
+  if (!Array.isArray(nodes)) return nodes;
+  const from = folderReadBy(nodes);
+  const to = stripTrailingSep(folderPath);
+  if (from === null || from === to) return nodes;
+  return reroot(nodes, from, to);
+}
+
+/** The folder a listing's entries are named under: each path is it, then a name. */
+function folderReadBy(nodes) {
+  for (const node of nodes) {
+    if (node && typeof node.path === 'string' && typeof node.name === 'string' && node.name && node.path.endsWith(node.name)) {
+      return stripTrailingSep(node.path.slice(0, node.path.length - node.name.length));
+    }
+  }
+  return null;
+}
+
+/** `nodes` with the leading `from` of every path, at any depth, made `to`. */
+function reroot(nodes, from, to) {
+  return nodes.map((node) => {
+    if (!node || typeof node !== 'object' || typeof node.path !== 'string' || !node.path.startsWith(from)) return node;
+    const path = to + node.path.slice(from.length);
+    const children = Array.isArray(node.children) ? reroot(node.children, from, to) : node.children;
+    return { ...node, ...(node.id === undefined ? {} : { id: path }), path, ...(children === undefined ? {} : { children }) };
+  });
+}
+
+/**
  * Where the keyboard should land after `key`, given the visible rows.
  *
  * Returns `{ index }` to move focus, `{ expand }` / `{ collapse }` to open or
@@ -166,4 +234,39 @@ export function navigate(rows, index, key) {
     default:
       return null;
   }
+}
+
+/**
+ * What the Explorer's delete prompt says about `target` ({ name, isDir,
+ * isLink }), given the names of the open files under it that have unsaved
+ * changes.
+ *
+ * Deleting closes the tabs of everything deleted, and their unsaved changes
+ * went with them without a word — nothing said so, and on Windows they had
+ * survived until paths were matched there too. So the prompt says so, and
+ * Cancel keeps them.
+ *
+ * A link is deleted as a link, and what it points to is still there — but a
+ * tab opened through it names its file by the link's path, which is gone. Kept
+ * open, its Save made a new folder or file where the link had been, and the
+ * file the user meant to edit never got the edits. So those tabs close too,
+ * and the prompt says to save first to keep the edits where the link leads.
+ */
+export function deletePromptMessage(target, unsavedNames = []) {
+  const unsaved = unsavedChangesIn(unsavedNames);
+  if (target.isLink) {
+    const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost; save them first to keep them in what it points to.` : '';
+    return `Are you sure you want to delete the link '${target.name}'? What it points to is not touched.${lost}`;
+  }
+  const contents = target.isDir ? ' Its contents will be deleted too.' : '';
+  const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost.` : '';
+  return `Are you sure you want to delete '${target.name}'?${contents}${lost}`;
+}
+
+/** "a.js", "a.js and b.js", "a.js, b.js and 3 other files". */
+function unsavedChangesIn(names) {
+  if (names.length === 0) return '';
+  if (names.length === 1) return names[0];
+  if (names.length <= 3) return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} other files`;
 }

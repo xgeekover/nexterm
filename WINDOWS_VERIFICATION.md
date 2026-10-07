@@ -589,6 +589,136 @@ cmd; and whether the app, started from the Start menu, finds npm's
   where `opencode` is installed: `where.exe opencode`); with no such line,
   conhost dropped the title. No offer at all is the typed line not being
   followed — note the shell.
+### V26 — a shell that exits comes back with Enter
+
+Reported from this PC (2026-10-07): quitting `opencode` with Ctrl+C in cmd
+sometimes left a terminal printing "[NexTerm] PTY session not found: pty-5"
+for every key. cmd had exited (the backend drops a session only when its shell
+ends); why is not known yet. npm runs OpenCode through `opencode.cmd`, so a
+second Ctrl+C can reach cmd at "Terminate batch job (Y/N)?" — the exit code
+the terminal now prints will say. Never run on Windows since the fix: checked
+in the suites with the browser mock.
+
+- In cmd, start `opencode` and press Ctrl+C two or three times quickly, a few
+  times over. Whenever cmd goes with it, the terminal shows one grey
+  `[process exited with code …]` line — write down the code, it says how cmd
+  ended (`0xC000013A, ended by Ctrl+C` is the suspected one) — and
+  `Press Enter to start a new shell in this terminal.`, and no yellow
+  `[NexTerm] PTY session …` line however many keys are pressed.
+- Enter: a new cmd prompt at the top of the same pane, in the same
+  directory; the old output and the notice are in the scrollback just above
+  it (scroll up). Commands run, and the prompt and their output stay where
+  they are written — nothing lands on top of old output. Resize the pane: the
+  same. The tab's name is no longer struck through.
+- If cmd went while OpenCode was still on screen: the notice shows over
+  OpenCode's last screen, a drag there selects text (it does not reach
+  OpenCode), and Enter brings back cmd's own screen with the cursor visible.
+  Arrow keys and Shift+Enter then behave as in a new terminal.
+- `exit` at a PowerShell prompt: the same notice with code 0, and Enter brings
+  PowerShell back.
+- When it fails, say which half: a yellow `[NexTerm] Could not start a new
+  shell: …` is the spawn (note the text); keys still producing
+  `PTY session …` lines means the notice was never reached — note the exit
+  code printed, if any.
+
+### V27 — Clear Terminal clears it, and stays cleared
+
+Clear Terminal (palette, Terminal menu, Ctrl+L with the focus outside a
+terminal) used to do nothing at all. It now clears xterm's screen and
+scrollback; ConPTY is not told (portable-pty has no ClearPseudoConsole), so
+the risk on Windows is ConPTY painting the old screen back on its next full
+redraw. Never run on Windows: checked with the browser mock.
+
+- In cmd, run `dir /s C:\Windows\System32\drivers` (a few screens). Click the
+  Explorer, then Ctrl+L: the terminal is empty but for the prompt line at the
+  top, and the scrollbar shows no scrollback.
+- Drag a divider to resize the pane, then maximize and restore the window:
+  the old output does not come back. Type `dir`: it prints below the prompt.
+- Ctrl+L with the terminal focused is cmd's (nothing happens in cmd; in
+  PowerShell it clears the screen itself) — NexTerm does not take it there.
+- Palette: type `save all` — the first row is *Save All Files*, not *Clear
+  Terminal*.
+
+### V28 — no terminal starts on another machine
+
+A directory on another machine (`\\host\share`) is never where a terminal
+starts: starting a shell there, or only resolving the path, makes Windows
+connect to the host and sign in with your credentials — and any program's
+output can claim a directory (OSC 7). Never run on Windows.
+
+- Settings ▸ Terminal ▸ Working Directory ▸ Custom path, type
+  `\\localhost\C$\Windows`: the field says the directory is on another machine
+  and a terminal never starts in one. Open a new terminal: it starts in the
+  open folder (or your home directory), not there.
+- In PowerShell, `cd \\localhost\C$\Windows`, then quit the shell with `exit`
+  and press Enter: the new shell starts where the terminal was before the
+  `cd`, not on the share. The same after closing and reopening NexTerm.
+- A folder on a mapped drive letter (`Z:\…`) is a local path and works as
+  before.
+
+### V29 — closing with unsaved edits asks, and a dead page cannot hold the window
+
+The backend decides every close now (src-tauri/src/commands/app.rs): with
+nothing unsaved the window closes at once; with an unsaved editor tab it asks
+the page, which shows Save / Don't Save / Cancel. A page that does not answer
+within 2 s — crashed, hung — no longer keeps the window open. Never run on
+Windows: checked with the suites and the browser mock.
+
+- Edit a file without saving, then Alt+F4: the window comes forward if it was
+  behind and asks. Cancel keeps everything. Alt+F4 again, Don't Save: the
+  window closes, with no second "Leave site?" question.
+- The same with the title bar's ✕ double-clicked: one question, not a close,
+  and it stays up (the second press does not cancel it). Cancel, then press
+  Enter: nothing happens — the keyboard is back in the editor, not on ✕.
+- The same with nothing unsaved: Alt+F4 closes at once.
+- Edit a file, then Ctrl+R or F5 with the editor focused: a "Leave site?"
+  question (or nothing at all, if WebView2 already swallows the key — say
+  which); the edit is still there afterwards.
+- Known and not fixed: shutting down, signing out or a restart for an update
+  with unsaved edits loses them without asking (tao ignores
+  WM_QUERYENDSESSION).
+
+### V30 — pasting a pnpm or npm-workspaces project without Developer Mode
+
+A copy of a folder whose node_modules is full of junctions failed at the first
+one and rolled the whole paste back, because a symlink needs Developer Mode or
+an administrator. Junctions are copied as junctions now. Never run on Windows.
+
+- With Developer Mode off, in the Explorer copy a pnpm project (or any folder
+  with a junction: `mklink /J link target`) and paste it beside itself. While
+  it copies the Explorer says "Copying '…'…" and Paste is greyed; a hidden
+  `.<name>.copying` folder appears and becomes `<name> copy` at the end.
+- In the copy, `dir node_modules` shows `<JUNCTION>` entries, and the project
+  runs (`pnpm test` or similar).
+- A relative folder symlink in the source (made with Developer Mode on:
+  `mklink /D shared ..\libs\shared` inside `packages\app`), pasted with it
+  off: in the copy, `packages\app\shared` is a `<JUNCTION>` that opens the
+  copy's own `libs\shared` — not a `.…copying` folder that no longer exists.
+- Close NexTerm in the middle of a big paste: what is left is the
+  `.<name>.copying` folder, never a half-filled `<name> copy`.
+
+### V31 — Open Folder holds the window while the picker is open
+
+The folder picker belongs to the window now. Never run on Windows.
+
+- File ▸ Open Folder…: while the picker is open, clicking NexTerm does
+  nothing (it is disabled behind the dialog), so nothing can be typed into a
+  tab the folder switch would then close without asking.
+
+### V32 — a link to another machine inside a project is never followed
+
+With Developer Mode on (or a repository checked out with
+`core.symlinks=true`), a link inside the open folder whose target is a share
+(`mklink /D docs \\localhost\C$\Windows`) was followed — by the Explorer, Go to
+File, search and opening a file through it — and following one signs in to
+that machine. Never run on Windows.
+
+- Open the folder: `docs` is listed as a link and does not expand. Go to File
+  does not list anything under it; Search in Files finds nothing under it;
+  opening `docs\…` from a terminal link says "Path goes through a link to
+  another machine".
+- The same through a second link: `mklink /D via docs` — `via` does not
+  expand either, and nothing under it is listed, searched or opened.
 
 ## What the first run found
 

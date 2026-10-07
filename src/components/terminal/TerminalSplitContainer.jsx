@@ -40,6 +40,7 @@ import { cn } from '../../lib/utils.js';
 import { ActivityDot } from './ActivityDot.jsx';
 import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
+import { copyText } from '../../lib/copyText.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -394,38 +395,6 @@ function tabsOfGroup(tree, tabs) {
     .flatMap((pane) => pane.tabIds)
     .map((id) => byId.get(id))
     .filter(Boolean);
-}
-
-
-/**
- * Copy text to the clipboard. Prefers the async Clipboard API (works inside
- * Tauri's webview for a click-triggered call); falls back to the classic
- * hidden-textarea + execCommand trick for any environment where that API is
- * unavailable or throws (e.g. an insecure context).
- */
-async function copyToClipboard(text) {
-  if (!text) return;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return;
-    }
-  } catch (_) {
-    // fall through to the legacy fallback below
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  } catch (_) {
-    // Best effort — nothing else we can do without a clipboard API.
-  }
 }
 
 /** Translucent overlay showing where the dropped tab will land. */
@@ -903,7 +872,7 @@ function TerminalPane({
                   icon: Copy,
                   onSelect: () => {
                     const target = paneTabs.find((t) => t.id === chipMenu.tabId);
-                    if (target?.cwd) copyToClipboard(target.cwd);
+                    if (target?.cwd) copyText(target.cwd);
                   },
                 },
               ]
@@ -1633,12 +1602,13 @@ export function TerminalSplitContainer({ headerSlot = null }) {
 
   // Split whichever pane's own button was clicked, then focus the pane it
   // creates — a clear, visible sign the click did something, even when the
-  // pane split wasn't already the focused one.
+  // pane split wasn't already the focused one. Focused by the pane alone,
+  // which names its group: a split whose group went away while its shell
+  // started lands in another one (see the store's `splitPane`).
   const handleSplit = useCallback(
     async (paneId, direction) => {
-      const groupId = activeGroupIdRef.current;
-      const newPaneId = await splitPane(paneId, direction, groupId);
-      if (newPaneId) setActivePane(newPaneId, groupId);
+      const newPaneId = await splitPane(paneId, direction, activeGroupIdRef.current);
+      if (newPaneId) setActivePane(newPaneId);
     },
     [splitPane, setActivePane]
   );

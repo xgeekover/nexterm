@@ -280,14 +280,16 @@ describe('A start marker that arrives late', () => {
       const watching = await T.getState().createTab(); // on screen; `tab` is not
       try {
         await cmdPrompt(tab);
-        // A long build, started a minute ago from the palette, in the background.
+        // A long build, typed a minute ago in the background terminal. The
+        // shell has not answered it yet, and cmd sends no C, so the minute it
+        // has been running is set here rather than waited out.
         const original = mockBridge.invoke;
         mockBridge.invoke = function (command, args, ...rest) {
           if (command === 'pty_write') return Promise.resolve(null);
           return original.call(this, command, args, ...rest);
         };
         try {
-          await T.getState().executeCommand('build.cmd', tab.id);
+          await T.getState().writeRaw(tab.id, 'build.cmd\r');
         } finally {
           mockBridge.invoke = original;
         }
@@ -309,10 +311,6 @@ describe('A start marker that arrives late', () => {
           false,
           'the status bar reported an exit code'
         );
-
-        const block = done.blocks[done.blocks.length - 1];
-        assert.equal(block.status, 'completed', 'the block did not close');
-        assert.equal(block.exitCode, null, 'the block was given an exit code nobody reported');
 
         const note = T.getState().notifications.find((n) => n.tabId === tab.id);
         assert.ok(note, 'a long command in a background terminal finished and nobody was told');

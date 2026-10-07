@@ -24,6 +24,7 @@ import { StartupCommandsDialog } from './StartupCommandsDialog.jsx';
 import { activityLabel } from '../../lib/tabActivity.js';
 import { startupCommandOf, startupCount } from '../../lib/startupCommands.js';
 import { cn } from '../../lib/utils.js';
+import { copyText } from '../../lib/copyText.js';
 
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
 const INDENT = 10;
@@ -343,7 +344,7 @@ export function TerminalsPanel() {
         label: 'Copy Path',
         disabled: !tab.cwd,
         disabledReason: !tab.cwd ? 'This terminal has no directory yet' : undefined,
-        onSelect: () => navigator.clipboard?.writeText(tab.cwd || ''),
+        onSelect: () => copyText(tab.cwd),
       },
       { type: 'separator', key: 's2' },
       {

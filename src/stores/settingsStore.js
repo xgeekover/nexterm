@@ -207,9 +207,41 @@ function persistSettings(state) {
   saveState(SETTINGS_KEY, payload);
 }
 
+/** The views that can be dragged between regions, in the order a region lists them. */
+const VIEW_ORDER = ['explorer', 'search', 'terminal', 'terminals'];
+
+/** The flag that shows each region. */
+const REGION_SHOWN = { left: 'sidebarVisible', right: 'secondarySidebarVisible', bottom: 'panelVisible' };
+
+/** The views a region hosts, in tab order. */
+export function viewsIn(viewLocations, region) {
+  return VIEW_ORDER.filter((view) => viewLocations?.[view] === region);
+}
+
+/**
+ * The view a region shows: the one last chosen there — by its tab, the
+ * activity bar or a shortcut — while it is still there, or else the region's
+ * first. Null for a region with no views.
+ *
+ * One answer, read by the layout that draws the region and by the activity
+ * bar that lights the icon for it. The activity bar used to work it out from
+ * the last `showView` request, which the layout drops as soon as it has
+ * applied it: with Search on screen the Explorer was lit, and a click on the
+ * Explorer hid the side bar instead of showing the Explorer.
+ */
+export function shownView({ viewLocations, chosenViews }, region) {
+  const views = viewsIn(viewLocations, region);
+  const chosen = chosenViews?.[region];
+  return views.includes(chosen) ? chosen : views[0] ?? null;
+}
+
+/** Whether `view` is on screen: its region is showing, and showing it. */
+export function isViewShown(state, view) {
+  const region = state.viewLocations?.[view];
+  return Boolean(region && state[REGION_SHOWN[region]] && shownView(state, region) === view);
+}
+
 export const useSettingsStore = create((set, get) => ({
-  activeView: 'terminal', // 'terminal' | 'editor' | 'agents' | 'chat' | 'all' — legacy, mapped onto shell flags below
-  layoutMode: 'split', // 'split' | 'single'
   isCommandPaletteOpen: false,
   commandPaletteMode: 'all', // 'all' | 'files' (⌘P quick open)
   isSettingsModalOpen: false,
@@ -224,8 +256,7 @@ export const useSettingsStore = create((set, get) => ({
   // VS Code Dark Modern shell regions
   sidebarVisible: true, // primary sidebar (Explorer)
   panelVisible: true, // bottom panel (terminal)
-  secondarySidebarVisible: true, // secondary sidebar (Agents)
-  secondaryTab: 'agents', // 'agents' (AI Chat was removed)
+  secondarySidebarVisible: true, // secondary sidebar (Terminals)
 
   // Which region ('left' | 'right' | 'bottom') each draggable view currently
   // lives in. Not persisted — resets to the default VS Code-style layout on
@@ -239,23 +270,22 @@ export const useSettingsStore = create((set, get) => ({
     terminals: 'right',
   },
 
-  // Legacy view switcher — kept because other subsystems still call it to
-  // bring their own region into view. It no longer hides everything else;
-  // it just maps the old view name onto the new shell flags.
-  setActiveView: (activeView) => {
-    set({ activeView });
-    switch (activeView) {
+  // The view last chosen in each region that hosts more than one — the
+  // primary side bar holds the Explorer and Search. Read through `shownView`,
+  // which falls back to a region's first view. Not persisted either.
+  chosenViews: {},
+  chooseView: (region, view) =>
+    set((state) => ({ chosenViews: { ...state.chosenViews, [region]: view } })),
+
+  // Bring the region a view lives in on screen: the palette opens a file
+  // ('editor') or a terminal ('terminal') where it can be seen.
+  setActiveView: (view) => {
+    switch (view) {
       case 'editor':
         set({ sidebarVisible: true });
         break;
       case 'terminal':
         set({ panelVisible: true });
-        break;
-      case 'chat':
-        set({ secondarySidebarVisible: true, secondaryTab: 'agents' });
-        break;
-      case 'agents':
-        set({ secondarySidebarVisible: true, secondaryTab: 'agents' });
         break;
       case 'all':
         set({ sidebarVisible: true, panelVisible: true, secondarySidebarVisible: true });
@@ -264,50 +294,47 @@ export const useSettingsStore = create((set, get) => ({
         break;
     }
   },
-  setLayoutMode: (layoutMode) => set({ layoutMode }),
 
   toggleSidebar: () => set((state) => ({ sidebarVisible: !state.sidebarVisible })),
   togglePanel: () => set((state) => ({ panelVisible: !state.panelVisible })),
 
-  // No tab: plain visibility toggle. With a tab: open on that tab if closed,
-  // switch to that tab if open on a different one, or close if already open
-  // on that exact tab (VS Code's activity-bar-click behaviour).
-  toggleSecondarySidebar: (tab) => {
-    set((state) => {
-      if (!tab) {
-        return { secondarySidebarVisible: !state.secondarySidebarVisible };
-      }
-      if (state.secondarySidebarVisible && state.secondaryTab === tab) {
-        return { secondarySidebarVisible: false };
-      }
-      return { secondarySidebarVisible: true, secondaryTab: tab };
-    });
-  },
-  setSecondaryTab: (tab) => set({ secondaryTab: tab }),
+  toggleSecondarySidebar: () => set((state) => ({ secondarySidebarVisible: !state.secondarySidebarVisible })),
 
   /**
    * Bring one view on screen and make it the visible one in its region.
    *
-   * The activity bar lives outside `PanelLayout`, which owns "which tab of a
-   * region is showing" as local state — so this is the one line of it that
-   * has to be shared. `requestedView` is a request, not a second source of
-   * truth: the layout honours it when that view is in that region and forgets
-   * about it otherwise.
+   * Which tab of a region is showing is `chosenViews`, here rather than in
+   * `PanelLayout`, so the activity bar, which lives outside the layout, reads
+   * the same answer the layout draws (see `shownView`).
    */
   showView: (view) =>
     set((state) => {
       const region = state.viewLocations[view];
       if (!region) return {};
-      const visibility =
-        region === 'left'
-          ? { sidebarVisible: true }
-          : region === 'right'
-            ? { secondarySidebarVisible: true }
-            : { panelVisible: true };
-      return { ...visibility, requestedView: { view, region, at: Date.now() } };
+      return {
+        [REGION_SHOWN[region]]: true,
+        chosenViews: { ...state.chosenViews, [region]: view },
+        requestedView: { view, region, at: Date.now() },
+      };
     }),
 
-  /** The last `showView` request, or null. Cleared once the layout applies it. */
+  /**
+   * What an activity-bar icon does, as in VS Code: show its view, or hide the
+   * view's region when that view is already the one on screen.
+   */
+  toggleView: (view) => {
+    const state = get();
+    const region = state.viewLocations[view];
+    if (!region) return;
+    if (isViewShown(state, view)) set({ [REGION_SHOWN[region]]: false });
+    else state.showView(view);
+  },
+
+  /**
+   * The last `showView` request, or null: that a view was asked for, and
+   * when. Dropped once the layout has drawn it, so it never lingers as an
+   * account of which view is showing — `chosenViews` is that.
+   */
   requestedView: null,
   clearRequestedView: () => set({ requestedView: null }),
 

@@ -119,7 +119,23 @@ fn main() {
                     menu::forward_to_webview(handle, event.id().as_ref());
                 });
             }
+
+            // ⌘Q, the Dock's Quit and logging out end a macOS app without
+            // closing its window, so the guard on the window's close below
+            // never hears of them. See commands/app.rs.
+            #[cfg(target_os = "macos")]
+            commands::app::ask_before_quitting(app.handle());
             Ok(())
+        })
+        // Every way of closing the window comes here, and the backend decides
+        // whether it goes ahead — never the page, which may have crashed or
+        // hung. See commands/app.rs.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if commands::app::hold_close(window) {
+                    api.prevent_close();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::pty::pty_spawn,
@@ -133,20 +149,27 @@ fn main() {
             commands::fs::fs_pick_root,
             commands::fs::fs_read_dir,
             commands::fs::fs_read_file,
+            commands::fs::fs_file_size,
             commands::fs::fs_write_file,
             commands::fs::fs_create_file,
             commands::fs::fs_create_dir,
             commands::fs::fs_rename_path,
             commands::fs::fs_delete_path,
+            commands::fs::fs_copy_path,
             commands::fs::fs_set_root,
             commands::fs::git_status,
             commands::fs::fs_search,
+            commands::fs::fs_list_files,
             commands::system::system_get_info,
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
             commands::notification::show_desktop_notification,
             commands::clipboard::clipboard_read,
             commands::agent::agent_sessions,
+            commands::app::app_set_unsaved,
+            commands::app::app_close_ack,
+            commands::app::app_close_window,
+            commands::app::app_quit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");

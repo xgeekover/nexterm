@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { forgetOutput, startPtyOutputBus } from '../lib/ptyOutputBus.js';
 import { notifyTerminal } from '../lib/terminalNotice.js';
+import { parseSize, restartsShell, sessionIsGone } from '../lib/shellExit.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
 // schema as absent, which for this store's keys would mean silently bootstrapping
 // over the user's workspace. Reads go through `loadVersionedState` + an explicit
@@ -665,12 +666,12 @@ function buildPersistedPayload(state) {
 /**
  * Debounced write-behind, with a ceiling.
  *
- * A plain restart-on-every-change debounce is starvable, and a terminal is
- * exactly the thing that starves it: `pty-output` rebuilds `state.tabs` on
- * every chunk, so a shell printing more often than the debounce (a dev server,
- * `tail -f`, a test watcher) pushed the save out forever. Renaming a group or
- * rearranging panes then never reached disk until the output stopped — and if
- * the app was quit while it was still streaming, all of it was lost.
+ * A plain restart-on-every-change debounce is starvable, and a terminal was
+ * exactly the thing that starved it: `pty-output` used to rebuild `state.tabs`
+ * on every chunk, so a shell printing more often than the debounce (a dev
+ * server, `tail -f`, a test watcher) pushed the save out forever. Renaming a
+ * group or rearranging panes then never reached disk until the output stopped
+ * — and if the app was quit while it was still streaming, all of it was lost.
  *
  * So: coalesce bursts as before, but never go longer than PERSIST_MAX_WAIT_MS
  * without writing.
@@ -764,18 +765,6 @@ export function migrateV1Workspace(v1) {
 }
 
 /**
- * Read the live workspace payload, migrating an older schema instead of
- * throwing it away.
- *
- * `loadState` deliberately returns the fallback for ANY version mismatch,
- * which for this key would mean: bootstrap a single terminal, then let the
- * 300ms write-behind overwrite the user's real workspace. So this goes through
- * `loadVersionedState` and branches on the version explicitly; anything
- * unrecognised (including a *newer* schema written by a future build) returns
- * null, which bootstraps but — because nothing is understood — is the only
- * safe reading.
- */
-/**
  * Copy the pre-upgrade payload aside before this version can write over it.
  *
  * The upgrade launch is the one launch where the saved workspace is
@@ -794,6 +783,18 @@ function backUpPreUpgradePayload() {
   }
 }
 
+/**
+ * Read the live workspace payload, migrating an older schema instead of
+ * throwing it away.
+ *
+ * `loadState` deliberately returns the fallback for ANY version mismatch,
+ * which for this key would mean: bootstrap a single terminal, then let the
+ * 300ms write-behind overwrite the user's real workspace. So this goes through
+ * `loadVersionedState` and branches on the version explicitly; anything
+ * unrecognised (including a *newer* schema written by a future build) returns
+ * null, which bootstraps but — because nothing is understood — is the only
+ * safe reading.
+ */
 function loadWorkspacePayload() {
   const stored = loadVersionedState(PERSIST_KEY);
   if (!stored) return null;
@@ -943,6 +944,43 @@ function remapTreeTabIds(node, map) {
   return { ...node, children: node.children.map((c) => remapTreeTabIds(c, map)) };
 }
 
+/**
+ * The layout a start puts in place — the restored one, or a fresh start's
+ * first terminal — with every terminal already in the store kept in it.
+ *
+ * A start begins with no terminals, and its layout used to replace `tabs`
+ * along with the placeholder group: a terminal made while it ran vanished
+ * from the screen with its shell still running. New terminals now wait for
+ * the start (see `spawnTab`); this keeps one made before it began, or any
+ * that gets past that wait, rather than dropping it. It goes into the active
+ * pane of the group on screen and is shown, as a new terminal is.
+ *
+ * A restore keeps the tab ids it saved, and the counter starts from one on
+ * every launch, so a terminal made before the restore can hold an id a
+ * restored one is about to take. Two tabs with one id would share one xterm
+ * (the registry keys on it), so the restored terminal takes a new id instead.
+ *
+ * `layout` is `{ tabs, groups, activeGroupId, activeTabId }`; so is what
+ * comes back, ready for `set()`.
+ */
+function keepTabsMadeMeanwhile(state, layout) {
+  const kept = state.tabs;
+  if (kept.length === 0) return layout;
+
+  const taken = new Set(kept.map((t) => t.id));
+  const ids = new Map(layout.tabs.map((t) => [t.id, taken.has(t.id) ? makeTabId() : t.id]));
+  const layoutTabs = layout.tabs.map((t) => ({ ...t, id: ids.get(t.id) }));
+  const groups = layout.groups.map((g) => ({ ...g, tree: remapTreeTabIds(g.tree, ids) }));
+  const active = groups.find((g) => g.id === layout.activeGroupId) || groups[0];
+  const tree = kept.reduce((t, tab) => addTabToPane(t, active.activePaneId, tab.id), active.tree);
+  return settle(state, {
+    tabs: [...layoutTabs, ...kept],
+    groups: groups.map((g) => (g === active ? { ...g, tree } : g)),
+    activeGroupId: active.id,
+    activeTabId: kept[kept.length - 1].id,
+  });
+}
+
 /** Give every pane in a tree a brand-new id, so the same layout can be loaded twice. */
 function regeneratePaneIds(node, idMap = new Map()) {
   if (!node) return null;
@@ -996,6 +1034,16 @@ const shownTitles = new Map();
 
 /** tab id -> the pending lookup of its opencode conversation. */
 const resolveTimers = new Map();
+
+/** Tab ids whose new shell is being started (`restartShell`): one at a time. */
+const restarting = new Set();
+
+/**
+ * Tab ids on their way out (`closeTab`, `killTabIfOrphaned`). Each holds the
+ * session it read before awaiting the kill, so a new shell `restartShell`
+ * installed meanwhile would outlive the tab, running with nothing to show it.
+ */
+const closingTabs = new Set();
 
 /**
  * How long a title has to stay before its conversation is looked up. opencode
@@ -1124,6 +1172,12 @@ function nextDefaultTitle(tabs, preferred = null) {
  * A group already called "Group N" keeps N when nothing else uses it, so
  * clearing a default name leaves it as it was; otherwise it gets the lowest
  * number nobody uses.
+ *
+ * A group being made has no id yet (`null`), so every group there is counts
+ * and it gets the lowest free number. New groups were numbered by how many
+ * groups there were, which reused a number the moment one in the middle
+ * closed: with Group 1, 2 and 3, close Group 2, make a new one, and there
+ * were two "Group 3"s.
  */
 function nextDefaultGroupName(groups, groupId) {
   const numberIn = (name) => {
@@ -1162,6 +1216,20 @@ async function disposeTerminalView(tabId) {
     disposeTerminal(tabId);
   } catch (_) {
     // Terminal view module unavailable — nothing to dispose.
+  }
+}
+
+/**
+ * Clear a tab's xterm (`clearTerminal` in the registry). False where there is
+ * none to clear — no document, as in the Node-run tests, or no view yet.
+ */
+async function clearTerminalView(tabId) {
+  if (typeof document === 'undefined') return false;
+  try {
+    const { clearTerminal } = await import('../components/terminal/terminalRegistry.js');
+    return clearTerminal(tabId);
+  } catch (_) {
+    return false;
   }
 }
 
@@ -1212,6 +1280,15 @@ export const useTerminalStore = create((set, get, api) => {
    * finished spawning.
    */
   const spawnTab = async (title = null, cwd = null, shell = null) => {
+    // A terminal asked for while the store is starting — the empty pane's New
+    // Terminal, a shortcut, the menu — is made once the start is over. Made
+    // beside it, it was dropped when the restore put its layout in place, its
+    // shell left running; it could take the id of a terminal being restored,
+    // as the counter moves past the saved ids only once they are all back;
+    // and one asked for before the start had reaped the previous page's
+    // shells was reaped with them. A start that fails lets it through all
+    // the same.
+    if (initInFlight) await initInFlight.catch(() => {});
     try {
       // Nothing asked for a directory -> the `terminal.integrated.cwd`
       // setting decides, and `null` hands it back to the backend's own
@@ -1254,8 +1331,6 @@ export const useTerminalStore = create((set, get, api) => {
         defaultTitle,
         sessionId: ptySession.session_id,
         cwd: ptySession.cwd || get().cwd,
-        blocks: [],
-        activePrompt: '',
         agent: null,
         agentResumeOffered: false,
         // What the backend actually ran, not what was asked for. The status
@@ -1426,7 +1501,6 @@ export const useTerminalStore = create((set, get, api) => {
     resolveTimers.delete(tabId);
   };
 
-  /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   /**
    * Freeze one group into something storable: its layout with the live tab
    * ids swapped for stable slot ids, and each terminal's title and CURRENT
@@ -1540,19 +1614,30 @@ export const useTerminalStore = create((set, get, api) => {
       )
     );
 
+  /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   const killTabIfOrphaned = async (tabId) => {
     if (groupOfTab(get(), tabId)) return;
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
+    closingTabs.add(tabId);
     try {
-      await invoke('pty_kill', { session_id: tab.sessionId });
-    } catch (e) {
-      console.warn('[TerminalStore] pty_kill failed:', e);
+      try {
+        await invoke('pty_kill', { session_id: tab.sessionId });
+      } catch (e) {
+        console.warn('[TerminalStore] pty_kill failed:', e);
+      }
+      await disposeTerminalView(tabId);
+      typedLines.delete(tabId);
+      forgetAgentTitle(tabId);
+      // Whatever its shell printed that no terminal ever showed goes with it, as
+      // in `closeTab`. Closing a pane, a group or the whole workspace comes this
+      // way, and a tab of theirs never brought forward kept up to BACKLOG_LIMIT
+      // characters for the life of the app.
+      forgetOutput(tab.sessionId);
+      set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
+    } finally {
+      closingTabs.delete(tabId);
     }
-    await disposeTerminalView(tabId);
-    typedLines.delete(tabId);
-    forgetAgentTitle(tabId);
-    set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
   };
 
   /**
@@ -1626,8 +1711,6 @@ export const useTerminalStore = create((set, get, api) => {
         defaultTitle,
         sessionId: ptySession.session_id,
         cwd: ptySession.cwd || wantedCwd,
-        blocks: [],
-        activePrompt: '',
         // What was running here, and the fact that it is NOT running now.
         // The shell comes back empty and the conversation is offered rather
         // than taken: starting an agent costs tokens and hits an API, so it
@@ -1701,8 +1784,6 @@ export const useTerminalStore = create((set, get, api) => {
   return {
     tabs: [],
     activeTabId: null,
-    history: [],
-    historyIndex: -1,
     cwd: '/workspace',
     isInitialized: false,
 
@@ -1878,17 +1959,17 @@ export const useTerminalStore = create((set, get, api) => {
         });
       }),
 
-    /**
-     * Bring a group on screen. Its arrangement is exactly as it was last left;
-     * the active tab moves with it (an inactive group's terminals keep
-     * running, so this is purely a view/focus change).
-     */
     /** Rename the session you are working in. */
     renameWorkspace: (name) => {
       const trimmed = (name || '').trim();
       if (trimmed) set({ workspaceName: trimmed });
     },
 
+    /**
+     * Bring a group on screen. Its arrangement is exactly as it was last left;
+     * the active tab moves with it (an inactive group's terminals keep
+     * running, so this is purely a view/focus change).
+     */
     setActiveGroup: (groupId) =>
       set((state) => {
         const group = state.groups.find((g) => g.id === groupId);
@@ -1988,7 +2069,7 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = await spawnTab(null, cwd);
       if (!tab) return null;
       const group = makeGroup({
-        name: (typeof name === 'string' && name.trim()) || `Group ${get().groups.length + 1}`,
+        name: (typeof name === 'string' && name.trim()) || nextDefaultGroupName(get().groups, null),
         tabIds: [tab.id],
       });
       set((state) =>
@@ -2165,7 +2246,7 @@ export const useTerminalStore = create((set, get, api) => {
         if (leaves.length === 1 && leaves[0].tabIds.length === 1) return null;
       }
       const group = makeGroup({
-        name: (typeof name === 'string' && name.trim()) || `Group ${state.groups.length + 1}`,
+        name: (typeof name === 'string' && name.trim()) || nextDefaultGroupName(state.groups, null),
         tabIds: [tabId],
       });
       set((s) => {
@@ -2375,15 +2456,17 @@ export const useTerminalStore = create((set, get, api) => {
       const newGroups = made.map((m) => m.group);
       const active = newGroups[Math.min(entry.activeIndex ?? 0, newGroups.length - 1)];
 
-      set((state) =>
-        settle(state, {
+      set((state) => ({
+        ...settle(state, {
           groups: mode === 'replace' ? newGroups : [...state.groups, ...newGroups],
           activeGroupId: active.id,
           activeTabId: collectLeaves(active.tree)[0]?.activeTabId ?? null,
-          // Replacing the session means you are now IN that workspace.
-          ...(mode === 'replace' && entry.name ? { workspaceName: entry.name } : {}),
-        })
-      );
+        }),
+        // Replacing the session means you are now IN that workspace. Beside
+        // `settle`, not through it: it hands back the layout and nothing else,
+        // so a name in its patch was dropped and the session kept its old one.
+        ...(mode === 'replace' && entry.name ? { workspaceName: entry.name } : {}),
+      }));
 
       runStartupCommands(made.flatMap((m) => m.startups));
       for (const tabId of doomed) await killTabIfOrphaned(tabId);
@@ -2476,14 +2559,24 @@ export const useTerminalStore = create((set, get, api) => {
 
       const newPaneId = makePaneId();
       set((state) => {
-        // The group can have gone away while the PTY was spawning.
-        if (!state.groups.some((g) => g.id === group.id)) return {};
+        // What was to be split can be gone by the time the shell is up: the
+        // pane closed, its group with it, or — asked for while the store was
+        // starting — the placeholder layout replaced by the restore. The split
+        // then goes where it would with nothing asked for: beside the active
+        // pane of that group, or of the group on screen once the group is
+        // gone. Splitting a pane that was not there any more changed nothing
+        // and left the new terminal in no pane, its shell running unseen.
+        const target = state.groups.find((g) => g.id === group.id) ?? resolveGroup(state, null, null);
+        if (!target) return {};
+        const at = collectLeaves(target.tree).some((l) => l.id === targetPaneId)
+          ? targetPaneId
+          : target.activePaneId;
         const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id };
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) =>
+          groups: updateGroup(state, target.id, (g) =>
             withoutZoom({
               ...g,
-              tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
+              tree: splitAt(g.tree, at, newLeaf, direction, false),
             })
           ),
         });
@@ -2492,13 +2585,15 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
-     * Split the active group's active pane and focus the newly created one.
+     * Split the active group's active pane and focus the newly created one —
+     * by the pane alone, which names its group: a split whose group went away
+     * while its shell started lands in another one (see `splitPane`).
      */
     splitActivePane: async (direction = 'horizontal') => {
       const group = get().getActiveGroup();
       if (!group) return null;
       const newPaneId = await get().splitPane(group.activePaneId, direction, group.id);
-      if (newPaneId) get().setActivePane(newPaneId, group.id);
+      if (newPaneId) get().setActivePane(newPaneId);
       return newPaneId;
     },
 
@@ -2737,35 +2832,15 @@ export const useTerminalStore = create((set, get, api) => {
       listening = true;
       // Before any shell is spawned: output a tab prints before its terminal
       // exists is kept for it from the first byte (see ptyOutputBus.js).
+      //
+      // The bus hands output straight to each terminal; the store does not
+      // listen for it at all. A handler here would run for every chunk a
+      // shell prints, and one that built a new `tabs` array per chunk
+      // re-rendered everything that subscribes to it — the terminals side
+      // bar, the split panes, the status bar. Profiled `type`-ing 1 MB into a
+      // terminal, React's re-renders were the top of the renderer's
+      // JavaScript time, above anything xterm.js did.
       await startPtyOutputBus();
-      unlisteners.push(await listen('pty-output', (payload) => {
-        const { session_id, data } = payload || {};
-        if (!session_id || !data) return;
-
-        // Output with no running block is prompt/banner noise — never appended
-        // to a finished (possibly pinned) block. It also must not touch the
-        // store: this runs for every chunk a shell prints, and a new `tabs`
-        // array re-rendered everything that subscribes to it (the terminals
-        // side bar, the split panes, the status bar) once per chunk. Profiled
-        // `type`-ing 1 MB into a terminal: React's re-renders were the top of
-        // the renderer's JavaScript time, above anything xterm.js did.
-        set((state) => {
-          let changed = false;
-          const tabs = state.tabs.map((tab) => {
-            if (tab.sessionId !== session_id) return tab;
-            const runningIdx = tab.blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx === -1) return tab;
-            changed = true;
-            const blocks = [...tab.blocks];
-            blocks[runningIdx] = {
-              ...blocks[runningIdx],
-              output: blocks[runningIdx].output + data,
-            };
-            return { ...tab, blocks };
-          });
-          return changed ? { tabs } : state;
-        });
-      }));
       // OSC 133 "C" (see src-tauri/src/pty/osc.rs): a command has begun. This
       // is the only signal that a terminal is BUSY rather than sitting at a
       // prompt, and without it the tab strip could report a verdict but never
@@ -2783,9 +2858,9 @@ export const useTerminalStore = create((set, get, api) => {
             // again describes nothing that is still true.
             return { ...tab, running: true, runStartedAt: Date.now(), lastExitCode: null };
           });
-          // Same discipline as the pty-output handler above — a new `tabs`
-          // array re-renders the side bar, every pane and the status bar, so
-          // it is only ever built when something actually changed.
+          // A new `tabs` array re-renders the side bar, every pane and the
+          // status bar, so it is only ever built when something actually
+          // changed.
           return changed ? { tabs } : state;
         });
       }));
@@ -2805,11 +2880,6 @@ export const useTerminalStore = create((set, get, api) => {
           const raised = [];
           const nextTabs = state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
-            // Remember the code whether or not a block was tracking this
-            // command: typing straight into the terminal never creates one,
-            // which is the normal case, so anything reading it off `blocks`
-            // only ever saw commands run from the palette.
-            //
             // An end with no code — cmd's, whose PROMPT has no way to say —
             // is a command that FINISHED, not one that succeeded. It stays
             // null, and null is no verdict anywhere it is read: no red dot,
@@ -2842,29 +2912,13 @@ export const useTerminalStore = create((set, get, api) => {
             // SUBMIT_GRACE_MS — a resume that fails at once — is not counted,
             // so its record stays for one more offer.
             const agentExited = tab.running && tab.agentTyped?.sessionId === session_id;
-            tab = {
+            return {
               ...tab,
               lastExitCode: code,
               running: false,
               runStartedAt: null,
               ...(agentExited ? { agent: null, agentResumeOffered: false, agentTyped: null } : {}),
             };
-            const idx = tab.blocks.findIndex((b) => b.status === 'running');
-            if (idx === -1) return tab;
-            const blocks = [...tab.blocks];
-            const running = blocks[idx];
-            blocks[idx] = {
-              ...running,
-              // zsh pads the last line to the terminal width before the prompt;
-              // drop that trailing whitespace so blocks end cleanly.
-              output: running.output.replace(/[ \t]+\r?$/, ''),
-              // Only a code the shell gave can make it a failure; with none
-              // it is simply finished.
-              status: code === null || code === 0 ? 'completed' : 'failed',
-              exitCode: code,
-              durationMs: Date.now() - (running.startTime || Date.now()),
-            };
-            return { ...tab, blocks };
           });
           return raised.length === 0
             ? { tabs: nextTabs }
@@ -2880,13 +2934,34 @@ export const useTerminalStore = create((set, get, api) => {
         // Nothing more will come from this shell to count.
         commandEndsBySession.delete(session_id);
 
+        // Nor to show, when no tab holds it: its output was kept for a
+        // terminal that will never exist. A tab closed before its shell's end
+        // got here — the backend drains the shell after the kill, so output
+        // arrives after the close freed what was kept — or a shell left by a
+        // previous page load, reaped at startup. Not while the store is still
+        // starting: a restore spawns every shell before any tab holds one, and
+        // a shell already gone (a missing WSL distro, a broken profile) left
+        // its last words for the tab about to show them.
+        const forgetIfUnheld = (state) => {
+          if (!state.tabs.some((t) => t.sessionId === session_id)) forgetOutput(session_id);
+        };
+        if (get().isInitialized) {
+          forgetIfUnheld(get());
+        } else {
+          const stop = api.subscribe((state) => {
+            if (!state.isInitialized) return;
+            stop();
+            forgetIfUnheld(state);
+          });
+        }
+
         set((state) => ({
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember that this shell is gone. Without it the tab looked
             // alive — blinking cursor, full scrollback — while every
             // keystroke went nowhere.
-            tab = {
+            return {
               ...tab,
               exited: { code: typeof exit_code === 'number' ? exit_code : null },
               // A shell killed mid-command never sends its "D" marker, so this
@@ -2894,18 +2969,6 @@ export const useTerminalStore = create((set, get, api) => {
               running: false,
               runStartedAt: null,
             };
-            const blocks = [...tab.blocks];
-            const runningIdx = blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx !== -1) {
-              const blk = blocks[runningIdx];
-              blocks[runningIdx] = {
-                ...blk,
-                status: exit_code === 0 ? 'completed' : 'failed',
-                exitCode: exit_code,
-                durationMs: Math.max(1, Date.now() - (blk.startTime || Date.now())),
-              };
-            }
-            return { ...tab, blocks };
           }),
         }));
       }));
@@ -3011,10 +3074,14 @@ export const useTerminalStore = create((set, get, api) => {
         // leaked shell per reload, measured as 1 → 2 → 3 → 4 child shells over
         // three reloads with a single terminal on screen.
         //
-        // We claim nothing, because nothing has been spawned yet: this store
-        // only reaches `bootstrap` when it holds no terminals at all.
+        // We claim what this store holds, which is normally nothing: a page
+        // load starts it with no terminals, and one asked for while this runs
+        // waits for it (`spawnTab`). One made before the start began is kept
+        // by it (`keepTabsMadeMeanwhile`), so its shell must not be reaped.
         try {
-          const reaped = await invoke('pty_retain_only', { session_ids: [] });
+          const reaped = await invoke('pty_retain_only', {
+            session_ids: get().tabs.map((t) => t.sessionId).filter(Boolean),
+          });
           if (reaped) {
             console.info(`[TerminalStore] Reaped ${reaped} terminal session(s) left by a previous page load.`);
           }
@@ -3032,6 +3099,12 @@ export const useTerminalStore = create((set, get, api) => {
         set({ savedGroups: loadSavedGroups(), savedWorkspaces: loadSavedWorkspaces() });
 
         const saved = loadWorkspacePayload();
+        // The session's name is saved with its layout, and comes back even
+        // when the layout does not: a session closed down to no terminals at
+        // all, or one whose every terminal fails to start, takes the fresh
+        // start below — which kept "Default" and saved it over the name.
+        const savedName =
+          typeof saved?.workspaceName === 'string' && saved.workspaceName.trim() ? saved.workspaceName.trim() : null;
         let restored = null;
         if (saved) {
           try {
@@ -3046,14 +3119,21 @@ export const useTerminalStore = create((set, get, api) => {
         }
 
         if (restored) {
-          set({
-            tabs: restored.tabs,
-            activeTabId: restored.activeTabId,
+          set((state) => ({
+            ...keepTabsMadeMeanwhile(state, {
+              tabs: restored.tabs,
+              groups: restored.groups,
+              activeGroupId: restored.activeGroupId,
+              activeTabId: restored.activeTabId,
+            }),
             cwd: restored.cwd,
             isInitialized: true,
-            groups: restored.groups,
-            activeGroupId: restored.activeGroupId,
-          });
+            // The session's name is saved with its layout and comes back with
+            // it. It used to be read and dropped: every launch was "Default"
+            // again, and the first save after it wrote that over the name the
+            // user had given.
+            workspaceName: restored.workspaceName,
+          }));
           return;
         }
 
@@ -3089,20 +3169,21 @@ export const useTerminalStore = create((set, get, api) => {
           defaultTitle,
           sessionId: ptySession.session_id,
           cwd: ptySession.cwd || rootPath,
-          blocks: [],
-          activePrompt: '',
           spawnedAt: Date.now(),
         };
         const group = makeGroup({ name: 'Group 1', tabIds: [initialTab.id] });
 
-        set({
-          tabs: [initialTab],
-          activeTabId: initialTab.id,
+        set((state) => ({
+          ...keepTabsMadeMeanwhile(state, {
+            tabs: [initialTab],
+            groups: [group],
+            activeGroupId: group.id,
+            activeTabId: initialTab.id,
+          }),
           cwd: initialTab.cwd,
           isInitialized: true,
-          groups: [group],
-          activeGroupId: group.id,
-        });
+          ...(savedName ? { workspaceName: savedName } : {}),
+        }));
       } catch (err) {
         console.error('[TerminalStore] Failed to initialize terminal session:', err);
       }
@@ -3134,7 +3215,13 @@ export const useTerminalStore = create((set, get, api) => {
       if (!newTab) return null;
 
       set((state) => {
-        const group = resolveGroup(state, groupId, paneId);
+        // The pane asked for can be gone by the time the shell is up — closed,
+        // or, asked for while the store was starting, replaced along with the
+        // whole placeholder layout — and its group with it. The terminal then
+        // goes where one goes when nothing is asked for: the active pane of
+        // the group on screen. It used to go nowhere, a shell running with no
+        // pane to show it until the next launch reaped it.
+        const group = resolveGroup(state, groupId, paneId) ?? resolveGroup(state, null, null);
         if (!group) return {};
         const targetPaneId = collectLeaves(group.tree).some((l) => l.id === paneId)
           ? paneId
@@ -3227,136 +3314,44 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       if (!tab) return;
 
+      closingTabs.add(tabId);
       try {
-        await invoke('pty_kill', { session_id: tab.sessionId });
-      } catch (e) {
-        console.warn('[TerminalStore] pty_kill failed:', e);
+        try {
+          await invoke('pty_kill', { session_id: tab.sessionId });
+        } catch (e) {
+          console.warn('[TerminalStore] pty_kill failed:', e);
+        }
+        await disposeTerminalView(tabId);
+        typedLines.delete(tabId);
+        forgetAgentTitle(tabId);
+        // Whatever its shell printed that no terminal ever showed goes with it.
+        forgetOutput(tab.sessionId);
+
+        // `settle` sweeps a dropped tab id out of EVERY group (not just one
+        // tree), prunes whichever pane it emptied, and drops a group that ends
+        // up with nothing — keeping the last group as an empty one.
+        set((state) =>
+          settle(state, {
+            tabs: state.tabs.filter((t) => t.id !== tabId),
+            activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
+          })
+        );
+      } finally {
+        closingTabs.delete(tabId);
       }
-      await disposeTerminalView(tabId);
-      typedLines.delete(tabId);
-      forgetAgentTitle(tabId);
-      // Whatever its shell printed that no terminal ever showed goes with it.
-      forgetOutput(tab.sessionId);
-
-      // `settle` sweeps a dropped tab id out of EVERY group (not just one
-      // tree), prunes whichever pane it emptied, and drops a group that ends
-      // up with nothing — keeping the last group as an empty one.
-      set((state) =>
-        settle(state, {
-          tabs: state.tabs.filter((t) => t.id !== tabId),
-          activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
-        })
-      );
     },
 
-    executeCommand: async (commandText, tabId = null) => {
-      const trimmed = (commandText || '').trim();
-      if (!trimmed) return null;
-
-      const targetTabId = tabId || get().activeTabId;
-      const tab = get().tabs.find((t) => t.id === targetTabId);
-      if (!tab) return null;
-
-      const blockId = `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const block = {
-        id: blockId,
-        command: trimmed,
-        cwd: tab.cwd || get().cwd,
-        output: '',
-        exitCode: null,
-        durationMs: 0,
-        startTime: Date.now(),
-        status: 'running',
-        pinned: false,
-      };
-
-      set((state) => {
-        const nextTabs = state.tabs.map((t) => {
-          if (t.id !== targetTabId) return t;
-          return {
-            ...t,
-            lastExitCode: null,
-            blocks: [...t.blocks, block],
-          };
-        });
-        const nextHistory = [...state.history, trimmed];
-        return {
-          tabs: nextTabs,
-          history: nextHistory,
-          historyIndex: nextHistory.length,
-        };
-      });
-
-      try {
-        await invoke('pty_write', {
-          session_id: tab.sessionId,
-          data: `${trimmed}\n`,
-        });
-      } catch (err) {
-        console.error('[TerminalStore] Failed to write to PTY:', err);
-        set((state) => ({
-          tabs: state.tabs.map((t) => {
-            if (t.id !== targetTabId) return t;
-            return {
-              ...t,
-              blocks: t.blocks.map((b) =>
-                b.id === blockId ? { ...b, status: 'failed', exitCode: 1, output: `Error: ${err.message}\n` } : b
-              ),
-            };
-          }),
-        }));
-      }
-
-      return block;
+    /**
+     * Terminal: Clear — the palette's Clear Terminal, the Terminal menu, and
+     * ⌘L / Ctrl+L outside a terminal (inside one, Ctrl+L is the shell's).
+     * All of them used to clear "unpinned blocks", which nothing has shown
+     * since the block view went, so every way in did nothing.
+     */
+    clearTerminal: async (tabId = null) => {
+      const targetId = tabId || get().activeTabId;
+      return targetId ? clearTerminalView(targetId) : false;
     },
 
-    pinBlock: (blockId) => {
-      let resultPinned = false;
-      set((state) => ({
-        tabs: state.tabs.map((tab) => ({
-          ...tab,
-          blocks: tab.blocks.map((b) => {
-            if (b.id === blockId) {
-              resultPinned = !b.pinned;
-              return { ...b, pinned: resultPinned };
-            }
-            return b;
-          }),
-        })),
-      }));
-      return resultPinned;
-    },
-
-    clearBlocks: (tabId = null) => {
-      const targetTabId = tabId || get().activeTabId;
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.id !== targetTabId) return tab;
-          return {
-            ...tab,
-            blocks: tab.blocks.filter((b) => b.pinned),
-          };
-        }),
-      }));
-    },
-
-    // Replace a block's recorded output outright. No other field changes.
-    // (Bookkeeping only — the live terminal surface renders straight from PTY
-    // output and never reads `blocks`; this exists for callers that want to
-    // overwrite a block's history entry wholesale, e.g. a future re-run.)
-    setBlockOutput: (tabId, blockId, output) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.id !== tabId) return tab;
-          return {
-            ...tab,
-            blocks: tab.blocks.map((b) => (b.id === blockId ? { ...b, output } : b)),
-          };
-        }),
-      }));
-    },
-
-    // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
     /**
      * Run an agent in a terminal, and remember which conversation it is.
      *
@@ -3548,10 +3543,19 @@ export const useTerminalStore = create((set, get, api) => {
       }));
     },
 
+    // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
     writeRaw: async (tabId, data) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      // A terminal whose shell has exited has nowhere to send keys. Enter
+      // starts a new shell in its place (src/lib/shellExit.js); anything else
+      // is dropped quietly — every key used to come back as one more
+      // "PTY session not found" line.
+      if (tab.exited) {
+        if (restartsShell(data)) await get().restartShell(targetId);
+        return;
+      }
       // Every key and every line the app types goes through here, so this is
       // where the line being typed can be followed to the command it runs.
       followTyping(tab, data);
@@ -3567,9 +3571,108 @@ export const useTerminalStore = create((set, get, api) => {
         // Swallowing that to the console is how a pasted block could vanish
         // with nothing on screen to say it had.
         const message = typeof err === 'string' ? err : err?.message;
+        // The shell is gone and its exit has not reached us yet (or never
+        // will: a writer that died keeps the session but takes no input).
+        // Say it once, in words, and treat the terminal as exited from here.
+        if (sessionIsGone(message)) {
+          let first = false;
+          set((state) => ({
+            tabs: state.tabs.map((t) => {
+              if (t.id !== targetId || t.sessionId !== tab.sessionId || t.exited) return t;
+              first = true;
+              return { ...t, exited: { code: null }, running: false, runStartedAt: null };
+            }),
+          }));
+          if (first && !notifyTerminal(targetId, 'The shell in this terminal has stopped. Press Enter to start a new one.')) {
+            console.error('[TerminalStore] Raw write failed:', err);
+          }
+          return;
+        }
         if (!notifyTerminal(targetId, message)) {
           console.error('[TerminalStore] Raw write failed:', err);
         }
+      }
+    },
+
+    /**
+     * Start a new shell in a terminal whose shell has exited — what Enter
+     * does there (`writeRaw`), as Windows Terminal's "press Enter to
+     * restart". The tab, its place in its pane and its scrollback stay; it
+     * gets a fresh session in its last directory, with the shell it ran.
+     *
+     * A session that stopped taking input may still have a live shell
+     * behind it (the writer died, the process did not), so it is ended
+     * first rather than left running unseen. Its agent record goes: the
+     * agent ended with the shell, and offering it back would be a guess.
+     * Resolves with whether a new shell was started; on failure the terminal
+     * stays exited, says why, and the next Enter tries again.
+     */
+    restartShell: async (tabId) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab || !tab.exited || restarting.has(tabId) || closingTabs.has(tabId)) return false;
+      restarting.add(tabId);
+      try {
+        try {
+          await invoke('pty_kill', { session_id: tab.sessionId });
+        } catch (_) {
+          // Already gone, which is the usual case.
+        }
+        const startDir = await startDirFor(tab.cwd);
+        const shellSpec = tab.shell || useSettingsStore.getState().terminalDefaultShell;
+        // At the size the terminal last told its PTY, not 80×24 with a resize
+        // to follow: ConPTY redraws on a resize from where it believes its
+        // cursor is.
+        const size = parseSize(tab.lastSize);
+        const { cols, rows } = size ?? { cols: 80, rows: 24 };
+        const spawnAt = (dir) => invoke('pty_spawn', { cols, rows, cwd: dir, shell: shellSpec });
+        let ptySession;
+        try {
+          ptySession = await spawnAt(startDir);
+        } catch (err) {
+          if (startDir === null) throw err;
+          ptySession = await spawnAt(null);
+        }
+        if (!get().tabs.some((t) => t.id === tabId) || closingTabs.has(tabId)) {
+          // Closed, or being closed, while the new shell started: it must not
+          // outlive the tab.
+          invoke('pty_kill', { session_id: ptySession.session_id }).catch(() => {});
+          return false;
+        }
+        typedLines.delete(tabId);
+        forgetAgentTitle(tabId);
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  sessionId: ptySession.session_id,
+                  cwd: ptySession.cwd || t.cwd,
+                  shell: ptySession.shell || t.shell,
+                  exited: null,
+                  running: false,
+                  runStartedAt: null,
+                  lastExitCode: null,
+                  commandLine: null,
+                  agent: null,
+                  agentResumeOffered: false,
+                  agentTyped: null,
+                  // What the new PTY was started at — 80×24 when the old one
+                  // was never told a size — so `resizePty` sends what differs.
+                  lastSize: size ? tab.lastSize : null,
+                  spawnedAt: Date.now(),
+                }
+              : t
+          ),
+        }));
+        return true;
+      } catch (err) {
+        const message = typeof err === 'string' ? err : err?.message;
+        if (!notifyTerminal(tabId, `Could not start a new shell: ${message}`)) {
+          console.error('[TerminalStore] Could not start a new shell:', err);
+        }
+        return false;
+      } finally {
+        restarting.delete(tabId);
       }
     },
 
@@ -3625,7 +3728,6 @@ export const useTerminalStore = create((set, get, api) => {
       }, SUBMIT_GRACE_MS);
     },
 
-    // Keep the backend PTY's window size in step with the pane (debounced by the caller).
     /**
      * Tell the shell how big its terminal is — once the size has stopped
      * changing.
@@ -3662,8 +3764,11 @@ export const useTerminalStore = create((set, get, api) => {
           set((state) => ({
             tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
           }));
+          // The tab's session now: Enter may have started a new shell since
+          // the size was asked for, and the old one is gone.
+          const sessionId = get().tabs.find((t) => t.id === tab.id)?.sessionId ?? tab.sessionId;
           try {
-            await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
+            await invoke('pty_resize', { session_id: sessionId, cols, rows });
           } catch (err) {
             console.error('[TerminalStore] Resize failed:', err);
           }
@@ -3672,8 +3777,6 @@ export const useTerminalStore = create((set, get, api) => {
         pendingResizes.set(tab.id, { key, timer, resolve });
       });
     },
-
-    setCwd: (cwd) => set({ cwd }),
 
     getActiveTab: () => {
       const { tabs, activeTabId } = get();
@@ -3698,8 +3801,8 @@ export const useTerminalStore = create((set, get, api) => {
  * of exactly what would be saved.
  *
  * Comparing `state.tabs` by reference used to schedule a save on every
- * `pty-output` chunk — the array is rebuilt per chunk, but none of the
- * persisted FIELDS change — which is what kept the debounce permanently reset.
+ * `pty-output` chunk — the array was rebuilt per chunk, but none of the
+ * persisted FIELDS changed — which is what kept the debounce permanently reset.
  * The cure for that was a fingerprint kept by hand beside the payload, and
  * the two drifted apart: `agent` went into the payload and never into the
  * fingerprint, so starting an agent or dismissing the offer to resume one
@@ -3707,12 +3810,11 @@ export const useTerminalStore = create((set, get, api) => {
  * never reached disk. A field added to the payload is now compared here
  * without anyone having to remember it.
  *
- * It runs on every change to `tabs` or `groups` — once per output chunk while
- * a palette command is running, once per command start and finish, once per
- * settled resize. For 16 terminals in 4 groups that is under 4 KB of JSON and
- * about 5µs, measured; the fingerprint it replaces already stringified every
- * group's tree and took about 3µs. Scrollback is not in the payload, so a
- * busy terminal does not make it any dearer.
+ * It runs on every change to `tabs` or `groups` — once per command start and
+ * finish, once per settled resize. For 16 terminals in 4 groups that is under
+ * 4 KB of JSON and about 5µs, measured; the fingerprint it replaces already
+ * stringified every group's tree and took about 3µs. Scrollback is not in the
+ * payload, so a busy terminal does not make it any dearer.
  */
 function persistKeyOf(state) {
   return JSON.stringify(buildPersistedPayload(state));

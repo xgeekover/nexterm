@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Filter,
   FolderPlus,
   FolderOpen,
@@ -10,20 +11,14 @@ import { Filter,
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TreeRow, NameInput, indentFor, ROW_HEIGHT } from './TreeRow.jsx';
-import { filterTree, flattenVisible, navigate } from './treeRows.js';
+import { deletePromptMessage, filterTree, flattenVisible, navigate } from './treeRows.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
+import { copyText } from '../../lib/copyText.js';
+import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
-
-async function writeToSystemClipboard(text) {
-  try {
-    await navigator?.clipboard?.writeText?.(text);
-  } catch (err) {
-    console.error('[FileExplorer] Failed to write to the system clipboard:', err);
-  }
-}
 
 export function FileExplorer() {
   const fileTree = useEditorStore((s) => s.fileTree);
@@ -57,11 +52,12 @@ export function FileExplorer() {
   const copyToClipboard = useEditorStore((s) => s.copyToClipboard);
   const cutToClipboard = useEditorStore((s) => s.cutToClipboard);
   const pasteClipboard = useEditorStore((s) => s.pasteClipboard);
+  const pasting = useEditorStore((s) => s.pasting);
 
   const [explorerError, setExplorerError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
   const [contextMenu, setContextMenu] = useState(null); // { x, y, target }
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, name }
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, isLink, name }
 
   // A remount (the side bar reopened) re-reads the tree. The FIRST mount runs
   // before App has asked the backend for the workspace root — a child's
@@ -144,7 +140,7 @@ export function FileExplorer() {
       disabledReason: noSelectionReason,
       onSelect: () => copyToClipboard(target.path, target.isDir),
     });
-    const canPaste = Boolean(clipboard) && isFolderish;
+    const canPaste = Boolean(clipboard) && isFolderish && !pasting;
     items.push({
       key: 'paste',
       label: 'Paste',
@@ -153,7 +149,9 @@ export function FileExplorer() {
         ? 'Nothing to cut or copy yet'
         : !isFolderish
           ? 'Cannot paste into a file'
-          : undefined,
+          : pasting
+            ? `Still copying '${pasting}'`
+            : undefined,
       onSelect: () => {
         pasteClipboard(target.path).catch((err) => setExplorerError(err.message));
       },
@@ -165,14 +163,14 @@ export function FileExplorer() {
       label: 'Copy Path',
       disabled: isEmpty,
       disabledReason: noSelectionReason,
-      onSelect: () => writeToSystemClipboard(target.path),
+      onSelect: () => copyText(target.path),
     });
     items.push({
       key: 'copy-relative-path',
       label: 'Copy Relative Path',
       disabled: isEmpty,
       disabledReason: noSelectionReason,
-      onSelect: () => writeToSystemClipboard(relativeTo(rootPath, target.path)),
+      onSelect: () => copyText(relativeTo(rootPath, target.path)),
     });
 
     pushSeparator();
@@ -189,7 +187,19 @@ export function FileExplorer() {
       disabled: isEmpty,
       disabledReason: noSelectionReason,
       danger: true,
-      onSelect: () => setDeleteConfirm({ path: target.path, isDir: target.isDir, name: target.name }),
+      onSelect: () =>
+        setDeleteConfirm({
+          path: target.path,
+          isDir: target.isDir,
+          isLink: Boolean(target.isLink),
+          name: target.name,
+          // Named in the prompt, so Cancel can keep them: deleting closes them.
+          unsaved: useEditorStore
+            .getState()
+            .tabsUnder(target.path)
+            .filter((t) => t.isDirty)
+            .map((t) => t.fileName),
+        }),
     });
 
     return items;
@@ -508,6 +518,11 @@ export function FileExplorer() {
               {explorerError}
             </div>
           )}
+          {pasting && (
+            <div role="status" className="px-3 py-1 text-ui-sm text-vsc-muted border-b border-vsc-border">
+              Copying '{pasting}'…
+            </div>
+          )}
 
           {rows.length === 0 && createIndex === -1 ? (
             <div className="px-4 py-3 text-vsc-muted text-ui-sm">
@@ -534,6 +549,7 @@ export function FileExplorer() {
                         type: r.isFolder ? 'folder' : 'file',
                         path: r.node.path,
                         isDir: r.isFolder,
+                        isLink: Boolean(r.node.is_symlink),
                         name: r.node.name,
                       })
                     }
@@ -557,20 +573,43 @@ export function FileExplorer() {
         onClose={() => setContextMenu(null)}
       />
 
-      <ConfirmDialog
-        open={Boolean(deleteConfirm)}
-        title={deleteConfirm?.isDir ? 'Delete Folder' : 'Delete File'}
-        message={`Are you sure you want to delete '${deleteConfirm?.name}'?${deleteConfirm?.isDir ? ' Its contents will be deleted too.' : ''}`}
-        confirmLabel="Delete"
-        danger
-        onConfirm={() => {
-          const target = deleteConfirm;
-          setDeleteConfirm(null);
-          if (!target) return;
-          deletePath(target.path, target.isDir).catch((err) => setExplorerError(err.message));
-        }}
-        onCancel={() => setDeleteConfirm(null)}
-      />
+      {/* Drawn over the whole window, not inside the side bar: the panel keeps
+          the transform its mount animation ends on (`.animate-panel-in`), which
+          makes it the containing block of a `fixed` overlay — the dialog was
+          clipped to the 260px panel, and the terminals beside it stayed
+          clickable. EditorPanel and TerminalsPanel portal theirs for the same
+          reason. Only while open: the render suite draws this component with
+          renderToString, which cannot draw a portal. */}
+      {deleteConfirm
+        ? createPortal(
+            <ConfirmDialog
+              open
+              title={deleteConfirm.isLink ? 'Delete Link' : deleteConfirm.isDir ? 'Delete Folder' : 'Delete File'}
+              // A link is removed as a link (src-tauri/src/fs/mod.rs
+              // delete_path): what it points to is left alone, so "its
+              // contents will be deleted too" would be false — and frightening.
+              message={deletePromptMessage(deleteConfirm, deleteConfirm.unsaved)}
+              confirmLabel="Delete"
+              danger
+              onConfirm={() => {
+                const target = deleteConfirm;
+                setDeleteConfirm(null);
+                if (!target) return;
+                deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(err.message));
+              }}
+              onCancel={() => setDeleteConfirm(null)}
+              // Chosen from the context menu, which has gone by the time
+              // this opens, so nothing had the keyboard to give it back to:
+              // the tree it was chosen in takes it, as it had it before the
+              // menu opened.
+              fallbackFocus={() => {
+                if (treeRef.current) treeRef.current.focus({ preventScroll: true });
+                else focusWorkspace('terminal');
+              }}
+            />,
+            document.body
+          )
+        : null}
     </div>
   );
 }

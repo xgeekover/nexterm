@@ -593,7 +593,7 @@ describe('Program notifications: where one goes', () => {
 
 describe('Program notifications: the store puts them in the bell and on the desktop', () => {
   let saved = null;
-  const tab = (id) => ({ id, sessionId: `sess-${id}`, title: `Terminal ${id}`, defaultTitle: `Terminal ${id}`, blocks: [] });
+  const tab = (id) => ({ id, sessionId: `sess-${id}`, title: `Terminal ${id}`, defaultTitle: `Terminal ${id}` });
   // Group 1 is on screen, split: pane 1 shows `a` (the active tab) over `b`,
   // pane 2 shows `c`. Group 2 holds `d`.
   const GROUPS = [

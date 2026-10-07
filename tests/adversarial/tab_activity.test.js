@@ -79,8 +79,8 @@ describe('The indicator follows the shell', () => {
   beforeEach(async () => {
     S.setState({
       tabs: [
-        { id: 'a', sessionId: 'sess-a', title: 'A', blocks: [], running: false, lastExitCode: null },
-        { id: 'b', sessionId: 'sess-b', title: 'B', blocks: [], running: false, lastExitCode: null },
+        { id: 'a', sessionId: 'sess-a', title: 'A', running: false, lastExitCode: null },
+        { id: 'b', sessionId: 'sess-b', title: 'B', running: false, lastExitCode: null },
       ],
       activeTabId: 'a',
     });

@@ -4,7 +4,8 @@ pub mod search;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;
-use std::ffi::OsString;
+use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -65,10 +66,25 @@ pub fn read_dir_hierarchy(root_str: &str, max_depth: Option<usize>) -> Result<Ve
     }
 
     let depth_limit = max_depth.unwrap_or(3);
-    read_dir_recursive(&root, 0, depth_limit)
+    let mut listing = vec![canonical_or(&root)];
+    read_dir_recursive(&root, 0, depth_limit, &mut listing)
 }
 
-fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Result<Vec<FileNode>, String> {
+/// `listing` holds where each folder from the top of this listing down to
+/// `dir` really is, in the filesystem's own spelling.
+///
+/// A link to a folder is reported as a folder (`is_dir`), because that is
+/// what it opens as and a linked `packages/shared` should show what is in it,
+/// and as a link (`is_symlink`), because deleting or renaming it acts on the
+/// link alone. It is walked like any folder unless it leads back to one of
+/// the folders in `listing`: that would repeat the listing inside itself at
+/// every level down to the depth limit, which the caller chooses.
+fn read_dir_recursive(
+    dir: &Path,
+    current_depth: usize,
+    max_depth: usize,
+    listing: &mut Vec<PathBuf>,
+) -> Result<Vec<FileNode>, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read directory '{}': {e}", dir.display()))?;
 
     let mut nodes = Vec::new();
@@ -77,7 +93,11 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
-        let is_dir = path.is_dir();
+        // `file_type` describes the entry itself; `is_dir` follows a link —
+        // except one to another machine, which is listed as what it is, a
+        // link, and never followed.
+        let is_symlink = entry.file_type().is_ok_and(|t| t.is_symlink());
+        let is_dir = !(is_symlink && link_leads_off_machine(&path)) && path.is_dir();
         if is_dir && SKIPPED_FOLDERS.contains(&name.as_str()) {
             continue;
         }
@@ -86,13 +106,19 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
         let path_str = id.clone();
 
         if is_dir {
-            let children = if current_depth + 1 < max_depth {
-                match read_dir_recursive(&path, current_depth + 1, max_depth) {
-                    Ok(ch) => Some(ch),
-                    Err(_) => Some(Vec::new()),
-                }
+            let walk_to = if current_depth + 1 < max_depth {
+                folder_to_walk(&path, &entry.file_name(), is_symlink, listing)
             } else {
-                Some(Vec::new())
+                None
+            };
+            let children = match walk_to {
+                Some(real) => {
+                    listing.push(real);
+                    let children = read_dir_recursive(&path, current_depth + 1, max_depth, listing);
+                    listing.pop();
+                    children.unwrap_or_default()
+                }
+                None => Vec::new(),
             };
 
             nodes.push(FileNode {
@@ -101,8 +127,9 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
                 path: path_str,
                 is_dir: true,
                 size: Some(0),
-                children,
+                children: Some(children),
                 extension: None,
+                is_symlink,
             });
         } else {
             let size = entry.metadata().ok().map(|m| m.len());
@@ -116,6 +143,7 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
                 size,
                 children: None,
                 extension,
+                is_symlink,
             });
         }
     }
@@ -131,12 +159,95 @@ fn read_dir_recursive(dir: &Path, current_depth: usize, max_depth: usize) -> Res
     Ok(nodes)
 }
 
-pub fn read_file(path_str: &str) -> Result<String, String> {
-    let path = resolve_path(path_str);
-    if !path.exists() {
-        return Err(format!("File not found: {path_str}"));
+/// Where the folder entry `name` in the last folder of `listing` really is,
+/// or `None` when it is a link leading back to a folder `listing` is inside.
+fn folder_to_walk(path: &Path, name: &OsStr, is_symlink: bool, listing: &[PathBuf]) -> Option<PathBuf> {
+    if !is_symlink {
+        // Not a link, so it is where its name says: no need to ask the disk.
+        return listing.last().map(|parent| parent.join(name));
     }
-    fs::read_to_string(&path).map_err(|e| format!("Failed to read file '{path_str}': {e}"))
+    let target = path.canonical().ok()?;
+    let loops_back = listing.iter().any(|open| open.starts_with(&target));
+    (!loops_back).then_some(target)
+}
+
+/// The largest file `read_file` opens.
+///
+/// The editor holds a file whole: read into memory, serialized into the IPC
+/// reply, handed to Monaco — and read again before every save, to see
+/// whether it changed on disk. A 500 MB log clicked in the Explorer froze
+/// the window or ran the webview out of memory, and the unsaved work in
+/// every other tab went with it. Search stops at 2 MB
+/// (`search::MAX_FILE_BYTES`); a file is worth opening well past that.
+pub const MAX_OPEN_BYTES: u64 = 50 * 1024 * 1024;
+
+/// How much of a file is looked at for a NUL before the rest is read.
+const TEXT_SNIFF_BYTES: u64 = 8 * 1024;
+
+/// A file's text. Refused without reading it when it is not a file or is
+/// over `MAX_OPEN_BYTES`, after its first 8 KB when those hold a NUL, and
+/// once read when it is not UTF-8.
+///
+/// Refusals start with fixed words the editor can tell apart: "File not
+/// found", "File is too large to open" (with the size and the limit) and
+/// "File is not UTF-8 text". NUL is valid UTF-8, so without the look at the
+/// first bytes a binary file that happened to decode — or a UTF-16 one —
+/// opened as a buffer of garbage that a save would write back; and every
+/// other binary file was read whole before being refused.
+pub fn read_file(path_str: &str) -> Result<String, String> {
+    use std::io::Read;
+
+    let path = resolve_path(path_str);
+    let failed = |e: std::io::Error| format!("Failed to read file '{path_str}': {e}");
+    let meta = fs::metadata(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("File not found: {path_str}"),
+        _ => failed(e),
+    })?;
+    // A folder, a FIFO or a device. Opening a FIFO waits for a writer that
+    // may never come, which held the command's thread for good.
+    if !meta.is_file() {
+        return Err(format!("Failed to read file '{path_str}': it is not a file"));
+    }
+    if meta.len() > MAX_OPEN_BYTES {
+        return Err(too_large_to_open(path_str, meta.len()));
+    }
+
+    let file = fs::File::open(&path).map_err(failed)?;
+    // Never more than the limit, even of a file that grows while it is read.
+    let mut reader = file.take(MAX_OPEN_BYTES + 1);
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    (&mut reader).take(TEXT_SNIFF_BYTES).read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.contains(&0) {
+        return Err(not_text(path_str));
+    }
+    reader.read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() as u64 > MAX_OPEN_BYTES {
+        let now = reader.get_ref().metadata().map_or(bytes.len() as u64, |m| m.len());
+        return Err(too_large_to_open(path_str, now));
+    }
+    String::from_utf8(bytes).map_err(|_| not_text(path_str))
+}
+
+fn too_large_to_open(path_str: &str, size: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    // Rounded up, so a file a byte over the limit does not read as at it.
+    let shown = |bytes: u64| {
+        let tenths = (u128::from(bytes) * 10).div_ceil(u128::from(MB));
+        if tenths >= 10 * 1024 {
+            format!("{:.1} GB", tenths as f64 / 10.0 / 1024.0)
+        } else {
+            format!("{}.{} MB", tenths / 10, tenths % 10)
+        }
+    };
+    format!(
+        "File is too large to open ({}; the limit is {} MB): {path_str}",
+        shown(size),
+        MAX_OPEN_BYTES / MB
+    )
+}
+
+fn not_text(path_str: &str) -> String {
+    format!("File is not UTF-8 text: {path_str}")
 }
 
 pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
@@ -149,17 +260,30 @@ pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
     fs::write(&path, content).map_err(|e| format!("Failed to write file '{path_str}': {e}"))
 }
 
+/// Create an empty file where nothing is: no file, no folder, and no link,
+/// whether or not the link leads anywhere.
+///
+/// `create_new` asks exactly that of the OS, in one step: std documents it
+/// as failing when anything is at the path, "also no (dangling) symlink", on
+/// every platform. This used to check `exists()` and then write: `exists()`
+/// follows a link, so a link to nothing was "not there" and the write made
+/// its target; and a file that appeared between the two was emptied.
 pub fn create_file(path_str: &str) -> Result<(), String> {
     let path = resolve_path(path_str);
-    if path.exists() {
-        return Err(format!("File already exists: {path_str}"));
-    }
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory: {e}"))?;
         }
     }
-    fs::write(&path, "").map_err(|e| format!("Failed to create file '{path_str}': {e}"))
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map(drop)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("File already exists: {path_str}"),
+            _ => format!("Failed to create file '{path_str}': {e}"),
+        })
 }
 
 pub fn create_dir(path_str: &str) -> Result<(), String> {
@@ -167,13 +291,29 @@ pub fn create_dir(path_str: &str) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|e| format!("Failed to create directory '{path_str}': {e}"))
 }
 
+/// Delete a file, a folder or a link.
+///
+/// `path` must name the entry itself — `Workspace::confine_entry` — not where
+/// it leads. What kind of entry it is comes from `symlink_metadata`, which
+/// does not follow a link: `exists()` and `is_dir()` do, so a dangling link
+/// could not be deleted at all, and a link to a folder was taken for the
+/// folder. A link is removed as a link whatever `recursive` says; the
+/// Explorer shows a link to a folder as a folder and asks for a recursive
+/// delete of it.
 pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
     let path = resolve_path(path_str);
-    if !path.exists() {
-        return Err(format!("Path does not exist: {path_str}"));
+    let file_type = path
+        .symlink_metadata()
+        .map_err(|_| format!("Path does not exist: {path_str}"))?
+        .file_type();
+    if file_type.is_symlink() {
+        return remove_link(&path, file_type)
+            .map_err(|e| format!("Failed to delete link '{path_str}': {e}"));
     }
-    if path.is_dir() {
+    if file_type.is_dir() {
         if recursive {
+            // Does not follow links inside the folder either: std removes
+            // each one as a link.
             fs::remove_dir_all(&path).map_err(|e| format!("Failed to delete directory recursively '{path_str}': {e}"))
         } else {
             fs::remove_dir(&path).map_err(|e| format!("Failed to delete directory '{path_str}': {e}"))
@@ -183,17 +323,102 @@ pub fn delete_path(path_str: &str, recursive: bool) -> Result<(), String> {
     }
 }
 
+/// Remove a link, never what it leads to.
+///
+/// On unix a link is one directory entry whatever it points at, and unlink
+/// removes it. Windows files a link to a folder — a directory symlink or a
+/// junction — as a directory: `DeleteFileW` refuses it, and `RemoveDirectoryW`
+/// removes the link and leaves the folder it leads to alone.
+fn remove_link(path: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+    if is_folder_link(file_type) {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+/// A link Windows files as a directory: a directory symlink or a junction.
+#[cfg(windows)]
+fn is_folder_link(file_type: fs::FileType) -> bool {
+    use std::os::windows::fs::FileTypeExt;
+    file_type.is_symlink_dir()
+}
+
+/// Unix has no such thing: a link to a folder is not a folder.
+#[cfg(not(windows))]
+fn is_folder_link(_: fs::FileType) -> bool {
+    false
+}
+
 /// True when both paths name the same on-disk entry.
 ///
 /// String comparison cannot answer this: on a case-insensitive volume (APFS
 /// and NTFS by default) `Foo.txt` and `foo.txt` are one file, and macOS also
 /// folds NFC and NFD spellings of the same name together. `canonicalize`
-/// returns the filesystem's own spelling, so comparing those answers it.
+/// returns the filesystem's own spelling, so comparing those answers it — for
+/// anything but a link, which `canonicalize` follows. Asked about a link and
+/// the file it points at, it said "the same entry", and a rename of one onto
+/// the other's name then replaced the file with the link. So a link is never
+/// the same entry as something that is not a link, and two links are compared
+/// as links.
 fn is_same_entry(a: &Path, b: &Path) -> bool {
-    match (a.canonical(), b.canonical()) {
-        (Ok(a), Ok(b)) => a == b,
+    let (Ok(meta_a), Ok(meta_b)) = (a.symlink_metadata(), b.symlink_metadata()) else {
+        return false;
+    };
+    match (meta_a.file_type().is_symlink(), meta_b.file_type().is_symlink()) {
+        (false, false) => matches!((a.canonical(), b.canonical()), (Ok(a), Ok(b)) if a == b),
+        (true, true) => is_same_link(a, b, &meta_a, &meta_b),
         _ => false,
     }
+}
+
+/// Whether two links are one link spelled two ways: both in the same folder,
+/// under two names that folder files as one entry.
+fn is_same_link(a: &Path, b: &Path, meta_a: &fs::Metadata, meta_b: &fs::Metadata) -> bool {
+    let (Some(name_a), Some(name_b)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let folder = match (a.parent().map(Path::canonical), b.parent().map(Path::canonical)) {
+        (Some(Ok(x)), Some(Ok(y))) if x == y => x,
+        _ => return false,
+    };
+    if name_a == name_b {
+        return true;
+    }
+    // When the folder lists both names they are two entries — hard links to
+    // one link, or a folder that tells case apart — whatever the test below
+    // would say about them.
+    let listed = fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    name == name_a || name == name_b
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    listed < 2 && names_one_entry(name_a, name_b, meta_a, meta_b)
+}
+
+/// The kernel has already looked both names up: two that led to one inode
+/// are one entry.
+#[cfg(unix)]
+fn names_one_entry(_: &OsStr, _: &OsStr, a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// std has no stable file id on Windows (`MetadataExt::file_index` is
+/// nightly-only). NTFS folds case and nothing else, so two names in one
+/// folder are one entry when they differ only in case. Only ASCII case is
+/// counted: NTFS certainly folds that, and taking a name it would NOT fold for
+/// the same entry is the mistake that overwrites a file, while missing one it
+/// would fold only refuses a rename.
+#[cfg(windows)]
+fn names_one_entry(a: &OsStr, b: &OsStr, _: &fs::Metadata, _: &fs::Metadata) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 /// Rename or move a path in one filesystem operation.
@@ -210,6 +435,11 @@ fn is_same_entry(a: &Path, b: &Path) -> bool {
 ///
 /// `fs::rename` has none of those failure modes: it is atomic, it never looks
 /// inside the entry, and the kernel resolves same-entry questions.
+///
+/// Both paths must name entries, not where they lead — `Workspace::
+/// confine_entry`. Resolving a link here moves the file it points at, and
+/// resolving the new name gives it the existing entry's spelling, so a
+/// case-only rename becomes `rename(x, x)` and changes nothing.
 pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
     let from = resolve_path(from_str);
     let to = resolve_path(to_str);
@@ -225,11 +455,7 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
     // A pure case or Unicode-normalization change resolves to the same entry;
     // that is a rename to allow, not a collision to refuse.
     if to.symlink_metadata().is_ok() && !same {
-        let name = to
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| to_str.to_string());
-        return Err(format!("A file or folder named '{name}' already exists"));
+        return Err(already_exists(&to));
     }
 
     // `rename` reports this as a bare EINVAL; say what actually happened.
@@ -252,14 +478,211 @@ pub fn rename_path(from_str: &str, to_str: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to rename '{from_str}' to '{to_str}': {e}"))
 }
 
+/// Copy a file or a folder to a name nothing has yet: the Explorer's paste.
+///
+/// `from` is where the source leads (`Workspace::confine`), so a link is
+/// copied as what it points at, the way reading it would be. `to` names the
+/// new entry (`Workspace::confine_entry`) and must not exist — as a file, a
+/// folder or a dangling link — which is checked before anything is written,
+/// so a paste can neither overwrite a file nor merge into a folder. Its
+/// folder must exist as well: creating that would bring back a folder deleted
+/// since the Explorer last looked.
+///
+/// A file is copied as bytes, permissions included, by `fs::copy`. A folder
+/// is copied with everything in it — nothing hidden the way the Explorer
+/// hides `.git` or `node_modules`, and nothing decoded, so a PNG is a file
+/// like any other. The paste this replaces walked the Explorer's listing and
+/// copied each file as text: it left those folders out, and the first binary
+/// file stopped it with half the copy written.
+///
+/// Links inside the folder are copied as links (`copy_link`) and never
+/// followed. Following one that leads to a folder above it would copy the
+/// tree into itself again at every level, as deep as the system lets a path
+/// go, and one that leads out of the open folder would copy what is out there
+/// in. A relative link keeps its
+/// spelling, so one pointing within the folder points within the copy.
+/// Sockets, FIFOs and devices are left out: they have no bytes of their own,
+/// and opening a FIFO waits for a writer that may never come. The one a
+/// project realistically holds is git's fsmonitor socket in `.git`, which
+/// means nothing without the daemon that made it.
+///
+/// A folder copy that fails part-way is removed again, so a paste either
+/// happens or leaves nothing behind.
+pub fn copy_path(from: &Path, to: &Path) -> Result<(), String> {
+    let source = from
+        .metadata()
+        .map_err(|_| format!("Path does not exist: {}", from.display()))?;
+    if to.symlink_metadata().is_ok() {
+        return Err(already_exists(to));
+    }
+    if !to.parent().is_some_and(Path::is_dir) {
+        return Err(format!("Cannot copy to '{}': its folder does not exist", to.display()));
+    }
+
+    if source.is_dir() {
+        if to.starts_with(from) {
+            return Err(format!("Cannot copy '{}' inside itself", from.display()));
+        }
+        copy_folder(from, to)
+    } else if source.is_file() {
+        fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy '{}' to '{}': {e}", from.display(), to.display()))
+    } else {
+        Err(format!("Cannot copy '{}': it is not a file or a folder", from.display()))
+    }
+}
+
+fn already_exists(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    format!("A file or folder named '{name}' already exists")
+}
+
+/// `copy_path` for a folder. It is filled under a temporary name beside `to`
+/// (`staging_beside`) and takes the name `to` only once it is complete.
+///
+/// A big folder takes minutes, and it used to be filled in place: the
+/// Explorer showed it at once, so a file saved or an agent run in it while it
+/// filled was removed with it when the copy then failed, and a copy the app
+/// was closed in the middle of stayed behind looking finished. Now nothing
+/// knows the temporary folder's name, so removing it on failure removes only
+/// this copy's own (`remove_dir_all` removes the links it meets as links), and
+/// an interrupted one is plainly unfinished.
+fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
+    let staging = staging_beside(to)?;
+    let discard = |error: String| match fs::remove_dir_all(&staging) {
+        Ok(()) => Err(error),
+        Err(e) => Err(format!(
+            "{error} (and the unfinished copy at '{}' could not be removed: {e})",
+            staging.display()
+        )),
+    };
+    if let Err(error) = fill_folder(from, &staging, to) {
+        return discard(error);
+    }
+    // `to` was free when the copy began; something may have taken it since.
+    if to.symlink_metadata().is_ok() {
+        return discard(already_exists(to));
+    }
+    fs::rename(&staging, to).or_else(|e| discard(format!("Failed to name the copy '{}': {e}", to.display())))
+}
+
+/// A new, empty folder beside `to` for a copy to fill: `.<name>.copying`, or
+/// that with a number while it is taken — a copy the app was closed in the
+/// middle of leaves one.
+fn staging_beside(to: &Path) -> Result<PathBuf, String> {
+    let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
+        return Err(format!("Cannot copy to '{}'", to.display()));
+    };
+    let name = name.to_string_lossy();
+    for n in 1..=100u32 {
+        let candidate = parent.join(match n {
+            1 => format!(".{name}.copying"),
+            _ => format!(".{name}.copying-{n}"),
+        });
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Failed to create '{}': {e}", candidate.display())),
+        }
+    }
+    Err(format!("Cannot copy to '{}': too many unfinished copies beside it", to.display()))
+}
+
+/// Copy what is in `from` into `to`, which will be renamed `published` once
+/// the copy is complete (`copy_folder`): where a copied link has to name an
+/// absolute place, it names the place it will be.
+fn fill_folder(from: &Path, to: &Path, published: &Path) -> Result<(), String> {
+    // Folders still to copy, as (source, copy, the copy's final name). A list
+    // rather than recursion: a deep tree would be a deep stack, on a
+    // blocking-pool thread with a small one.
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf(), published.to_path_buf())];
+    while let Some((source, copy, final_copy)) = pending.pop() {
+        let unreadable = |e: std::io::Error| format!("Failed to read '{}': {e}", source.display());
+        for entry in fs::read_dir(&source).map_err(unreadable)? {
+            let entry = entry.map_err(unreadable)?;
+            let (from_entry, to_entry) = (entry.path(), copy.join(entry.file_name()));
+            let final_entry = final_copy.join(entry.file_name());
+            // The entry itself: a link is not followed.
+            let file_type = entry.file_type().map_err(unreadable)?;
+            if file_type.is_symlink() {
+                copy_link(&from_entry, &to_entry, &final_entry, file_type)
+                    .map_err(|e| format!("Failed to copy the link '{}': {e}", from_entry.display()))?;
+            } else if file_type.is_dir() {
+                fs::create_dir(&to_entry)
+                    .map_err(|e| format!("Failed to create '{}': {e}", to_entry.display()))?;
+                pending.push((from_entry, to_entry, final_entry));
+            } else if file_type.is_file() {
+                fs::copy(&from_entry, &to_entry)
+                    .map_err(|e| format!("Failed to copy '{}': {e}", from_entry.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where a junction standing in for a folder symlink to `target` should
+/// point, for a link that will be at `published`: an absolute target as it
+/// is, a relative one read from the folder the link will be in.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn junction_target(target: &Path, published: &Path) -> PathBuf {
+    match published.parent() {
+        Some(parent) if target.is_relative() => lexical_normalize(&parent.join(target)),
+        _ => target.to_path_buf(),
+    }
+}
+
+/// Make `to` a link spelled exactly like the link `from`.
+#[cfg(unix)]
+fn copy_link(from: &Path, to: &Path, _published: &Path, _: fs::FileType) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(fs::read_link(from)?, to)
+}
+
+/// Windows makes a link to a folder and a link to a file differently, and a
+/// symlink only in Developer Mode or for an administrator — which a copy of a
+/// pnpm or npm-workspaces project, `node_modules` full of junctions, used to
+/// fail on and roll back. A junction needs no privilege: one is copied as a
+/// junction, and a folder symlink Windows will not make becomes one too, to
+/// the same folder (a relative target read from where the copy is). A file
+/// symlink has no such stand-in, so the copy gets the file it leads to.
+///
+/// A junction holds an absolute path, so a relative target is read from
+/// where the link will be once the copy has its name (`published`), not from
+/// where it is being filled: read from there, it pointed into the hidden
+/// `.<name>.copying` folder and broke the moment that was renamed.
+#[cfg(windows)]
+fn copy_link(from: &Path, to: &Path, published: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+    /// ERROR_PRIVILEGE_NOT_HELD
+    const NO_PRIVILEGE: i32 = 1314;
+    let target = fs::read_link(from)?;
+    if is_folder_link(file_type) {
+        if junction::exists(from).unwrap_or(false) {
+            return junction::create(&target, to);
+        }
+        return match std::os::windows::fs::symlink_dir(&target, to) {
+            Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => junction::create(junction_target(&target, published), to),
+            made => made,
+        };
+    }
+    match std::os::windows::fs::symlink_file(&target, to) {
+        Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => fs::copy(from, to).map(|_| ()),
+        made => made,
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Workspace root confinement
 //
-// Every fs_* command resolves its path through `Workspace::confine`, which
-// rejects anything that escapes the active root. The root itself can only be
-// changed by `fs_pick_root`, which goes through a native folder dialog, so the
-// webview cannot widen its own access by calling a command.
+// Every fs_* command resolves its path through `Workspace::confine` — or
+// `confine_entry`, when it acts on the entry itself — which rejects anything
+// that escapes the active root. The root itself moves through `fs_pick_root`
+// (a native folder dialog) or `fs_set_root` (Open Recent, any existing
+// directory the webview names), so confinement keeps every other command to
+// the open folder; it is not a boundary the webview cannot move.
 // ---------------------------------------------------------------------------
 
 /// The file inside the app config directory that remembers the open folder,
@@ -355,6 +778,13 @@ impl Workspace {
         confine_to(&root, path_str)
     }
 
+    /// `confine`, for an operation on the entry the path names rather than on
+    /// what it leads to — see `confine_entry_to`.
+    pub fn confine_entry(&self, path_str: &str) -> Result<PathBuf, String> {
+        let root = self.root().ok_or_else(|| "No folder is open".to_string())?;
+        confine_entry_to(&root, path_str)
+    }
+
     /// Where a new terminal starts: the requested directory when it is one,
     /// else the open folder, else — no folder open — the home directory, which
     /// is where VS Code starts one too.
@@ -395,7 +825,13 @@ impl Workspace {
     /// thing it can mean — so it keeps going through `confine`.
     fn start_dir(&self, requested: &str) -> Option<PathBuf> {
         let trimmed = requested.trim();
-        if trimmed.is_empty() {
+        // A directory on another machine is nowhere to start: starting a
+        // shell there, or only resolving the path to see whether it is a
+        // directory, connects to the host and signs in with the user's
+        // credentials (see `is_network_path`). What asks for one is a
+        // directory a shell reported (OSC 7, which anything a program prints
+        // can fake), saved with a session or live, or the setting.
+        if trimmed.is_empty() || is_network_path(trimmed) {
             return None;
         }
         let path = Path::new(trimmed);
@@ -429,10 +865,183 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Does `path` name another machine, or a device rather than a file?
+///
+/// Decided by spelling alone, the same on every platform: what matters is
+/// what the path means to Windows, which opens `\\host\share\x` by
+/// connecting to the host and signing in with the user's credentials. Two
+/// separators first, of either kind (`\\host`, `//host`, `/\host`) — which
+/// is also how the device namespaces `\\.\` and `\\?\` begin — or `\??\`,
+/// the NT spelling that reaches the same shares. Only the verbatim spelling
+/// of a local drive, `\\?\C:\…`, is local. The frontend's `isNetworkPath`
+/// (src/lib/terminalLinks.js) draws the same line.
+pub fn is_network_path(path: &str) -> bool {
+    let separator = |byte: &u8| *byte == b'\\' || *byte == b'/';
+    match without_verbatim_prefix(path).as_bytes() {
+        [first, second, ..] if separator(first) && separator(second) => true,
+        [first, b'?', b'?', fourth, ..] if separator(first) && separator(fourth) => true,
+        _ => false,
+    }
+}
+
+/// Whether following the links in `path` — any part of it, along any chain
+/// of them — reaches a path on another machine (`is_network_path`). Found
+/// out without following any: each part is looked at in turn, outermost
+/// first, and a link's target is read and looked at the same way before
+/// anything goes through it. Following one, even only to ask whether it is a
+/// folder, is what connects to the host and signs in.
+///
+/// Its first step alone was judged before, and `via -> docs -> \\host\share`
+/// went through: a git checkout or an unpacked archive makes a chain as
+/// easily as a direct link. A chain too long to be anything but a loop
+/// counts as leading off the machine — it is never followed either way.
+pub fn link_leads_off_machine(path: &Path) -> bool {
+    let mut hops = MAX_LINK_HOPS;
+    reaches_off_machine(path, &mut hops)
+}
+
+/// Links followed in one `link_leads_off_machine` before it gives up.
+const MAX_LINK_HOPS: u32 = 40;
+
+fn reaches_off_machine(path: &Path, hops: &mut u32) -> bool {
+    if is_network_path(&path.to_string_lossy()) {
+        return true;
+    }
+    let mut walked = PathBuf::new();
+    for part in path.components() {
+        walked.push(part);
+        // A drive or the root is no link, and `C:` on its own is a drive's
+        // current folder rather than anything in this path.
+        if matches!(part, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        // Everything above `walked` has been looked at already, so asking
+        // about `walked` itself follows nothing that is not known to be here.
+        let Ok(meta) = fs::symlink_metadata(&walked) else {
+            // Not there (yet): there is nothing below it to follow.
+            return false;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        if *hops == 0 {
+            return true;
+        }
+        *hops -= 1;
+        let Ok(target) = fs::read_link(&walked) else {
+            return true;
+        };
+        if is_network_path(&target.to_string_lossy()) {
+            return true;
+        }
+        let next = match walked.parent() {
+            Some(parent) if target.is_relative() => parent.join(&target),
+            _ => target,
+        };
+        if reaches_off_machine(&next, hops) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `path` without a verbatim prefix that a plainer spelling means the same
+/// as: `\\?\UNC\host\share` is `\\host\share`, `\\?\C:\x` is `C:\x`.
+fn without_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    let Some(rest) = path.strip_prefix(r"\\?\") else {
+        return Cow::Borrowed(path);
+    };
+    match rest.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => Cow::Borrowed(rest),
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// Whether confining `asked`, spelled out in full as `spelled`, would have to
+/// reach another machine to find out where it leads.
+///
+/// A network or device path is refused unless the open folder is itself on
+/// another machine and the path is inside it: that is the one host the user
+/// has chosen to reach, by opening the folder, and every file in such a
+/// folder has a path like this. Inside is judged by name, case and all,
+/// with the verbatim `\\?\UNC\` spelled plain — the backend hands such a
+/// folder out as `\\?\UNC\host\share\…`.
+fn on_another_machine(root: &Path, asked: &str, spelled: &Path) -> bool {
+    let spelled = spelled.to_string_lossy();
+    if !is_network_path(asked) && !is_network_path(&spelled) {
+        return false;
+    }
+    let root = root.to_string_lossy();
+    !(is_network_path(&root) && names_of(&spelled).starts_with(&names_of(&root)))
+}
+
+/// The names in a path, split at either separator.
+fn names_of(path: &str) -> Vec<String> {
+    without_verbatim_prefix(path)
+        .split(['\\', '/'])
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Resolve a webview-supplied path to what it leads to, refusing anything
+/// outside `root`. This is the confinement for reading and writing: a link
+/// inside the folder is followed to its file, as opening a file through a
+/// link should be, and one that leads out of the folder is refused.
 pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
+    match spelled_in(root, path_str)? {
+        None => Ok(root.to_path_buf()),
+        Some(path) => resolve_inside(root, &path, path_str),
+    }
+}
+
+/// Resolve a webview-supplied path to the entry it names, refusing anything
+/// outside `root`: the confinement for acting on an entry itself — delete,
+/// rename, move, the destination of a copy.
+///
+/// Only the folder the entry sits in is resolved; its own name is kept as
+/// given. `confine_to` resolves the whole path, and an entry operation handed
+/// that acts on the wrong thing. A link resolves to what it points at, so
+/// deleting `AGENTS.md -> CLAUDE.md` deleted CLAUDE.md, and deleting a link to
+/// a folder deleted the folder's whole tree. A new name resolves to the
+/// spelling of the entry it folds onto, so renaming `Readme.md` to
+/// `README.md` asked for `rename(Readme.md, Readme.md)`.
+///
+/// The folder goes through exactly what `confine_to` does, so a `..` or a
+/// folder link that leads out of the root is refused the same way. The name
+/// is a single component after `..` has been worked out, so on its own it
+/// leads nowhere but that folder.
+pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
+    let Some(path) = spelled_in(root, path_str)? else {
+        return Ok(root.to_path_buf());
+    };
+    // The open folder itself, spelled the way the backend hands it out. Every
+    // caller refuses to act on it, and says so, rather than calling it outside.
+    if path == root {
+        return Ok(path);
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(folder), Some(name)) => Ok(resolve_inside(root, folder, path_str)?.join(name)),
+        // `/` or `C:\`: no folder above it and no name of its own.
+        _ => resolve_inside(root, &path, path_str),
+    }
+}
+
+/// The path the webview named, made absolute against `root`, with `.` and
+/// `..` worked out by spelling alone. `None` for a blank path or `.`, which
+/// both mean the open folder.
+///
+/// Refused here, before anything touches the filesystem, when finding out
+/// where it leads would mean asking another machine (`on_another_machine`).
+/// The check after `canonicalize` came too late for that: canonicalizing
+/// `\\host\share\x` is what makes Windows connect to the host.
+fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
     let trimmed = path_str.trim();
     if trimmed.is_empty() || trimmed == "." {
-        return Ok(root.to_path_buf());
+        return Ok(None);
     }
 
     let expanded = match trimmed.strip_prefix("~/") {
@@ -444,15 +1053,41 @@ pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
     } else {
         root.join(expanded)
     };
-    let normalized = lexical_normalize(&joined);
+    let spelled = lexical_normalize(&joined);
+    if on_another_machine(root, trimmed, &spelled) {
+        return Err(format!("Path is on another machine or a device: {path_str}"));
+    }
+    Ok(Some(spelled))
+}
 
+/// `path` with every link in it resolved, refused unless that lands inside
+/// `root`.
+///
+/// A link that cannot be followed — to something that does not exist, or
+/// round in a loop — is refused wherever it is in the path. It used to be
+/// taken for a name that does not exist yet and kept as it was, and a save
+/// or a New File then wrote through it, making its target wherever it
+/// pointed, outside the open folder as easily as in it.
+fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, String> {
+    // Resolving follows every link in the path, and one that leads to
+    // another machine connects to it (see `link_leads_off_machine`): looked
+    // for first, along every link in the path and every chain of them.
+    if link_leads_off_machine(path) {
+        return Err(format!("Path goes through a link to another machine: {path_str}"));
+    }
     // Canonicalize the deepest part that exists so a symlink cannot point out
     // of the root; segments that do not exist yet are re-appended afterwards.
-    let mut cursor = normalized.as_path();
+    let mut cursor = path;
     let mut pending: Vec<OsString> = Vec::new();
     let resolved = loop {
         match cursor.canonical() {
             Ok(canonical) => break canonical,
+            Err(_) if cursor.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) => {
+                return Err(format!(
+                    "Path goes through a broken link ({}): {path_str}",
+                    cursor.display()
+                ));
+            }
             Err(_) => {
                 let name = cursor
                     .file_name()
@@ -516,6 +1151,91 @@ mod confine_tests {
         assert!(confine_to(&root, "../../etc/passwd").is_err());
         assert!(confine_to(&root, "inner/../../outside").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Windows opens `\\host\share\x` by connecting to the host and signing
+    /// in with the user's credentials (NTLM), and canonicalizing a path
+    /// opens it — so confinement reached the host before it ever compared
+    /// the path with the open folder. Each of these is refused for what it
+    /// is, by its spelling, before anything touches the filesystem: on
+    /// Windows any of them reaching `canonicalize` would contact a host.
+    #[test]
+    fn a_path_on_another_machine_is_refused_before_it_is_looked_up() {
+        let root = temp_root("network");
+        for path in [
+            r"\\host\share\x.txt",
+            "//host/share/x.txt",
+            r"/\host\share\x.txt",
+            r"\\?\UNC\host\share\x.txt",
+            r"\\.\pipe\x",
+            r"\??\UNC\host\share\x.txt",
+            "/??/UNC/host/share/x.txt",
+            r"\\?\GLOBALROOT\Device\Mup\host\share\x.txt",
+            r"  \\host\share\x.txt",
+        ] {
+            for (what, result) in [("confine_to", confine_to(&root, path)), ("confine_entry_to", confine_entry_to(&root, path))] {
+                let err = result.expect_err(&format!("{what} let {path:?} through"));
+                assert!(err.contains("another machine"), "{what} {path:?}: {err}");
+            }
+        }
+        // Local paths, in the spellings Windows allows, are still judged by
+        // where they lead.
+        assert_eq!(confine_to(&root, "inner/file.txt").unwrap(), root.join("inner/file.txt"));
+        assert!(confine_to(&root, "/etc/passwd").unwrap_err().contains("outside the workspace root"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same table as LK-27 in tests/adversarial/terminal_links.test.js,
+    /// which holds the frontend's `isNetworkPath` to it, and a few more.
+    #[test]
+    fn what_counts_as_another_machine_is_decided_by_spelling() {
+        for path in [
+            r"\\h\s",
+            "//h/s",
+            r"\/h/s",
+            r"/\h\s",
+            r"\\?\UNC\h\s",
+            r"\\.\pipe\p",
+            r"\??\C:\x",
+            "/??/x",
+            r"\\.\C:\x",
+            r"\\?\Volume{1b3b1146-4076-11e1-84aa-806e6f6e6963}\x",
+            r"\\?\GLOBALROOT\Device\Mup\h\s",
+        ] {
+            assert!(is_network_path(path), "{path}");
+        }
+        for path in [r"C:\x", "C:/x", "/x", r"\x", r"x\\y", r"\\?\C:\x", r"\\?\c:\x", "src/a.py", "", r"\?\x"] {
+            assert!(!is_network_path(path), "{path}");
+        }
+    }
+
+    /// A folder opened from a share — picked in the dialog, or a mapped
+    /// drive, which canonicalizes to the share — is reached the way the user
+    /// chose to reach it. Only paths inside it get past the spelling check;
+    /// the same share elsewhere, or another host, still does not.
+    #[test]
+    fn inside_a_folder_on_a_share_only_that_folder_is_reachable() {
+        for root in [r"\\?\UNC\nas\share\proj", "//nas/share/proj"] {
+            let root = Path::new(root);
+            let reaches = |path: &str| on_another_machine(root, path, Path::new(path));
+            for inside in [r"\\nas\share\proj", r"\\nas\share\proj\src\a.js", r"\\?\UNC\nas\share\proj\a.js", "//nas/share/proj/a.js"] {
+                assert!(!reaches(inside), "{} refused {inside}", root.display());
+            }
+            for outside in [
+                r"\\nas\share\other\a.js",
+                r"\\nas\share\project\a.js",
+                r"\\nas\share",
+                r"\\evil\share\proj\a.js",
+                r"\\NAS\share\proj\a.js",
+                r"\\.\pipe\proj",
+            ] {
+                assert!(reaches(outside), "{} let {outside} through", root.display());
+            }
+        }
+        // With a folder on this machine open, every one of them is refused.
+        let local = Path::new("/w/proj");
+        assert!(on_another_machine(local, r"\\nas\share\proj\a.js", Path::new(r"\\nas\share\proj\a.js")));
+        assert!(!on_another_machine(local, "src/a.js", &local.join("src/a.js")));
     }
 
     #[test]
@@ -692,6 +1412,29 @@ mod confine_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Found in review: Enter after a shell exited started the new one in the
+    /// directory the old one last reported, and a program can report one on
+    /// another machine. Refused before anything resolves it — on Unix `//dir`
+    /// is `/dir`, which is there, so the refusal is what is seen here.
+    #[test]
+    fn a_directory_on_another_machine_is_nowhere_to_start() {
+        let root = temp_root("check-network");
+        let elsewhere = temp_root("check-network-elsewhere");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        let plain = elsewhere.to_string_lossy().to_string();
+        assert!(workspace.can_start_in(&plain), "premise: the directory itself is somewhere to start");
+        let doubled = format!("//{}", plain.trim_start_matches(['/', '\\']));
+        for path in [doubled, r"\\host\share".to_string(), r"\\?\UNC\host\share".to_string()] {
+            assert!(!workspace.can_start_in(&path), "{path} passed the check");
+            assert_eq!(workspace.spawn_dir(Some(&path)), root, "{path}: a terminal falls back");
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
     /// With no folder open a relative path has nothing to be relative to, so
     /// a terminal asked for one starts at home — and the check has to say so
     /// rather than find the path beside the process.
@@ -830,6 +1573,118 @@ mod tests {
         // Delete dir
         assert!(delete_path(&dir_str, true).is_ok());
         assert!(!temp_dir.exists());
+    }
+
+    /// New File checked `exists()`, which follows a link, and then wrote: a
+    /// link to nothing was "not there", and the write made its target. And a
+    /// file that appeared between the check and the write was emptied.
+    #[cfg(unix)]
+    #[test]
+    fn creating_a_file_never_follows_a_link_or_empties_a_file() {
+        let dir = scratch("create-new");
+        std::os::unix::fs::symlink(dir.join("target.txt"), dir.join("link")).unwrap();
+        fs::write(dir.join("kept.txt"), "keep me").unwrap();
+
+        let err = create_file(&dir.join("link").to_string_lossy()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(dir.join("target.txt").symlink_metadata().is_err(), "the link's target was made");
+
+        let err = create_file(&dir.join("kept.txt").to_string_lossy()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("kept.txt")).unwrap(), "keep me");
+
+        create_file(&dir.join("sub").join("new.txt").to_string_lossy()).unwrap();
+        assert_eq!(fs::read(dir.join("sub").join("new.txt")).unwrap(), b"", "a new file, and its folder");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-read-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A 500 MB log clicked in the Explorer was read whole, sent whole over
+    /// IPC and handed whole to Monaco, which froze the window or ran the
+    /// webview out of memory. The size is checked before anything is read.
+    #[test]
+    fn a_file_too_large_to_open_is_refused_with_its_size_and_the_limit() {
+        assert_eq!(MAX_OPEN_BYTES, 50 * 1024 * 1024, "the sizes below are written for 50 MB");
+        let err = too_large_to_open("x", 3 * 1024 * 1024 * 1024);
+        assert!(err.contains("(3.0 GB; the limit is 50 MB)"), "{err}");
+
+        let dir = scratch("too-large");
+        let big = dir.join("big.log");
+        // Sparse: only the size is checked, so nothing has to be written.
+        fs::File::create(&big).unwrap().set_len(120 * 1024 * 1024).unwrap();
+        let just_over = dir.join("just-over.log");
+        fs::File::create(&just_over).unwrap().set_len(50 * 1024 * 1024 + 1).unwrap();
+        let at_limit = dir.join("at-limit.log");
+        fs::File::create(&at_limit).unwrap().set_len(50 * 1024 * 1024).unwrap();
+
+        let err = read_file(&big.to_string_lossy()).unwrap_err();
+        assert!(err.starts_with("File is too large to open"), "{err}");
+        assert!(err.contains("120.0 MB") && err.contains("the limit is 50 MB"), "{err}");
+
+        let err = read_file(&just_over.to_string_lossy()).unwrap_err();
+        assert!(err.starts_with("File is too large to open"), "{err}");
+        assert!(err.contains("50.1 MB"), "a byte over still reads as over: {err}");
+
+        // Exactly at the limit is still opened: NUL bytes are not text, so
+        // this one is refused as that, after its size has passed.
+        let err = read_file(&at_limit.to_string_lossy()).unwrap_err();
+        assert!(!err.contains("too large"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// NUL bytes are valid UTF-8, so a PNG whose bytes happened to decode —
+    /// or a UTF-16 file — opened as a buffer of garbage that saving would
+    /// then write back. A NUL in the first bytes says it is not text.
+    #[test]
+    fn a_file_that_is_not_text_is_refused_as_such() {
+        let dir = scratch("binary");
+        let cases: [(&str, &[u8]); 3] = [
+            ("nul.bin", b"a\0b"),
+            ("utf16.txt", b"h\0e\0l\0l\0o\0"),
+            ("latin1.txt", b"caf\xe9"),
+        ];
+        for (name, bytes) in cases {
+            fs::write(dir.join(name), bytes).unwrap();
+            let err = read_file(&dir.join(name).to_string_lossy()).unwrap_err();
+            assert!(err.starts_with("File is not UTF-8 text"), "{name}: {err}");
+        }
+        fs::write(dir.join("ok.txt"), "한글 and ✅\n").unwrap();
+        assert_eq!(read_file(&dir.join("ok.txt").to_string_lossy()).unwrap(), "한글 and ✅\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Opening a FIFO waits for a writer that may never come: a click on one
+    /// held a worker thread for good and the tab never opened. The read runs
+    /// on a thread with a deadline, so that is a failure here, not a hang.
+    #[cfg(unix)]
+    #[test]
+    fn something_that_is_not_a_file_is_refused_without_waiting_on_it() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = scratch("fifo");
+        let fifo = dir.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "premise: a FIFO to open");
+
+        let path = fifo.to_string_lossy().to_string();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(read_file(&path));
+        });
+        let read = finished
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the read is still waiting on the FIFO");
+        assert!(read.unwrap_err().contains("not a file"));
+
+        let err = read_file(&dir.to_string_lossy()).unwrap_err();
+        assert!(err.contains("not a file"), "a folder: {err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1106,6 +1961,59 @@ mod explorer_contract_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// What the Explorer is told about links: a link to a folder still opens
+    /// as a folder and shows what is in it, under the link's own path, and
+    /// every link says it is one, so a delete of it can be worded for a link.
+    #[cfg(unix)]
+    #[test]
+    fn links_are_reported_as_links_and_a_folder_link_still_opens_as_a_folder() {
+        let root = build_tree("links");
+        std::os::unix::fs::symlink("src", root.join("shared")).unwrap();
+        std::os::unix::fs::symlink("package.json", root.join("alias.json")).unwrap();
+        std::os::unix::fs::symlink("gone", root.join("dangling")).unwrap();
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+
+        let shared = child(&nodes, "shared");
+        assert!(shared.is_dir && shared.is_symlink);
+        let inside = shared.children.as_ref().expect("a folder link lists its folder");
+        let index = child(inside, "index.js");
+        assert_eq!(Path::new(&index.path), root.join("shared").join("index.js"), "under the link's own path");
+        assert!(!index.is_symlink, "what is inside a linked folder is not itself a link");
+
+        let alias = child(&nodes, "alias.json");
+        assert!(!alias.is_dir && alias.is_symlink);
+        let dangling = child(&nodes, "dangling");
+        assert!(!dangling.is_dir && dangling.is_symlink, "a link to nothing is still listed, as a link");
+
+        let src = child(&nodes, "src");
+        assert!(src.is_dir && !src.is_symlink, "the real folder is not a link");
+        assert!(!child(&nodes, "package.json").is_symlink);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link back up the tree used to be followed for as many levels as the
+    /// caller asked for, repeating the whole listing under it at every level.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_back_up_the_tree_is_listed_but_not_followed() {
+        let root = build_tree("loop");
+        std::os::unix::fs::symlink(".", root.join("here")).unwrap();
+        std::os::unix::fs::symlink("..", root.join("src").join("up")).unwrap();
+        let nodes = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+
+        let here = child(&nodes, "here");
+        assert!(here.is_dir, "a link to a folder still shows as a folder");
+        assert_eq!(here.children.as_ref().map(Vec::len), Some(0), "but the loop is not walked");
+
+        let src = child(&nodes, "src");
+        let up = child(src.children.as_ref().unwrap(), "up");
+        assert!(up.is_dir);
+        assert_eq!(up.children.as_ref().map(Vec::len), Some(0), "nor one two levels down");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// Write the real payload out for the JS half of this contract to read.
     /// Runs on every platform, so on the Windows job the file the JS suite
     /// picks up was produced by a Windows filesystem.
@@ -1131,5 +2039,207 @@ mod explorer_contract_tests {
             .unwrap();
 
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-copy-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("proj").join("src")).unwrap();
+        fs::write(dir.join("proj").join("src").join("a.txt"), "a").unwrap();
+        dir
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> =
+            fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// Found in review: a folder was filled in place, under its final name,
+    /// for as long as the copy ran. It is filled out of sight now and named
+    /// when complete, and an unfinished one left by a closed app is no
+    /// obstacle and is never touched.
+    #[test]
+    fn a_folder_copy_takes_its_name_only_when_complete() {
+        let root = temp_root("staging");
+        fs::create_dir(root.join(".proj copy.copying")).unwrap();
+        fs::write(root.join(".proj copy.copying").join("left.txt"), "an interrupted copy").unwrap();
+
+        copy_path(&root.join("proj"), &root.join("proj copy")).unwrap();
+
+        assert_eq!(fs::read_to_string(root.join("proj copy").join("src").join("a.txt")).unwrap(), "a");
+        assert_eq!(names_in(&root), vec![".proj copy.copying", "proj", "proj copy"], "nothing else left beside it");
+        assert_eq!(
+            fs::read_to_string(root.join(".proj copy.copying").join("left.txt")).unwrap(),
+            "an interrupted copy",
+            "the earlier unfinished copy is left alone"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The name was free when the copy began and taken by the time it was
+    /// done: what took it stays, and the finished copy goes rather than merge.
+    #[test]
+    fn a_name_taken_while_the_copy_ran_is_left_as_it_is() {
+        let root = temp_root("taken");
+        fs::create_dir(root.join("proj copy")).unwrap();
+        fs::write(root.join("proj copy").join("mine.txt"), "written while the copy ran").unwrap();
+
+        let err = copy_folder(&root.join("proj"), &root.join("proj copy")).unwrap_err();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(names_in(&root.join("proj copy")), vec!["mine.txt"]);
+        assert_eq!(names_in(&root), vec!["proj", "proj copy"], "the unfinished copy is gone");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A copy that fails removes only what it made, which is out of sight.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_fails_removes_only_its_own_unfinished_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("fails");
+        let locked = root.join("proj").join("locked.txt");
+        fs::write(&locked, "locked").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // root reads anything, so there is nothing to fail on there.
+        if fs::read(&locked).is_err() {
+            let err = copy_path(&root.join("proj"), &root.join("proj copy")).unwrap_err();
+            assert!(err.contains("locked.txt"), "{err}");
+            assert_eq!(names_in(&root), vec!["proj"], "neither the copy nor its unfinished folder is left");
+        }
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod off_machine_link_tests {
+    use super::*;
+
+    /// A folder holding `docs`, a link spelled as a folder on another machine
+    /// (`//…`, a local path on Unix, so the link would reach a real folder
+    /// here if it were followed), and the open folder canonical, as
+    /// `set_root` makes it.
+    fn folder_with_off_machine_link(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("nexterm-off-machine-{tag}-{}", std::process::id()));
+        let reachable = std::env::temp_dir().join(format!("nexterm-off-machine-{tag}-share-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&reachable);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&reachable).unwrap();
+        fs::write(reachable.join("doc.md"), "on the share").unwrap();
+        let spelled = format!("/{}", dunce::canonicalize(&reachable).unwrap().display());
+        assert!(is_network_path(&spelled), "premise: {spelled} reads as another machine");
+        std::os::unix::fs::symlink(&spelled, root.join("docs")).unwrap();
+        (dunce::canonicalize(&root).unwrap(), reachable)
+    }
+
+    /// Found in review: the refusal of paths on another machine looked only
+    /// at how a path was spelled, and a link inside the open folder that
+    /// leads to one was followed — on Windows, connecting to the host and
+    /// signing in — by the Explorer, by opening a file through it, by Quick
+    /// Open and by search.
+    #[test]
+    fn a_link_to_another_machine_is_never_followed() {
+        let (root, reachable) = folder_with_off_machine_link("follow");
+
+        let err = confine_to(&root, &root.join("docs").join("doc.md").to_string_lossy()).unwrap_err();
+        assert!(err.contains("link to another machine"), "{err}");
+        let err = confine_to(&root, "docs/doc.md").unwrap_err();
+        assert!(err.contains("link to another machine"), "{err}");
+
+        let tree = read_dir_hierarchy(&root.to_string_lossy(), Some(3)).unwrap();
+        let docs = tree.iter().find(|n| n.name == "docs").expect("the link is listed");
+        assert!(!docs.is_dir, "listed as a link, not walked into as a folder");
+        assert!(docs.children.as_ref().is_none_or(Vec::is_empty));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&reachable);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod off_machine_chain_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-off-chain-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dunce::canonicalize(&dir).unwrap()
+    }
+
+    /// Found in the last review: only a link's first step was judged, so
+    /// `via -> docs -> //host/share` was followed — by the Explorer listing
+    /// the folder, by Go to File and by search, by opening a file through it.
+    /// (`//…` is a local path on Unix, which is what lets a followed chain be
+    /// seen here; on Windows following it signs in to the host.)
+    #[test]
+    fn a_chain_of_links_to_another_machine_is_never_followed() {
+        let root = scratch("root");
+        let share = scratch("share");
+        fs::write(share.join("doc.md"), "TOKEN on the share\n").unwrap();
+        std::os::unix::fs::symlink(format!("/{}", share.display()), root.join("docs")).unwrap();
+        std::os::unix::fs::symlink("docs", root.join("via")).unwrap();
+        // A link whose own target is local but goes through one that is not.
+        std::os::unix::fs::symlink("docs/doc.md", root.join("through.md")).unwrap();
+        // And one that stays here, which still works.
+        fs::write(root.join("real.md"), "TOKEN here\n").unwrap();
+        std::os::unix::fs::symlink("real.md", root.join("alias.md")).unwrap();
+
+        for name in ["docs", "via", "through.md"] {
+            assert!(link_leads_off_machine(&root.join(name)), "{name} was taken for a link that stays here");
+        }
+        assert!(!link_leads_off_machine(&root.join("alias.md")));
+        assert!(!link_leads_off_machine(&root.join("real.md")));
+
+        let tree = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+        let via = tree.iter().find(|n| n.name == "via").unwrap();
+        assert!(!via.is_dir, "the chain was walked into as a folder");
+        for asked in ["via/doc.md", "through.md"] {
+            let err = confine_to(&root, asked).unwrap_err();
+            assert!(err.contains("link to another machine"), "{asked}: {err}");
+        }
+        assert!(confine_to(&root, "alias.md").is_ok(), "a link inside still opens");
+
+        let listed: Vec<String> = crate::fs::search::list_files(&root, 100)
+            .files
+            .iter()
+            .map(|f| Path::new(f).file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(listed, vec!["alias.md", "real.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&share);
+    }
+}
+
+#[cfg(test)]
+mod junction_target_tests {
+    use super::*;
+
+    /// Found in the last review: a folder symlink copied without the
+    /// privilege a symlink needs became a junction to a target read from the
+    /// hidden folder the copy fills — and broke when that was renamed.
+    #[test]
+    fn a_relative_folder_link_is_read_from_where_the_copy_will_be() {
+        let published = Path::new("/w/proj copy/packages/app/shared");
+        assert_eq!(
+            junction_target(Path::new("../../libs/shared"), published),
+            PathBuf::from("/w/proj copy/libs/shared"),
+            "inside the copy, by its final name"
+        );
+        assert_eq!(junction_target(Path::new("../../../elsewhere"), published), PathBuf::from("/w/elsewhere"));
+        assert_eq!(junction_target(Path::new("/abs/target"), published), PathBuf::from("/abs/target"));
+        assert!(!junction_target(Path::new("x"), published).to_string_lossy().contains(".copying"));
     }
 }

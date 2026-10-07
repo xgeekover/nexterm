@@ -143,7 +143,6 @@ const tab = (id, extra = {}) => ({
   title: id,
   defaultTitle: id,
   cwd: '/workspace',
-  blocks: [],
   running: false,
   lastExitCode: null,
   ...extra,
@@ -491,6 +490,50 @@ scenario(
   }
 );
 
+// ---- Go to File in a big folder ---------------------------------------------
+
+scenario(
+  'RN-44',
+  'Go to File in a folder of 1,000 files draws a screenful of rows and says how many more matched',
+  () => {
+    reset();
+    useEditorStore.setState({
+      fileTree: Array.from({ length: 1000 }, (_, i) => ({ name: `f${i}.js`, path: `/workspace/f${i}.js`, is_dir: false })),
+    });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'files' });
+  },
+  (html) => {
+    // Every file row ends in its "File" hint.
+    const rows = html.match(/>File<\/kbd>/g)?.length ?? 0;
+    expectThat(rows === 200, `${rows} file rows drawn for an empty query`);
+    expectText(html, '800 more — keep typing to narrow the list');
+    expectText(html, 'f0.js');
+  }
+);
+
+// ---- A file that would not open ----------------------------------------------
+
+scenario(
+  'RN-45',
+  'a file the backend would not open says which and why, over the corner of the window',
+  () => {
+    reset();
+    useEditorStore.setState({
+      openFailure: {
+        path: '/workspace/logs/app.log',
+        fileName: 'app.log',
+        reason: 'File is too large to open (60.1 MB; the limit is 50 MB)',
+      },
+    });
+  },
+  (html) => {
+    expectText(html, 'Could not open app.log');
+    expectText(html, 'File is too large to open (60.1 MB; the limit is 50 MB)');
+    expectThat(/<div\b[^>]*\srole="alert"/.test(html), 'the reason is not announced');
+    expectThat(buttonsIn(html).some((b) => b.title === 'Dismiss'), 'nothing to close it with');
+  }
+);
+
 // ---- A command that finished without a code --------------------------------
 
 /** The class list of the status bar's notification badge, or null when it is not drawn. */
@@ -695,6 +738,97 @@ for (const [id, value] of [
     }
   );
 }
+
+// ---- Keyboard Shortcuts -----------------------------------------------------
+
+scenario(
+  'RN-60',
+  'a keypress bound to two commands is reported, naming the one that runs',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+    // Open Folder's chord given to Open Recent too. Open Folder comes first in
+    // the bindings, so it is the one the keypress runs — though Open Recent
+    // is listed above it, and the banner used to say "whichever is listed
+    // first wins".
+    useSettingsStore.getState().setSetting('keybindings', { 'open-recent': 'mod+shift+o' });
+  },
+  (html) => {
+    expectText(html, 'One shortcut never runs');
+    expectText(html, 'runs Open Folder…, never Open Recent…');
+    expectThat(!visibleText(html).includes('Whichever is listed first wins'), 'the banner still names no winner');
+    // Both rows' chords are marked, and each says what happens.
+    const marked = [...html.matchAll(/<kbd\b[^>]*\stitle="([^"]*)"[^>]*\sclass="[^"]*border-vsc-error/g)]
+      .map((m) => visibleText(m[1]));
+    expectThat(
+      marked.length === 2 && marked.every((t) => t.includes('runs Open Folder…, never Open Recent…')),
+      `the marked chords say ${JSON.stringify(marked)}`
+    );
+  }
+);
+
+const { COMMANDS, configurableCommands } = await import('../../src/lib/keybindings.js');
+
+scenario(
+  'RN-61',
+  'Settings names every shortcut a focused terminal never sees, and only those',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    // It said only the two side-bar toggles were claimed over a terminal,
+    // while ten commands were.
+    const note = visibleText(html).split('\n').find((line) => line.startsWith('Over a focused terminal'));
+    expectThat(note, 'no note about what a focused terminal never sees');
+    for (const { id, title } of configurableCommands()) {
+      const named = note.includes(title);
+      if (COMMANDS[id].overTerminal) expectThat(named, `${title} is taken ahead of the terminal, and the note does not say so`);
+      else expectThat(!named, `the note says ${title} is taken ahead of the terminal; it is not`);
+    }
+  }
+);
+
+// ---- The activity bar ---------------------------------------------------------
+
+/** Whether the activity bar draws its icon called `title` lit. */
+function activityLit(html, title) {
+  const icon = new RegExp(`<button\\b[^>]*\\stitle="${title}"[^>]*\\sclass="([^"]*)"`).exec(html);
+  expectThat(icon, `no activity-bar icon called ${title}`);
+  return !icon[1].includes('text-vsc-activitybar-muted');
+}
+
+const SEARCH_VIEW = /\saria-label="Search across files"/;
+
+scenario(
+  'RN-62',
+  'with Search on screen, the activity bar lights Search and not the Explorer',
+  () => {
+    reset();
+    useSettingsStore.getState().showView('search');
+    // What the layout does once it has drawn the request. The activity bar
+    // used to read the request, so from here on it lit the Explorer.
+    useSettingsStore.getState().clearRequestedView();
+  },
+  (html) => {
+    expectThat(!activityLit(html, 'Explorer'), 'the Explorer is lit while Search is on screen');
+    expectThat(activityLit(html, 'Search'), 'Search is on screen and its icon is not lit');
+    expectThat(SEARCH_VIEW.test(html), 'the side bar does not draw Search');
+  }
+);
+
+scenario(
+  'RN-63',
+  'with the Explorer on screen, the Explorer is lit and not Search',
+  () => {
+    reset();
+  },
+  (html) => {
+    expectThat(!SEARCH_VIEW.test(html), 'the side bar draws Search');
+    expectThat(activityLit(html, 'Explorer'), 'the Explorer is on screen and its icon is not lit');
+    expectThat(!activityLit(html, 'Search'), 'Search is lit while the Explorer is on screen');
+  }
+);
 
 // ---- Dragging an editor tab over a tab strip ---------------------------------
 

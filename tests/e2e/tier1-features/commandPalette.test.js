@@ -39,7 +39,7 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
     const titles = app.searchPalette('').commands.map((c) => c.title);
     assert.deepEqual(
       titles,
-      ['New Terminal Tab', 'Clear Terminal Output', 'Toggle Pane Zoom', 'Save All Files'],
+      ['New Terminal Tab', 'Clear Terminal', 'Toggle Pane Zoom', 'Save All Files'],
       'The palette offers exactly the four commands the app implements'
     );
   });

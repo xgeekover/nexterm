@@ -50,7 +50,7 @@ pub enum Marker {
     /// marker carried none — cmd's never does.
     CommandFinished(Option<i32>),
     /// OSC 7: the shell's live working directory, percent-decoded, host
-    /// component (if any) stripped.
+    /// component (if any) stripped — never one on another machine.
     WorkingDirectory(String),
     /// OSC 0 or OSC 2: the window title a program set, as it set it ('' when
     /// it cleared it). Reported, but NOT removed from the output — unlike
@@ -252,10 +252,21 @@ fn parse_marker(payload: &[u8]) -> Option<Marker> {
 /// anything that isn't a `file://` URI with an absolute path, so a foreign
 /// use of OSC 7 falls through to the "pass it through unchanged" path
 /// alongside every other unrecognised OSC sequence.
+///
+/// `None` too for a directory on another machine (`fs::is_network_path`),
+/// decided once the path is decoded, so no encoding of `//host` or
+/// `\\host` gets past. Anything a program prints can print an OSC 7, not
+/// only the shell's hooks, and the directory reported is where a new
+/// terminal starts and what Copy Path copies — and on Windows starting a
+/// terminal in `\\host\share`, or only asking whether it exists, connects
+/// to the host and signs in with the user's credentials. The cost is that a
+/// shell really in such a directory (Git Bash after `cd //host/share`)
+/// keeps the last directory it reported; cmd cannot be in one at all.
 fn parse_osc7_path(rest: &str) -> Option<String> {
     let uri = rest.strip_prefix("file://")?;
     let path_start = uri.find('/')?;
-    Some(as_native_path(&percent_decode(&uri[path_start..])))
+    let path = as_native_path(&percent_decode(&uri[path_start..]));
+    (!crate::fs::is_network_path(&path)).then_some(path)
 }
 
 /// Turn an OSC 7 URI path back into a path the OS can actually use.
@@ -509,6 +520,36 @@ mod tests {
         assert_eq!(parse_osc7_path("file:///C/notadrive"), Some("/C/notadrive".to_string()));
         assert_eq!(parse_osc7_path("file:///Cx:/nope"), Some("/Cx:/nope".to_string()));
         assert_eq!(parse_osc7_path("file:///"), Some("/".to_string()));
+    }
+
+    /// Anything a program prints can print an OSC 7, not only the shell's
+    /// hooks, and the directory it reports is where a new terminal starts
+    /// and what Copy Path copies. One on another machine is never reported,
+    /// however it is spelled or encoded.
+    #[test]
+    fn a_directory_on_another_machine_is_never_reported() {
+        for payload in [
+            "file:////host/share",
+            "file://h//host/share/dir",
+            "file:///%2Fhost/share",
+            "file:///%5C%5Chost%5Cshare",
+            "file:///%5C%5C%3F%5CUNC%5Chost%5Cshare",
+            "file:///\\\\.\\pipe\\x",
+            "file:///%3F%3F/UNC/host/share",
+        ] {
+            assert_eq!(parse_osc7_path(payload), None, "{payload}");
+        }
+
+        // Not reported, and passed on like any OSC this filter does not
+        // take: xterm has no OSC 7 handler, so nothing shows.
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]7;file:////host/share\x07ok");
+        assert!(r.markers.is_empty(), "{:?}", r.markers);
+        assert_eq!(r.output, "\x1b]7;file:////host/share\x07ok");
+
+        // What this machine's shells report is unchanged.
+        assert_eq!(parse_osc7_path("file:///C:/Users/dev"), Some("C:\\Users\\dev".to_string()));
+        assert_eq!(parse_osc7_path("file://host/Users/dev"), Some("/Users/dev".to_string()));
     }
 
     #[test]
