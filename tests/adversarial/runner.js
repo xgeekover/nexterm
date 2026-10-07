@@ -82,6 +82,8 @@ import './hyperlinks.test.js';
 import './palette_results.test.js';
 import './explorer_deep_folders.test.js';
 import './palette_mounted.test.js';
+import './editor_panel_logic.test.js';
+import './editor_read_failures.test.js';
 
 async function run() {
   console.log('====================================================');
