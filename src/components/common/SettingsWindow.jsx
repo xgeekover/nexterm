@@ -43,6 +43,21 @@ export function settingsWindowKey(e) {
 }
 
 /**
+ * Leave the field being typed in, if it is in `dialog`, so that it takes what
+ * was typed — a field does on leaving it (`TextLikeControl`), and closing the
+ * window is leaving it. Escape and a click beside the window closed it with
+ * the focus still in the field: the field never left, and a scrollback or a
+ * font size typed and not yet left was dropped without a word. Only ✕, by
+ * taking the focus first, kept it.
+ */
+export function leaveEditedField(dialog, doc) {
+  const active = doc?.activeElement;
+  if (!dialog || !active || active === doc.body || !dialog.contains(active)) return false;
+  active.blur?.();
+  return true;
+}
+
+/**
  * Where focus goes once the Settings window has closed: back to `opener`,
  * what had it when the window opened — the terminal or the editor, as a rule
  * — if it is still on the page and nothing else has taken focus since.
@@ -612,6 +627,7 @@ export function SettingsWindow() {
       const action = settingsWindowKey(e);
       if (action === 'close') {
         e.preventDefault();
+        leaveEditedField(dialogRef.current, document);
         setOpen(false);
         return;
       }
@@ -697,6 +713,7 @@ export function SettingsWindow() {
         // press's own default would then move focus to what was clicked —
         // nothing — and take it away again.
         e.preventDefault();
+        leaveEditedField(dialogRef.current, document);
         setOpen(false);
       }}
     >

@@ -16,6 +16,7 @@
  * cases see.
  */
 import { build } from 'esbuild';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import React from 'react';
@@ -230,6 +231,51 @@ describe('Settings: closing gives focus back', () => {
 });
 
 describe('Settings: what a focused terminal never sees', () => {
+  test('SW-12: closing the window leaves the field being typed in, so what was typed is kept', async () => {
+    // Found in review: Escape and a click beside the window closed it with
+    // the focus still in a number or text field, which commits only when
+    // left, so a value typed and not yet left was dropped without a word.
+    const leave = await exported('leaveEditedField');
+    const blurred = [];
+    const field = { blur: () => blurred.push('field') };
+    const outside = { blur: () => blurred.push('outside') };
+    const dialog = { contains: (el) => el === field };
+    const doc = (active) => ({ activeElement: active, body: { blur: () => blurred.push('body') } });
+
+    assert.equal(leave(dialog, doc(field)), true);
+    assert.deepEqual(blurred, ['field'], 'the field in the window is left');
+    assert.equal(leave(dialog, doc(outside)), false, 'focus elsewhere is not touched');
+    const d = doc(null);
+    d.activeElement = d.body;
+    assert.equal(leave(dialog, d), false);
+    assert.equal(leave(null, doc(field)), false);
+    assert.deepEqual(blurred, ['field']);
+
+    // Both ways of closing that do not move the focus first leave the field.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8');
+    assert.match(src, /if \(action === 'close'\) \{\s*e\.preventDefault\(\);\s*leaveEditedField\(dialogRef\.current, document\);\s*setOpen\(false\);/, 'Escape');
+    assert.match(src, /e\.preventDefault\(\);\s*leaveEditedField\(dialogRef\.current, document\);\s*setOpen\(false\);\s*\}\}/, 'a click beside the window');
+  });
+
+  test('SW-13: wired — focus goes back on close, Escape in the recorder stays there, and the gear takes no focus', () => {
+    // Found in review: the helpers above are tested on their own, and taking
+    // any of these three lines out left every suite green.
+    const win = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8');
+    assert.match(
+      win,
+      /const opener = document\.activeElement;\s*return \(\) => \{\s*focusAfterClose\(opener, document\)\?\.focus\(\);/,
+      'what had focus when the window opened gets it back'
+    );
+    assert.match(win, /const action = settingsWindowKey\(e\);/, 'Escape is judged by settingsWindowKey, which leaves it to the recorder');
+    assert.match(win, /document\.addEventListener\('keydown', onKeyDown, true\);/);
+    const sidebar = readFileSync(new URL('../../src/components/layout/Sidebar.jsx', import.meta.url), 'utf8');
+    assert.match(
+      sidebar,
+      /onMouseDown=\{\(e\) => e\.preventDefault\(\)\}\s*onClick=\{\(\) => setSettingsModalOpen\(true\)\}/,
+      'the gear leaves focus where it was'
+    );
+  });
+
   test('SW-10: the note above the shortcuts names every command claimed over a terminal, and no other', async () => {
     // It said "only the two side-bar toggles are claimed" while ten were —
     // the wrong answer for someone looking for what took a key from their
