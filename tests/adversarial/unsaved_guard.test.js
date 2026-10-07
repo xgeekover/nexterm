@@ -525,6 +525,53 @@ describe('The guard as the app runs it', () => {
     });
   });
 
+  test('UG-18: a guard that goes away tells the backend nothing is unsaved — a crashed React tree must not leave every close held', async () => {
+    // A render that throws unmounts the whole tree, this hook with it. The
+    // page is still alive, but nothing in it answers the backend any more.
+    await openFile('on disk', 'edited');
+    await insideTheApp(async ({ bridge, mount, unmount }) => {
+      mount();
+      await until(() => bridge.sentWith('app_set_unsaved').length === 1, 'the first report');
+      assert.deepEqual(bridge.sentWith('app_set_unsaved'), [{ unsaved: true }]);
+
+      unmount();
+      await until(() => bridge.sentWith('app_set_unsaved').length === 2, 'the last word').catch(() => {});
+      assert.deepEqual(
+        bridge.sentWith('app_set_unsaved'),
+        [{ unsaved: true }, { unsaved: false }],
+        'the backend still holds closes and quits for a guard that is gone'
+      );
+    });
+  });
+
+  test("UG-19: a guard going away and the one replacing it are heard in order — React mounts effects twice in development", async () => {
+    const { reportUnsaved } = await guard();
+    await openFile('on disk', 'edited');
+    const heard = [];
+    let calls = 0;
+    let release;
+    const firstHeld = new Promise((resolve) => {
+      release = resolve;
+    });
+    // The first report is slow to arrive, as one sent over IPC can be.
+    const send = async (unsaved) => {
+      calls += 1;
+      if (calls === 1) await firstHeld;
+      heard.push(unsaved);
+    };
+
+    const stopFirst = reportUnsaved(S, send); // "unsaved", held up
+    stopFirst(); // "nothing unsaved": nobody left to answer
+    const stopSecond = reportUnsaved(S, send); // "unsaved" again
+    try {
+      release();
+      await until(() => heard.length === 3, 'three reports').catch(() => {});
+      assert.deepEqual(heard, [true, false, true], 'the backend ends up believing nothing is unsaved');
+    } finally {
+      stopSecond();
+    }
+  });
+
   test('UG-99: teardown', () => {
     S.setState(emptyEditor());
     assert.equal(S.getState().tabs.length, 0);

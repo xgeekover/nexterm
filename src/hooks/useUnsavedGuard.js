@@ -71,30 +71,51 @@ export function answerQuitRequest(id, editor = useEditorStore.getState(), api = 
 }
 
 /**
+ * Every report to the backend, one after another in the order they were
+ * made — every guard's, not each guard's own. In development React mounts
+ * effects twice, so a guard going away and the one replacing it report in
+ * the same moment, and the last word of the first must not land after the
+ * first word of the second.
+ */
+let reports = Promise.resolve();
+
+/**
  * Keep the backend told whether any editor tab is unsaved.
  *
  * It decides every close and every quit from this alone. With nothing
  * unsaved it lets them through without asking the page, and a macOS quit has
  * to be answered while AppKit waits, with no round trip to the page at all.
  * Sent only when it changes, not on every keystroke, and one at a time so
- * that the backend cannot hear them out of order. Returns the unsubscribe.
+ * that the backend cannot hear them out of order.
+ *
+ * Returns the stop, which also tells the backend that nothing is unsaved.
+ * Once this guard is gone nobody is left to answer the backend's questions —
+ * a render that throws takes the whole React tree down, this guard with it —
+ * and a backend still told "unsaved" would hold each close for an answer
+ * that never comes, and on macOS call off each quit and logout.
  */
 export function reportUnsaved(
   store = useEditorStore,
   send = (unsaved) => invoke('app_set_unsaved', { unsaved })
 ) {
   let last = null;
-  let queue = Promise.resolve();
+  const queue = (unsaved) => {
+    reports = reports
+      .then(() => send(unsaved))
+      .catch((err) => console.warn('[unsaved] could not tell the backend about unsaved changes:', err));
+  };
   const report = (state) => {
     const unsaved = state.tabs.some((t) => t.isDirty);
     if (unsaved === last) return;
     last = unsaved;
-    queue = queue
-      .then(() => send(unsaved))
-      .catch((err) => console.warn('[unsaved] could not tell the backend about unsaved changes:', err));
+    queue(unsaved);
   };
   report(store.getState());
-  return store.subscribe(report);
+  const unsubscribe = store.subscribe(report);
+  return () => {
+    unsubscribe();
+    queue(false);
+  };
 }
 
 /** Undo one thing the guard set up; an unsubscribe that fails is only logged. */
