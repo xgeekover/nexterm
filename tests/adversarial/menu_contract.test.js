@@ -106,7 +106,7 @@ const ACTION_OF = {
   'toggle-pane-zoom': 'terminal.togglePaneZoom()',
   'find-in-terminal': 'terminal.openFind()',
   'command-history': 'settings.setCommandPaletteOpen(true,history)',
-  'clear-terminal': 'terminal.clearBlocks()',
+  'clear-terminal': 'terminal.clearTerminal()',
   'close-window': 'window.close()',
 };
 

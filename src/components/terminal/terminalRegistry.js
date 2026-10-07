@@ -1026,6 +1026,19 @@ export function reportFocusOut(tabId) {
   }, 0);
 }
 
+/**
+ * Clear a terminal as VS Code's Terminal: Clear does: the scrollback and the
+ * screen go, and the line the cursor is on — the prompt being typed at —
+ * moves to the top. The shell is not told and loses nothing. Returns whether
+ * there was a terminal to clear.
+ */
+export function clearTerminal(tabId) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed) return false;
+  entry.term.clear();
+  return true;
+}
+
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;

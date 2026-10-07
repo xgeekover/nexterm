@@ -400,7 +400,7 @@ export class AppEnvironment {
         return tab ? this.#liveTab(tab.id) : null;
       }
       case 'clear_terminal':
-        this.terminal.clearBlocks();
+        this.terminal.clearTerminal();
         return null;
       case 'toggle_pane_zoom':
         this.terminal.togglePaneZoom();

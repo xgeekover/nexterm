@@ -84,8 +84,8 @@ const STAND_INS = {
       createTab: async () => {
         calls.push(['createTab']);
       },
-      clearBlocks: () => {
-        calls.push(['clearBlocks']);
+      clearTerminal: () => {
+        calls.push(['clearTerminal']);
       },
       togglePaneZoom: () => {
         calls.push(['togglePaneZoom']);

@@ -162,3 +162,21 @@ describe('Command palette: the backend\'s file list (browser mock)', () => {
     assert.deepEqual(cut, { files: all.files.slice(0, 3), truncated: true });
   });
 });
+
+describe('Command palette: which command comes first', () => {
+  // Enter runs the first row. A description matches loosely — Clear
+  // Terminal's ("Clears the active terminal's screen and scrollback…")
+  // spells "save all" — and declared first, it was the row Enter ran.
+  test('PR-13: a command named by the query comes before one only its description matches', () => {
+    const commands = (query) =>
+      buildPaletteGroups({ fileTree: [], rootPath: ROOT, query, mode: 'commands' }).find((g) => g.label === 'commands')?.items ?? [];
+    const clear = paletteCommands(DEFAULT_RESOLVED).find((c) => c.id === 'cmd-clear-terminal');
+    assert.ok(clear.subtitle.length > 0, 'setup');
+
+    const saveAll = commands('save all');
+    assert.equal(saveAll[0]?.title, 'Save All Files', JSON.stringify(saveAll.map((c) => c.title)));
+    assert.ok(saveAll.some((c) => c.id === 'cmd-clear-terminal'), 'setup: the description does match');
+    // With nothing typed, every command, in the order they are declared.
+    assert.deepEqual(commands('').map((c) => c.id), paletteCommands(DEFAULT_RESOLVED).map((c) => c.id));
+  });
+});

@@ -1219,6 +1219,20 @@ async function disposeTerminalView(tabId) {
   }
 }
 
+/**
+ * Clear a tab's xterm (`clearTerminal` in the registry). False where there is
+ * none to clear — no document, as in the Node-run tests, or no view yet.
+ */
+async function clearTerminalView(tabId) {
+  if (typeof document === 'undefined') return false;
+  try {
+    const { clearTerminal } = await import('../components/terminal/terminalRegistry.js');
+    return clearTerminal(tabId);
+  } catch (_) {
+    return false;
+  }
+}
+
 /** A machine left running overnight must not grow this without bound. */
 const NOTIFICATION_LIMIT = 50;
 
@@ -3457,6 +3471,17 @@ export const useTerminalStore = create((set, get, api) => {
         })),
       }));
       return resultPinned;
+    },
+
+    /**
+     * Terminal: Clear — the palette's Clear Terminal, the Terminal menu, and
+     * ⌘L / Ctrl+L outside a terminal (inside one, Ctrl+L is the shell's).
+     * All of them used to clear "unpinned blocks", which nothing has shown
+     * since the block view went, so every way in did nothing.
+     */
+    clearTerminal: async (tabId = null) => {
+      const targetId = tabId || get().activeTabId;
+      return targetId ? clearTerminalView(targetId) : false;
     },
 
     clearBlocks: (tabId = null) => {

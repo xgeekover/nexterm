@@ -159,8 +159,8 @@ export const COMMANDS = {
     run: (ctx) => ctx.toggleSidebar(),
   },
   'clear-terminal': {
-    title: 'Clear Unpinned Blocks',
-    run: (ctx) => ctx.clearBlocks?.(),
+    title: 'Clear Terminal',
+    run: (ctx) => ctx.clearTerminal?.(),
   },
   'search-in-files': {
     title: 'Search in Files',

@@ -237,7 +237,7 @@ pub fn spec() -> Vec<Submenu> {
             // Shift makes it not a bare Ctrl+letter, so the window may claim
             // it everywhere — and it is not Ctrl+R, which is the shell's.
             custom("command-history", "Command History…", "CmdOrCtrl+Shift+H"),
-            terminal_safe("clear-terminal", "Clear Unpinned Blocks", "CmdOrCtrl+L"),
+            terminal_safe("clear-terminal", "Clear Terminal", "CmdOrCtrl+L"),
         ],
     });
 

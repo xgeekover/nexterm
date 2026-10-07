@@ -64,8 +64,8 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       type: 'command',
       id: 'cmd-clear-terminal',
       command: 'clear_terminal',
-      title: 'Clear Terminal Output',
-      subtitle: 'Purges unpinned blocks in current terminal tab',
+      title: 'Clear Terminal',
+      subtitle: 'Clears the active terminal\'s screen and scrollback; the line being typed stays',
       hint: hint('clear-terminal'),
     },
     {
@@ -196,17 +196,24 @@ export function buildPaletteGroups({
     hint: 'File',
   }));
 
-  const commands =
-    mode === 'files'
-      ? []
-      : paletteCommands(bindings).filter(
-          (cmd) => fuzzyMatch(q, cmd.title) || fuzzyMatch(q, cmd.subtitle)
-        );
+  const commands = mode === 'files' ? [] : matchingCommands(paletteCommands(bindings), q);
 
   return [
     { label: 'files', items: fileRows, more: found.more, truncated: files ? filesTruncated === true : false },
     { label: 'commands', items: commands },
   ].filter((group) => group.items.length > 0);
+}
+
+/**
+ * The commands `q` matches: those whose title it matches first, then those
+ * only their description does, each in the order they are declared. A loose
+ * match on a description is easy — "Clears the active terminal's screen and
+ * scrollback" spells "save all" — and the first row is the one Enter runs.
+ */
+function matchingCommands(all, q) {
+  const byTitle = all.filter((cmd) => fuzzyMatch(q, cmd.title));
+  const byDescription = all.filter((cmd) => !byTitle.includes(cmd) && fuzzyMatch(q, cmd.subtitle));
+  return [...byTitle, ...byDescription];
 }
 
 /** Each source's files, readied for matching, kept until the source is replaced. */

@@ -160,7 +160,7 @@ export function CommandPalette() {
   const saveAll = useEditorStore((s) => s.saveAll);
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
-  const clearTerminalBlocks = useTerminalStore((s) => s.clearBlocks);
+  const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
   const writeRaw = useTerminalStore((s) => s.writeRaw);
 
@@ -275,7 +275,7 @@ export function CommandPalette() {
         setActiveView('terminal');
         return;
       case 'clear_terminal':
-        clearTerminalBlocks();
+        clearTerminal();
         return;
       case 'toggle_pane_zoom':
         // The active pane of the group on screen, as the shortcut does.
