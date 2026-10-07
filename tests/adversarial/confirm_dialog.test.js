@@ -1031,3 +1031,21 @@ describe('ConfirmDialog: as drawn', () => {
     assert.equal(renderToString(h(ui.ConfirmDialog, deleteFolder([], 'x', { open: false }))), '');
   });
 });
+
+describe('ConfirmDialog: the press that opened it', () => {
+  // Found in the last review: on Windows the title bar's ✕ is part of the
+  // page, and the second press of a double-click on it landed on the dim
+  // area of the question it had just opened — cancelling it at once.
+  test('CD-28: a press on the dim area within half a second of opening is not Cancel', async () => {
+    const { backdropCancels, BACKDROP_GRACE_MS } = await loadDialogModule();
+    assert.equal(BACKDROP_GRACE_MS, 500, 'the same half second the backend holds a second close for');
+    assert.equal(backdropCancels(1000, 1000), false);
+    assert.equal(backdropCancels(1000, 1499), false);
+    assert.equal(backdropCancels(1000, 1500), true);
+    assert.equal(backdropCancels(null, 5000), false, 'not open yet');
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../../src/components/common/ConfirmDialog.jsx', import.meta.url), 'utf8');
+    assert.match(src, /if \(e\.target === e\.currentTarget && backdropCancels\(openedAtRef\.current, Date\.now\(\)\)\) onCancel\?\.\(\);/);
+    assert.match(src, /openDialogs\.push\(self\);\s*openedAtRef\.current = Date\.now\(\);/);
+  });
+});

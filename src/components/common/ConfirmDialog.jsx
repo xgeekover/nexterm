@@ -105,6 +105,24 @@ export function focusOnClose(stack, entry, { focused, body, onPage }) {
 }
 
 /**
+ * How long after a dialog opens a press on the dim area around it is not
+ * taken as Cancel.
+ *
+ * The question a window close asks opens under the pointer that asked for
+ * it: on Windows the title bar's ✕ is part of the page, and the second press
+ * of a double-click on it landed on the dim area of a question drawn a few
+ * milliseconds after the first — cancelling it at once, the window left open
+ * with nothing asked. The backend holds a second close within the same half
+ * second for the same reason (`REPEAT_GRACE` in src-tauri/src/commands/app.rs).
+ */
+export const BACKDROP_GRACE_MS = 500;
+
+/** Whether a press on the dim area at `now` cancels a dialog opened at `openedAt`. */
+export function backdropCancels(openedAt, now) {
+  return typeof openedAt === 'number' && now - openedAt >= BACKDROP_GRACE_MS;
+}
+
+/**
  * VS Code-style modal confirmation. Replaces the native `confirm()` which
  * blocks the whole webview and cannot be styled.
  */
@@ -139,6 +157,8 @@ export function ConfirmDialog({
   // run of the effect below, which can find it still on this dialog's own
   // button when there was nothing to give it back to.
   const returnToRef = useRef(null);
+  // When this opened — see `backdropCancels`.
+  const openedAtRef = useRef(null);
 
   // Once per opening: the confirm button takes focus and the keys are
   // listened for. This used to run again whenever a callback changed, which
@@ -152,6 +172,7 @@ export function ConfirmDialog({
     if (!box?.contains(focused)) returnToRef.current = focused;
     const self = { returnTo: returnToRef.current, box, confirm: confirmRef.current };
     openDialogs.push(self);
+    openedAtRef.current = Date.now();
     confirmRef.current?.focus();
 
     // In the capture phase, ahead of the element the key was aimed at: a
@@ -188,7 +209,7 @@ export function ConfirmDialog({
     <div
       className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 pt-[18vh]"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel?.();
+        if (e.target === e.currentTarget && backdropCancels(openedAtRef.current, Date.now())) onCancel?.();
       }}
     >
       <div
