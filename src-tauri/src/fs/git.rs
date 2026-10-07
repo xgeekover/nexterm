@@ -19,6 +19,7 @@
 // `PathBuf` is only named by the tests below; `#![deny(warnings)]` turns an
 // unused import into a failed build, and `cargo test` would not have caught it
 // because there the import IS used.
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 #[cfg(windows)]
@@ -92,6 +93,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 ///   the repository's own setting. A git older than 2.36 reads the value only
 ///   as a path, so there it names the `false` command, which fails, and git
 ///   falls back to checking every file itself.
+///
+/// The status also turns off the filters the repository defines
+/// (`repository_filters_off`), and leaves submodules' working trees alone
+/// (`STATUS_ARGS`).
 const BACKGROUND_OPTIONS: [&str; 3] = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 
 /// `git` run in `dir` with `BACKGROUND_OPTIONS`, and without a console window.
@@ -233,6 +238,103 @@ pub fn parse_status(stdout: &str, repo_root: &Path) -> GitStatus {
     status
 }
 
+/// The status itself. `--ignore-submodules=dirty`: what a submodule's own
+/// working tree holds is asked of a git run inside it, which runs whatever
+/// filters the submodule's config names (see `repository_filters_off`) and
+/// was never shown them. A submodule moved to another commit still shows.
+const STATUS_ARGS: [&str; 5] = ["status", "--porcelain=v2", "--branch", "-z", "--ignore-submodules=dirty"];
+
+/// The filter drivers named in `git config -z --get-regexp '^filter\.'`
+/// output whose commands the repository sets: with `--show-scope`
+/// (`scoped`), each entry comes after its scope, and only `local` (its
+/// `.git/config`) and `worktree` (`config.worktree`) — with what they
+/// include — are the repository's; without, every driver counts.
+///
+/// A driver counts once one of those sets its `clean`, `smudge` or
+/// `process`; a `required` alone runs nothing.
+fn filter_drivers(listing: &str, scoped: bool) -> BTreeSet<String> {
+    let mut fields = listing.split('\0');
+    let mut names = BTreeSet::new();
+    loop {
+        let scope = if scoped {
+            match fields.next() {
+                Some(scope) => scope,
+                None => break,
+            }
+        } else {
+            "local"
+        };
+        let Some(entry) = fields.next() else { break };
+        if !matches!(scope, "local" | "worktree") {
+            continue;
+        }
+        // `filter.<name>.<variable>`: git prints the section and the variable
+        // in lower case, and the name — which may hold dots — as it is.
+        let key = entry.split('\n').next().unwrap_or("");
+        let Some((name, variable)) = key.strip_prefix("filter.").and_then(|rest| rest.rsplit_once('.')) else {
+            continue;
+        };
+        if matches!(variable, "clean" | "smudge" | "process") {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+/// `-c` settings that switch off every filter driver the repository's own
+/// config defines or redefines, or `None` when that cannot be done.
+///
+/// To tell whether a tracked file changed, `git status` runs it through the
+/// clean filter `.gitattributes` assigns it — `filter.<driver>.clean`, or
+/// `.process` — whenever the stat data the index keeps for it is out of
+/// date, as it always is in a folder just unpacked. Both halves can come with
+/// the folder: `.gitattributes` is committed, and a `.git/config` from an
+/// archive or a shared drive can define the driver. So the status that runs
+/// on opening the folder ran a program the folder named, as `core.fsmonitor`
+/// did (see `BACKGROUND_OPTIONS`).
+///
+/// No git setting turns filters off, so each driver whose command comes from
+/// the repository — scope `local` or `worktree`, and what those include — is
+/// given empty ones: git runs no filter whose command is empty, and
+/// `required=false` keeps a required one from failing the status. Drivers
+/// set up in the user's own config, git-lfs's among them, still run. `-c`
+/// cannot name a driver with `=` in it (git splits the setting there), so a
+/// repository that defines one gets no status at all. A git older than 2.26
+/// cannot say where a setting comes from, and then every driver is off.
+fn repository_filters_off(root: &Path) -> Option<Vec<String>> {
+    let listed = |scoped: bool| -> Option<Option<String>> {
+        let mut args = vec!["config", "-z"];
+        if scoped {
+            args.push("--show-scope");
+        }
+        args.extend(["--get-regexp", r"^filter\."]);
+        let output = git_command(root, &args).output().ok()?;
+        match output.status.code() {
+            Some(0) => Some(Some(String::from_utf8_lossy(&output.stdout).into_owned())),
+            // Nothing matched: no filter drivers anywhere.
+            Some(1) => Some(Some(String::new())),
+            _ => Some(None),
+        }
+    };
+    let names = match listed(true)? {
+        Some(listing) => filter_drivers(&listing, true),
+        None => filter_drivers(&listed(false)??, false),
+    };
+    if names.iter().any(|name| name.contains('=')) {
+        return None;
+    }
+    Some(
+        names
+            .iter()
+            .flat_map(|name| {
+                ["clean=", "smudge=", "process=", "required=false"]
+                    .map(|setting| ["-c".to_string(), format!("filter.{name}.{setting}")])
+            })
+            .flatten()
+            .collect(),
+    )
+}
+
 /// Ask git about `root`, or `None` when there is nothing to ask.
 pub fn status_of(root: &Path) -> Option<GitStatus> {
     // Also the "is this a repository at all" check, and it gives the root that
@@ -247,7 +349,9 @@ pub fn status_of(root: &Path) -> Option<GitStatus> {
     // gives the platform's own spelling — the same one `read_dir_hierarchy`
     // hands the Explorer, which is what these paths have to match.
     let repo_root = crate::fs::canonical_or(Path::new(trimmed));
-    let stdout = git(root, &["status", "--porcelain=v2", "--branch", "-z"])?;
+    let filters_off = repository_filters_off(root)?;
+    let args: Vec<&str> = filters_off.iter().map(String::as_str).chain(STATUS_ARGS).collect();
+    let stdout = git(root, &args)?;
     Some(parse_status(&stdout, &repo_root))
 }
 
@@ -430,10 +534,7 @@ mod tests {
     /// subcommand, and none of them may be lost on the way.
     #[test]
     fn every_background_call_takes_no_lock_and_runs_no_fsmonitor() {
-        for subcommand in [
-            &["rev-parse", "--show-toplevel"][..],
-            &["status", "--porcelain=v2", "--branch", "-z"][..],
-        ] {
+        for subcommand in [&["rev-parse", "--show-toplevel"][..], &STATUS_ARGS[..]] {
             let command = git_command(Path::new("/w/proj"), subcommand);
             assert_eq!(command.get_program(), "git");
             let args: Vec<String> = command
@@ -571,6 +672,163 @@ mod tests {
 
         assert!(status.is_some(), "the repository still answers");
         assert!(!hook_ran, "opening the folder ran the program its .git/config names as core.fsmonitor");
+    }
+
+    /// Only a driver whose command the repository sets is switched off; one
+    /// from the user's own config — git-lfs's — still runs, even where the
+    /// repository marks it required.
+    #[test]
+    fn only_the_filters_a_repository_sets_commands_for_are_switched_off() {
+        let listing = z(&[
+            "global",
+            "filter.lfs.clean\ngit-lfs clean -- %f",
+            "global",
+            "filter.lfs.process\ngit-lfs filter-process",
+            "local",
+            "filter.lfs.required\ntrue",
+            "local",
+            "filter.evil.clean\n./x",
+            "worktree",
+            "filter.My.Dotted.name.smudge\n./y",
+            "system",
+            "filter.site.process\n./z",
+            "local",
+            "filter.other.textconv\n./w",
+        ]);
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+        assert_eq!(filter_drivers(&listing, true), set(&["My.Dotted.name", "evil"]));
+        assert!(filter_drivers("", true).is_empty());
+        assert!(filter_drivers("", false).is_empty());
+
+        // A git too old for `--show-scope`: every driver with a command.
+        let unscoped = z(&["filter.lfs.clean\nx", "filter.evil.process\ny", "filter.req.required\ntrue"]);
+        assert_eq!(filter_drivers(&unscoped, false), set(&["evil", "lfs"]));
+    }
+
+    /// Runs git as `scratch_repo` sets repositories up, reading none of this
+    /// machine's configuration.
+    #[cfg(unix)]
+    fn set_up(repo: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "NexTerm")
+            .env("GIT_AUTHOR_EMAIL", "nexterm@example.invalid")
+            .env("GIT_COMMITTER_NAME", "NexTerm")
+            .env("GIT_COMMITTER_EMAIL", "nexterm@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A clean filter the repository defines, assigned to every file by a
+    /// committed `.gitattributes` — the two halves that arrive with a folder —
+    /// and a tracked file whose cached stat data is out of date, as in any
+    /// folder just unpacked. Returns where the filter leaves its mark.
+    #[cfg(unix)]
+    fn plant_a_filter(repo: &Path, driver: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let ran = repo.parent().unwrap().join(format!("the-filter-ran-{}", driver.len()));
+        let script = repo.parent().unwrap().join(format!("filter-{}.sh", driver.len()));
+        std::fs::write(&script, format!("#!/bin/sh\necho ran >> '{}'\ncat\n", ran.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.join(".gitattributes"), format!("* filter={driver}\n")).unwrap();
+        set_up(repo, &["add", ".gitattributes"]);
+        set_up(repo, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "attributes"]);
+        let config = repo.join(".git").join("config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str(&format!("[filter \"{driver}\"]\n\tclean = {}\n\trequired = true\n", script.display()));
+        std::fs::write(&config, text).unwrap();
+        let file = std::fs::File::options().write(true).open(repo.join("tracked.txt")).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
+        ran
+    }
+
+    /// Found in review: the status that runs on opening a folder ran the
+    /// clean filter the folder's own `.git/config` defines. It answers as
+    /// before — an unchanged file unchanged, a changed one changed — without.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_cannot_make_the_background_status_run_its_filters() {
+        let Some(repo) = scratch_repo("filters") else {
+            eprintln!("git unavailable or too old; skipping");
+            return;
+        };
+        let ran = plant_a_filter(&repo, "evil");
+
+        let unchanged = status_of(&repo);
+        std::fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+        let changed = status_of(&repo);
+        let filter_ran = ran.exists();
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+
+        assert!(!filter_ran, "opening the folder ran the clean filter its .git/config defines");
+        let unchanged = unchanged.expect("the repository still answers, its filter marked required");
+        assert!(unchanged.files.is_empty(), "nothing changed, but git said {:?}", unchanged.files);
+        let changed = changed.expect("the repository still answers");
+        assert!(
+            changed.files.iter().any(|f| f.path.ends_with("tracked.txt") && f.status == GitFileStatus::Modified),
+            "{:?}",
+            changed.files
+        );
+    }
+
+    /// `-c` cannot name a driver with `=` in it, and git runs one all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_filter_that_cannot_be_switched_off_costs_the_status_not_a_program() {
+        let Some(repo) = scratch_repo("filter-eq") else {
+            eprintln!("git unavailable or too old; skipping");
+            return;
+        };
+        let ran = plant_a_filter(&repo, "a=b");
+
+        let status = status_of(&repo);
+        let filter_ran = ran.exists();
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+
+        assert!(!filter_ran, "the filter named `a=b` ran");
+        assert!(status.is_none(), "{status:?}");
+    }
+
+    /// A submodule's working tree is asked about by a git run inside it, with
+    /// the submodule's own config — filters the status never saw.
+    #[cfg(unix)]
+    #[test]
+    fn a_submodule_cannot_make_the_background_status_run_its_filters() {
+        let (Some(sub), Some(repo)) = (scratch_repo("filter-sub"), scratch_repo("filter-super")) else {
+            eprintln!("git unavailable or too old; skipping");
+            return;
+        };
+        let sub_path = sub.to_string_lossy().to_string();
+        set_up(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &sub_path, "sub"]);
+        set_up(&repo, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "submodule"]);
+        let inside = repo.join("sub");
+        // The planted config lands in the superproject's .git/modules/sub.
+        let ran = {
+            std::fs::write(inside.join(".gitattributes"), "* filter=evil\n").unwrap();
+            set_up(&inside, &["add", ".gitattributes"]);
+            set_up(&inside, &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "attributes"]);
+            let ran = repo.parent().unwrap().join("the-submodule-filter-ran");
+            set_up(&inside, &["config", "filter.evil.clean", &format!("sh -c \"echo ran >> '{}'; cat\"", ran.display())]);
+            let file = std::fs::File::options().write(true).open(inside.join("tracked.txt")).unwrap();
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
+            ran
+        };
+
+        let status = status_of(&repo);
+        let filter_ran = ran.exists();
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+        let _ = std::fs::remove_dir_all(sub.parent().unwrap());
+
+        assert!(!filter_ran, "the status ran the clean filter a submodule's config defines");
+        let status = status.expect("the repository still answers");
+        // The submodule's commit moved (the attributes commit), and that still shows.
+        assert!(status.files.iter().any(|f| f.path.ends_with("sub")), "{:?}", status.files);
     }
 
     #[test]
