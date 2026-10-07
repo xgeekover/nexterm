@@ -50,7 +50,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { trackCommandMarks } from '../../lib/stickyCommand.js';
-import { openExternal } from '../../lib/openExternal.js';
+import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installTerminalRightClick } from '../../lib/terminalRightClick.js';
@@ -630,11 +630,11 @@ function registerLinks(term, tabId) {
           text: match.text,
           decorations: { pointerCursor: true, underline: true },
           activate: (event) => {
-            event?.preventDefault?.();
             if (match.kind === 'url') {
-              openExternal(match.href);
+              openWebLink(event, match.href);
               return;
             }
+            event?.preventDefault?.();
             const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
             const editor = useEditorStore.getState();
             // Null when there is nothing to resolve against, or when the path
@@ -654,6 +654,48 @@ function registerLinks(term, tabId) {
       );
     },
   });
+}
+
+/**
+ * What a click on a web address in the output does — the same whichever way
+ * the output made it one: an address printed as text (`registerLinks`) or a
+ * program's OSC 8 hyperlink (`hyperlinkHandler`). xterm calls both on the
+ * same click, and both go to the browser through `openExternal`, which hands
+ * over http and https and refuses the rest.
+ */
+function openWebLink(event, href) {
+  event?.preventDefault?.();
+  openExternal(href);
+}
+
+/**
+ * xterm's handler for OSC 8 hyperlinks — text a program has made a link,
+ * `ESC ] 8 ; ; <address> ST <text> ESC ] 8 ; ; ST`: `ls --hyperlink`, gcc's
+ * diagnostics, delta, the links OpenCode and Claude Code print.
+ *
+ * With no handler xterm opens one itself, with `window.confirm` and then
+ * `window.open`: a dialog of the webview's, then the page handed to the
+ * webview rather than to the browser. Here it opens on the same click, and
+ * the same way, as every other link in the terminal (`openWebLink`).
+ *
+ * What a hyperlink shows is not where it goes, so while the pointer is on one
+ * the terminal's tooltip says where (`hyperlinkTitle`). And only http and
+ * https are links at all: xterm drops every other scheme before offering one
+ * — `allowNonHttpProtocols` is stated here rather than left to its default —
+ * so a `file://` hyperlink, which on Windows can name a share on another
+ * machine that opening would sign in to, stays plain text; `openExternal`
+ * would refuse it anyway.
+ */
+function hyperlinkHandler(container) {
+  return {
+    allowNonHttpProtocols: false,
+    activate: (event, uri) => openWebLink(event, uri),
+    hover: (_event, uri) => {
+      const title = hyperlinkTitle(uri);
+      if (title) container.title = title;
+    },
+    leave: () => container.removeAttribute('title'),
+  };
 }
 
 /**
@@ -746,6 +788,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     theme: resolveTerminalTheme(settingsState.terminalTheme),
     // `{}` off Windows: xterm's own "not set". See terminalCompat.js.
     windowsPty: windowsPtyFor(useSystemStore.getState()) ?? {},
+    // A program's OSC 8 hyperlinks open as the terminal's other links do.
+    linkHandler: hyperlinkHandler(container),
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);

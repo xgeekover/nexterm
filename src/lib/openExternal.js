@@ -6,7 +6,9 @@
  * write, which may be a paste, a downloaded file's name, or a server's reply.
  * So it is narrow on purpose, in three independent places:
  *
- *   1. `terminalLinks.js` only ever matches `http` and `https`, so a
+ *   1. `terminalLinks.js` only ever matches `http` and `https`, and xterm
+ *      offers a program's OSC 8 hyperlink only for those two (the registry's
+ *      `hyperlinkHandler` keeps `allowNonHttpProtocols` off), so a
  *      `file:///…` or `javascript:…` in the output is never offered as a link;
  *   2. this function refuses anything else again, because it is exported and
  *      the next caller may not have come through that matcher;
@@ -14,7 +16,9 @@
  *      schemes, so even a compromised frontend cannot ask for more.
  *
  * Nothing opens on its own. A person clicks a link they can see, which is the
- * same contract every terminal emulator has.
+ * same contract every terminal emulator has — and since an OSC 8 hyperlink
+ * draws text of the program's choosing over its address, the address is
+ * shown while the pointer is on it (`hyperlinkTitle`).
  */
 import { invoke, isTauri } from './ipc.js';
 
@@ -27,6 +31,37 @@ export function isOpenable(url) {
   } catch {
     return false;
   }
+}
+
+/**
+ * How much of an address a hyperlink's tooltip shows. Past it the address is
+ * cut at the end, after the scheme and host it opens, which always show: a
+ * program can make an address as long as it likes, and the tooltip is no
+ * place for megabytes.
+ */
+export const HYPERLINK_TITLE_LIMIT = 300;
+
+/**
+ * Where an OSC 8 hyperlink goes, as its tooltip says it — or null for one
+ * that would not open (`isOpenable`).
+ *
+ * A program draws a hyperlink over text of its own choosing, so "here" can
+ * lead anywhere, and the tooltip is the one place the address shows. It shows
+ * the address as it will be read — parsed, as the opener and the browser
+ * parse it, not as the program spelled it: an international host name in
+ * punycode, and anything outside ASCII after it percent-encoded, so no
+ * right-to-left mark can turn it round.
+ * And without a user name: in `https://example.com@evil.example/` the part
+ * before the `@` is a user name sent to the host, the host is evil.example,
+ * and the tooltip shows `https://evil.example/`.
+ */
+export function hyperlinkTitle(uri) {
+  if (!isOpenable(uri)) return null;
+  const url = new URL(uri);
+  const rest = `${url.pathname}${url.search}${url.hash}`;
+  const room = HYPERLINK_TITLE_LIMIT - url.origin.length;
+  if (rest.length <= room) return `${url.origin}${rest}`;
+  return `${url.origin}${rest.slice(0, Math.max(0, room - 1))}…`;
 }
 
 /**
@@ -61,4 +96,4 @@ export async function openExternal(url) {
   }
 }
 
-export default { openExternal, isOpenable };
+export default { openExternal, isOpenable, hyperlinkTitle };
