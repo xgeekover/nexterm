@@ -3939,8 +3939,6 @@ export const useTerminalStore = create((set, get, api) => {
       });
     },
 
-    setCwd: (cwd) => set({ cwd }),
-
     getActiveTab: () => {
       const { tabs, activeTabId } = get();
       return tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
