@@ -58,6 +58,7 @@ import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { attachOutput, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
+import { exitNotice } from '../../lib/shellExit.js';
 
 const instances = new Map();
 
@@ -689,17 +690,15 @@ function bindSession(entry, sessionId) {
     startPtyOutputBus();
     ptyUnlisten = attachOutput(sessionId, (data) => entry.term.write(data));
 
-    // When the shell exits, say so. The pane used to keep a blinking cursor
-    // and simply swallow every keystroke, with no way to tell a dead terminal
-    // from a hung one — the failure only showed up in the devtools console.
+    // When the shell exits, say so — with the code as Windows documents it —
+    // and that Enter starts a new one (the store's `restartShell`). The pane
+    // used to keep a blinking cursor and swallow every keystroke, then print
+    // a failed write for each one.
     listen('pty-exit', (payload) => {
       const { session_id, exit_code } = payload || {};
       if (session_id !== sessionId || entry.exited) return;
       entry.exited = true;
-      const code = typeof exit_code === 'number' ? exit_code : null;
-      entry.term.write(
-        `\r\n\x1b[90m[process exited${code === null ? '' : ` with code ${code}`}]\x1b[0m\r\n`
-      );
+      entry.term.write(exitNotice(typeof exit_code === 'number' ? exit_code : null));
     }).then((off) => {
       if (cancelled) off();
       else exitUnlisten = off;
@@ -874,6 +873,14 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
+  // A tab first shown after its shell already exited heard no exit event:
+  // what the shell printed comes from the output bus above, and the notice
+  // that it is gone — and how to get a new one — goes after it.
+  const exited = useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.exited;
+  if (exited && sessionId) {
+    entry.exited = true;
+    term.write(exitNotice(typeof exited.code === 'number' ? exited.code : null));
+  }
   return entry;
 }
 

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { forgetOutput, startPtyOutputBus } from '../lib/ptyOutputBus.js';
 import { notifyTerminal } from '../lib/terminalNotice.js';
+import { restartsShell, sessionIsGone } from '../lib/shellExit.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
 // schema as absent, which for this store's keys would mean silently bootstrapping
 // over the user's workspace. Reads go through `loadVersionedState` + an explicit
@@ -996,6 +997,9 @@ const shownTitles = new Map();
 
 /** tab id -> the pending lookup of its opencode conversation. */
 const resolveTimers = new Map();
+
+/** Tab ids whose new shell is being started (`restartShell`): one at a time. */
+const restarting = new Set();
 
 /**
  * How long a title has to stay before its conversation is looked up. opencode
@@ -3578,6 +3582,14 @@ export const useTerminalStore = create((set, get, api) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      // A terminal whose shell has exited has nowhere to send keys. Enter
+      // starts a new shell in its place (src/lib/shellExit.js); anything else
+      // is dropped quietly — every key used to come back as one more
+      // "PTY session not found" line.
+      if (tab.exited) {
+        if (restartsShell(data)) await get().restartShell(targetId);
+        return;
+      }
       // Every key and every line the app types goes through here, so this is
       // where the line being typed can be followed to the command it runs.
       followTyping(tab, data);
@@ -3593,9 +3605,102 @@ export const useTerminalStore = create((set, get, api) => {
         // Swallowing that to the console is how a pasted block could vanish
         // with nothing on screen to say it had.
         const message = typeof err === 'string' ? err : err?.message;
+        // The shell is gone and its exit has not reached us yet (or never
+        // will: a writer that died keeps the session but takes no input).
+        // Say it once, in words, and treat the terminal as exited from here.
+        if (sessionIsGone(message)) {
+          let first = false;
+          set((state) => ({
+            tabs: state.tabs.map((t) => {
+              if (t.id !== targetId || t.sessionId !== tab.sessionId || t.exited) return t;
+              first = true;
+              return { ...t, exited: { code: null }, running: false, runStartedAt: null };
+            }),
+          }));
+          if (first && !notifyTerminal(targetId, 'The shell in this terminal has stopped. Press Enter to start a new one.')) {
+            console.error('[TerminalStore] Raw write failed:', err);
+          }
+          return;
+        }
         if (!notifyTerminal(targetId, message)) {
           console.error('[TerminalStore] Raw write failed:', err);
         }
+      }
+    },
+
+    /**
+     * Start a new shell in a terminal whose shell has exited — what Enter
+     * does there (`writeRaw`), as Windows Terminal's "press Enter to
+     * restart". The tab, its place in its pane and its scrollback stay; it
+     * gets a fresh session in its last directory, with the shell it ran.
+     *
+     * A session that stopped taking input may still have a live shell
+     * behind it (the writer died, the process did not), so it is ended
+     * first rather than left running unseen. Its agent record goes: the
+     * agent ended with the shell, and offering it back would be a guess.
+     * Resolves with whether a new shell was started; on failure the terminal
+     * stays exited, says why, and the next Enter tries again.
+     */
+    restartShell: async (tabId) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab || !tab.exited || restarting.has(tabId)) return false;
+      restarting.add(tabId);
+      try {
+        try {
+          await invoke('pty_kill', { session_id: tab.sessionId });
+        } catch (_) {
+          // Already gone, which is the usual case.
+        }
+        const startDir = await startDirFor(tab.cwd);
+        const shellSpec = tab.shell || useSettingsStore.getState().terminalDefaultShell;
+        const spawnAt = (dir) => invoke('pty_spawn', { cols: 80, rows: 24, cwd: dir, shell: shellSpec });
+        let ptySession;
+        try {
+          ptySession = await spawnAt(startDir);
+        } catch (err) {
+          if (startDir === null) throw err;
+          ptySession = await spawnAt(null);
+        }
+        if (!get().tabs.some((t) => t.id === tabId)) {
+          // Closed while the new shell started: it must not outlive the tab.
+          invoke('pty_kill', { session_id: ptySession.session_id }).catch(() => {});
+          return false;
+        }
+        typedLines.delete(tabId);
+        forgetAgentTitle(tabId);
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  sessionId: ptySession.session_id,
+                  cwd: ptySession.cwd || t.cwd,
+                  shell: ptySession.shell || t.shell,
+                  exited: null,
+                  running: false,
+                  runStartedAt: null,
+                  lastExitCode: null,
+                  commandLine: null,
+                  agent: null,
+                  agentResumeOffered: false,
+                  agentTyped: null,
+                  // The new PTY starts at 80×24; the size the old one was told
+                  // must not make `resizePty` think this one already has it.
+                  lastSize: null,
+                  spawnedAt: Date.now(),
+                }
+              : t
+          ),
+        }));
+        return true;
+      } catch (err) {
+        const message = typeof err === 'string' ? err : err?.message;
+        if (!notifyTerminal(tabId, `Could not start a new shell: ${message}`)) {
+          console.error('[TerminalStore] Could not start a new shell:', err);
+        }
+        return false;
+      } finally {
+        restarting.delete(tabId);
       }
     },
 

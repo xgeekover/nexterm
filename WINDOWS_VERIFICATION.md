@@ -589,6 +589,31 @@ cmd; and whether the app, started from the Start menu, finds npm's
   where `opencode` is installed: `where.exe opencode`); with no such line,
   conhost dropped the title. No offer at all is the typed line not being
   followed — note the shell.
+### V26 — a shell that exits comes back with Enter
+
+Reported from this PC (2026-10-07): quitting `opencode` with Ctrl+C in cmd
+sometimes left a terminal printing "[NexTerm] PTY session not found: pty-5"
+for every key. cmd had exited (the backend drops a session only when its shell
+ends); why is not known yet. npm runs OpenCode through `opencode.cmd`, so a
+second Ctrl+C can reach cmd at "Terminate batch job (Y/N)?" — the exit code
+the terminal now prints will say. Never run on Windows since the fix: checked
+in the suites with the browser mock.
+
+- In cmd, start `opencode` and press Ctrl+C two or three times quickly, a few
+  times over. Whenever cmd goes with it, the terminal shows one grey
+  `[process exited with code …]` line — write down the code, it says how cmd
+  ended (`0xC000013A, ended by Ctrl+C` is the suspected one) — and
+  `Press Enter to start a new shell in this terminal.`, and no yellow
+  `[NexTerm] PTY session …` line however many keys are pressed.
+- Enter: a new cmd prompt in the same directory, in the same pane, with the
+  old output still above it; commands run. The tab's name is no longer struck
+  through.
+- `exit` at a PowerShell prompt: the same notice with code 0, and Enter brings
+  PowerShell back.
+- When it fails, say which half: a yellow `[NexTerm] Could not start a new
+  shell: …` is the spawn (note the text); keys still producing
+  `PTY session …` lines means the notice was never reached — note the exit
+  code printed, if any.
 
 ## What the first run found
 
