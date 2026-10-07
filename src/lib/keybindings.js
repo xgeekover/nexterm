@@ -247,8 +247,8 @@ export const COMMANDS = {
  *
  * Order decides nothing here — no two commands share a keypress, which
  * CK-06 holds on both platforms — but reading order is kept roughly menu
- * order. Once a user binds one keypress twice, the binding listed first runs;
- * `findConflicts` says which.
+ * order. Once a user binds one keypress to two commands, the one whose
+ * defaults come first here runs it; `findConflicts` says which.
  */
 export const DEFAULT_KEYBINDINGS = [
   { command: 'quick-open', key: 'mod+p' },

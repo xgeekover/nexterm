@@ -468,10 +468,10 @@ describe('Recording a shortcut takes only something that can be one', () => {
   });
 
   test('CK-26: recording for a command claimed over the terminal leaves Tab and typing to the shell', () => {
-    // The whole sequence a user goes through: Change on Find in Terminal,
-    // Tab (meant to move on), a letter (meant to type), then a real chord.
-    // Only the chord is ever bound, and afterwards a focused terminal still
-    // gets Tab and the letter.
+    // What a user presses after Change on Find in Terminal: Tab (meant to
+    // move on — it leaves the field, which ends the recording), a letter or
+    // a capital (meant to type), a real chord. Only the chord is ever bound,
+    // and afterwards a focused terminal still gets Tab and the letter.
     assert.ok(COMMANDS['find-in-terminal'].overTerminal, 'the premise: it is claimed over a terminal');
     let bound = null;
     for (const e of [
