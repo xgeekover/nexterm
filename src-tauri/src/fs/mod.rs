@@ -4,6 +4,7 @@ pub mod search;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -168,12 +169,83 @@ fn folder_to_walk(path: &Path, name: &OsStr, is_symlink: bool, listing: &[PathBu
     (!loops_back).then_some(target)
 }
 
+/// The largest file `read_file` opens.
+///
+/// The editor holds a file whole: read into memory, serialized into the IPC
+/// reply, handed to Monaco — and read again before every save, to see
+/// whether it changed on disk. A 500 MB log clicked in the Explorer froze
+/// the window or ran the webview out of memory, and the unsaved work in
+/// every other tab went with it. Search stops at 2 MB
+/// (`search::MAX_FILE_BYTES`); a file is worth opening well past that.
+pub const MAX_OPEN_BYTES: u64 = 50 * 1024 * 1024;
+
+/// How much of a file is looked at for a NUL before the rest is read.
+const TEXT_SNIFF_BYTES: u64 = 8 * 1024;
+
+/// A file's text. Refused without reading it when it is not a file or is
+/// over `MAX_OPEN_BYTES`, after its first 8 KB when those hold a NUL, and
+/// once read when it is not UTF-8.
+///
+/// Refusals start with fixed words the editor can tell apart: "File not
+/// found", "File is too large to open" (with the size and the limit) and
+/// "File is not UTF-8 text". NUL is valid UTF-8, so without the look at the
+/// first bytes a binary file that happened to decode — or a UTF-16 one —
+/// opened as a buffer of garbage that a save would write back; and every
+/// other binary file was read whole before being refused.
 pub fn read_file(path_str: &str) -> Result<String, String> {
+    use std::io::Read;
+
     let path = resolve_path(path_str);
-    if !path.exists() {
-        return Err(format!("File not found: {path_str}"));
+    let failed = |e: std::io::Error| format!("Failed to read file '{path_str}': {e}");
+    let meta = fs::metadata(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("File not found: {path_str}"),
+        _ => failed(e),
+    })?;
+    // A folder, a FIFO or a device. Opening a FIFO waits for a writer that
+    // may never come, which held the command's thread for good.
+    if !meta.is_file() {
+        return Err(format!("Failed to read file '{path_str}': it is not a file"));
     }
-    fs::read_to_string(&path).map_err(|e| format!("Failed to read file '{path_str}': {e}"))
+    if meta.len() > MAX_OPEN_BYTES {
+        return Err(too_large_to_open(path_str, meta.len()));
+    }
+
+    let file = fs::File::open(&path).map_err(failed)?;
+    // Never more than the limit, even of a file that grows while it is read.
+    let mut reader = file.take(MAX_OPEN_BYTES + 1);
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    (&mut reader).take(TEXT_SNIFF_BYTES).read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.contains(&0) {
+        return Err(not_text(path_str));
+    }
+    reader.read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() as u64 > MAX_OPEN_BYTES {
+        let now = reader.get_ref().metadata().map_or(bytes.len() as u64, |m| m.len());
+        return Err(too_large_to_open(path_str, now));
+    }
+    String::from_utf8(bytes).map_err(|_| not_text(path_str))
+}
+
+fn too_large_to_open(path_str: &str, size: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    // Rounded up, so a file a byte over the limit does not read as at it.
+    let shown = |bytes: u64| {
+        let tenths = (u128::from(bytes) * 10).div_ceil(u128::from(MB));
+        if tenths >= 10 * 1024 {
+            format!("{:.1} GB", tenths as f64 / 10.0 / 1024.0)
+        } else {
+            format!("{}.{} MB", tenths / 10, tenths % 10)
+        }
+    };
+    format!(
+        "File is too large to open ({}; the limit is {} MB): {path_str}",
+        shown(size),
+        MAX_OPEN_BYTES / MB
+    )
+}
+
+fn not_text(path_str: &str) -> String {
+    format!("File is not UTF-8 text: {path_str}")
 }
 
 pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
@@ -186,17 +258,30 @@ pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
     fs::write(&path, content).map_err(|e| format!("Failed to write file '{path_str}': {e}"))
 }
 
+/// Create an empty file where nothing is: no file, no folder, and no link,
+/// whether or not the link leads anywhere.
+///
+/// `create_new` asks exactly that of the OS, in one step: std documents it
+/// as failing when anything is at the path, "also no (dangling) symlink", on
+/// every platform. This used to check `exists()` and then write: `exists()`
+/// follows a link, so a link to nothing was "not there" and the write made
+/// its target; and a file that appeared between the two was emptied.
 pub fn create_file(path_str: &str) -> Result<(), String> {
     let path = resolve_path(path_str);
-    if path.exists() {
-        return Err(format!("File already exists: {path_str}"));
-    }
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory: {e}"))?;
         }
     }
-    fs::write(&path, "").map_err(|e| format!("Failed to create file '{path_str}': {e}"))
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map(drop)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("File already exists: {path_str}"),
+            _ => format!("Failed to create file '{path_str}': {e}"),
+        })
 }
 
 pub fn create_dir(path_str: &str) -> Result<(), String> {
@@ -712,12 +797,73 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Does `path` name another machine, or a device rather than a file?
+///
+/// Decided by spelling alone, the same on every platform: what matters is
+/// what the path means to Windows, which opens `\\host\share\x` by
+/// connecting to the host and signing in with the user's credentials. Two
+/// separators first, of either kind (`\\host`, `//host`, `/\host`) — which
+/// is also how the device namespaces `\\.\` and `\\?\` begin — or `\??\`,
+/// the NT spelling that reaches the same shares. Only the verbatim spelling
+/// of a local drive, `\\?\C:\…`, is local. The frontend's `isNetworkPath`
+/// (src/lib/terminalLinks.js) draws the same line.
+pub fn is_network_path(path: &str) -> bool {
+    let separator = |byte: &u8| *byte == b'\\' || *byte == b'/';
+    match without_verbatim_prefix(path).as_bytes() {
+        [first, second, ..] if separator(first) && separator(second) => true,
+        [first, b'?', b'?', fourth, ..] if separator(first) && separator(fourth) => true,
+        _ => false,
+    }
+}
+
+/// `path` without a verbatim prefix that a plainer spelling means the same
+/// as: `\\?\UNC\host\share` is `\\host\share`, `\\?\C:\x` is `C:\x`.
+fn without_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    let Some(rest) = path.strip_prefix(r"\\?\") else {
+        return Cow::Borrowed(path);
+    };
+    match rest.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => Cow::Borrowed(rest),
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// Whether confining `asked`, spelled out in full as `spelled`, would have to
+/// reach another machine to find out where it leads.
+///
+/// A network or device path is refused unless the open folder is itself on
+/// another machine and the path is inside it: that is the one host the user
+/// has chosen to reach, by opening the folder, and every file in such a
+/// folder has a path like this. Inside is judged by name, case and all,
+/// with the verbatim `\\?\UNC\` spelled plain — the backend hands such a
+/// folder out as `\\?\UNC\host\share\…`.
+fn on_another_machine(root: &Path, asked: &str, spelled: &Path) -> bool {
+    let spelled = spelled.to_string_lossy();
+    if !is_network_path(asked) && !is_network_path(&spelled) {
+        return false;
+    }
+    let root = root.to_string_lossy();
+    !(is_network_path(&root) && names_of(&spelled).starts_with(&names_of(&root)))
+}
+
+/// The names in a path, split at either separator.
+fn names_of(path: &str) -> Vec<String> {
+    without_verbatim_prefix(path)
+        .split(['\\', '/'])
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Resolve a webview-supplied path to what it leads to, refusing anything
 /// outside `root`. This is the confinement for reading and writing: a link
 /// inside the folder is followed to its file, as opening a file through a
 /// link should be, and one that leads out of the folder is refused.
 pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
-    match spelled_in(root, path_str) {
+    match spelled_in(root, path_str)? {
         None => Ok(root.to_path_buf()),
         Some(path) => resolve_inside(root, &path, path_str),
     }
@@ -740,7 +886,7 @@ pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
 /// is a single component after `..` has been worked out, so on its own it
 /// leads nowhere but that folder.
 pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
-    let Some(path) = spelled_in(root, path_str) else {
+    let Some(path) = spelled_in(root, path_str)? else {
         return Ok(root.to_path_buf());
     };
     // The open folder itself, spelled the way the backend hands it out. Every
@@ -758,10 +904,15 @@ pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> 
 /// The path the webview named, made absolute against `root`, with `.` and
 /// `..` worked out by spelling alone. `None` for a blank path or `.`, which
 /// both mean the open folder.
-fn spelled_in(root: &Path, path_str: &str) -> Option<PathBuf> {
+///
+/// Refused here, before anything touches the filesystem, when finding out
+/// where it leads would mean asking another machine (`on_another_machine`).
+/// The check after `canonicalize` came too late for that: canonicalizing
+/// `\\host\share\x` is what makes Windows connect to the host.
+fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
     let trimmed = path_str.trim();
     if trimmed.is_empty() || trimmed == "." {
-        return None;
+        return Ok(None);
     }
 
     let expanded = match trimmed.strip_prefix("~/") {
@@ -773,11 +924,21 @@ fn spelled_in(root: &Path, path_str: &str) -> Option<PathBuf> {
     } else {
         root.join(expanded)
     };
-    Some(lexical_normalize(&joined))
+    let spelled = lexical_normalize(&joined);
+    if on_another_machine(root, trimmed, &spelled) {
+        return Err(format!("Path is on another machine or a device: {path_str}"));
+    }
+    Ok(Some(spelled))
 }
 
 /// `path` with every link in it resolved, refused unless that lands inside
 /// `root`.
+///
+/// A link that cannot be followed — to something that does not exist, or
+/// round in a loop — is refused wherever it is in the path. It used to be
+/// taken for a name that does not exist yet and kept as it was, and a save
+/// or a New File then wrote through it, making its target wherever it
+/// pointed, outside the open folder as easily as in it.
 fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, String> {
     // Canonicalize the deepest part that exists so a symlink cannot point out
     // of the root; segments that do not exist yet are re-appended afterwards.
@@ -786,6 +947,12 @@ fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, S
     let resolved = loop {
         match cursor.canonical() {
             Ok(canonical) => break canonical,
+            Err(_) if cursor.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) => {
+                return Err(format!(
+                    "Path goes through a broken link ({}): {path_str}",
+                    cursor.display()
+                ));
+            }
             Err(_) => {
                 let name = cursor
                     .file_name()
@@ -849,6 +1016,91 @@ mod confine_tests {
         assert!(confine_to(&root, "../../etc/passwd").is_err());
         assert!(confine_to(&root, "inner/../../outside").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Windows opens `\\host\share\x` by connecting to the host and signing
+    /// in with the user's credentials (NTLM), and canonicalizing a path
+    /// opens it — so confinement reached the host before it ever compared
+    /// the path with the open folder. Each of these is refused for what it
+    /// is, by its spelling, before anything touches the filesystem: on
+    /// Windows any of them reaching `canonicalize` would contact a host.
+    #[test]
+    fn a_path_on_another_machine_is_refused_before_it_is_looked_up() {
+        let root = temp_root("network");
+        for path in [
+            r"\\host\share\x.txt",
+            "//host/share/x.txt",
+            r"/\host\share\x.txt",
+            r"\\?\UNC\host\share\x.txt",
+            r"\\.\pipe\x",
+            r"\??\UNC\host\share\x.txt",
+            "/??/UNC/host/share/x.txt",
+            r"\\?\GLOBALROOT\Device\Mup\host\share\x.txt",
+            r"  \\host\share\x.txt",
+        ] {
+            for (what, result) in [("confine_to", confine_to(&root, path)), ("confine_entry_to", confine_entry_to(&root, path))] {
+                let err = result.expect_err(&format!("{what} let {path:?} through"));
+                assert!(err.contains("another machine"), "{what} {path:?}: {err}");
+            }
+        }
+        // Local paths, in the spellings Windows allows, are still judged by
+        // where they lead.
+        assert_eq!(confine_to(&root, "inner/file.txt").unwrap(), root.join("inner/file.txt"));
+        assert!(confine_to(&root, "/etc/passwd").unwrap_err().contains("outside the workspace root"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same table as LK-27 in tests/adversarial/terminal_links.test.js,
+    /// which holds the frontend's `isNetworkPath` to it, and a few more.
+    #[test]
+    fn what_counts_as_another_machine_is_decided_by_spelling() {
+        for path in [
+            r"\\h\s",
+            "//h/s",
+            r"\/h/s",
+            r"/\h\s",
+            r"\\?\UNC\h\s",
+            r"\\.\pipe\p",
+            r"\??\C:\x",
+            "/??/x",
+            r"\\.\C:\x",
+            r"\\?\Volume{1b3b1146-4076-11e1-84aa-806e6f6e6963}\x",
+            r"\\?\GLOBALROOT\Device\Mup\h\s",
+        ] {
+            assert!(is_network_path(path), "{path}");
+        }
+        for path in [r"C:\x", "C:/x", "/x", r"\x", r"x\\y", r"\\?\C:\x", r"\\?\c:\x", "src/a.py", "", r"\?\x"] {
+            assert!(!is_network_path(path), "{path}");
+        }
+    }
+
+    /// A folder opened from a share — picked in the dialog, or a mapped
+    /// drive, which canonicalizes to the share — is reached the way the user
+    /// chose to reach it. Only paths inside it get past the spelling check;
+    /// the same share elsewhere, or another host, still does not.
+    #[test]
+    fn inside_a_folder_on_a_share_only_that_folder_is_reachable() {
+        for root in [r"\\?\UNC\nas\share\proj", "//nas/share/proj"] {
+            let root = Path::new(root);
+            let reaches = |path: &str| on_another_machine(root, path, Path::new(path));
+            for inside in [r"\\nas\share\proj", r"\\nas\share\proj\src\a.js", r"\\?\UNC\nas\share\proj\a.js", "//nas/share/proj/a.js"] {
+                assert!(!reaches(inside), "{} refused {inside}", root.display());
+            }
+            for outside in [
+                r"\\nas\share\other\a.js",
+                r"\\nas\share\project\a.js",
+                r"\\nas\share",
+                r"\\evil\share\proj\a.js",
+                r"\\NAS\share\proj\a.js",
+                r"\\.\pipe\proj",
+            ] {
+                assert!(reaches(outside), "{} let {outside} through", root.display());
+            }
+        }
+        // With a folder on this machine open, every one of them is refused.
+        let local = Path::new("/w/proj");
+        assert!(on_another_machine(local, r"\\nas\share\proj\a.js", Path::new(r"\\nas\share\proj\a.js")));
+        assert!(!on_another_machine(local, "src/a.js", &local.join("src/a.js")));
     }
 
     #[test]
@@ -1163,6 +1415,118 @@ mod tests {
         // Delete dir
         assert!(delete_path(&dir_str, true).is_ok());
         assert!(!temp_dir.exists());
+    }
+
+    /// New File checked `exists()`, which follows a link, and then wrote: a
+    /// link to nothing was "not there", and the write made its target. And a
+    /// file that appeared between the check and the write was emptied.
+    #[cfg(unix)]
+    #[test]
+    fn creating_a_file_never_follows_a_link_or_empties_a_file() {
+        let dir = scratch("create-new");
+        std::os::unix::fs::symlink(dir.join("target.txt"), dir.join("link")).unwrap();
+        fs::write(dir.join("kept.txt"), "keep me").unwrap();
+
+        let err = create_file(&dir.join("link").to_string_lossy()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(dir.join("target.txt").symlink_metadata().is_err(), "the link's target was made");
+
+        let err = create_file(&dir.join("kept.txt").to_string_lossy()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("kept.txt")).unwrap(), "keep me");
+
+        create_file(&dir.join("sub").join("new.txt").to_string_lossy()).unwrap();
+        assert_eq!(fs::read(dir.join("sub").join("new.txt")).unwrap(), b"", "a new file, and its folder");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-read-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A 500 MB log clicked in the Explorer was read whole, sent whole over
+    /// IPC and handed whole to Monaco, which froze the window or ran the
+    /// webview out of memory. The size is checked before anything is read.
+    #[test]
+    fn a_file_too_large_to_open_is_refused_with_its_size_and_the_limit() {
+        assert_eq!(MAX_OPEN_BYTES, 50 * 1024 * 1024, "the sizes below are written for 50 MB");
+        let err = too_large_to_open("x", 3 * 1024 * 1024 * 1024);
+        assert!(err.contains("(3.0 GB; the limit is 50 MB)"), "{err}");
+
+        let dir = scratch("too-large");
+        let big = dir.join("big.log");
+        // Sparse: only the size is checked, so nothing has to be written.
+        fs::File::create(&big).unwrap().set_len(120 * 1024 * 1024).unwrap();
+        let just_over = dir.join("just-over.log");
+        fs::File::create(&just_over).unwrap().set_len(50 * 1024 * 1024 + 1).unwrap();
+        let at_limit = dir.join("at-limit.log");
+        fs::File::create(&at_limit).unwrap().set_len(50 * 1024 * 1024).unwrap();
+
+        let err = read_file(&big.to_string_lossy()).unwrap_err();
+        assert!(err.starts_with("File is too large to open"), "{err}");
+        assert!(err.contains("120.0 MB") && err.contains("the limit is 50 MB"), "{err}");
+
+        let err = read_file(&just_over.to_string_lossy()).unwrap_err();
+        assert!(err.starts_with("File is too large to open"), "{err}");
+        assert!(err.contains("50.1 MB"), "a byte over still reads as over: {err}");
+
+        // Exactly at the limit is still opened: NUL bytes are not text, so
+        // this one is refused as that, after its size has passed.
+        let err = read_file(&at_limit.to_string_lossy()).unwrap_err();
+        assert!(!err.contains("too large"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// NUL bytes are valid UTF-8, so a PNG whose bytes happened to decode —
+    /// or a UTF-16 file — opened as a buffer of garbage that saving would
+    /// then write back. A NUL in the first bytes says it is not text.
+    #[test]
+    fn a_file_that_is_not_text_is_refused_as_such() {
+        let dir = scratch("binary");
+        let cases: [(&str, &[u8]); 3] = [
+            ("nul.bin", b"a\0b"),
+            ("utf16.txt", b"h\0e\0l\0l\0o\0"),
+            ("latin1.txt", b"caf\xe9"),
+        ];
+        for (name, bytes) in cases {
+            fs::write(dir.join(name), bytes).unwrap();
+            let err = read_file(&dir.join(name).to_string_lossy()).unwrap_err();
+            assert!(err.starts_with("File is not UTF-8 text"), "{name}: {err}");
+        }
+        fs::write(dir.join("ok.txt"), "한글 and ✅\n").unwrap();
+        assert_eq!(read_file(&dir.join("ok.txt").to_string_lossy()).unwrap(), "한글 and ✅\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Opening a FIFO waits for a writer that may never come: a click on one
+    /// held a worker thread for good and the tab never opened. The read runs
+    /// on a thread with a deadline, so that is a failure here, not a hang.
+    #[cfg(unix)]
+    #[test]
+    fn something_that_is_not_a_file_is_refused_without_waiting_on_it() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = scratch("fifo");
+        let fifo = dir.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "premise: a FIFO to open");
+
+        let path = fifo.to_string_lossy().to_string();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(read_file(&path));
+        });
+        let read = finished
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the read is still waiting on the FIFO");
+        assert!(read.unwrap_err().contains("not a file"));
+
+        let err = read_file(&dir.to_string_lossy()).unwrap_err();
+        assert!(err.contains("not a file"), "a folder: {err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -148,6 +148,7 @@ fn main() {
             commands::fs::fs_set_root,
             commands::fs::git_status,
             commands::fs::fs_search,
+            commands::fs::fs_list_files,
             commands::system::system_get_info,
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,

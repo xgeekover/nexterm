@@ -65,6 +65,28 @@ pub fn fs_search(
     )
 }
 
+/// Every file in the open folder, for Quick Open: at most `limit` of them
+/// (`DEFAULT_LIST_LIMIT` when not given), sorted, with `truncated` saying
+/// whether there were more. Confined by construction, like `fs_search`: the
+/// walk starts at the open folder, skips what the Explorer hides and never
+/// follows a link into a folder.
+///
+/// Not `#[tauri::command(async)]`, for the reason `fs_copy_path` gives: a
+/// walk takes as long as the tree is big, so it goes to the blocking pool
+/// rather than holding one of the async runtime's worker threads, which
+/// every other async command shares.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fs_list_files(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<fs::search::FileList, String> {
+    let root = fs::search::root_of(state.workspace.root())?;
+    let limit = limit.unwrap_or(fs::search::DEFAULT_LIST_LIMIT);
+    tauri::async_runtime::spawn_blocking(move || fs::search::list_files(&root, limit))
+        .await
+        .map_err(|e| format!("Listing the folder stopped unexpectedly: {e}"))
+}
+
 /// Whether a terminal asked to start in `path` would start there — the one
 /// question the Settings field for a custom directory needs answered. It goes
 /// through `Workspace::can_start_in`, which asks `start_dir`: the same
@@ -129,10 +151,10 @@ pub async fn fs_pick_root(app: AppHandle, state: State<'_, AppState>) -> Result<
     let path = picked
         .into_path()
         .map_err(|e| format!("Invalid folder selection: {e}"))?;
-    let root = state.workspace.set_root(&path)?;
-    let root_str = root.to_string_lossy().to_string();
-    state.fs_watcher.start_watching(app.clone(), &root_str)?;
-    Ok(Some(root_str))
+    open_root(&state.workspace, &path, |root| {
+        state.fs_watcher.start_watching(app.clone(), &root.to_string_lossy())
+    })
+    .map(Some)
 }
 
 /// Open a folder the user has opened before, without a dialog.
@@ -144,10 +166,35 @@ pub async fn fs_pick_root(app: AppHandle, state: State<'_, AppState>) -> Result<
 /// still goes through the one function that decides what a root may be.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_set_root(app: AppHandle, state: State<AppState>, path: String) -> Result<String, String> {
-    let root = state.workspace.set_root(std::path::Path::new(&path))?;
-    let root_str = root.to_string_lossy().to_string();
-    state.fs_watcher.start_watching(app.clone(), &root_str)?;
-    Ok(root_str)
+    open_root(&state.workspace, std::path::Path::new(&path), |root| {
+        state.fs_watcher.start_watching(app.clone(), &root.to_string_lossy())
+    })
+}
+
+/// Make `path` the open folder, and `watch` it.
+///
+/// The folder is open once `set_root` says so: every path is confined to it
+/// from then on, and it is written down for the next launch. A watcher that
+/// then failed to start used to fail the command as well, so the frontend
+/// kept showing the folder it had while the backend refused every file of
+/// it as outside the workspace. On Linux that is a folder holding one the
+/// user cannot read (EACCES), or more folders than inotify may watch
+/// (ENOSPC). The folder opens regardless and only does not refresh by
+/// itself, which is what startup already does with a watcher that fails
+/// (main.rs).
+fn open_root(
+    workspace: &fs::Workspace,
+    path: &std::path::Path,
+    watch: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<String, String> {
+    let root = workspace.set_root(path)?;
+    if let Err(e) = watch(&root) {
+        eprintln!(
+            "[NexTerm] {} is open, but changes made outside the app will not show until it is refreshed: {e}",
+            root.display()
+        );
+    }
+    Ok(root.to_string_lossy().to_string())
 }
 
 #[tauri::command(async, rename_all = "snake_case")]
@@ -166,12 +213,20 @@ pub fn fs_read_file(state: State<AppState>, path: String) -> Result<String, Stri
 
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_write_file(state: State<AppState>, path: String, content: String) -> Result<(), String> {
-    fs::write_file(&confined(&state, &path)?, &content)
+    write_in(&state.workspace, &path, &content)
+}
+
+fn write_in(workspace: &fs::Workspace, path: &str, content: &str) -> Result<(), String> {
+    fs::write_file(&workspace.confine(path)?.to_string_lossy(), content)
 }
 
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_create_file(state: State<AppState>, path: String) -> Result<(), String> {
-    fs::create_file(&confined(&state, &path)?)
+    create_in(&state.workspace, &path)
+}
+
+fn create_in(workspace: &fs::Workspace, path: &str) -> Result<(), String> {
+    fs::create_file(&workspace.confine(path)?.to_string_lossy())
 }
 
 #[tauri::command(async, rename_all = "snake_case")]
@@ -261,6 +316,7 @@ mod dispatch_tests {
     const MUST_BE_ASYNC: &[&str] = &[
         "git_status",
         "fs_search",
+        "fs_list_files",
         "fs_read_dir",
         "fs_read_file",
         "fs_write_file",
@@ -352,25 +408,30 @@ mod dispatch_tests {
 
     /// `async` in the attribute moves a body onto the async runtime's worker
     /// threads, not the blocking pool. A copy runs for as long as the folder
-    /// is big, so `fs_copy_path` hands it to the blocking pool itself, and
-    /// turning it into an attribute-`async` command would quietly undo that.
+    /// is big, and so does listing every file in it, so `fs_copy_path` and
+    /// `fs_list_files` hand their work to the blocking pool themselves, and
+    /// turning either into an attribute-`async` command would quietly undo
+    /// that.
     #[test]
-    fn the_copy_runs_on_the_blocking_pool() {
+    fn the_copy_and_the_listing_run_on_the_blocking_pool() {
         let src = source();
-        // By line, so a checkout with CRLF endings reads the same, and from a
-        // line that starts with the signature, so this test's own text is
-        // never taken for it.
-        let body: Vec<&str> = src
-            .lines()
-            .skip_while(|line| !line.starts_with("pub async fn fs_copy_path"))
-            .take_while(|line| line.trim_end() != "}")
-            .collect();
-        assert!(!body.is_empty(), "fs_copy_path is gone, or no longer an async fn");
-        assert!(
-            body.iter().any(|line| line.contains("spawn_blocking")),
-            "fs_copy_path must run the copy through spawn_blocking:\n{}",
-            body.join("\n")
-        );
+        for name in ["fs_copy_path", "fs_list_files"] {
+            // By line, so a checkout with CRLF endings reads the same, and
+            // from a line that starts with the signature, so this test's own
+            // text is never taken for it.
+            let signature = format!("pub async fn {name}");
+            let body: Vec<&str> = src
+                .lines()
+                .skip_while(|line| !line.starts_with(&signature))
+                .take_while(|line| line.trim_end() != "}")
+                .collect();
+            assert!(!body.is_empty(), "{name} is gone, or no longer an async fn");
+            assert!(
+                body.iter().any(|line| line.contains("spawn_blocking")),
+                "{name} must run its work through spawn_blocking:\n{}",
+                body.join("\n")
+            );
+        }
     }
 
     /// v0.5.2 and earlier used the dialog plugin's blocking picker from a
@@ -399,17 +460,18 @@ mod dispatch_tests {
     }
 }
 
-/// Delete, rename and copy as the commands run them — confinement included —
-/// on real folders.
+/// Delete, rename, copy, save and New File as the commands run them —
+/// confinement included — on real folders.
 ///
 /// The functions in `crate::fs` were tested on their own, with paths handed
-/// straight to them. That missed both ways confinement used to change what
+/// straight to them. That missed the ways confinement used to change what
 /// they were given: a link was resolved to the file it points at before
-/// `delete_path` ever saw it, and a new name was resolved to the existing
-/// entry's spelling before `rename_path` saw it.
+/// `delete_path` ever saw it, a new name was resolved to the existing
+/// entry's spelling before `rename_path` saw it, and a link to nothing was
+/// passed to `write_file` as a name still free.
 #[cfg(test)]
 mod entry_tests {
-    use super::{copy_in, delete_in, rename_in};
+    use super::{copy_in, create_in, delete_in, rename_in, write_in};
     use crate::fs::Workspace;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -852,6 +914,69 @@ mod entry_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A link whose target does not exist was taken for a name that does not
+    /// exist yet: confinement let it through, and a save or a New File wrote
+    /// through it — creating whatever it pointed at, outside the open folder
+    /// as easily as in it.
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_written_through_a_broken_link() {
+        let (workspace, root) = open_folder("write-broken");
+        let outside = outside_folder("write-broken");
+        let planted = outside.join("planted.txt");
+        link(&planted, &root.join("out"));
+        link("missing.txt", &root.join("in"));
+        link(outside.join("no-such-folder"), &root.join("gone"));
+
+        for name in ["out", "in"] {
+            assert!(write_in(&workspace, name, "x").is_err(), "saved through the link {name}");
+            assert!(create_in(&workspace, name).is_err(), "created through the link {name}");
+        }
+        assert!(write_in(&workspace, "gone/new.txt", "x").is_err(), "saved below a link to no folder");
+
+        assert!(planted.symlink_metadata().is_err(), "a file was made outside the folder");
+        assert!(root.join("missing.txt").symlink_metadata().is_err(), "the link's target was made");
+        assert!(is_link(&root.join("out")) && is_link(&root.join("in")), "the links themselves stay");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// Save and New File on plain files, on every platform: a New File over
+    /// a file that is there refuses and leaves it as it was.
+    #[test]
+    fn a_save_and_a_new_file_land_in_the_folder_and_never_empty_a_file() {
+        let (workspace, root) = open_folder("write-plain");
+
+        create_in(&workspace, "notes/new.txt").unwrap();
+        write_in(&workspace, "notes/new.txt", "saved").unwrap();
+        let err = create_in(&workspace, "notes/new.txt").unwrap_err();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(root.join("notes").join("new.txt")).unwrap(), "saved");
+        assert!(write_in(&workspace, "../nexterm-write-escaped.txt", "x").is_err());
+        assert!(create_in(&workspace, "../nexterm-write-escaped.txt").is_err());
+        assert!(root.parent().unwrap().join("nexterm-write-escaped.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link that leads to a file in the folder is saved through, as a link
+    /// opened in the editor should be; only one that leads nowhere is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_file_in_the_folder_is_still_saved_through() {
+        let (workspace, root) = open_folder("write-link");
+        fs::write(root.join("CLAUDE.md"), "old").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+
+        write_in(&workspace, "AGENTS.md", "new").unwrap();
+
+        assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "new");
+        assert!(is_link(&root.join("AGENTS.md")));
+        let err = create_in(&workspace, "AGENTS.md").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_copy_needs_a_source_and_a_folder_to_land_in() {
         let (workspace, root) = open_folder("copy-missing");
@@ -979,5 +1104,61 @@ mod entry_tests {
         copied.unwrap();
         assert_eq!(names_in(&root.join("proj copy")), vec!["a.txt"]);
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// Opening a folder, as `fs_pick_root` and `fs_set_root` both do it, with the
+/// watcher stood in for: a real one only fails where the OS says no.
+#[cfg(test)]
+mod open_root_tests {
+    use super::open_root;
+    use crate::fs::Workspace;
+    use std::path::{Path, PathBuf};
+
+    fn folder(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-open-root-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dunce::canonicalize(&dir).unwrap()
+    }
+
+    /// On Linux the watcher fails on a folder with an unreadable folder in
+    /// it (EACCES) or more folders than inotify may watch (ENOSPC). By then
+    /// the folder was open — and written down for the next launch — and the
+    /// command failed anyway: the frontend kept the folder it had while the
+    /// backend had moved on, refusing every file still shown as outside the
+    /// workspace.
+    #[test]
+    fn a_folder_that_cannot_be_watched_still_opens() {
+        let workspace = Workspace::new();
+        let before = folder("unwatched-before");
+        let after = folder("unwatched-after");
+        workspace.set_root(&before).unwrap();
+
+        let opened = open_root(&workspace, &after, |_| Err("Failed to watch path: no space left on device".into()))
+            .expect("the folder opens, unwatched");
+
+        assert_eq!(Path::new(&opened), after);
+        assert_eq!(workspace.root(), Some(after.clone()), "backend and frontend agree on the folder");
+        let _ = std::fs::remove_dir_all(&before);
+        let _ = std::fs::remove_dir_all(&after);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_is_neither_watched_nor_opened() {
+        let workspace = Workspace::new();
+        let before = folder("unopened");
+        workspace.set_root(&before).unwrap();
+
+        let mut watched = false;
+        let result = open_root(&workspace, &before.join("gone"), |_| {
+            watched = true;
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!watched);
+        assert_eq!(workspace.root(), Some(before.clone()), "the folder already open stays open");
+        let _ = std::fs::remove_dir_all(&before);
     }
 }

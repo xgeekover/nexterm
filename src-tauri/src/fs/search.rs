@@ -11,20 +11,25 @@
 //!      to `e` in a large repository is not an answer — it is a hang, then a
 //!      megabyte of JSON the webview has to render. What was cut is reported,
 //!      never silently dropped.
-//!   2. **It skips what the Explorer skips.** The same `is_ignored` the tree
-//!      and the file watcher use, so search results and the tree agree about
+//!   2. **It skips what the Explorer skips.** The same folder list the tree
+//!      and the file watcher use, matched below the open folder only
+//!      (`is_ignored_below`), so search results and the tree agree about
 //!      what is in the project. (A consequence worth knowing: `.gitignore` is
 //!      NOT read — only the fixed folder list. A project whose build output
 //!      lives somewhere unusual will see it here.)
 //!   3. **It never leaves the open folder.** The walk starts at the confined
 //!      root and every result is inside it.
+//!
+//! Quick Open's list of files (`list_files`) is the same walk, without the
+//! reading: everything the editor could open, bounded the same way.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::fs::watcher::is_ignored;
+use crate::fs::watcher::is_ignored_below;
+use crate::fs::Canonical;
 
 /// A file bigger than this is not something anyone greps for a phrase; it is a
 /// build artifact, a lockfile dump or a log, and reading it costs more than the
@@ -69,6 +74,23 @@ pub struct SearchResults {
     pub truncated: bool,
 }
 
+/// How many files `list_files` hands back when not told: every file of any
+/// project one opens to edit, in a reply the webview takes in at once.
+pub const DEFAULT_LIST_LIMIT: usize = 20_000;
+
+/// The most `list_files` hands back whatever it is asked for, so the reply
+/// stays a few megabytes of JSON.
+const MAX_LIST_LIMIT: usize = 100_000;
+
+/// Every file in the open folder, for Quick Open.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileList {
+    /// Absolute paths, in the platform's own spelling, sorted.
+    pub files: Vec<String>,
+    /// True when the folder holds more files than were listed.
+    pub truncated: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SearchOptions {
     pub case_sensitive: bool,
@@ -78,54 +100,57 @@ pub struct SearchOptions {
 
 /// What to look for, compiled once for the whole walk.
 enum Matcher {
-    /// Plain text. `needle` is already lowercased when the search is
-    /// case-insensitive, and the haystack is lowered to match.
-    Plain { needle: String, case_sensitive: bool },
+    /// Plain text, case included: the one search a substring find answers.
+    Exact(String),
+    /// Everything else — a pattern, a whole word, or text in any case.
     Regex(regex::Regex),
 }
 
 impl Matcher {
+    /// Text in any case is a regex too, of the text escaped. It used to be
+    /// found by lowercasing the line and the query, and that gave the match's
+    /// offset in the LOWERCASED line. Lowercasing changes some characters'
+    /// length in bytes — the Kelvin sign (3 bytes) becomes `k` (1), the
+    /// Turkish İ (2) becomes `i̇` (3) — so the offset, applied to the line as
+    /// written, could land inside a character, which panicked and left the
+    /// search unanswered, or past the end of the line. A regex match says
+    /// where it is in the line itself.
     fn build(query: &str, options: SearchOptions) -> Result<Self, String> {
-        if options.regex || options.whole_word {
-            let escaped = if options.regex {
-                query.to_string()
-            } else {
-                regex::escape(query)
-            };
-            // `\b` on both sides is what "whole word" means, and it composes
-            // with a user-supplied pattern the same way.
-            let pattern = if options.whole_word {
-                format!(r"\b(?:{escaped})\b")
-            } else {
-                escaped
-            };
-            let built = regex::RegexBuilder::new(&pattern)
-                .case_insensitive(!options.case_sensitive)
-                .size_limit(1 << 20)
-                .build()
-                .map_err(|e| format!("bad pattern: {e}"))?;
-            return Ok(Matcher::Regex(built));
+        if options.case_sensitive && !options.regex && !options.whole_word {
+            return Ok(Matcher::Exact(query.to_string()));
         }
-        Ok(Matcher::Plain {
-            needle: if options.case_sensitive {
-                query.to_string()
-            } else {
-                query.to_lowercase()
-            },
-            case_sensitive: options.case_sensitive,
-        })
+        let escaped = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        // `\b` on both sides is what "whole word" means, and it composes
+        // with a user-supplied pattern the same way.
+        let pattern = if options.whole_word {
+            format!(r"\b(?:{escaped})\b")
+        } else {
+            escaped
+        };
+        let built = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!options.case_sensitive)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|e| {
+                // Escaped text is always a valid pattern; all it can do is
+                // outgrow the size limit, at several thousand characters.
+                if options.regex {
+                    format!("bad pattern: {e}")
+                } else {
+                    format!("search text too long: {e}")
+                }
+            })?;
+        Ok(Matcher::Regex(built))
     }
 
     /// The 0-based byte offset of the first match in `line`, if any.
     fn find(&self, line: &str) -> Option<usize> {
         match self {
-            Matcher::Plain { needle, case_sensitive } => {
-                if *case_sensitive {
-                    line.find(needle.as_str())
-                } else {
-                    line.to_lowercase().find(needle.as_str())
-                }
-            }
+            Matcher::Exact(needle) => line.find(needle.as_str()),
             Matcher::Regex(re) => re.find(line).map(|m| m.start()),
         }
     }
@@ -162,12 +187,7 @@ pub fn search(root: &Path, query: &str, options: SearchOptions) -> Result<Search
     let mut results = SearchResults::default();
     let mut total = 0usize;
 
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !is_ignored(e.path()))
-        .filter_map(Result::ok)
-    {
+    for entry in visible(root, WalkDir::new(root)) {
         if results.files.len() >= MAX_FILES || total >= MAX_TOTAL_MATCHES {
             results.truncated = true;
             break;
@@ -221,6 +241,55 @@ pub fn search(root: &Path, query: &str, options: SearchOptions) -> Result<Search
 
     results.total_matches = total as u32;
     Ok(results)
+}
+
+/// Every entry `walker` meets under `root`, the root included, outside the
+/// folders the Explorer hides. Search and `list_files` both walk through
+/// here, in the order each sets on `walker`.
+///
+/// A link to a folder is met as an entry and never walked into: following
+/// one that leads above it would walk the tree again inside itself, and one
+/// that leads out would walk out of the open folder.
+fn visible(root: &Path, walker: WalkDir) -> impl Iterator<Item = walkdir::DirEntry> + '_ {
+    walker
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(move |e| !is_ignored_below(root, e.path()))
+        .filter_map(Result::ok)
+}
+
+/// Every file under `root` the editor could open, for Quick Open: at most
+/// `limit` (and never more than `MAX_LIST_LIMIT`), with `truncated` saying
+/// whether there were more.
+///
+/// The walk is in name order, so the files kept when there are too many are
+/// the same ones each time rather than whichever the disk listed first. A
+/// link is listed when it leads to a file inside the open folder; one that
+/// leads out, or nowhere, is a file the editor would refuse to open.
+pub fn list_files(root: &Path, limit: usize) -> FileList {
+    let limit = limit.min(MAX_LIST_LIMIT);
+    let mut list = FileList::default();
+    for entry in visible(root, WalkDir::new(root).sort_by_file_name()) {
+        let opens = if entry.path_is_symlink() {
+            // Resolved as confinement resolves it, and in its spelling.
+            entry
+                .path()
+                .canonical()
+                .is_ok_and(|target| target.starts_with(root) && target.is_file())
+        } else {
+            entry.file_type().is_file()
+        };
+        if !opens {
+            continue;
+        }
+        if list.files.len() >= limit {
+            list.truncated = true;
+            break;
+        }
+        list.files.push(entry.path().to_string_lossy().to_string());
+    }
+    list.files.sort();
+    list
 }
 
 /// The confined root a search should start from, or an error when no folder is
@@ -294,6 +363,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A dependency opened from `node_modules` to read it: every path in it
+    /// has `node_modules` in it, and the walk used to be cut at the open
+    /// folder itself — nothing searched, "No results".
+    #[test]
+    fn a_folder_opened_inside_node_modules_is_searched() {
+        let base = scratch("inside-node-modules");
+        let root = base.join("node_modules").join("lib");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("node_modules").join("dep")).unwrap();
+        fs::write(root.join("src").join("index.js"), "needle\n").unwrap();
+        fs::write(root.join("node_modules").join("dep").join("index.js"), "needle\n").unwrap();
+
+        let out = search(&root, "needle", opts()).unwrap();
+
+        let found: Vec<&str> = out.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(out.files.len(), 1, "{found:?}");
+        assert!(found[0].ends_with("index.js") && found[0].contains("src"), "{found:?}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn case_sensitivity_is_a_choice() {
         let dir = fixture("case");
@@ -356,6 +445,139 @@ mod tests {
         let out = search(&dir, "needle", opts()).unwrap();
         assert_eq!(out.files[0].matches[0].column, 10);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Lowercasing changes some characters' length in bytes: the Kelvin sign
+    /// (3 bytes) becomes `k` (1), the Turkish İ (2) becomes `i̇` (3). The match
+    /// was found in a lowercased copy of the line and its offset used on the
+    /// line as written, which landed inside a character — a panic, and a
+    /// search that never answered — or past the end of the line, or a column
+    /// or two off.
+    #[test]
+    fn case_folding_that_changes_byte_lengths_neither_panics_nor_moves_the_column() {
+        let dir = scratch("folding");
+        fs::write(dir.join("kelvin.txt"), "\u{212A} needle\n").unwrap();
+        fs::write(dir.join("turkish.txt"), "İİİab\nİ needle\n").unwrap();
+        let column = |out: &SearchResults, file: &str, line: u32| {
+            out.files
+                .iter()
+                .find(|f| f.path.ends_with(file))
+                .and_then(|f| f.matches.iter().find(|m| m.line == line))
+                .map(|m| m.column)
+                .unwrap_or_else(|| panic!("no match on {file}:{line}: {out:?}"))
+        };
+
+        let out = search(&dir, "needle", opts()).unwrap();
+        assert_eq!(column(&out, "kelvin.txt", 1), 3, "after `K `");
+        assert_eq!(column(&out, "turkish.txt", 2), 3, "after `İ `");
+
+        let out = search(&dir, "AB", opts()).unwrap();
+        assert_eq!(column(&out, "turkish.txt", 1), 4, "after `İİİ`");
+
+        // The Kelvin sign is a capital K to Unicode, and any-case text is
+        // found in any case.
+        let out = search(&dir, "k needle", opts()).unwrap();
+        assert_eq!(column(&out, "kelvin.txt", 1), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Text in any case is compiled, and past some thousands of characters
+    /// it outgrows the regex size limit. That is the only way escaped text
+    /// fails to compile, and "bad pattern" would blame a pattern nobody wrote.
+    #[test]
+    fn text_too_long_to_search_for_says_so() {
+        let dir = fixture("toolong");
+        let query = "needle ".repeat(10_000);
+        let err = search(&dir, &query, opts()).unwrap_err();
+        assert!(err.contains("too long"), "unexpected error: {err}");
+        assert!(!err.contains("bad pattern"), "{err}");
+        // A few hundred characters is an ordinary search.
+        let out = search(&dir, &"x".repeat(500), opts()).unwrap();
+        assert!(out.files.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Quick Open's list: every file, sorted, absolute, and nothing from the
+    /// folders the Explorer hides.
+    #[test]
+    fn every_file_is_listed_sorted_without_what_the_explorer_hides() {
+        let dir = fixture("list");
+        let list = list_files(&dir, DEFAULT_LIST_LIMIT);
+        let mut expected: Vec<String> = [&["README.md"][..], &["src", "app.js"], &["src", "other.rs"]]
+            .iter()
+            .map(|names| names.iter().fold(dir.clone(), |path, name| path.join(name)))
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(list.files, expected);
+        assert!(!list.truncated);
+        assert!(list.files.iter().all(|f| Path::new(f).is_absolute()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_list_stops_at_the_limit_and_says_so() {
+        let dir = scratch("list-limit");
+        for name in ["a", "b", "c", "d", "e"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        let list = list_files(&dir, 3);
+        assert_eq!(list.files.len(), 3);
+        assert!(list.truncated);
+        // The walk is in name order, so the same three come back each time.
+        assert_eq!(list.files, ["a", "b", "c"].map(|n| dir.join(n).to_string_lossy().to_string()));
+
+        let all = list_files(&dir, 5);
+        assert_eq!(all.files.len(), 5);
+        assert!(!all.truncated, "exactly the limit is everything");
+        assert!(list_files(&dir, 0).truncated);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_opened_inside_node_modules_lists_its_files() {
+        let base = scratch("list-inside-node-modules");
+        let root = base.join("node_modules").join("lib");
+        fs::create_dir_all(root.join("node_modules").join("dep")).unwrap();
+        fs::write(root.join("index.js"), "").unwrap();
+        fs::write(root.join("node_modules").join("dep").join("index.js"), "").unwrap();
+
+        let list = list_files(&root, DEFAULT_LIST_LIMIT);
+
+        assert_eq!(list.files, vec![root.join("index.js").to_string_lossy().to_string()]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A link to a folder is never walked into — one back up the tree would
+    /// list it again inside itself — and a link is listed only when it leads
+    /// to a file the editor would open.
+    #[cfg(unix)]
+    #[test]
+    fn links_are_listed_only_when_they_lead_to_a_file_inside() {
+        use std::os::unix::fs::symlink;
+        // Canonical, as the open folder always is (`Workspace::set_root`).
+        let dir = dunce::canonicalize(scratch("list-links")).unwrap();
+        let outside = scratch("list-links-outside");
+        fs::write(outside.join("secret.txt"), "").unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src").join("a.js"), "").unwrap();
+        fs::write(dir.join("CLAUDE.md"), "").unwrap();
+        symlink("CLAUDE.md", dir.join("AGENTS.md")).unwrap();
+        symlink("src", dir.join("shared")).unwrap();
+        symlink(".", dir.join("loop")).unwrap();
+        symlink(outside.join("secret.txt"), dir.join("ext.txt")).unwrap();
+        symlink("nowhere", dir.join("dangling")).unwrap();
+
+        let list = list_files(&dir, DEFAULT_LIST_LIMIT);
+
+        let names: Vec<String> = list
+            .files
+            .iter()
+            .map(|f| Path::new(f).strip_prefix(&dir).unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["AGENTS.md", "CLAUDE.md", "src/a.js"]);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
