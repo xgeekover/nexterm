@@ -76,6 +76,9 @@ import './agent_resume_opencode.test.js';
 import './confirm_dialog.test.js';
 import './settings_window.test.js';
 import './activity_bar.test.js';
+import './workspace_names.test.js';
+import './startup_restore.test.js';
+import './hyperlinks.test.js';
 
 async function run() {
   console.log('====================================================');
