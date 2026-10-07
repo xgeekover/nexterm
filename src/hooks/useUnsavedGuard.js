@@ -118,6 +118,22 @@ export function reportUnsaved(
   };
 }
 
+/**
+ * `beforeunload`: hold a reload of the page while an editor tab is unsaved.
+ *
+ * Ctrl+R and F5 reload the page in WebView2, and a reload drops every editor
+ * buffer without a word. It is not a close, so the backend never asks about
+ * it. Cancelling the event is how a page asks the webview to confirm first.
+ * Returns whether it held.
+ */
+export function holdReload(event, editor = useEditorStore.getState()) {
+  if (!editor.tabs.some((t) => t.isDirty)) return false;
+  event.preventDefault();
+  // Chromium before 119 asked only when this was set as well.
+  event.returnValue = true;
+  return true;
+}
+
 /** Undo one thing the guard set up; an unsubscribe that fails is only logged. */
 function undo(off) {
   try {
@@ -156,6 +172,12 @@ function startUnsavedGuard() {
     .then(keep)
     .catch((err) => console.error('[unsaved] cannot answer a quit request:', err));
 
+  const onBeforeUnload = (event) => {
+    holdReload(event);
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
+  keep(() => window.removeEventListener('beforeunload', onBeforeUnload));
+
   keep(reportUnsaved());
 
   return () => {
@@ -165,9 +187,10 @@ function startUnsavedGuard() {
 }
 
 /**
- * Closing the window or quitting the app asks about unsaved editor tabs
- * first, as closing one tab always has. Only inside the desktop app: a
- * browser tab has no window of ours to hold.
+ * Closing the window, quitting the app or reloading the page asks about
+ * unsaved editor tabs first, as closing one tab always has. Only inside the
+ * desktop app: a browser tab has no window of ours to hold, and its files
+ * live in the page and go with a reload anyway.
  */
 export function useUnsavedGuard() {
   useEffect(() => (isTauri() ? startUnsavedGuard() : undefined), []);

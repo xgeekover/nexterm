@@ -87,6 +87,18 @@ async function until(ready, what) {
 /** Let whatever is under way land. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 10));
 
+/** A `beforeunload` event, as far as a listener uses it. */
+function unloadEvent() {
+  return {
+    type: 'beforeunload',
+    defaultPrevented: false,
+    returnValue: '',
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+  };
+}
+
 describe('Closing the window with unsaved editor tabs', () => {
   beforeEach(() => {
     S.setState(emptyEditor());
@@ -243,6 +255,24 @@ describe('Quitting the app with unsaved editor tabs (macOS ⌘Q, Dock ▸ Quit, 
 
     assert.equal(backend.count('quit'), 1);
     assert.equal(await invoke('fs_read_file', { path }), 'edited');
+  });
+
+  test('UG-20: a reload of the page is held while something is unsaved, and only then', async () => {
+    // Ctrl+R and F5 reload the page in WebView2. A reload is not a close, so
+    // the backend never asks, and every buffer would go without a word.
+    const { holdReload } = await guard();
+    const { tab } = await openFile('on disk');
+
+    const free = unloadEvent();
+    assert.equal(holdReload(free, S.getState()), false);
+    assert.equal(free.defaultPrevented, false, 'a reload with nothing unsaved must not ask');
+    assert.equal(free.returnValue, '');
+
+    S.getState().editBuffer(tab.id, 'edited');
+    const held = unloadEvent();
+    assert.equal(holdReload(held, S.getState()), true);
+    assert.equal(held.defaultPrevented, true, 'a reload would drop the unsaved edit');
+    assert.ok(held.returnValue, 'Chromium before 119 asked only when returnValue was set');
   });
 
   test('UG-10: the backend is told when something becomes unsaved, and when nothing is', async () => {
@@ -570,6 +600,24 @@ describe('The guard as the app runs it', () => {
     } finally {
       stopSecond();
     }
+  });
+
+  test('UG-21: the hook holds a reload while a tab is unsaved, and lets go when it goes', async () => {
+    const { tab } = await openFile('on disk');
+    const reloadListeners = (page) => page.window.listeners.filter((l) => l.type === 'beforeunload').length;
+    await insideTheApp(async ({ page, mount, unmount }) => {
+      mount();
+      assert.equal(reloadListeners(page), 1, 'nothing hears a reload coming');
+      assert.equal(page.window.dispatch(unloadEvent()).defaultPrevented, false, 'nothing unsaved: reload freely');
+
+      S.getState().editBuffer(tab.id, 'edited');
+      const event = page.window.dispatch(unloadEvent());
+      assert.equal(event.defaultPrevented, true, 'Ctrl+R would drop the unsaved edit without a word');
+      assert.ok(event.returnValue);
+
+      unmount();
+      assert.equal(reloadListeners(page), 0, 'a guard that is gone still holds reloads');
+    });
   });
 
   test('UG-99: teardown', () => {
