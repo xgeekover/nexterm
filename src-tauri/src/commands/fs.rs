@@ -129,10 +129,10 @@ pub async fn fs_pick_root(app: AppHandle, state: State<'_, AppState>) -> Result<
     let path = picked
         .into_path()
         .map_err(|e| format!("Invalid folder selection: {e}"))?;
-    let root = state.workspace.set_root(&path)?;
-    let root_str = root.to_string_lossy().to_string();
-    state.fs_watcher.start_watching(app.clone(), &root_str)?;
-    Ok(Some(root_str))
+    open_root(&state.workspace, &path, |root| {
+        state.fs_watcher.start_watching(app.clone(), &root.to_string_lossy())
+    })
+    .map(Some)
 }
 
 /// Open a folder the user has opened before, without a dialog.
@@ -144,10 +144,35 @@ pub async fn fs_pick_root(app: AppHandle, state: State<'_, AppState>) -> Result<
 /// still goes through the one function that decides what a root may be.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_set_root(app: AppHandle, state: State<AppState>, path: String) -> Result<String, String> {
-    let root = state.workspace.set_root(std::path::Path::new(&path))?;
-    let root_str = root.to_string_lossy().to_string();
-    state.fs_watcher.start_watching(app.clone(), &root_str)?;
-    Ok(root_str)
+    open_root(&state.workspace, std::path::Path::new(&path), |root| {
+        state.fs_watcher.start_watching(app.clone(), &root.to_string_lossy())
+    })
+}
+
+/// Make `path` the open folder, and `watch` it.
+///
+/// The folder is open once `set_root` says so: every path is confined to it
+/// from then on, and it is written down for the next launch. A watcher that
+/// then failed to start used to fail the command as well, so the frontend
+/// kept showing the folder it had while the backend refused every file of
+/// it as outside the workspace. On Linux that is a folder holding one the
+/// user cannot read (EACCES), or more folders than inotify may watch
+/// (ENOSPC). The folder opens regardless and only does not refresh by
+/// itself, which is what startup already does with a watcher that fails
+/// (main.rs).
+fn open_root(
+    workspace: &fs::Workspace,
+    path: &std::path::Path,
+    watch: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<String, String> {
+    let root = workspace.set_root(path)?;
+    if let Err(e) = watch(&root) {
+        eprintln!(
+            "[NexTerm] {} is open, but changes made outside the app will not show until it is refreshed: {e}",
+            root.display()
+        );
+    }
+    Ok(root.to_string_lossy().to_string())
 }
 
 #[tauri::command(async, rename_all = "snake_case")]
@@ -979,5 +1004,61 @@ mod entry_tests {
         copied.unwrap();
         assert_eq!(names_in(&root.join("proj copy")), vec!["a.txt"]);
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// Opening a folder, as `fs_pick_root` and `fs_set_root` both do it, with the
+/// watcher stood in for: a real one only fails where the OS says no.
+#[cfg(test)]
+mod open_root_tests {
+    use super::open_root;
+    use crate::fs::Workspace;
+    use std::path::{Path, PathBuf};
+
+    fn folder(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-open-root-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dunce::canonicalize(&dir).unwrap()
+    }
+
+    /// On Linux the watcher fails on a folder with an unreadable folder in
+    /// it (EACCES) or more folders than inotify may watch (ENOSPC). By then
+    /// the folder was open — and written down for the next launch — and the
+    /// command failed anyway: the frontend kept the folder it had while the
+    /// backend had moved on, refusing every file still shown as outside the
+    /// workspace.
+    #[test]
+    fn a_folder_that_cannot_be_watched_still_opens() {
+        let workspace = Workspace::new();
+        let before = folder("unwatched-before");
+        let after = folder("unwatched-after");
+        workspace.set_root(&before).unwrap();
+
+        let opened = open_root(&workspace, &after, |_| Err("Failed to watch path: no space left on device".into()))
+            .expect("the folder opens, unwatched");
+
+        assert_eq!(Path::new(&opened), after);
+        assert_eq!(workspace.root(), Some(after.clone()), "backend and frontend agree on the folder");
+        let _ = std::fs::remove_dir_all(&before);
+        let _ = std::fs::remove_dir_all(&after);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_is_neither_watched_nor_opened() {
+        let workspace = Workspace::new();
+        let before = folder("unopened");
+        workspace.set_root(&before).unwrap();
+
+        let mut watched = false;
+        let result = open_root(&workspace, &before.join("gone"), |_| {
+            watched = true;
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert!(!watched);
+        assert_eq!(workspace.root(), Some(before.clone()), "the folder already open stays open");
+        let _ = std::fs::remove_dir_all(&before);
     }
 }

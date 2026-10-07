@@ -54,9 +54,24 @@ impl FsWatcherManager {
         })
     }
 
-    /// Watch `root`, handing each change to `report`. `start_watching` is
-    /// this with `report` emitting `fs-change`; tests hand it a channel.
-    pub fn watch(&self, root: &Path, report: impl Fn(FsChangePayload) + Send + 'static) -> Result<(), String> {
+    /// Watch `root` in place of whatever was watched before, handing each
+    /// change to `report`. `start_watching` is this with `report` emitting
+    /// `fs-change`; tests hand it a channel.
+    ///
+    /// The previous watcher goes first, whether or not this one starts: the
+    /// folder it watched is no longer open. Only a watcher that started used
+    /// to replace it, so a folder that could not be watched left the last
+    /// one reporting changes to a folder nobody had open any more.
+    pub fn watch(
+        &self,
+        root: &Path,
+        report: impl Fn(FsChangePayload) + Send + 'static,
+    ) -> Result<(), String> {
+        // Taken out under the lock, dropped outside it: stopping a watcher
+        // waits for its thread.
+        let previous = self.watcher.lock().take();
+        drop(previous);
+
         let watched = root.to_path_buf();
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
@@ -70,12 +85,12 @@ impl FsWatcherManager {
         )
         .map_err(|e| format!("Failed to create file watcher: {e}"))?;
 
-        if root.exists() {
-            watcher
-                .watch(root, RecursiveMode::Recursive)
-                .map_err(|e| format!("Failed to watch path '{}': {e}", root.display()))?;
-            *self.watcher.lock() = Some(watcher);
-        }
+        // A folder that is not there is an error like any other, not an Ok
+        // that watches nothing.
+        watcher
+            .watch(root, RecursiveMode::Recursive)
+            .map_err(|e| format!("Failed to watch path '{}': {e}", root.display()))?;
+        *self.watcher.lock() = Some(watcher);
         Ok(())
     }
 }
@@ -202,5 +217,44 @@ mod tests {
         assert!(wait_for(&rx, "index.js"), "no change reported for a file in the open folder");
         drop(manager);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Opening a folder replaces the watcher. One that could not be watched
+    /// left the previous folder's watcher running, reporting changes to a
+    /// folder that was no longer open; it also returned Ok for a folder that
+    /// did not exist, watching nothing.
+    ///
+    /// The previous watcher holds the only sender of the channel it reports
+    /// to, so the channel closing is the watcher being gone — checked that
+    /// way rather than by writing a file and waiting for silence, which
+    /// inotify can still race.
+    #[test]
+    fn a_folder_that_cannot_be_watched_stops_the_previous_watcher() {
+        let before = temp_folder("previous");
+        let manager = FsWatcherManager::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        manager
+            .watch(&before, move |change| {
+                let _ = tx.send(change);
+            })
+            .unwrap();
+        std::fs::write(before.join("one.txt"), "1").unwrap();
+        assert!(wait_for(&rx, "one.txt"), "premise: the first folder is watched");
+
+        let err = manager.watch(&before.join("gone"), |_| {}).unwrap_err();
+        assert!(err.contains("gone"), "the error names the folder: {err}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("the previous folder is still being watched")
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&before);
     }
 }
