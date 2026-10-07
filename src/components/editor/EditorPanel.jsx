@@ -408,6 +408,31 @@ function unsavedPromptText({ kind, names }) {
 }
 
 /**
+ * What the prompt over a save that would replace the file on disk says.
+ *
+ * Usually the file has changed since the tab read it, and what is on disk
+ * can be taken instead. When it could not be read back at all (`unreadable`)
+ * — grown past the 50 MB the editor opens, a log appended to; no longer
+ * text; behind a link that leads nowhere — whether it changed cannot be
+ * known, and there is no version on disk to take: it says why, and offers
+ * only to overwrite or not.
+ */
+export function overwritePromptText({ fileName, unreadable = null }) {
+  if (unreadable == null) {
+    return {
+      title: 'File Changed on Disk',
+      message: `${fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`,
+      altLabel: 'Use Disk Version',
+    };
+  }
+  return {
+    title: 'File on Disk Could Not Be Read',
+    message: `${fileName} could not be read back to see whether it changed on disk since you opened it: ${String(unreadable).replace(/\.$/, '')}. Saving now would replace whatever is there with this tab's version.`,
+    altLabel: null,
+  };
+}
+
+/**
  * One editor group (leaf of the split tree): its own tab strip plus the
  * Monaco editor for whichever of *its* tabs is active. Tabs can be dragged
  * along a strip to reorder them, into another group (at a position in its
@@ -685,14 +710,15 @@ export function EditorPanel() {
     />
   ) : null;
 
+  const overwriteText = pendingOverwrite ? overwritePromptText(pendingOverwrite) : null;
   const overwritePrompt = pendingOverwrite ? (
     <ConfirmDialog
       open
-      title="File Changed on Disk"
-      message={`${pendingOverwrite.fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`}
+      title={overwriteText.title}
+      message={overwriteText.message}
       confirmLabel="Overwrite"
       danger
-      altLabel="Use Disk Version"
+      altLabel={overwriteText.altLabel}
       cancelLabel="Cancel"
       onConfirm={() => {
         confirmPendingOverwrite().catch((err) =>

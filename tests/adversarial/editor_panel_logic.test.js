@@ -126,3 +126,41 @@ describe('EditorPanel: the editor a group holds', () => {
     assert.equal(held(ref), null);
   });
 });
+
+// ---- The question over a save ------------------------------------------------
+
+/**
+ * A save reads the file back first and asks before it replaces something
+ * newer. When the file could not be read back at all — grown past the 50 MB
+ * the editor opens — it was written over without a question (see
+ * editor_read_failures.test.js); now it asks, and the question has to say
+ * what is really known, and offer only what can be done.
+ */
+describe('EditorPanel: what "File Changed on Disk" says', () => {
+  beforeEach(loadUi);
+
+  test('EP-03: a file that could not be read back says why, and offers no disk version to take — there is none', () => {
+    const text = exported('overwritePromptText');
+    const unread = text({
+      tabId: 't1',
+      fileName: 'app.log',
+      diskContent: null,
+      unreadable: 'File is too large to open (60.1 MB; the limit is 50 MB)',
+    });
+    assert.equal(unread.title, 'File on Disk Could Not Be Read');
+    assert.equal(
+      unread.message,
+      'app.log could not be read back to see whether it changed on disk since you opened it: File is too large to open (60.1 MB; the limit is 50 MB). Saving now would replace whatever is there with this tab\'s version.'
+    );
+    assert.equal(unread.altLabel, null, '"Use Disk Version" would read it again, and fail');
+    assert.ok(!text({ fileName: 'a.txt', unreadable: 'Permission denied.' }).message.includes('..'), 'one full stop');
+
+    const changed = text({ tabId: 't1', fileName: 'a.js', diskContent: 'theirs', unreadable: null });
+    assert.deepEqual(changed, {
+      title: 'File Changed on Disk',
+      message: 'a.js has changed on disk since you opened it. Saving now would replace those changes with this tab\'s version.',
+      altLabel: 'Use Disk Version',
+    });
+    assert.deepEqual(text({ fileName: 'a.js', diskContent: 'theirs' }), changed, 'a question asked before `unreadable` existed');
+  });
+});

@@ -259,6 +259,15 @@ function errorText(err) {
 }
 
 /**
+ * Whether `fs_read_file` failed because nothing is at the path: the one
+ * failure that the backend and the browser mock both word "File not found:
+ * <path>".
+ */
+export function isFileNotFound(err) {
+  return errorText(err).startsWith('File not found: ');
+}
+
+/**
  * The fixed words `read_file` refuses a file with (src-tauri/src/fs/mod.rs),
  * each followed by ": <path>" — the path as it resolved it, links followed
  * and in the disk's own case, which need not be how it was asked for.
@@ -354,16 +363,24 @@ async function writeTab(set, get, targetId, { force = false } = {}) {
   // `tab.content` over that silently destroys the newer version.
   if (!force) {
     let onDisk = null;
+    let unreadable = null;
     try {
       onDisk = await invoke('fs_read_file', { path: tab.filePath });
-    } catch {
-      // Gone or unreadable — writing recreates it, which is the expected
-      // outcome of saving, so fall through.
+    } catch (err) {
+      // Only a file that is not there is saved without asking: writing
+      // makes it again, which is what saving a deleted file should do. Any
+      // other failure leaves what is on disk unknown. Every failure used to
+      // count as gone: a log opened under the 50 MB the backend reads, and
+      // appended to past it since, was refused here as too large and then
+      // overwritten with the tab's older, shorter text, unasked.
+      if (!isFileNotFound(err)) unreadable = readFailureReason(err, tab.filePath);
     }
-    if (onDisk !== null && onDisk !== tab.savedContent) {
-      set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk } });
+    if (unreadable !== null || (onDisk !== null && onDisk !== tab.savedContent)) {
+      set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk, unreadable } });
       const err = new Error(
-        `${tab.fileName} has changed on disk since it was opened.`
+        unreadable === null
+          ? `${tab.fileName} has changed on disk since it was opened.`
+          : `${tab.fileName} could not be read back to see whether it changed on disk: ${unreadable}`
       );
       err.code = 'EXTERNAL_CHANGE';
       throw err;
@@ -447,8 +464,10 @@ export const useEditorStore = create((set, get) => ({
   // silently. `proceed` does what was asked once the edits are saved or
   // given up; `abandon` settles the asker's promise when nothing will be.
   pendingClose: null,   // { kind: 'tab' | 'pane' | 'root' | 'window' | 'quit', id, tabIds: [], names: [], proceed, abandon } | null
-  // A save refused because the file changed on disk after this tab read it.
-  pendingOverwrite: null, // { tabId, fileName, diskContent } | null
+  // A save refused because the file changed on disk after this tab read it,
+  // or could not be read back to tell (`unreadable`: why, else null — and
+  // then there is no `diskContent` to take instead).
+  pendingOverwrite: null, // { tabId, fileName, diskContent, unreadable } | null
   // The last file that would not open, and why — on screen until dismissed
   // or a file opens (OpenFailureNotice).
   openFailure: null, // { path, fileName, reason } | null

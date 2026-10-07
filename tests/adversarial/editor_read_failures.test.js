@@ -1,6 +1,5 @@
 /**
- * What the editor does when the backend will not read a file it is asked to
- * open.
+ * What the editor does when the backend will not read a file.
  *
  * `fs_read_file` refuses a file over 50 MB, one that is not UTF-8 text, and
  * a path through a link that leads nowhere, each in fixed words ending in
@@ -12,13 +11,17 @@
  *   File not found: <path>
  *
  * Opening such a file failed with nothing on screen: the refusal went to the
- * console, and the click did nothing at all.
+ * console, and the click did nothing at all. And a save reads the file back
+ * first, to see whether something else changed it, and took ANY failure of
+ * that read for "the file is gone, write it": a log opened under the limit
+ * and appended to past it since was refused as too large, and then
+ * overwritten with the tab's older, shorter text without a question.
  *
  * Tauri rejects with the command's own string, so the refusals are handed
  * to the store as strings here, through the browser mock's `invoke`.
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { useEditorStore, readFailureReason } from '../../src/stores/editorStore.js';
+import { useEditorStore, isFileNotFound, readFailureReason } from '../../src/stores/editorStore.js';
 import { invoke, mockBridge } from '../../src/lib/ipc.js';
 
 const S = useEditorStore;
@@ -151,8 +154,97 @@ describe('Opening a file the backend will not read', () => {
     assert.equal(readFailureReason(new Error(''), path), 'Unknown error');
     assert.equal(readFailureReason(undefined, path), 'Unknown error');
   });
+});
 
-  test('RF-05: teardown', () => {
+// ---- Saving ----------------------------------------------------------------
+
+/** What a save came to: the error it was refused with, or null when it wrote. */
+const outcome = (saving) => saving.then(() => null, (err) => err);
+
+/** The writes among the commands the backend was sent. */
+const writes = (seen) => seen.filter((command) => command === 'fs_write_file');
+
+/** A file opened as `content`, its tab edited to `edited`. */
+async function openEdited(content = 'line 1\n', edited = 'line 1\nmy note\n') {
+  const path = scratch();
+  await invoke('fs_write_file', { path, content });
+  const tab = await S.getState().openFile(path);
+  S.getState().editBuffer(tab.id, edited);
+  return { path, tab };
+}
+
+describe('Saving a file that cannot be read back first', () => {
+  beforeEach(() => {
+    S.setState(emptyEditor());
+  });
+
+  test('RF-05: a log appended to past the size limit since it was opened is not overwritten — the save asks first, and says why', async () => {
+    const { path, tab } = await openEdited();
+    const seen = [];
+
+    const err = await withInvoke(refusing(path, TOO_LARGE(path), seen), () => outcome(S.getState().saveFile(tab.id)));
+
+    assert.deepEqual(writes(seen), [], 'the newer, bigger file was written over without a question');
+    assert.equal(err?.code, 'EXTERNAL_CHANGE');
+    assert.deepEqual(S.getState().pendingOverwrite, {
+      tabId: tab.id,
+      fileName: tab.fileName,
+      diskContent: null,
+      unreadable: 'File is too large to open (60.1 MB; the limit is 50 MB)',
+    });
+    const after = S.getState().tabs.find((t) => t.id === tab.id);
+    assert.equal(after.isDirty, true, 'the edit is still unsaved');
+    assert.equal(await invoke('fs_read_file', { path }), 'line 1\n');
+  });
+
+  test('RF-06: every failure but "File not found" asks; a file that is gone is saved without asking, made again', async () => {
+    for (const words of [NOT_TEXT, BROKEN_LINK, NOT_A_FILE, () => 'Unknown IPC command: fs_read_file']) {
+      S.setState(emptyEditor());
+      const { path, tab } = await openEdited();
+      const seen = [];
+      const err = await withInvoke(refusing(path, words(path), seen), () => outcome(S.getState().saveFile(tab.id)));
+      assert.deepEqual(writes(seen), [], `${words(path)}: written without asking`);
+      assert.equal(err?.code, 'EXTERNAL_CHANGE', words(path));
+      assert.equal(S.getState().pendingOverwrite?.unreadable, readFailureReason(words(path), path));
+    }
+
+    S.setState(emptyEditor());
+    const { path, tab } = await openEdited();
+    await withInvoke(refusing(path, NOT_FOUND(path)), () => S.getState().saveFile(tab.id));
+    assert.equal(S.getState().pendingOverwrite, null, 'a deleted file is saved back without a question, as before');
+    assert.equal(await invoke('fs_read_file', { path }), 'line 1\nmy note\n');
+
+    assert.equal(isFileNotFound(NOT_FOUND(path)), true);
+    assert.equal(isFileNotFound(new Error(NOT_FOUND(path))), true);
+    for (const words of [TOO_LARGE, NOT_TEXT, BROKEN_LINK, NOT_A_FILE]) assert.equal(isFileNotFound(words(path)), false, words(path));
+  });
+
+  test('RF-07: Overwrite writes the tab anyway — the user said so', async () => {
+    const { path, tab } = await openEdited();
+    await withInvoke(refusing(path, TOO_LARGE(path)), async () => {
+      await failureOf(S.getState().saveFile(tab.id));
+      await S.getState().confirmPendingOverwrite();
+    });
+    assert.equal(await invoke('fs_read_file', { path }), 'line 1\nmy note\n');
+    assert.equal(S.getState().pendingOverwrite, null);
+    assert.equal(S.getState().tabs.find((t) => t.id === tab.id).isDirty, false);
+  });
+
+  test('RF-08: Save in "Save a.js?" asks the same question in its place — nothing written, the tab kept', async () => {
+    const { path, tab } = await openEdited();
+    S.getState().requestCloseTab(tab.id);
+    const seen = [];
+
+    const err = await withInvoke(refusing(path, TOO_LARGE(path), seen), () => outcome(S.getState().savePendingClose()));
+
+    assert.deepEqual(writes(seen), [], 'written over, then closed');
+    assert.ok(S.getState().tabs.some((t) => t.id === tab.id), 'the tab was closed');
+    assert.equal(err?.code, 'EXTERNAL_CHANGE');
+    assert.equal(S.getState().pendingClose, null, 'never both questions at once');
+    assert.equal(S.getState().pendingOverwrite?.tabId, tab.id);
+  });
+
+  test('RF-09: teardown', () => {
     S.setState(emptyEditor());
     assert.equal(S.getState().openFailure, null);
   });
