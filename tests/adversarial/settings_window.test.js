@@ -297,3 +297,20 @@ describe('Settings: what a focused terminal never sees', () => {
     assert.ok(text.includes(overTerminalNote()), 'the section does not draw the generated note');
   });
 });
+
+describe('The window buttons take no focus', () => {
+  // Found in the last review: after Cancel on the question a close asks, the
+  // keyboard went back to the ✕ that asked it — and Enter asked again, with
+  // Save ready to press.
+  test('SW-14: minimize, maximize and close leave the keyboard where it was', () => {
+    const src = readFileSync(new URL('../../src/components/layout/WindowControls.jsx', import.meta.url), 'utf8');
+    assert.match(src, /const keepFocus = \(e\) => e\.preventDefault\(\);/);
+    for (const [title, action] of [['"Minimize"', 'minimize'], ["\\{maximized \\? 'Restore' : 'Maximize'\\}", 'toggleMaximize'], ['"Close"', 'close']]) {
+      assert.match(
+        src,
+        new RegExp(`title=${title}\\s*onMouseDown=\\{keepFocus\\}\\s*onClick=\\{\\(\\) => windowControls\\.${action}\\(\\)\\}`),
+        action
+      );
+    }
+  });
+});
