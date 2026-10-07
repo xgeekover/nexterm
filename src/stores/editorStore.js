@@ -1418,6 +1418,10 @@ export const useEditorStore = create((set, get) => ({
       return;
     }
 
+    // Taken before anything is awaited: finding a free name lists the
+    // folder first, and a second Paste in that moment started a second copy.
+    const copying = mode === 'copy';
+    if (copying) set({ pasting: name });
     try {
       const destName = await freeNameIn(targetBase, name, isDir, mode === 'copy' && sameLocation);
       const destPath = join(targetBase, destName);
@@ -1433,18 +1437,15 @@ export const useEditorStore = create((set, get) => ({
         // Copying through fs_read_dir/fs_read_file lost what the Explorer
         // hides (.git, node_modules, dist…) and stopped at the first file
         // that is not UTF-8 text, with half the folder already written.
-        set({ pasting: name });
-        try {
-          await invoke('fs_copy_path', { from: srcPath, to: destPath });
-        } finally {
-          set({ pasting: null });
-        }
+        await invoke('fs_copy_path', { from: srcPath, to: destPath });
       }
 
       await get().refreshExplorer();
     } catch (err) {
       console.error(`[EditorStore] Failed to paste ${srcPath} into ${targetBase}:`, err);
       throw err;
+    } finally {
+      if (copying) set({ pasting: null });
     }
   },
 

@@ -590,6 +590,40 @@ describe('Explorer paste never writes over anything', () => {
     assert.doesNotMatch(explorer, /keepUnsaved/, 'no delete keeps a tab whose path is gone');
   });
 
+  test('EP-09: a Paste is taken before the folder is even listed — a second one in that moment starts nothing', async () => {
+    // Found in the last review: `pasting` was set only once a free name had
+    // been found, which lists the destination first — slow on a big or
+    // network folder — and a second Paste then started a second whole copy.
+    await invoke('fs_write_file', { path: `${scratchDir}/big2/a.txt`, content: 'a' });
+    const dest = `${scratchDir}/into2`;
+    await invoke('fs_create_dir', { path: dest });
+    await useEditorStore.getState().refreshExplorer();
+    useEditorStore.getState().copyToClipboard(`${scratchDir}/big2`, true);
+
+    const real = Object.getPrototypeOf(mockBridge).invoke;
+    let release;
+    const listing = new Promise((resolve) => { release = resolve; });
+    let copies = 0;
+    mockBridge.invoke = async (command, args) => {
+      if (command === 'fs_read_dir' && args?.path === dest) await listing;
+      if (command === 'fs_copy_path') copies += 1;
+      return real.call(mockBridge, command, args);
+    };
+    try {
+      const first = useEditorStore.getState().pasteClipboard(dest);
+      assert.equal(useEditorStore.getState().pasting, 'big2', 'taken before the listing answers');
+      const second = await useEditorStore.getState().pasteClipboard(dest).then(() => 'a second paste', (err) => err);
+      assert.ok(second instanceof Error && /Still copying 'big2'/.test(second.message), String(second));
+      release();
+      await first;
+    } finally {
+      release();
+      delete mockBridge.invoke;
+    }
+    assert.equal(copies, 1);
+    assert.equal(useEditorStore.getState().pasting, null);
+  });
+
   test('EP-06: fs_copy_path refuses a destination that exists, and writes nothing (the mock keeps the contract)', async () => {
     const src = `${scratchDir}/src`;
     const dest = `${scratchDir}/dest`;
