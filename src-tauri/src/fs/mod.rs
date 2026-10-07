@@ -4,6 +4,7 @@ pub mod search;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -796,12 +797,73 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Does `path` name another machine, or a device rather than a file?
+///
+/// Decided by spelling alone, the same on every platform: what matters is
+/// what the path means to Windows, which opens `\\host\share\x` by
+/// connecting to the host and signing in with the user's credentials. Two
+/// separators first, of either kind (`\\host`, `//host`, `/\host`) — which
+/// is also how the device namespaces `\\.\` and `\\?\` begin — or `\??\`,
+/// the NT spelling that reaches the same shares. Only the verbatim spelling
+/// of a local drive, `\\?\C:\…`, is local. The frontend's `isNetworkPath`
+/// (src/lib/terminalLinks.js) draws the same line.
+pub fn is_network_path(path: &str) -> bool {
+    let separator = |byte: &u8| *byte == b'\\' || *byte == b'/';
+    match without_verbatim_prefix(path).as_bytes() {
+        [first, second, ..] if separator(first) && separator(second) => true,
+        [first, b'?', b'?', fourth, ..] if separator(first) && separator(fourth) => true,
+        _ => false,
+    }
+}
+
+/// `path` without a verbatim prefix that a plainer spelling means the same
+/// as: `\\?\UNC\host\share` is `\\host\share`, `\\?\C:\x` is `C:\x`.
+fn without_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    let Some(rest) = path.strip_prefix(r"\\?\") else {
+        return Cow::Borrowed(path);
+    };
+    match rest.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => Cow::Borrowed(rest),
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// Whether confining `asked`, spelled out in full as `spelled`, would have to
+/// reach another machine to find out where it leads.
+///
+/// A network or device path is refused unless the open folder is itself on
+/// another machine and the path is inside it: that is the one host the user
+/// has chosen to reach, by opening the folder, and every file in such a
+/// folder has a path like this. Inside is judged by name, case and all,
+/// with the verbatim `\\?\UNC\` spelled plain — the backend hands such a
+/// folder out as `\\?\UNC\host\share\…`.
+fn on_another_machine(root: &Path, asked: &str, spelled: &Path) -> bool {
+    let spelled = spelled.to_string_lossy();
+    if !is_network_path(asked) && !is_network_path(&spelled) {
+        return false;
+    }
+    let root = root.to_string_lossy();
+    !(is_network_path(&root) && names_of(&spelled).starts_with(&names_of(&root)))
+}
+
+/// The names in a path, split at either separator.
+fn names_of(path: &str) -> Vec<String> {
+    without_verbatim_prefix(path)
+        .split(['\\', '/'])
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Resolve a webview-supplied path to what it leads to, refusing anything
 /// outside `root`. This is the confinement for reading and writing: a link
 /// inside the folder is followed to its file, as opening a file through a
 /// link should be, and one that leads out of the folder is refused.
 pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
-    match spelled_in(root, path_str) {
+    match spelled_in(root, path_str)? {
         None => Ok(root.to_path_buf()),
         Some(path) => resolve_inside(root, &path, path_str),
     }
@@ -824,7 +886,7 @@ pub fn confine_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
 /// is a single component after `..` has been worked out, so on its own it
 /// leads nowhere but that folder.
 pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> {
-    let Some(path) = spelled_in(root, path_str) else {
+    let Some(path) = spelled_in(root, path_str)? else {
         return Ok(root.to_path_buf());
     };
     // The open folder itself, spelled the way the backend hands it out. Every
@@ -842,10 +904,15 @@ pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> 
 /// The path the webview named, made absolute against `root`, with `.` and
 /// `..` worked out by spelling alone. `None` for a blank path or `.`, which
 /// both mean the open folder.
-fn spelled_in(root: &Path, path_str: &str) -> Option<PathBuf> {
+///
+/// Refused here, before anything touches the filesystem, when finding out
+/// where it leads would mean asking another machine (`on_another_machine`).
+/// The check after `canonicalize` came too late for that: canonicalizing
+/// `\\host\share\x` is what makes Windows connect to the host.
+fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
     let trimmed = path_str.trim();
     if trimmed.is_empty() || trimmed == "." {
-        return None;
+        return Ok(None);
     }
 
     let expanded = match trimmed.strip_prefix("~/") {
@@ -857,7 +924,11 @@ fn spelled_in(root: &Path, path_str: &str) -> Option<PathBuf> {
     } else {
         root.join(expanded)
     };
-    Some(lexical_normalize(&joined))
+    let spelled = lexical_normalize(&joined);
+    if on_another_machine(root, trimmed, &spelled) {
+        return Err(format!("Path is on another machine or a device: {path_str}"));
+    }
+    Ok(Some(spelled))
 }
 
 /// `path` with every link in it resolved, refused unless that lands inside
@@ -945,6 +1016,91 @@ mod confine_tests {
         assert!(confine_to(&root, "../../etc/passwd").is_err());
         assert!(confine_to(&root, "inner/../../outside").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Windows opens `\\host\share\x` by connecting to the host and signing
+    /// in with the user's credentials (NTLM), and canonicalizing a path
+    /// opens it — so confinement reached the host before it ever compared
+    /// the path with the open folder. Each of these is refused for what it
+    /// is, by its spelling, before anything touches the filesystem: on
+    /// Windows any of them reaching `canonicalize` would contact a host.
+    #[test]
+    fn a_path_on_another_machine_is_refused_before_it_is_looked_up() {
+        let root = temp_root("network");
+        for path in [
+            r"\\host\share\x.txt",
+            "//host/share/x.txt",
+            r"/\host\share\x.txt",
+            r"\\?\UNC\host\share\x.txt",
+            r"\\.\pipe\x",
+            r"\??\UNC\host\share\x.txt",
+            "/??/UNC/host/share/x.txt",
+            r"\\?\GLOBALROOT\Device\Mup\host\share\x.txt",
+            r"  \\host\share\x.txt",
+        ] {
+            for (what, result) in [("confine_to", confine_to(&root, path)), ("confine_entry_to", confine_entry_to(&root, path))] {
+                let err = result.expect_err(&format!("{what} let {path:?} through"));
+                assert!(err.contains("another machine"), "{what} {path:?}: {err}");
+            }
+        }
+        // Local paths, in the spellings Windows allows, are still judged by
+        // where they lead.
+        assert_eq!(confine_to(&root, "inner/file.txt").unwrap(), root.join("inner/file.txt"));
+        assert!(confine_to(&root, "/etc/passwd").unwrap_err().contains("outside the workspace root"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same table as LK-27 in tests/adversarial/terminal_links.test.js,
+    /// which holds the frontend's `isNetworkPath` to it, and a few more.
+    #[test]
+    fn what_counts_as_another_machine_is_decided_by_spelling() {
+        for path in [
+            r"\\h\s",
+            "//h/s",
+            r"\/h/s",
+            r"/\h\s",
+            r"\\?\UNC\h\s",
+            r"\\.\pipe\p",
+            r"\??\C:\x",
+            "/??/x",
+            r"\\.\C:\x",
+            r"\\?\Volume{1b3b1146-4076-11e1-84aa-806e6f6e6963}\x",
+            r"\\?\GLOBALROOT\Device\Mup\h\s",
+        ] {
+            assert!(is_network_path(path), "{path}");
+        }
+        for path in [r"C:\x", "C:/x", "/x", r"\x", r"x\\y", r"\\?\C:\x", r"\\?\c:\x", "src/a.py", "", r"\?\x"] {
+            assert!(!is_network_path(path), "{path}");
+        }
+    }
+
+    /// A folder opened from a share — picked in the dialog, or a mapped
+    /// drive, which canonicalizes to the share — is reached the way the user
+    /// chose to reach it. Only paths inside it get past the spelling check;
+    /// the same share elsewhere, or another host, still does not.
+    #[test]
+    fn inside_a_folder_on_a_share_only_that_folder_is_reachable() {
+        for root in [r"\\?\UNC\nas\share\proj", "//nas/share/proj"] {
+            let root = Path::new(root);
+            let reaches = |path: &str| on_another_machine(root, path, Path::new(path));
+            for inside in [r"\\nas\share\proj", r"\\nas\share\proj\src\a.js", r"\\?\UNC\nas\share\proj\a.js", "//nas/share/proj/a.js"] {
+                assert!(!reaches(inside), "{} refused {inside}", root.display());
+            }
+            for outside in [
+                r"\\nas\share\other\a.js",
+                r"\\nas\share\project\a.js",
+                r"\\nas\share",
+                r"\\evil\share\proj\a.js",
+                r"\\NAS\share\proj\a.js",
+                r"\\.\pipe\proj",
+            ] {
+                assert!(reaches(outside), "{} let {outside} through", root.display());
+            }
+        }
+        // With a folder on this machine open, every one of them is refused.
+        let local = Path::new("/w/proj");
+        assert!(on_another_machine(local, r"\\nas\share\proj\a.js", Path::new(r"\\nas\share\proj\a.js")));
+        assert!(!on_another_machine(local, "src/a.js", &local.join("src/a.js")));
     }
 
     #[test]
