@@ -23,6 +23,8 @@ import './terminal_intellisense.test.js';
 import './suggestion_layer.test.js';
 import './ipc_contract.test.js';
 import './editor_unsaved.test.js';
+import './unsaved_guard.test.js';
+import './editor_windows_paths.test.js';
 import './keybindings_platform.test.js';
 import './menu_contract.test.js';
 import './init_once.test.js';
@@ -71,6 +73,7 @@ import './shell_restart.test.js';
 import './terminal_right_click.test.js';
 import './terminal_right_click_headless.test.js';
 import './agent_resume_opencode.test.js';
+import './confirm_dialog.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Filter,
   FolderPlus,
   FolderOpen,
@@ -61,7 +62,7 @@ export function FileExplorer() {
   const [explorerError, setExplorerError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
   const [contextMenu, setContextMenu] = useState(null); // { x, y, target }
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, name }
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, isLink, name }
 
   // A remount (the side bar reopened) re-reads the tree. The FIRST mount runs
   // before App has asked the backend for the workspace root — a child's
@@ -189,7 +190,8 @@ export function FileExplorer() {
       disabled: isEmpty,
       disabledReason: noSelectionReason,
       danger: true,
-      onSelect: () => setDeleteConfirm({ path: target.path, isDir: target.isDir, name: target.name }),
+      onSelect: () =>
+        setDeleteConfirm({ path: target.path, isDir: target.isDir, isLink: Boolean(target.isLink), name: target.name }),
     });
 
     return items;
@@ -534,6 +536,7 @@ export function FileExplorer() {
                         type: r.isFolder ? 'folder' : 'file',
                         path: r.node.path,
                         isDir: r.isFolder,
+                        isLink: Boolean(r.node.is_symlink),
                         name: r.node.name,
                       })
                     }
@@ -557,20 +560,39 @@ export function FileExplorer() {
         onClose={() => setContextMenu(null)}
       />
 
-      <ConfirmDialog
-        open={Boolean(deleteConfirm)}
-        title={deleteConfirm?.isDir ? 'Delete Folder' : 'Delete File'}
-        message={`Are you sure you want to delete '${deleteConfirm?.name}'?${deleteConfirm?.isDir ? ' Its contents will be deleted too.' : ''}`}
-        confirmLabel="Delete"
-        danger
-        onConfirm={() => {
-          const target = deleteConfirm;
-          setDeleteConfirm(null);
-          if (!target) return;
-          deletePath(target.path, target.isDir).catch((err) => setExplorerError(err.message));
-        }}
-        onCancel={() => setDeleteConfirm(null)}
-      />
+      {/* Drawn over the whole window, not inside the side bar: the panel keeps
+          the transform its mount animation ends on (`.animate-panel-in`), which
+          makes it the containing block of a `fixed` overlay — the dialog was
+          clipped to the 260px panel, and the terminals beside it stayed
+          clickable. EditorPanel and TerminalsPanel portal theirs for the same
+          reason. Only while open: the render suite draws this component with
+          renderToString, which cannot draw a portal. */}
+      {deleteConfirm
+        ? createPortal(
+            <ConfirmDialog
+              open
+              title={deleteConfirm.isLink ? 'Delete Link' : deleteConfirm.isDir ? 'Delete Folder' : 'Delete File'}
+              // A link is removed as a link (src-tauri/src/fs/mod.rs
+              // delete_path): what it points to is left alone, so "its
+              // contents will be deleted too" would be false — and frightening.
+              message={
+                deleteConfirm.isLink
+                  ? `Are you sure you want to delete the link '${deleteConfirm.name}'? What it points to is not touched.`
+                  : `Are you sure you want to delete '${deleteConfirm.name}'?${deleteConfirm.isDir ? ' Its contents will be deleted too.' : ''}`
+              }
+              confirmLabel="Delete"
+              danger
+              onConfirm={() => {
+                const target = deleteConfirm;
+                setDeleteConfirm(null);
+                if (!target) return;
+                deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(err.message));
+              }}
+              onCancel={() => setDeleteConfirm(null)}
+            />,
+            document.body
+          )
+        : null}
     </div>
   );
 }
