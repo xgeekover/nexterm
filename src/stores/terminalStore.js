@@ -666,12 +666,12 @@ function buildPersistedPayload(state) {
 /**
  * Debounced write-behind, with a ceiling.
  *
- * A plain restart-on-every-change debounce is starvable, and a terminal is
- * exactly the thing that starves it: `pty-output` rebuilds `state.tabs` on
- * every chunk, so a shell printing more often than the debounce (a dev server,
- * `tail -f`, a test watcher) pushed the save out forever. Renaming a group or
- * rearranging panes then never reached disk until the output stopped — and if
- * the app was quit while it was still streaming, all of it was lost.
+ * A plain restart-on-every-change debounce is starvable, and a terminal was
+ * exactly the thing that starved it: `pty-output` used to rebuild `state.tabs`
+ * on every chunk, so a shell printing more often than the debounce (a dev
+ * server, `tail -f`, a test watcher) pushed the save out forever. Renaming a
+ * group or rearranging panes then never reached disk until the output stopped
+ * — and if the app was quit while it was still streaming, all of it was lost.
  *
  * So: coalesce bursts as before, but never go longer than PERSIST_MAX_WAIT_MS
  * without writing.
@@ -1331,8 +1331,6 @@ export const useTerminalStore = create((set, get, api) => {
         defaultTitle,
         sessionId: ptySession.session_id,
         cwd: ptySession.cwd || get().cwd,
-        blocks: [],
-        activePrompt: '',
         agent: null,
         agentResumeOffered: false,
         // What the backend actually ran, not what was asked for. The status
@@ -1713,8 +1711,6 @@ export const useTerminalStore = create((set, get, api) => {
         defaultTitle,
         sessionId: ptySession.session_id,
         cwd: ptySession.cwd || wantedCwd,
-        blocks: [],
-        activePrompt: '',
         // What was running here, and the fact that it is NOT running now.
         // The shell comes back empty and the conversation is offered rather
         // than taken: starting an agent costs tokens and hits an API, so it
@@ -1788,8 +1784,6 @@ export const useTerminalStore = create((set, get, api) => {
   return {
     tabs: [],
     activeTabId: null,
-    history: [],
-    historyIndex: -1,
     cwd: '/workspace',
     isInitialized: false,
 
@@ -2838,35 +2832,15 @@ export const useTerminalStore = create((set, get, api) => {
       listening = true;
       // Before any shell is spawned: output a tab prints before its terminal
       // exists is kept for it from the first byte (see ptyOutputBus.js).
+      //
+      // The bus hands output straight to each terminal; the store does not
+      // listen for it at all. A handler here would run for every chunk a
+      // shell prints, and one that built a new `tabs` array per chunk
+      // re-rendered everything that subscribes to it — the terminals side
+      // bar, the split panes, the status bar. Profiled `type`-ing 1 MB into a
+      // terminal, React's re-renders were the top of the renderer's
+      // JavaScript time, above anything xterm.js did.
       await startPtyOutputBus();
-      unlisteners.push(await listen('pty-output', (payload) => {
-        const { session_id, data } = payload || {};
-        if (!session_id || !data) return;
-
-        // Output with no running block is prompt/banner noise — never appended
-        // to a finished (possibly pinned) block. It also must not touch the
-        // store: this runs for every chunk a shell prints, and a new `tabs`
-        // array re-rendered everything that subscribes to it (the terminals
-        // side bar, the split panes, the status bar) once per chunk. Profiled
-        // `type`-ing 1 MB into a terminal: React's re-renders were the top of
-        // the renderer's JavaScript time, above anything xterm.js did.
-        set((state) => {
-          let changed = false;
-          const tabs = state.tabs.map((tab) => {
-            if (tab.sessionId !== session_id) return tab;
-            const runningIdx = tab.blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx === -1) return tab;
-            changed = true;
-            const blocks = [...tab.blocks];
-            blocks[runningIdx] = {
-              ...blocks[runningIdx],
-              output: blocks[runningIdx].output + data,
-            };
-            return { ...tab, blocks };
-          });
-          return changed ? { tabs } : state;
-        });
-      }));
       // OSC 133 "C" (see src-tauri/src/pty/osc.rs): a command has begun. This
       // is the only signal that a terminal is BUSY rather than sitting at a
       // prompt, and without it the tab strip could report a verdict but never
@@ -2884,9 +2858,9 @@ export const useTerminalStore = create((set, get, api) => {
             // again describes nothing that is still true.
             return { ...tab, running: true, runStartedAt: Date.now(), lastExitCode: null };
           });
-          // Same discipline as the pty-output handler above — a new `tabs`
-          // array re-renders the side bar, every pane and the status bar, so
-          // it is only ever built when something actually changed.
+          // A new `tabs` array re-renders the side bar, every pane and the
+          // status bar, so it is only ever built when something actually
+          // changed.
           return changed ? { tabs } : state;
         });
       }));
@@ -2906,11 +2880,6 @@ export const useTerminalStore = create((set, get, api) => {
           const raised = [];
           const nextTabs = state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
-            // Remember the code whether or not a block was tracking this
-            // command: typing straight into the terminal never creates one,
-            // which is the normal case, so anything reading it off `blocks`
-            // only ever saw commands run from the palette.
-            //
             // An end with no code — cmd's, whose PROMPT has no way to say —
             // is a command that FINISHED, not one that succeeded. It stays
             // null, and null is no verdict anywhere it is read: no red dot,
@@ -2943,29 +2912,13 @@ export const useTerminalStore = create((set, get, api) => {
             // SUBMIT_GRACE_MS — a resume that fails at once — is not counted,
             // so its record stays for one more offer.
             const agentExited = tab.running && tab.agentTyped?.sessionId === session_id;
-            tab = {
+            return {
               ...tab,
               lastExitCode: code,
               running: false,
               runStartedAt: null,
               ...(agentExited ? { agent: null, agentResumeOffered: false, agentTyped: null } : {}),
             };
-            const idx = tab.blocks.findIndex((b) => b.status === 'running');
-            if (idx === -1) return tab;
-            const blocks = [...tab.blocks];
-            const running = blocks[idx];
-            blocks[idx] = {
-              ...running,
-              // zsh pads the last line to the terminal width before the prompt;
-              // drop that trailing whitespace so blocks end cleanly.
-              output: running.output.replace(/[ \t]+\r?$/, ''),
-              // Only a code the shell gave can make it a failure; with none
-              // it is simply finished.
-              status: code === null || code === 0 ? 'completed' : 'failed',
-              exitCode: code,
-              durationMs: Date.now() - (running.startTime || Date.now()),
-            };
-            return { ...tab, blocks };
           });
           return raised.length === 0
             ? { tabs: nextTabs }
@@ -3008,7 +2961,7 @@ export const useTerminalStore = create((set, get, api) => {
             // Remember that this shell is gone. Without it the tab looked
             // alive — blinking cursor, full scrollback — while every
             // keystroke went nowhere.
-            tab = {
+            return {
               ...tab,
               exited: { code: typeof exit_code === 'number' ? exit_code : null },
               // A shell killed mid-command never sends its "D" marker, so this
@@ -3016,18 +2969,6 @@ export const useTerminalStore = create((set, get, api) => {
               running: false,
               runStartedAt: null,
             };
-            const blocks = [...tab.blocks];
-            const runningIdx = blocks.findIndex((b) => b.status === 'running');
-            if (runningIdx !== -1) {
-              const blk = blocks[runningIdx];
-              blocks[runningIdx] = {
-                ...blk,
-                status: exit_code === 0 ? 'completed' : 'failed',
-                exitCode: exit_code,
-                durationMs: Math.max(1, Date.now() - (blk.startTime || Date.now())),
-              };
-            }
-            return { ...tab, blocks };
           }),
         }));
       }));
@@ -3222,8 +3163,6 @@ export const useTerminalStore = create((set, get, api) => {
           defaultTitle,
           sessionId: ptySession.session_id,
           cwd: ptySession.cwd || rootPath,
-          blocks: [],
-          activePrompt: '',
           spawnedAt: Date.now(),
         };
         const group = makeGroup({ name: 'Group 1', tabIds: [initialTab.id] });
@@ -3395,84 +3334,6 @@ export const useTerminalStore = create((set, get, api) => {
       }
     },
 
-    executeCommand: async (commandText, tabId = null) => {
-      const trimmed = (commandText || '').trim();
-      if (!trimmed) return null;
-
-      const targetTabId = tabId || get().activeTabId;
-      const tab = get().tabs.find((t) => t.id === targetTabId);
-      if (!tab) return null;
-
-      const blockId = `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const block = {
-        id: blockId,
-        command: trimmed,
-        cwd: tab.cwd || get().cwd,
-        output: '',
-        exitCode: null,
-        durationMs: 0,
-        startTime: Date.now(),
-        status: 'running',
-        pinned: false,
-      };
-
-      set((state) => {
-        const nextTabs = state.tabs.map((t) => {
-          if (t.id !== targetTabId) return t;
-          return {
-            ...t,
-            lastExitCode: null,
-            blocks: [...t.blocks, block],
-          };
-        });
-        const nextHistory = [...state.history, trimmed];
-        return {
-          tabs: nextTabs,
-          history: nextHistory,
-          historyIndex: nextHistory.length,
-        };
-      });
-
-      try {
-        await invoke('pty_write', {
-          session_id: tab.sessionId,
-          data: `${trimmed}\n`,
-        });
-      } catch (err) {
-        console.error('[TerminalStore] Failed to write to PTY:', err);
-        set((state) => ({
-          tabs: state.tabs.map((t) => {
-            if (t.id !== targetTabId) return t;
-            return {
-              ...t,
-              blocks: t.blocks.map((b) =>
-                b.id === blockId ? { ...b, status: 'failed', exitCode: 1, output: `Error: ${err.message}\n` } : b
-              ),
-            };
-          }),
-        }));
-      }
-
-      return block;
-    },
-
-    pinBlock: (blockId) => {
-      let resultPinned = false;
-      set((state) => ({
-        tabs: state.tabs.map((tab) => ({
-          ...tab,
-          blocks: tab.blocks.map((b) => {
-            if (b.id === blockId) {
-              resultPinned = !b.pinned;
-              return { ...b, pinned: resultPinned };
-            }
-            return b;
-          }),
-        })),
-      }));
-      return resultPinned;
-    },
-
     /**
      * Terminal: Clear — the palette's Clear Terminal, the Terminal menu, and
      * ⌘L / Ctrl+L outside a terminal (inside one, Ctrl+L is the shell's).
@@ -3482,35 +3343,6 @@ export const useTerminalStore = create((set, get, api) => {
     clearTerminal: async (tabId = null) => {
       const targetId = tabId || get().activeTabId;
       return targetId ? clearTerminalView(targetId) : false;
-    },
-
-    clearBlocks: (tabId = null) => {
-      const targetTabId = tabId || get().activeTabId;
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.id !== targetTabId) return tab;
-          return {
-            ...tab,
-            blocks: tab.blocks.filter((b) => b.pinned),
-          };
-        }),
-      }));
-    },
-
-    // Replace a block's recorded output outright. No other field changes.
-    // (Bookkeeping only — the live terminal surface renders straight from PTY
-    // output and never reads `blocks`; this exists for callers that want to
-    // overwrite a block's history entry wholesale, e.g. a future re-run.)
-    setBlockOutput: (tabId, blockId, output) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.id !== tabId) return tab;
-          return {
-            ...tab,
-            blocks: tab.blocks.map((b) => (b.id === blockId ? { ...b, output } : b)),
-          };
-        }),
-      }));
     },
 
     /**
@@ -3962,8 +3794,8 @@ export const useTerminalStore = create((set, get, api) => {
  * of exactly what would be saved.
  *
  * Comparing `state.tabs` by reference used to schedule a save on every
- * `pty-output` chunk — the array is rebuilt per chunk, but none of the
- * persisted FIELDS change — which is what kept the debounce permanently reset.
+ * `pty-output` chunk — the array was rebuilt per chunk, but none of the
+ * persisted FIELDS changed — which is what kept the debounce permanently reset.
  * The cure for that was a fingerprint kept by hand beside the payload, and
  * the two drifted apart: `agent` went into the payload and never into the
  * fingerprint, so starting an agent or dismissing the offer to resume one
@@ -3971,12 +3803,11 @@ export const useTerminalStore = create((set, get, api) => {
  * never reached disk. A field added to the payload is now compared here
  * without anyone having to remember it.
  *
- * It runs on every change to `tabs` or `groups` — once per output chunk while
- * a palette command is running, once per command start and finish, once per
- * settled resize. For 16 terminals in 4 groups that is under 4 KB of JSON and
- * about 5µs, measured; the fingerprint it replaces already stringified every
- * group's tree and took about 3µs. Scrollback is not in the payload, so a
- * busy terminal does not make it any dearer.
+ * It runs on every change to `tabs` or `groups` — once per command start and
+ * finish, once per settled resize. For 16 terminals in 4 groups that is under
+ * 4 KB of JSON and about 5µs, measured; the fingerprint it replaces already
+ * stringified every group's tree and took about 3µs. Scrollback is not in the
+ * payload, so a busy terminal does not make it any dearer.
  */
 function persistKeyOf(state) {
   return JSON.stringify(buildPersistedPayload(state));

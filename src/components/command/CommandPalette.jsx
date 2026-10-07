@@ -255,8 +255,7 @@ export function CommandPalette() {
     if (item.type === 'history') {
       // Typed into the terminal rather than executed behind the user's back:
       // a command from yesterday may want editing, and the newline is the
-      // user's to press. It also keeps this off the `executeCommand` path,
-      // which nothing in the UI uses.
+      // user's to press.
       const tabId = useTerminalStore.getState().activeTabId;
       if (tabId) {
         writeRaw(tabId, item.command);

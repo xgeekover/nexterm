@@ -152,11 +152,12 @@ describe('Output a tab printed before its terminal existed', () => {
     assert.doesNotMatch(registry, /listen\('pty-output'/, 'no listener of its own left to race the bus');
     assert.match(registry, /forgetOutput\(entry\.sessionId\)/, 'a rebound instance drops the old shell');
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(store, /listen\('pty-output'/, 'the bus is the one listener: the store follows no output itself');
     const attach = store.indexOf('attachListeners: async () => {');
     assert.ok(attach > 0);
     const startAt = store.indexOf('await startPtyOutputBus();', attach);
-    const firstListen = store.indexOf("listen('pty-output'", attach);
-    assert.ok(startAt > attach && startAt < firstListen, 'the bus starts before the other listeners, at bootstrap');
+    const firstListen = store.indexOf("await listen('", attach);
+    assert.ok(startAt > attach && startAt < firstListen, 'the bus starts before the store’s listeners, at bootstrap');
     // What closing a terminal frees is checked by doing it — PB-09 to PB-14,
     // every way a terminal closes. One `forgetOutput(tab.sessionId)` anywhere
     // in the store satisfied a check that read the source, and closing a pane,

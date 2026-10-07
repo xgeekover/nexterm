@@ -96,8 +96,7 @@ export function StatusBar() {
   }, [activeTab?.lastSize]);
 
   // The shell's own verdict on the last command, recorded from
-  // `pty-command-done` — which fires for anything typed, not only for the
-  // commands the block UI happens to be tracking.
+  // `pty-command-done` for every command that runs in the terminal.
   const lastExitCode = activeTab?.lastExitCode ?? null;
 
   const { left, right } = useMemo(

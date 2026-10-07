@@ -8,19 +8,6 @@ describe('Tier 2: Boundary & Corner Cases', () => {
     await app.initialize();
   });
 
-  test('TC-BND-01: Empty or whitespace-only command in terminal does not create ghost blocks', async () => {
-    const tab = app.getActiveTerminalTab();
-    const initialBlockCount = tab.blocks.length;
-
-    const res1 = await app.executeTerminalCommand('');
-    assert.equal(res1, null, 'Empty string command must return null');
-    assert.equal(tab.blocks.length, initialBlockCount, 'No block should be created for empty command');
-
-    const res2 = await app.executeTerminalCommand('     \n\t   ');
-    assert.equal(res2, null, 'Whitespace-only command must return null');
-    assert.equal(tab.blocks.length, initialBlockCount, 'No block should be created for whitespace command');
-  });
-
   test('TC-BND-02: Non-zero exit code (127 command not found) is kept on the tab', async () => {
     const run = await app.runTerminalCommand('invalid-command-404');
     assert.equal(run.exitCode, 127, 'Exit code must be 127');

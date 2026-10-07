@@ -128,7 +128,7 @@ describe('Status bar: per-platform conventions', () => {
   });
 });
 
-describe('Status bar: the exit code comes from the shell, not from a block', () => {
+describe('Status bar: the exit code comes from the shell', () => {
   // Deliberately does NOT call init(): the store is a module singleton shared
   // with every other suite, and spinning it up here (PTYs, persistence timers,
   // id counters) corrupted the terminal-groups migration cases. Only the
@@ -145,8 +145,6 @@ describe('Status bar: the exit code comes from the shell, not from a block', () 
           title: 'Terminal 1',
           sessionId: SESSION,
           cwd: '/workspace',
-          blocks: [],
-          activePrompt: '',
         },
       ],
       activeTabId: TAB,
@@ -155,14 +153,12 @@ describe('Status bar: the exit code comes from the shell, not from a block', () 
 
   const tab = () => S.getState().tabs.find((t) => t.id === TAB);
 
-  test('SB-08: a command typed straight into the terminal still records its code', async () => {
+  test('SB-08: a command typed straight into the terminal records its code', async () => {
     const { mockBridge } = await import('../../src/lib/ipc.js');
 
-    // Nothing called executeCommand, so there is no block — the normal case
-    // for anyone who just types. Reading the code off `blocks`, as the bar
-    // first did, found nothing here.
-    assert.equal(tab().blocks.length, 0, 'precondition: no block is tracking this command');
-
+    // The shell's verdict (OSC 133 "D") lands on the tab, where the bar reads
+    // it. The bar first read it off the store's command blocks, which a
+    // command typed at the prompt never had.
     await mockBridge.emit('pty-command-done', { session_id: SESSION, exit_code: 127 });
     assert.equal(tab().lastExitCode, 127, 'the shell’s verdict is recorded on the tab');
 

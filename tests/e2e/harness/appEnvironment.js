@@ -11,9 +11,9 @@
  * Two shapes have to be bridged:
  *
  *  - The stores update immutably (`set(state => ...)` hands back new objects),
- *    while the tests hold a reference and read it after awaiting. So tabs and
- *    blocks are handed out as LIVE VIEWS that re-read the store by id on every
- *    property access — see `liveView`.
+ *    while the tests hold a reference and read it after awaiting. So tabs are
+ *    handed out as LIVE VIEWS that re-read the store by id on every property
+ *    access — see `liveView`.
  *  - The stores are module singletons, but each test builds a fresh
  *    `AppEnvironment`. The constructor resets all three stores and the mock
  *    backend, so cases stay independent.
@@ -45,10 +45,10 @@ if (typeof globalThis.localStorage === 'undefined' || globalThis.localStorage ==
 }
 
 /**
- * A stand-in for one store-owned object (a tab, a block) that always reflects
- * the store's CURRENT copy of it. `read()` re-resolves it by id on each access,
- * so `const tab = app.getActiveTerminalTab()` stays correct after the store has
- * replaced `tab` several times over.
+ * A stand-in for one store-owned object (a terminal or editor tab) that
+ * always reflects the store's CURRENT copy of it. `read()` re-resolves it by
+ * id on each access, so `const tab = app.getActiveTerminalTab()` stays correct
+ * after the store has replaced `tab` several times over.
  */
 function liveView(read) {
   return new Proxy(
@@ -168,8 +168,6 @@ export class AppEnvironment {
     useTerminalStore.setState({
       tabs: [],
       activeTabId: null,
-      history: [],
-      historyIndex: -1,
       cwd: '/workspace',
       isInitialized: false,
       savedGroups: [],
@@ -234,13 +232,6 @@ export class AppEnvironment {
 
   #liveTab(tabId) {
     return liveView(() => useTerminalStore.getState().tabs.find((t) => t.id === tabId) || null);
-  }
-
-  #liveBlock(tabId, blockId) {
-    return liveView(() => {
-      const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
-      return tab ? tab.blocks.find((b) => b.id === blockId) || null : null;
-    });
   }
 
   getActiveTerminalTab() {
@@ -320,22 +311,6 @@ export class AppEnvironment {
       exitCode: this.terminal.tabs.find((t) => t.id === id)?.lastExitCode ?? null,
       sawRunning,
     };
-  }
-
-  async executeTerminalCommand(commandText, tabId = null) {
-    const targetId = tabId || this.terminal.activeTabId;
-    const block = await this.terminal.executeCommand(commandText, tabId);
-    return block ? this.#liveBlock(targetId, block.id) : null;
-  }
-
-  pinBlock(blockId) {
-    const found = this.terminal.tabs.some((t) => t.blocks.some((b) => b.id === blockId));
-    if (!found) throw new Error(`Block not found: ${blockId}`);
-    return this.terminal.pinBlock(blockId);
-  }
-
-  clearTerminalBlocks(tabId = null) {
-    this.terminal.clearBlocks(tabId);
   }
 
   // --- MONACO EDITOR -------------------------------------------------------

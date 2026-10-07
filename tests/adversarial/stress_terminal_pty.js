@@ -46,131 +46,9 @@ console.log(`${c.bold}${c.cyan}  NexTerm Adversarial Stress & Bug Hunter Suite  
 console.log(`${c.bold}${c.cyan}====================================================${c.reset}\n`);
 
 // =========================================================================
-// SECTION 1: TERMINAL BLOCKS & RAPID SEQUENTIAL SUBMISSIONS
+// SECTION 1: PTY LIFECYCLE, MULTI-TAB & CONCURRENCY
 // =========================================================================
-console.log(`${c.bold}▶ SECTION 1: Terminal Blocks & Command Sequencing${c.reset}`);
-
-await runTest('TC-ADV-TERM-01: Sequential execution with await correctly isolates outputs', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b1 = await env.executeTerminalCommand('echo 1');
-  assert.equal(b1.status, 'completed');
-  assert.equal(b1.output.trim(), '1');
-
-  const b2 = await env.executeTerminalCommand('echo 2');
-  assert.equal(b2.status, 'completed');
-  assert.equal(b2.output.trim(), '2');
-
-  const b3 = await env.executeTerminalCommand('ls');
-  assert.equal(b3.status, 'completed');
-  assert.ok(b3.output.length > 0);
-  env.destroy();
-});
-
-await runTest('TC-ADV-TERM-02: Rapid sequential command submissions without waiting (BURST)', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const activeTab = env.getActiveTerminalTab();
-
-  // Rapid dispatch without awaiting each one sequentially
-  const p1 = env.executeTerminalCommand('echo 1');
-  const p2 = env.executeTerminalCommand('echo 2');
-  const p3 = env.executeTerminalCommand('ls');
-
-  await Promise.all([p1, p2, p3]);
-
-  // Check the state of all 3 blocks
-  const blocks = activeTab.blocks;
-  assert.equal(blocks.length, 3, 'Should have created 3 distinct blocks');
-
-  const b1 = blocks[0];
-  const b2 = blocks[1];
-  const b3 = blocks[2];
-
-  // BUG INVESTIGATION:
-  // In AppEnvironment and terminalStore, output listener updates:
-  // tab.blocks[tab.blocks.length - 1]
-  // Because all 3 blocks were pushed synchronously, tab.blocks.length - 1 was ALWAYS block 3!
-  const b1Finished = b1.status === 'completed';
-  const b2Finished = b2.status === 'completed';
-  const b3Finished = b3.status === 'completed';
-
-  const b1HasOutput = b1.output.trim() === '1';
-  const b2HasOutput = b2.output.trim() === '2';
-
-  if (!b1Finished || !b1HasOutput || !b2Finished || !b2HasOutput) {
-    recordFinding(
-      'CRITICAL',
-      'Rapid sequential terminal commands suffer from Block Output Collision & Orphaned Running State',
-      `When multiple commands are submitted rapidly in sequence before PTY output/exit events arrive, ` +
-      `the listener indexing logic (tab.blocks[tab.blocks.length - 1]) directs all output to the newest block ` +
-      `and leaves previous blocks permanently stuck in 'running' status with empty output. ` +
-      `Block 1 status: '${b1.status}', output: '${b1.output}'. Block 2 status: '${b2.status}', output: '${b2.output}'. ` +
-      `Block 3 status: '${b3.status}', output: '${b3.output.slice(0, 30)}...'`,
-      `Submit multiple commands without awaiting: Promise.all([execute('echo 1'), execute('echo 2'), execute('ls')])`
-    );
-    throw new Error(`Block output collision: B1 status=${b1.status}, B2 status=${b2.status}, B3 status=${b3.status}`);
-  }
-
-  env.destroy();
-});
-
-// =========================================================================
-// SECTION 2: COMMANDS WITH FAILURE EXIT CODES & UNKNOWN COMMANDS
-// =========================================================================
-console.log(`\n${c.bold}▶ SECTION 2: Terminal Failure Exit Codes & Error Handling${c.reset}`);
-
-await runTest('TC-ADV-TERM-03: Arbitrary non-existent command flags error and non-zero exit code', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b = await env.executeTerminalCommand('nonexistent_command_xyz');
-  
-  if (b.status !== 'failed' || b.exitCode !== 127) {
-    recordFinding(
-      'HIGH',
-      'Non-existent command "nonexistent_command_xyz" incorrectly marked as completed with exit code 0 in MockIpc',
-      `Executing an arbitrary non-existent command like 'nonexistent_command_xyz' emits exit_code: 0 and status: 'completed' ` +
-      `because MockIpc only checks for hardcoded 'invalid-command-404'. Any real shell returns 127 command not found. ` +
-      `Observed: status='${b.status}', exitCode=${b.exitCode}`,
-      `await env.executeTerminalCommand('nonexistent_command_xyz'); -> check block.status and block.exitCode`
-    );
-    throw new Error(`Command was not flagged as failed: status=${b.status}, exitCode=${b.exitCode}`);
-  }
-
-  env.destroy();
-});
-
-await runTest('TC-ADV-TERM-04: Hardcoded failing test command correctly flags failed status', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b = await env.executeTerminalCommand('npm test');
-  assert.equal(b.status, 'failed');
-  assert.equal(b.exitCode, 1);
-  assert.ok(b.output.includes('FAIL'));
-
-  env.destroy();
-});
-
-await runTest('TC-ADV-TERM-05: Known 404 command flags failed status and exit code 127', async () => {
-  const env = new AppEnvironment();
-  await env.initialize();
-
-  const b = await env.executeTerminalCommand('invalid-command-404');
-  assert.equal(b.status, 'failed');
-  assert.equal(b.exitCode, 127);
-  assert.ok(b.output.includes('command not found'));
-
-  env.destroy();
-});
-
-// =========================================================================
-// SECTION 4: PTY LIFECYCLE, MULTI-TAB & CONCURRENCY
-// =========================================================================
-console.log(`\n${c.bold}▶ SECTION 4: PTY Lifecycle, Multi-Tab & Concurrency${c.reset}`);
+console.log(`${c.bold}▶ SECTION 1: PTY Lifecycle, Multi-Tab & Concurrency${c.reset}`);
 
 await runTest('TC-ADV-PTY-01: High tab churn (create and close 20 tabs rapidly)', async () => {
   const env = new AppEnvironment();
@@ -243,9 +121,9 @@ await runTest('TC-ADV-PTY-04: pty_resize bounds clamping', async () => {
 });
 
 // =========================================================================
-// SECTION 5: FILE EXPLORER & MONACO EDITOR STRESS
+// SECTION 2: FILE EXPLORER & MONACO EDITOR STRESS
 // =========================================================================
-console.log(`\n${c.bold}▶ SECTION 5: File Explorer & Monaco Editor Stress${c.reset}`);
+console.log(`\n${c.bold}▶ SECTION 2: File Explorer & Monaco Editor Stress${c.reset}`);
 
 await runTest('TC-ADV-FS-01: Reading non-existent file cleanly throws error', async () => {
   const env = new AppEnvironment();

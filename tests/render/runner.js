@@ -143,7 +143,6 @@ const tab = (id, extra = {}) => ({
   title: id,
   defaultTitle: id,
   cwd: '/workspace',
-  blocks: [],
   running: false,
   lastExitCode: null,
   ...extra,

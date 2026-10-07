@@ -1,23 +1,11 @@
 import { describe, test, beforeEach, assert, AppEnvironment } from '../harness/index.js';
 
-describe('Tier 1: Terminal Blocks & Multi-Tab Feature Coverage', () => {
+describe('Tier 1: Terminal Commands & Multi-Tab Feature Coverage', () => {
   let app;
 
   beforeEach(async () => {
     app = new AppEnvironment();
     await app.initialize();
-  });
-
-  test('TC-TERM-01: Shell command execution renders a distinct block container with command text', async () => {
-    const activeTab = app.getActiveTerminalTab();
-    assert.ok(activeTab, 'Active terminal tab must exist on launch');
-    assert.equal(activeTab.blocks.length, 0, 'Initially tab should have 0 blocks');
-
-    const block = await app.executeTerminalCommand('echo "Welcome to NexTerm"');
-    assert.ok(block, 'Command execution must return a block object');
-    assert.equal(block.command, 'echo "Welcome to NexTerm"');
-    assert.equal(activeTab.blocks.length, 1, 'Tab should now have 1 block card');
-    assert.equal(activeTab.blocks[0].id, block.id);
   });
 
   test('TC-TERM-02: A command typed at the prompt reaches the shell, and what it prints reaches the terminal', async () => {
@@ -48,33 +36,6 @@ describe('Tier 1: Terminal Blocks & Multi-Tab Feature Coverage', () => {
     // Switch back to initial tab
     app.switchTerminalTab(initialTab.id);
     assert.equal(app.activeTerminalTabId, initialTab.id, 'Active tab should switch back to initial tab');
-  });
-
-  test('TC-TERM-05: Block action toolbar supports pinning and unpinning blocks', async () => {
-    const block = await app.executeTerminalCommand('pwd');
-    assert.equal(block.pinned, false, 'Block should not be pinned by default');
-
-    const isPinned = app.pinBlock(block.id);
-    assert.equal(isPinned, true, 'Block pin action should toggle pinned state to true');
-    assert.equal(block.pinned, true);
-
-    const isUnpinned = app.pinBlock(block.id);
-    assert.equal(isUnpinned, false, 'Second pin action should toggle pinned state back to false');
-  });
-
-  test('TC-TERM-06: Clearing terminal blocks preserves pinned blocks and purges unpinned blocks', async () => {
-    const block1 = await app.executeTerminalCommand('echo one');
-    const block2 = await app.executeTerminalCommand('echo two');
-    const activeTab = app.getActiveTerminalTab();
-    assert.equal(activeTab.blocks.length, 2);
-
-    // Pin block 1
-    app.pinBlock(block1.id);
-
-    // Clear blocks
-    app.clearTerminalBlocks();
-    assert.equal(activeTab.blocks.length, 1, 'Only pinned block should remain after clear');
-    assert.equal(activeTab.blocks[0].id, block1.id, 'Remaining block must be the pinned block 1');
   });
 
   test('TC-TERM-07: Closing a terminal tab kills the backend PTY session and reallocates active tab', async () => {
