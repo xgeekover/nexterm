@@ -3,8 +3,16 @@
 //! Closing the window is answered in the webview: it listens for the window's
 //! close request and holds it behind the same Save / Don't Save / Cancel
 //! prompt as closing one tab (src/hooks/useUnsavedGuard.js). That covers every
-//! way out on Windows and Linux, where the app is closed by closing its
-//! window.
+//! way of closing the window — its ✕, File ▸ Exit, Ctrl/⌘+Shift+W, Alt+F4, the
+//! taskbar — and on Windows and Linux that is how the app is quit.
+//!
+//! It does not cover Windows shutting down, signing out, or restarting for an
+//! update. Windows does not close the window then. It sends
+//! WM_QUERYENDSESSION, which tao 0.35.3 does not handle (the default window
+//! procedure agrees to end the session), and then WM_ENDSESSION, on which tao
+//! only stops its event loop. The process ends, and every unsaved edit is lost
+//! without a prompt. Whether a Linux session ending closes the window first
+//! has not been checked.
 //!
 //! Quitting a macOS app is not a window close. ⌘Q, the Dock's Quit and logging
 //! out all send `terminate:` to the application, and tao, the windowing layer
