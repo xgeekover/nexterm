@@ -405,4 +405,23 @@ describe('Terminal links: never a path on another machine', () => {
       assert.equal(isNetworkPath(path), false, String(path));
     }
   });
+
+  test('LK-28: an ES module\'s stack frame (Node, Deno, tsx) links its file again; a file URI naming a host does not', () => {
+    // Node prints `at file:///…` for ES modules. The rule that keeps a match
+    // from starting after a slash also kept it from starting at the third
+    // slash of the URI, so these stopped being links when the scan was made
+    // linear (found in review).
+    const offered = (line) => findLinks(line).map((l) => `${l.path}:${l.line}`);
+    assert.deepEqual(offered('    at file:///Users/me/proj/scripts/build.mjs:12:7'), ['/Users/me/proj/scripts/build.mjs:12']);
+    assert.deepEqual(offered('    at main (file:///Users/me/proj/a.mjs:3:9)'), ['/Users/me/proj/a.mjs:3']);
+    assert.deepEqual(offered('    at file:///home/me/app/a.ts:3:7'), ['/home/me/app/a.ts:3']);
+    assert.deepEqual(offered('    at file:///C:/Users/me/proj/index.mjs:3:7'), ['C:/Users/me/proj/index.mjs:3']);
+    for (const line of ['file:////host/share/x.py:1', 'file://host/share/x.py:1', 'at file://host/a.mjs:2:1']) {
+      assert.deepEqual(offered(line), [], line);
+    }
+    // And still linear around the new start.
+    const started = performance.now();
+    findLinks(`${'file:///'.repeat(8000)}x.js:1`);
+    assert.ok(performance.now() - started < 30, 'a long run of file URIs is read once');
+  });
 });
