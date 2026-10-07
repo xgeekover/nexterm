@@ -3,9 +3,11 @@ use tauri::{AppHandle, State};
 use crate::models::PtySessionInfo;
 use crate::AppState;
 
-/// The webview never chooses the shell binary and can only start a session
-/// inside the open folder; see `Workspace::spawn_dir` for where it starts
-/// otherwise. The chosen directory comes back as `PtySessionInfo::cwd`.
+/// The webview chooses the shell — a name `resolve_shell` looks up, or a path
+/// taken as written — and the directory, which may be any directory on this
+/// machine (a shell can `cd` anywhere the moment it exists); see
+/// `Workspace::spawn_dir` for where it starts when that one will not do. The
+/// chosen directory comes back as `PtySessionInfo::cwd`.
 ///
 /// `async` here does not make the body asynchronous — it tells Tauri to run
 /// this command off the IPC thread. Spawning forks a shell and writes the

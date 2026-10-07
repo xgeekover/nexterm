@@ -765,18 +765,6 @@ export function migrateV1Workspace(v1) {
 }
 
 /**
- * Read the live workspace payload, migrating an older schema instead of
- * throwing it away.
- *
- * `loadState` deliberately returns the fallback for ANY version mismatch,
- * which for this key would mean: bootstrap a single terminal, then let the
- * 300ms write-behind overwrite the user's real workspace. So this goes through
- * `loadVersionedState` and branches on the version explicitly; anything
- * unrecognised (including a *newer* schema written by a future build) returns
- * null, which bootstraps but — because nothing is understood — is the only
- * safe reading.
- */
-/**
  * Copy the pre-upgrade payload aside before this version can write over it.
  *
  * The upgrade launch is the one launch where the saved workspace is
@@ -795,6 +783,18 @@ function backUpPreUpgradePayload() {
   }
 }
 
+/**
+ * Read the live workspace payload, migrating an older schema instead of
+ * throwing it away.
+ *
+ * `loadState` deliberately returns the fallback for ANY version mismatch,
+ * which for this key would mean: bootstrap a single terminal, then let the
+ * 300ms write-behind overwrite the user's real workspace. So this goes through
+ * `loadVersionedState` and branches on the version explicitly; anything
+ * unrecognised (including a *newer* schema written by a future build) returns
+ * null, which bootstraps but — because nothing is understood — is the only
+ * safe reading.
+ */
 function loadWorkspacePayload() {
   const stored = loadVersionedState(PERSIST_KEY);
   if (!stored) return null;
@@ -1503,7 +1503,6 @@ export const useTerminalStore = create((set, get, api) => {
     resolveTimers.delete(tabId);
   };
 
-  /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   /**
    * Freeze one group into something storable: its layout with the live tab
    * ids swapped for stable slot ids, and each terminal's title and CURRENT
@@ -1617,6 +1616,7 @@ export const useTerminalStore = create((set, get, api) => {
       )
     );
 
+  /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   const killTabIfOrphaned = async (tabId) => {
     if (groupOfTab(get(), tabId)) return;
     const tab = get().tabs.find((t) => t.id === tabId);
@@ -1965,17 +1965,17 @@ export const useTerminalStore = create((set, get, api) => {
         });
       }),
 
-    /**
-     * Bring a group on screen. Its arrangement is exactly as it was last left;
-     * the active tab moves with it (an inactive group's terminals keep
-     * running, so this is purely a view/focus change).
-     */
     /** Rename the session you are working in. */
     renameWorkspace: (name) => {
       const trimmed = (name || '').trim();
       if (trimmed) set({ workspaceName: trimmed });
     },
 
+    /**
+     * Bring a group on screen. Its arrangement is exactly as it was last left;
+     * the active tab moves with it (an inactive group's terminals keep
+     * running, so this is purely a view/focus change).
+     */
     setActiveGroup: (groupId) =>
       set((state) => {
         const group = state.groups.find((g) => g.id === groupId);
@@ -3513,7 +3513,6 @@ export const useTerminalStore = create((set, get, api) => {
       }));
     },
 
-    // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
     /**
      * Run an agent in a terminal, and remember which conversation it is.
      *
@@ -3705,6 +3704,7 @@ export const useTerminalStore = create((set, get, api) => {
       }));
     },
 
+    // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
     writeRaw: async (tabId, data) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
@@ -3889,7 +3889,6 @@ export const useTerminalStore = create((set, get, api) => {
       }, SUBMIT_GRACE_MS);
     },
 
-    // Keep the backend PTY's window size in step with the pane (debounced by the caller).
     /**
      * Tell the shell how big its terminal is — once the size has stopped
      * changing.

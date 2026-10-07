@@ -40,8 +40,8 @@ let refreshTimer = null;
 let initInFlight = null;
 
 // --- Editor split tree ------------------------------------------------------
-// Mirrors src/stores/terminalStore.js's split-tree model so the editor
-// workspace can be arranged the same way the terminal already is:
+// The same leaf/split tree each terminal group holds (src/stores/terminalStore.js),
+// so the editor can be arranged the way a terminal group is:
 //   { type: 'leaf', id, tabIds: [], activeTabId } |
 //   { type: 'split', id, direction: 'horizontal'|'vertical', children: [...] }
 // Each leaf is an editor group holding its own file tabs, so a tab can be
@@ -148,11 +148,11 @@ function addTabToPane(node, paneId, tabId) {
   );
 }
 
-/** An empty root, used when the last editor tab goes away. */
 /** How many folders "Open Recent" remembers. */
 const RECENT_ROOT_LIMIT = 12;
 const RECENT_ROOTS_KEY = 'nexterm.recentRoots';
 
+/** An empty root, used when the last editor tab goes away. */
 const emptyEditorTree = () => ({ type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null });
 
 // --- Path helpers shared by the move/rename/duplicate flows below ---------

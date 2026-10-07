@@ -4,9 +4,12 @@
 //! `async`.** A plain `fn` command is `ExecutionContext::Blocking`, which
 //! means it runs on the event-loop thread: while it works, the window does
 //! not paint, does not scroll and does not answer. `#[tauri::command(async)]`
-//! on a synchronous function moves it to the runtime's blocking pool instead,
-//! which costs nothing and is the difference between a folder open that is
-//! instant and one that looks like a crash.
+//! on a synchronous function moves it off that thread — onto one of the
+//! async runtime's worker threads (`tokio::spawn`), not the blocking pool —
+//! and that is the difference between a folder open that is instant and one
+//! that looks like a crash. A body that can run for as long as a folder is
+//! big (`fs_copy_path`, `fs_list_files`) hands its work to the blocking pool
+//! itself, so it does not hold a worker every other command shares.
 //!
 //! The commands that only read a `Mutex` in memory (`fs_get_root`) stay
 //! blocking — dispatching those would be slower than doing them.
@@ -123,8 +126,10 @@ pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {
         .map(|root| root.to_string_lossy().to_string()))
 }
 
-/// Change the workspace root through a native folder picker. This is the only
-/// way the root can move, so the webview cannot widen its own access.
+/// Change the workspace root through a native folder picker. Besides this,
+/// only `fs_set_root` moves the root, to a folder the webview names — so the
+/// open folder is not a boundary against the webview, only the scope every
+/// other `fs_*` command is confined to.
 ///
 /// `async`, and the picker is the CALLBACK form, for one reason: a plain
 /// `fn` command runs in `ExecutionContext::Blocking`, which is the event-loop

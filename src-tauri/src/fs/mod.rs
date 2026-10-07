@@ -618,9 +618,10 @@ fn copy_link(from: &Path, to: &Path, file_type: fs::FileType) -> std::io::Result
 //
 // Every fs_* command resolves its path through `Workspace::confine` — or
 // `confine_entry`, when it acts on the entry itself — which rejects anything
-// that escapes the active root. The root itself can only be changed by
-// `fs_pick_root`, which goes through a native folder dialog, so the webview
-// cannot widen its own access by calling a command.
+// that escapes the active root. The root itself moves through `fs_pick_root`
+// (a native folder dialog) or `fs_set_root` (Open Recent, any existing
+// directory the webview names), so confinement keeps every other command to
+// the open folder; it is not a boundary the webview cannot move.
 // ---------------------------------------------------------------------------
 
 /// The file inside the app config directory that remembers the open folder,
