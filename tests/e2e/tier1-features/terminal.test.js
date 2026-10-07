@@ -20,17 +20,20 @@ describe('Tier 1: Terminal Blocks & Multi-Tab Feature Coverage', () => {
     assert.equal(activeTab.blocks[0].id, block.id);
   });
 
-  test('TC-TERM-02: Executed command receives stdout data streamed from PTY session into block', async () => {
-    const block = await app.executeTerminalCommand('echo hello-world');
-    assert.ok(block.output.includes('hello-world'), 'Block output must contain stdout stream text');
+  test('TC-TERM-02: A command typed at the prompt reaches the shell, and what it prints reaches the terminal', async () => {
+    const run = await app.runTerminalCommand('echo hello-world');
+    const writes = app.ipc.getCalls('pty_write');
+    assert.equal(writes.at(-1).args.data, 'echo hello-world\r', 'Typed into the shell, Enter included');
+    assert.ok(run.output.includes('hello-world'), 'The terminal must be handed what the shell printed');
   });
 
-  test('TC-TERM-03: Block records execution exit code and duration metadata', async () => {
-    const block = await app.executeTerminalCommand('ls');
-    assert.equal(block.exitCode, 0, 'Successful command must have exit code 0');
-    assert.equal(block.status, 'completed', 'Status should be completed');
-    assert.ok(typeof block.durationMs === 'number', 'Duration must be a numeric timestamp in ms');
-    assert.ok(block.durationMs >= 0, 'Duration must be non-negative');
+  test('TC-TERM-03: The tab follows the command — running while it runs, then the exit code the shell reported', async () => {
+    const run = await app.runTerminalCommand('ls');
+    assert.equal(run.sawRunning, true, 'The shell said the command started, and the tab must read as running');
+    assert.equal(run.exitCode, 0, 'Successful command must have exit code 0');
+    const tab = app.getActiveTerminalTab();
+    assert.equal(tab.running, false, 'Finished: the tab must not read as running any more');
+    assert.equal(tab.runStartedAt, null, 'and nothing is being timed');
   });
 
   test('TC-TERM-04: Multiple terminal tabs can be opened with independent PTY sessions and switched', async () => {

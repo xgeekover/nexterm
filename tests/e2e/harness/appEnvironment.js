@@ -23,6 +23,7 @@ import { useTerminalStore } from '../../../src/stores/terminalStore.js';
 import { useEditorStore } from '../../../src/stores/editorStore.js';
 import { useSettingsStore } from '../../../src/stores/settingsStore.js';
 import { mockBridge } from '../../../src/lib/ipc.js';
+import { attachOutput, resetPtyOutputBus } from '../../../src/lib/ptyOutputBus.js';
 import { buildPaletteGroups } from '../../../src/lib/paletteItems.js';
 import { DEFAULT_PROJECT_FILES } from '../../../src/lib/constants.js';
 import { getLanguageFromPath } from '../../../src/lib/utils.js';
@@ -149,6 +150,9 @@ function resetBridge(bridge) {
 }
 
 export class AppEnvironment {
+  /** session id -> everything its terminal has been handed (see `terminalOutput`). */
+  #screens = new Map();
+
   constructor() {
     // Drop the previous case's listeners and pending persist timer before the
     // backend forgets the sessions those listeners were about.
@@ -203,6 +207,11 @@ export class AppEnvironment {
   }
 
   async initialize() {
+    // The output bus is a module singleton as well, and `resetBridge` took
+    // its `pty-output` listener away with every other one: left alone it
+    // stayed "started" and heard nothing from the second case on. Reset, it
+    // is started again by the store's bootstrap, as it is when the app starts.
+    await resetPtyOutputBus();
     await this.terminal.init();
     await this.editor.init();
   }
@@ -253,6 +262,64 @@ export class AppEnvironment {
 
   async closeTerminalTab(tabId) {
     await this.terminal.closeTab(tabId);
+  }
+
+  #terminalTab(tabId) {
+    const targetId = tabId || this.terminal.activeTabId;
+    const tab = this.terminal.tabs.find((t) => t.id === targetId);
+    if (!tab) throw new Error(`Terminal tab not found: ${targetId}`);
+    return tab;
+  }
+
+  /**
+   * Everything a terminal's shell has printed, as the terminal is handed it:
+   * through the output bus (src/lib/ptyOutputBus.js), the way a TerminalView
+   * gets it. The first read attaches, which hands over what the bus kept
+   * while nothing showed the tab, as showing it for the first time does;
+   * from then on the harness is that terminal's screen. Raw, escape
+   * sequences and all — there is no terminal emulator here.
+   */
+  terminalOutput(tabId = null) {
+    const { sessionId } = this.#terminalTab(tabId);
+    let screen = this.#screens.get(sessionId);
+    if (!screen) {
+      screen = { text: '' };
+      this.#screens.set(sessionId, screen);
+      attachOutput(sessionId, (data) => {
+        screen.text += data;
+      });
+    }
+    return screen.text;
+  }
+
+  /**
+   * Type a command at a terminal's prompt and press Enter, the way the user
+   * does: through `writeRaw`, as every key goes. The mock shell runs a line
+   * inside the write that sends it, so once that write is done its start
+   * (OSC 133 "C"), its output and its end ("D") have all arrived.
+   *
+   * Returns what there is to see of it: `output`, what the shell printed for
+   * it (see `terminalOutput`); `exitCode`, the verdict the tab now carries —
+   * what the tab strip and the status bar read; and `sawRunning`, whether
+   * the tab read as running while the command ran.
+   */
+  async runTerminalCommand(commandText, tabId = null) {
+    const { id } = this.#terminalTab(tabId);
+    const shownBefore = this.terminalOutput(id).length;
+    let sawRunning = false;
+    const stop = useTerminalStore.subscribe((state) => {
+      if (state.tabs.find((t) => t.id === id)?.running) sawRunning = true;
+    });
+    try {
+      await this.terminal.writeRaw(id, `${commandText}\r`);
+    } finally {
+      stop();
+    }
+    return {
+      output: this.terminalOutput(id).slice(shownBefore),
+      exitCode: this.terminal.tabs.find((t) => t.id === id)?.lastExitCode ?? null,
+      sawRunning,
+    };
   }
 
   async executeTerminalCommand(commandText, tabId = null) {
