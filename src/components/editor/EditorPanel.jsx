@@ -417,6 +417,17 @@ function unsavedPromptText({ kind, names }) {
  * only to overwrite or not.
  */
 /**
+ * Whether a press makes the group it lands in the active one — and so its
+ * shown tab what Save writes. Only the main button: a middle-click closes a
+ * tab in another group without the focus leaving the one being typed in, and
+ * it made that group active all the same, so the next Ctrl+S saved a file the
+ * user was not editing and left the edited one unsaved.
+ */
+export function pressActivatesGroup(e) {
+  return e?.button === 0;
+}
+
+/**
  * The editor's prompts in the order they opened — `previous`, the order last
  * drawn, with those now closed dropped and those newly `open` added at the
  * end.
@@ -519,7 +530,9 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
 
   return (
     <div
-      onMouseDown={() => setActiveEditorPane(paneId)}
+      onMouseDown={(e) => {
+        if (pressActivatesGroup(e)) setActiveEditorPane(paneId);
+      }}
       onFocusCapture={() => setActiveEditorPane(paneId)}
       className={cn(
         'flex flex-col h-full w-full bg-vsc-editor overflow-hidden',

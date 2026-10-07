@@ -187,3 +187,20 @@ describe('The editor prompts, in the order they opened', () => {
     assert.match(panel, /promptOrder\.current\.map\(\(key\) => \(\s*<React\.Fragment key=\{key\}>\{promptOf\[key\]\}<\/React\.Fragment>/);
   });
 });
+
+describe('Which press makes a group the active one', () => {
+  // Found in review: a middle-click that closes a tab in another group left
+  // the focus where it was, yet made that group active — and Save wrote its
+  // file instead of the one being typed in.
+  test('PL-05: the main button does; a middle- or right-click does not', async () => {
+    const { pressActivatesGroup } = await loadEditorPanel();
+    assert.equal(pressActivatesGroup({ button: 0 }), true);
+    assert.equal(pressActivatesGroup({ button: 1 }), false, 'middle-click: closes a tab, focus stays');
+    assert.equal(pressActivatesGroup({ button: 2 }), false, 'right-click: a menu, focus stays');
+    assert.equal(pressActivatesGroup(undefined), false);
+
+    const { readFileSync } = await import('node:fs');
+    const panel = readFileSync(new URL('../../src/components/editor/EditorPanel.jsx', import.meta.url), 'utf8');
+    assert.match(panel, /onMouseDown=\{\(e\) => \{\s*if \(pressActivatesGroup\(e\)\) setActiveEditorPane\(paneId\);\s*\}\}/);
+  });
+});
