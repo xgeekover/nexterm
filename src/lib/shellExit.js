@@ -42,13 +42,60 @@ export function describeExitCode(code) {
   return unsigned === CTRL_C_EXIT ? `${unsigned} (${hex}, ended by Ctrl+C)` : `${unsigned} (${hex})`;
 }
 
-/** The lines a terminal shows when its shell has exited, as xterm writes them. */
+/**
+ * What a program switches on and only it switches off again, switched off:
+ * mouse reporting, synchronized output, modifyOtherKeys, and — through a soft
+ * reset (DECSTR) — a hidden cursor, application cursor keys and keypad,
+ * bracketed paste, focus reports, a scroll region, insert mode and colours.
+ * A program that dies with its shell never switches them off, and a terminal
+ * that kept them took every drag as a mouse report instead of a selection and
+ * every Shift+Enter as `CSI 27;2;13~`. The screen itself is left as it is.
+ */
+export const PROGRAM_MODES_OFF = '\x1b[?1000l\x1b[?1006l\x1b[?2026l\x1b[>4m\x1b[!p';
+
+/**
+ * What a terminal is written when its shell has exited, as xterm takes it:
+ * the modes its last program left switched off, then the lines that say so.
+ */
 export function exitNotice(code) {
   const described = describeExitCode(code);
   return (
+    PROGRAM_MODES_OFF +
     `\r\n\x1b[90m[process exited${described === null ? '' : ` with code ${described}`}]\x1b[0m` +
     `\r\n\x1b[90mPress Enter to start a new shell in this terminal.\x1b[0m\r\n`
   );
+}
+
+/**
+ * What a terminal is written before a new shell's first output, when it
+ * showed another shell before (Enter after an exit; a restore).
+ *
+ * Back on the normal screen, its cursor where it was before the program that
+ * took the alternate one — `ESC 7` first, so that on the normal screen
+ * already it stays put — and every mode a program set switched off: the new
+ * shell would otherwise have drawn on the dead program's alternate screen,
+ * with no scrollback, and sent its clicks as mouse reports.
+ *
+ * Then everything down to the cursor row goes up into the scrollback (a line
+ * feed per row from wherever the cursor is), leaving the cursor at the top of
+ * an empty screen. That is where a new pseudoconsole takes it to be: the
+ * backend answers ConPTY's startup query with the origin
+ * (src-tauri/src/pty/startup_query.rs), true only of an empty terminal, and
+ * ConPTY places what it draws from there — over the old screen, in a
+ * terminal that still showed one.
+ */
+export function freshScreen(rows) {
+  const lines = Number.isInteger(rows) && rows > 0 ? rows : 24;
+  return `\x1b7\x1b[?1049l${PROGRAM_MODES_OFF}${'\n'.repeat(lines)}\x1b[H\x1b[J`;
+}
+
+/** `"120x40"`, the size a terminal last told its PTY, as `{ cols, rows }`; null for anything else. */
+export function parseSize(key) {
+  const match = typeof key === 'string' ? /^(\d{1,4})x(\d{1,4})$/.exec(key) : null;
+  if (!match) return null;
+  const cols = Number(match[1]);
+  const rows = Number(match[2]);
+  return cols > 0 && rows > 0 ? { cols, rows } : null;
 }
 
 /**

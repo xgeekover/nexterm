@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { forgetOutput, startPtyOutputBus } from '../lib/ptyOutputBus.js';
 import { notifyTerminal } from '../lib/terminalNotice.js';
-import { restartsShell, sessionIsGone } from '../lib/shellExit.js';
+import { parseSize, restartsShell, sessionIsGone } from '../lib/shellExit.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
 // schema as absent, which for this store's keys would mean silently bootstrapping
 // over the user's workspace. Reads go through `loadVersionedState` + an explicit
@@ -3670,7 +3670,12 @@ export const useTerminalStore = create((set, get, api) => {
         }
         const startDir = await startDirFor(tab.cwd);
         const shellSpec = tab.shell || useSettingsStore.getState().terminalDefaultShell;
-        const spawnAt = (dir) => invoke('pty_spawn', { cols: 80, rows: 24, cwd: dir, shell: shellSpec });
+        // At the size the terminal last told its PTY, not 80×24 with a resize
+        // to follow: ConPTY redraws on a resize from where it believes its
+        // cursor is.
+        const size = parseSize(tab.lastSize);
+        const { cols, rows } = size ?? { cols: 80, rows: 24 };
+        const spawnAt = (dir) => invoke('pty_spawn', { cols, rows, cwd: dir, shell: shellSpec });
         let ptySession;
         try {
           ptySession = await spawnAt(startDir);
@@ -3702,9 +3707,9 @@ export const useTerminalStore = create((set, get, api) => {
                   agent: null,
                   agentResumeOffered: false,
                   agentTyped: null,
-                  // The new PTY starts at 80×24; the size the old one was told
-                  // must not make `resizePty` think this one already has it.
-                  lastSize: null,
+                  // What the new PTY was started at — 80×24 when the old one
+                  // was never told a size — so `resizePty` sends what differs.
+                  lastSize: size ? tab.lastSize : null,
                   spawnedAt: Date.now(),
                 }
               : t
@@ -3811,8 +3816,11 @@ export const useTerminalStore = create((set, get, api) => {
           set((state) => ({
             tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: key } : t)),
           }));
+          // The tab's session now: Enter may have started a new shell since
+          // the size was asked for, and the old one is gone.
+          const sessionId = get().tabs.find((t) => t.id === tab.id)?.sessionId ?? tab.sessionId;
           try {
-            await invoke('pty_resize', { session_id: tab.sessionId, cols, rows });
+            await invoke('pty_resize', { session_id: sessionId, cols, rows });
           } catch (err) {
             console.error('[TerminalStore] Resize failed:', err);
           }

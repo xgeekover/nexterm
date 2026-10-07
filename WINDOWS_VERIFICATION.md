@@ -605,9 +605,15 @@ in the suites with the browser mock.
   ended (`0xC000013A, ended by Ctrl+C` is the suspected one) — and
   `Press Enter to start a new shell in this terminal.`, and no yellow
   `[NexTerm] PTY session …` line however many keys are pressed.
-- Enter: a new cmd prompt in the same directory, in the same pane, with the
-  old output still above it; commands run. The tab's name is no longer struck
-  through.
+- Enter: a new cmd prompt at the top of the same pane, in the same
+  directory; the old output and the notice are in the scrollback just above
+  it (scroll up). Commands run, and the prompt and their output stay where
+  they are written — nothing lands on top of old output. Resize the pane: the
+  same. The tab's name is no longer struck through.
+- If cmd went while OpenCode was still on screen: the notice shows over
+  OpenCode's last screen, a drag there selects text (it does not reach
+  OpenCode), and Enter brings back cmd's own screen with the cursor visible.
+  Arrow keys and Shift+Enter then behave as in a new terminal.
 - `exit` at a PowerShell prompt: the same notice with code 0, and Enter brings
   PowerShell back.
 - When it fails, say which half: a yellow `[NexTerm] Could not start a new
