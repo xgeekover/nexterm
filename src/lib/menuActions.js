@@ -84,6 +84,7 @@ export function runMenuAction(id) {
       break;
     case 'search-in-files':
       settings.showView?.('search');
+      break;
     case 'command-history':
       settings.setCommandPaletteOpen(true, 'history');
       break;

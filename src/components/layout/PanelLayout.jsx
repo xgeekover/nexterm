@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Group, Panel, Separator, useGroupRef } from 'react-resizable-panels';
-import { useSettingsStore } from '../../stores/settingsStore.js';
+import { useSettingsStore, viewsIn, shownView } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TerminalSplitContainer } from '../terminal/index.js';
 import { TerminalsPanel } from '../terminal/index.js';
@@ -42,10 +42,8 @@ const DEFAULT_EDITOR_PANEL_LAYOUT = { 'editor-group': 60, 'bottom-panel': 40 };
 // doesn't linger, invisible, for a whole transition just to reflow late.
 const PANEL_TRANSITION_MS = 180;
 
-// The three draggable views and where each one is allowed to render.
-// Order here also controls tab order within a region.
-const VIEW_ORDER = ['explorer', 'search', 'terminal', 'terminals'];
-
+// The draggable views, by id. Their order within a region is VIEW_ORDER in
+// settingsStore.js, which also says which one a region shows.
 const VIEW_META = {
   explorer: { title: 'Explorer', Component: FileExplorer },
   search: { title: 'Search', Component: SearchPanel },
@@ -404,48 +402,36 @@ export function PanelLayout() {
     document.documentElement.classList.toggle('reduce-motion', reducedMotionSetting);
   }, [reducedMotionSetting]);
 
-  // Which view is shown when a region hosts more than one (tabs). Only
-  // overridden explicitly by clicking a tab; otherwise falls back to the
-  // first view assigned to that region.
-  const [explicitActive, setExplicitActive] = useState({});
+  // Which view a region shows when it hosts more than one (tabs) lives in the
+  // store, so the activity bar lights the view this draws: a tab clicked here,
+  // an activity-bar icon or a shortcut all set it, and a region nobody chose
+  // for shows its first view (see `shownView`).
+  const chosenViews = useSettingsStore((s) => s.chosenViews);
+  const chooseView = useSettingsStore((s) => s.chooseView);
 
-  const regionViews = useMemo(() => {
-    const map = { left: [], right: [], bottom: [] };
-    VIEW_ORDER.forEach((view) => {
-      const region = viewLocations[view];
-      if (map[region]) map[region].push(view);
-    });
-    return map;
-  }, [viewLocations]);
+  const regionViews = useMemo(
+    () => ({
+      left: viewsIn(viewLocations, 'left'),
+      right: viewsIn(viewLocations, 'right'),
+      bottom: viewsIn(viewLocations, 'bottom'),
+    }),
+    [viewLocations]
+  );
 
   const activeViewFor = useCallback(
-    (region) => {
-      const views = regionViews[region];
-      if (!views.length) return null;
-      const explicit = explicitActive[region];
-      return views.includes(explicit) ? explicit : views[0];
-    },
-    [regionViews, explicitActive]
+    (region) => shownView({ viewLocations, chosenViews }, region),
+    [viewLocations, chosenViews]
   );
 
-  const handleSelectView = useCallback(
-    (region, view) => setExplicitActive((prev) => ({ ...prev, [region]: view })),
-    []
-  );
+  const handleSelectView = useCallback((region, view) => chooseView(region, view), [chooseView]);
 
-  // The activity bar asks for a view from outside this component; honour the
-  // request once and drop it, so it can never become a second opinion about
-  // which tab is showing.
+  // `showView` has already made the view its region's choice; the request
+  // that came with it is dropped once drawn.
   const requestedView = useSettingsStore((s) => s.requestedView);
   const clearRequestedView = useSettingsStore((s) => s.clearRequestedView);
   useEffect(() => {
-    if (!requestedView) return;
-    const { view, region } = requestedView;
-    if (regionViews[region]?.includes(view)) {
-      setExplicitActive((prev) => ({ ...prev, [region]: view }));
-    }
-    clearRequestedView();
-  }, [requestedView, regionViews, clearRequestedView]);
+    if (requestedView) clearRequestedView();
+  }, [requestedView, clearRequestedView]);
 
   // --- Drag & drop -----------------------------------------------------
   const [draggingView, setDraggingView] = useState(null);
