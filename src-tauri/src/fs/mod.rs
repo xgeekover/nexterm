@@ -257,17 +257,30 @@ pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
     fs::write(&path, content).map_err(|e| format!("Failed to write file '{path_str}': {e}"))
 }
 
+/// Create an empty file where nothing is: no file, no folder, and no link,
+/// whether or not the link leads anywhere.
+///
+/// `create_new` asks exactly that of the OS, in one step: std documents it
+/// as failing when anything is at the path, "also no (dangling) symlink", on
+/// every platform. This used to check `exists()` and then write: `exists()`
+/// follows a link, so a link to nothing was "not there" and the write made
+/// its target; and a file that appeared between the two was emptied.
 pub fn create_file(path_str: &str) -> Result<(), String> {
     let path = resolve_path(path_str);
-    if path.exists() {
-        return Err(format!("File already exists: {path_str}"));
-    }
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directory: {e}"))?;
         }
     }
-    fs::write(&path, "").map_err(|e| format!("Failed to create file '{path_str}': {e}"))
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map(drop)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("File already exists: {path_str}"),
+            _ => format!("Failed to create file '{path_str}': {e}"),
+        })
 }
 
 pub fn create_dir(path_str: &str) -> Result<(), String> {
@@ -849,6 +862,12 @@ fn spelled_in(root: &Path, path_str: &str) -> Option<PathBuf> {
 
 /// `path` with every link in it resolved, refused unless that lands inside
 /// `root`.
+///
+/// A link that cannot be followed — to something that does not exist, or
+/// round in a loop — is refused wherever it is in the path. It used to be
+/// taken for a name that does not exist yet and kept as it was, and a save
+/// or a New File then wrote through it, making its target wherever it
+/// pointed, outside the open folder as easily as in it.
 fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, String> {
     // Canonicalize the deepest part that exists so a symlink cannot point out
     // of the root; segments that do not exist yet are re-appended afterwards.
@@ -857,6 +876,12 @@ fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, S
     let resolved = loop {
         match cursor.canonical() {
             Ok(canonical) => break canonical,
+            Err(_) if cursor.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) => {
+                return Err(format!(
+                    "Path goes through a broken link ({}): {path_str}",
+                    cursor.display()
+                ));
+            }
             Err(_) => {
                 let name = cursor
                     .file_name()
@@ -1234,6 +1259,29 @@ mod tests {
         // Delete dir
         assert!(delete_path(&dir_str, true).is_ok());
         assert!(!temp_dir.exists());
+    }
+
+    /// New File checked `exists()`, which follows a link, and then wrote: a
+    /// link to nothing was "not there", and the write made its target. And a
+    /// file that appeared between the check and the write was emptied.
+    #[cfg(unix)]
+    #[test]
+    fn creating_a_file_never_follows_a_link_or_empties_a_file() {
+        let dir = scratch("create-new");
+        std::os::unix::fs::symlink(dir.join("target.txt"), dir.join("link")).unwrap();
+        fs::write(dir.join("kept.txt"), "keep me").unwrap();
+
+        let err = create_file(&dir.join("link").to_string_lossy()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(dir.join("target.txt").symlink_metadata().is_err(), "the link's target was made");
+
+        let err = create_file(&dir.join("kept.txt").to_string_lossy()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("kept.txt")).unwrap(), "keep me");
+
+        create_file(&dir.join("sub").join("new.txt").to_string_lossy()).unwrap();
+        assert_eq!(fs::read(dir.join("sub").join("new.txt")).unwrap(), b"", "a new file, and its folder");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn scratch(tag: &str) -> PathBuf {

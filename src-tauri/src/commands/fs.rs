@@ -191,12 +191,20 @@ pub fn fs_read_file(state: State<AppState>, path: String) -> Result<String, Stri
 
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_write_file(state: State<AppState>, path: String, content: String) -> Result<(), String> {
-    fs::write_file(&confined(&state, &path)?, &content)
+    write_in(&state.workspace, &path, &content)
+}
+
+fn write_in(workspace: &fs::Workspace, path: &str, content: &str) -> Result<(), String> {
+    fs::write_file(&workspace.confine(path)?.to_string_lossy(), content)
 }
 
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_create_file(state: State<AppState>, path: String) -> Result<(), String> {
-    fs::create_file(&confined(&state, &path)?)
+    create_in(&state.workspace, &path)
+}
+
+fn create_in(workspace: &fs::Workspace, path: &str) -> Result<(), String> {
+    fs::create_file(&workspace.confine(path)?.to_string_lossy())
 }
 
 #[tauri::command(async, rename_all = "snake_case")]
@@ -424,17 +432,18 @@ mod dispatch_tests {
     }
 }
 
-/// Delete, rename and copy as the commands run them — confinement included —
-/// on real folders.
+/// Delete, rename, copy, save and New File as the commands run them —
+/// confinement included — on real folders.
 ///
 /// The functions in `crate::fs` were tested on their own, with paths handed
-/// straight to them. That missed both ways confinement used to change what
+/// straight to them. That missed the ways confinement used to change what
 /// they were given: a link was resolved to the file it points at before
-/// `delete_path` ever saw it, and a new name was resolved to the existing
-/// entry's spelling before `rename_path` saw it.
+/// `delete_path` ever saw it, a new name was resolved to the existing
+/// entry's spelling before `rename_path` saw it, and a link to nothing was
+/// passed to `write_file` as a name still free.
 #[cfg(test)]
 mod entry_tests {
-    use super::{copy_in, delete_in, rename_in};
+    use super::{copy_in, create_in, delete_in, rename_in, write_in};
     use crate::fs::Workspace;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -874,6 +883,69 @@ mod entry_tests {
         let err = copy_in(&workspace, "a.txt", "taken").unwrap_err();
         assert!(err.contains("already exists"), "{err}");
         assert!(root.join("made-through-the-link.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link whose target does not exist was taken for a name that does not
+    /// exist yet: confinement let it through, and a save or a New File wrote
+    /// through it — creating whatever it pointed at, outside the open folder
+    /// as easily as in it.
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_written_through_a_broken_link() {
+        let (workspace, root) = open_folder("write-broken");
+        let outside = outside_folder("write-broken");
+        let planted = outside.join("planted.txt");
+        link(&planted, &root.join("out"));
+        link("missing.txt", &root.join("in"));
+        link(outside.join("no-such-folder"), &root.join("gone"));
+
+        for name in ["out", "in"] {
+            assert!(write_in(&workspace, name, "x").is_err(), "saved through the link {name}");
+            assert!(create_in(&workspace, name).is_err(), "created through the link {name}");
+        }
+        assert!(write_in(&workspace, "gone/new.txt", "x").is_err(), "saved below a link to no folder");
+
+        assert!(planted.symlink_metadata().is_err(), "a file was made outside the folder");
+        assert!(root.join("missing.txt").symlink_metadata().is_err(), "the link's target was made");
+        assert!(is_link(&root.join("out")) && is_link(&root.join("in")), "the links themselves stay");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// Save and New File on plain files, on every platform: a New File over
+    /// a file that is there refuses and leaves it as it was.
+    #[test]
+    fn a_save_and_a_new_file_land_in_the_folder_and_never_empty_a_file() {
+        let (workspace, root) = open_folder("write-plain");
+
+        create_in(&workspace, "notes/new.txt").unwrap();
+        write_in(&workspace, "notes/new.txt", "saved").unwrap();
+        let err = create_in(&workspace, "notes/new.txt").unwrap_err();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(root.join("notes").join("new.txt")).unwrap(), "saved");
+        assert!(write_in(&workspace, "../nexterm-write-escaped.txt", "x").is_err());
+        assert!(create_in(&workspace, "../nexterm-write-escaped.txt").is_err());
+        assert!(root.parent().unwrap().join("nexterm-write-escaped.txt").symlink_metadata().is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A link that leads to a file in the folder is saved through, as a link
+    /// opened in the editor should be; only one that leads nowhere is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_file_in_the_folder_is_still_saved_through() {
+        let (workspace, root) = open_folder("write-link");
+        fs::write(root.join("CLAUDE.md"), "old").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+
+        write_in(&workspace, "AGENTS.md", "new").unwrap();
+
+        assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "new");
+        assert!(is_link(&root.join("AGENTS.md")));
+        let err = create_in(&workspace, "AGENTS.md").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 
