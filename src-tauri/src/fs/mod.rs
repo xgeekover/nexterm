@@ -539,20 +539,55 @@ fn already_exists(path: &Path) -> String {
     format!("A file or folder named '{name}' already exists")
 }
 
-/// `copy_path` for a folder: create `to`, fill it, and remove it again if
-/// filling it fails. `to` did not exist before (`copy_path` checked, and
-/// `create_dir` would refuse one that appeared since), so everything under it
-/// is this copy's own; `remove_dir_all` removes the links it meets as links,
-/// so the clean-up never reaches past the copy either.
+/// `copy_path` for a folder. It is filled under a temporary name beside `to`
+/// (`staging_beside`) and takes the name `to` only once it is complete.
+///
+/// A big folder takes minutes, and it used to be filled in place: the
+/// Explorer showed it at once, so a file saved or an agent run in it while it
+/// filled was removed with it when the copy then failed, and a copy the app
+/// was closed in the middle of stayed behind looking finished. Now nothing
+/// knows the temporary folder's name, so removing it on failure removes only
+/// this copy's own (`remove_dir_all` removes the links it meets as links), and
+/// an interrupted one is plainly unfinished.
 fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
-    fs::create_dir(to).map_err(|e| format!("Failed to create '{}': {e}", to.display()))?;
-    let Err(error) = fill_folder(from, to) else {
-        return Ok(());
-    };
-    match fs::remove_dir_all(to) {
+    let staging = staging_beside(to)?;
+    let discard = |error: String| match fs::remove_dir_all(&staging) {
         Ok(()) => Err(error),
-        Err(e) => Err(format!("{error} (and the partial copy at '{}' could not be removed: {e})", to.display())),
+        Err(e) => Err(format!(
+            "{error} (and the unfinished copy at '{}' could not be removed: {e})",
+            staging.display()
+        )),
+    };
+    if let Err(error) = fill_folder(from, &staging) {
+        return discard(error);
     }
+    // `to` was free when the copy began; something may have taken it since.
+    if to.symlink_metadata().is_ok() {
+        return discard(already_exists(to));
+    }
+    fs::rename(&staging, to).or_else(|e| discard(format!("Failed to name the copy '{}': {e}", to.display())))
+}
+
+/// A new, empty folder beside `to` for a copy to fill: `.<name>.copying`, or
+/// that with a number while it is taken — a copy the app was closed in the
+/// middle of leaves one.
+fn staging_beside(to: &Path) -> Result<PathBuf, String> {
+    let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
+        return Err(format!("Cannot copy to '{}'", to.display()));
+    };
+    let name = name.to_string_lossy();
+    for n in 1..=100u32 {
+        let candidate = parent.join(match n {
+            1 => format!(".{name}.copying"),
+            _ => format!(".{name}.copying-{n}"),
+        });
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Failed to create '{}': {e}", candidate.display())),
+        }
+    }
+    Err(format!("Cannot copy to '{}': too many unfinished copies beside it", to.display()))
 }
 
 fn fill_folder(from: &Path, to: &Path) -> Result<(), String> {
@@ -589,27 +624,37 @@ fn copy_link(from: &Path, to: &Path, _: fs::FileType) -> std::io::Result<()> {
     std::os::unix::fs::symlink(fs::read_link(from)?, to)
 }
 
-/// Windows makes a link to a folder and a link to a file differently, and
-/// only in Developer Mode or for an administrator; without that the copy
-/// fails and says why. A junction is copied as a directory symlink to the
-/// same folder — std can read a junction but not make one.
+/// Windows makes a link to a folder and a link to a file differently, and a
+/// symlink only in Developer Mode or for an administrator — which a copy of a
+/// pnpm or npm-workspaces project, `node_modules` full of junctions, used to
+/// fail on and roll back. A junction needs no privilege: one is copied as a
+/// junction, and a folder symlink Windows will not make becomes one too, to
+/// the same folder (a relative target read from where the copy is). A file
+/// symlink has no such stand-in, so the copy gets the file it leads to.
 #[cfg(windows)]
 fn copy_link(from: &Path, to: &Path, file_type: fs::FileType) -> std::io::Result<()> {
     /// ERROR_PRIVILEGE_NOT_HELD
     const NO_PRIVILEGE: i32 = 1314;
     let target = fs::read_link(from)?;
-    let made = if is_folder_link(file_type) {
-        std::os::windows::fs::symlink_dir(target, to)
-    } else {
-        std::os::windows::fs::symlink_file(target, to)
-    };
-    made.map_err(|e| match e.raw_os_error() {
-        Some(NO_PRIVILEGE) => std::io::Error::new(
-            e.kind(),
-            format!("{e}; Windows creates links only in Developer Mode or for an administrator"),
-        ),
-        _ => e,
-    })
+    if is_folder_link(file_type) {
+        if junction::exists(from).unwrap_or(false) {
+            return junction::create(&target, to);
+        }
+        return match std::os::windows::fs::symlink_dir(&target, to) {
+            Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => {
+                let absolute = match to.parent() {
+                    Some(parent) if target.is_relative() => parent.join(&target),
+                    _ => target,
+                };
+                junction::create(absolute, to)
+            }
+            made => made,
+        };
+    }
+    match std::os::windows::fs::symlink_file(&target, to) {
+        Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => fs::copy(from, to).map(|_| ()),
+        made => made,
+    }
 }
 
 
@@ -1910,6 +1955,85 @@ mod explorer_contract_tests {
         fs::write(out.join("backend-tree.json"), serde_json::to_string_pretty(&payload).unwrap())
             .unwrap();
 
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-copy-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("proj").join("src")).unwrap();
+        fs::write(dir.join("proj").join("src").join("a.txt"), "a").unwrap();
+        dir
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> =
+            fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// Found in review: a folder was filled in place, under its final name,
+    /// for as long as the copy ran. It is filled out of sight now and named
+    /// when complete, and an unfinished one left by a closed app is no
+    /// obstacle and is never touched.
+    #[test]
+    fn a_folder_copy_takes_its_name_only_when_complete() {
+        let root = temp_root("staging");
+        fs::create_dir(root.join(".proj copy.copying")).unwrap();
+        fs::write(root.join(".proj copy.copying").join("left.txt"), "an interrupted copy").unwrap();
+
+        copy_path(&root.join("proj"), &root.join("proj copy")).unwrap();
+
+        assert_eq!(fs::read_to_string(root.join("proj copy").join("src").join("a.txt")).unwrap(), "a");
+        assert_eq!(names_in(&root), vec![".proj copy.copying", "proj", "proj copy"], "nothing else left beside it");
+        assert_eq!(
+            fs::read_to_string(root.join(".proj copy.copying").join("left.txt")).unwrap(),
+            "an interrupted copy",
+            "the earlier unfinished copy is left alone"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The name was free when the copy began and taken by the time it was
+    /// done: what took it stays, and the finished copy goes rather than merge.
+    #[test]
+    fn a_name_taken_while_the_copy_ran_is_left_as_it_is() {
+        let root = temp_root("taken");
+        fs::create_dir(root.join("proj copy")).unwrap();
+        fs::write(root.join("proj copy").join("mine.txt"), "written while the copy ran").unwrap();
+
+        let err = copy_folder(&root.join("proj"), &root.join("proj copy")).unwrap_err();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(names_in(&root.join("proj copy")), vec!["mine.txt"]);
+        assert_eq!(names_in(&root), vec!["proj", "proj copy"], "the unfinished copy is gone");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A copy that fails removes only what it made, which is out of sight.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_fails_removes_only_its_own_unfinished_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("fails");
+        let locked = root.join("proj").join("locked.txt");
+        fs::write(&locked, "locked").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // root reads anything, so there is nothing to fail on there.
+        if fs::read(&locked).is_err() {
+            let err = copy_path(&root.join("proj"), &root.join("proj copy")).unwrap_err();
+            assert!(err.contains("locked.txt"), "{err}");
+            assert_eq!(names_in(&root), vec!["proj"], "neither the copy nor its unfinished folder is left");
+        }
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 }

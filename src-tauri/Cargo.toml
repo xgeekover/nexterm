@@ -49,6 +49,9 @@ winreg = "0.55"
 # Whether an image is on the clipboard, without reading it
 # (src/commands/clipboard.rs). arboard reads the text through it already.
 clipboard-win = "5.4"
+# Copying a folder link without the privilege a symlink needs (fs/mod.rs
+# `copy_link`): std can read a junction but not make one.
+junction = "2"
 
 # Whether an image is on the pasteboard, without reading it
 # (src/commands/clipboard.rs). arboard reads the text through these already.
