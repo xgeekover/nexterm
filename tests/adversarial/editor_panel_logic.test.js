@@ -97,7 +97,7 @@ const held = (ref) => ref.current?.name ?? null;
 describe('EditorPanel: the editor a group holds', () => {
   beforeEach(loadUi);
 
-  test('EP-01: an editor is held until it is disposed, and not after — what is asked of the group waits for the next one', () => {
+  test('PL-01: an editor is held until it is disposed, and not after — what is asked of the group waits for the next one', () => {
     const holdEditor = exported('holdEditor');
     const ref = { current: null };
     const first = fakeEditor('a.js');
@@ -113,7 +113,7 @@ describe('EditorPanel: the editor a group holds', () => {
     assert.equal(held(ref), 'b.js');
   });
 
-  test('EP-02: an editor disposed after the next one is held leaves the next one held', () => {
+  test('PL-02: an editor disposed after the next one is held leaves the next one held', () => {
     const holdEditor = exported('holdEditor');
     const ref = { current: null };
     const first = fakeEditor('a.js');
@@ -139,7 +139,7 @@ describe('EditorPanel: the editor a group holds', () => {
 describe('EditorPanel: what "File Changed on Disk" says', () => {
   beforeEach(loadUi);
 
-  test('EP-03: a file that could not be read back says why, and offers no disk version to take — there is none', () => {
+  test('PL-03: a file that could not be read back says why, and offers no disk version to take — there is none', () => {
     const text = exported('overwritePromptText');
     const unread = text({
       tabId: 't1',
@@ -162,5 +162,28 @@ describe('EditorPanel: what "File Changed on Disk" says', () => {
       altLabel: 'Use Disk Version',
     });
     assert.deepEqual(text({ fileName: 'a.js', diskContent: 'theirs' }), changed, 'a question asked before `unreadable` existed');
+  });
+});
+
+describe('The editor prompts, in the order they opened', () => {
+  // Found in review: the window-close prompt and "File Changed on Disk" share
+  // one portal, always drawn close-then-overwrite. A close asked while the
+  // overwrite prompt was showing went under it — and, the newest, took Enter.
+  test('PL-04: the newest prompt is drawn last, on top, where the keyboard is', async () => {
+    const { inOpenOrder } = await loadEditorPanel();
+    let order = [];
+    order = inOpenOrder(order, ['overwrite']);
+    assert.deepEqual(order, ['overwrite']);
+    order = inOpenOrder(order, ['unsaved', 'overwrite']);
+    assert.deepEqual(order, ['overwrite', 'unsaved'], 'the close prompt opened second, so it is on top');
+    order = inOpenOrder(order, ['unsaved']);
+    assert.deepEqual(order, ['unsaved']);
+    order = inOpenOrder(order, ['unsaved', 'overwrite']);
+    assert.deepEqual(order, ['unsaved', 'overwrite'], 'and the other way round');
+    assert.deepEqual(inOpenOrder(order, []), []);
+
+    const { readFileSync } = await import('node:fs');
+    const panel = readFileSync(new URL('../../src/components/editor/EditorPanel.jsx', import.meta.url), 'utf8');
+    assert.match(panel, /promptOrder\.current\.map\(\(key\) => \(\s*<React\.Fragment key=\{key\}>\{promptOf\[key\]\}<\/React\.Fragment>/);
   });
 });

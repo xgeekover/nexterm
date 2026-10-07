@@ -416,6 +416,20 @@ function unsavedPromptText({ kind, names }) {
  * known, and there is no version on disk to take: it says why, and offers
  * only to overwrite or not.
  */
+/**
+ * The editor's prompts in the order they opened — `previous`, the order last
+ * drawn, with those now closed dropped and those newly `open` added at the
+ * end.
+ *
+ * They share one portal, and the later in it is drawn on top. ConfirmDialog
+ * gives the keyboard to the newest; drawn in a fixed order, a window-close
+ * prompt that opened while "File Changed on Disk" was showing went under it
+ * and still took Enter, Escape and Tab.
+ */
+export function inOpenOrder(previous, open) {
+  return [...previous.filter((key) => open.includes(key)), ...open.filter((key) => !previous.includes(key))];
+}
+
 export function overwritePromptText({ fileName, unreadable = null }) {
   if (unreadable == null) {
     return {
@@ -739,12 +753,20 @@ export function EditorPanel() {
   // terminal panel maximised that box is zero high: a prompt nobody can see
   // is a window that will not close. The diff view replaces the editor, not
   // the question, so the prompts are drawn over it as well.
+  // Drawn in the order they opened: see `inOpenOrder`.
+  const promptOrder = useRef([]);
+  promptOrder.current = inOpenOrder(
+    promptOrder.current,
+    [unsavedPrompt && 'unsaved', overwritePrompt && 'overwrite'].filter(Boolean)
+  );
+  const promptOf = { unsaved: unsavedPrompt, overwrite: overwritePrompt };
   const prompts =
     unsavedPrompt || overwritePrompt
       ? createPortal(
           <>
-            {unsavedPrompt}
-            {overwritePrompt}
+            {promptOrder.current.map((key) => (
+              <React.Fragment key={key}>{promptOf[key]}</React.Fragment>
+            ))}
           </>,
           document.body
         )
