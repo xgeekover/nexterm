@@ -11,7 +11,7 @@ import { Filter,
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TreeRow, NameInput, indentFor, ROW_HEIGHT } from './TreeRow.jsx';
-import { filterTree, flattenVisible, navigate } from './treeRows.js';
+import { deletePromptMessage, filterTree, flattenVisible, navigate } from './treeRows.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
@@ -188,7 +188,18 @@ export function FileExplorer() {
       disabledReason: noSelectionReason,
       danger: true,
       onSelect: () =>
-        setDeleteConfirm({ path: target.path, isDir: target.isDir, isLink: Boolean(target.isLink), name: target.name }),
+        setDeleteConfirm({
+          path: target.path,
+          isDir: target.isDir,
+          isLink: Boolean(target.isLink),
+          name: target.name,
+          // Named in the prompt, so Cancel can keep them: deleting closes them.
+          unsaved: useEditorStore
+            .getState()
+            .tabsUnder(target.path)
+            .filter((t) => t.isDirty)
+            .map((t) => t.fileName),
+        }),
     });
 
     return items;
@@ -577,18 +588,16 @@ export function FileExplorer() {
               // A link is removed as a link (src-tauri/src/fs/mod.rs
               // delete_path): what it points to is left alone, so "its
               // contents will be deleted too" would be false — and frightening.
-              message={
-                deleteConfirm.isLink
-                  ? `Are you sure you want to delete the link '${deleteConfirm.name}'? What it points to is not touched.`
-                  : `Are you sure you want to delete '${deleteConfirm.name}'?${deleteConfirm.isDir ? ' Its contents will be deleted too.' : ''}`
-              }
+              message={deletePromptMessage(deleteConfirm, deleteConfirm.unsaved)}
               confirmLabel="Delete"
               danger
               onConfirm={() => {
                 const target = deleteConfirm;
                 setDeleteConfirm(null);
                 if (!target) return;
-                deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(err.message));
+                deletePath(target.path, target.isDir && !target.isLink, { keepUnsaved: target.isLink }).catch((err) =>
+                  setExplorerError(err.message)
+                );
               }}
               onCancel={() => setDeleteConfirm(null)}
               // Chosen from the context menu, which has gone by the time

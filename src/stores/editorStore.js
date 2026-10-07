@@ -1248,7 +1248,15 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
-  deletePath: async (path, recursive = false) => {
+  /** The open tabs at `path` or under it — what deleting `path` would close. */
+  tabsUnder: (path) => get().tabs.filter((t) => samePath(t.filePath, path) || isInside(path, t.filePath)),
+
+  /**
+   * Delete `path`, and close the tabs of what went with it. `keepUnsaved`
+   * leaves the ones with unsaved changes open: a link is deleted as a link,
+   * and the file such a tab was opened through is still there.
+   */
+  deletePath: async (path, recursive = false, { keepUnsaved = false } = {}) => {
     try {
       await invoke('fs_delete_path', { path, recursive });
       await get().refreshExplorer();
@@ -1256,10 +1264,11 @@ export const useEditorStore = create((set, get) => ({
       // left a deleted folder's files open, and saving one of those
       // recreated the directory the user had just deleted. Separator-blind:
       // a `${path}/` prefix never matched a Windows path, so on Windows,
-      // where this app is mostly used, that still happened.
-      const orphaned = get().tabs.filter(
-        (t) => samePath(t.filePath, path) || isInside(path, t.filePath)
-      );
+      // where this app is mostly used, that still happened. The prompt
+      // (FileExplorer, `deletePromptMessage`) has named the unsaved ones.
+      const orphaned = get()
+        .tabsUnder(path)
+        .filter((t) => !(keepUnsaved && t.isDirty));
       orphaned.forEach((t) => get().closeTab(t.id));
     } catch (err) {
       console.error(`[EditorStore] Failed to delete ${path}:`, err);

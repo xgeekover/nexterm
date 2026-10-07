@@ -216,3 +216,34 @@ export function navigate(rows, index, key) {
       return null;
   }
 }
+
+/**
+ * What the Explorer's delete prompt says about `target` ({ name, isDir,
+ * isLink }), given the names of the open files under it that have unsaved
+ * changes.
+ *
+ * Deleting closes the tabs of everything deleted, and their unsaved changes
+ * went with them without a word — nothing said so, and on Windows they had
+ * survived until paths were matched there too. So the prompt says so, and
+ * Cancel keeps them. A link is deleted as a link: what it points to is still
+ * there, and a file opened through it with unsaved changes stays open
+ * (`deletePath`'s `keepUnsaved`).
+ */
+export function deletePromptMessage(target, unsavedNames = []) {
+  const unsaved = unsavedChangesIn(unsavedNames);
+  if (target.isLink) {
+    const kept = unsaved ? ` Unsaved changes in ${unsaved} stay open.` : '';
+    return `Are you sure you want to delete the link '${target.name}'? What it points to is not touched.${kept}`;
+  }
+  const contents = target.isDir ? ' Its contents will be deleted too.' : '';
+  const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost.` : '';
+  return `Are you sure you want to delete '${target.name}'?${contents}${lost}`;
+}
+
+/** "a.js", "a.js and b.js", "a.js, b.js and 3 other files". */
+function unsavedChangesIn(names) {
+  if (names.length === 0) return '';
+  if (names.length === 1) return names[0];
+  if (names.length <= 3) return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} other files`;
+}
