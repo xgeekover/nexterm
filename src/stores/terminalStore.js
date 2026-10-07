@@ -944,6 +944,43 @@ function remapTreeTabIds(node, map) {
   return { ...node, children: node.children.map((c) => remapTreeTabIds(c, map)) };
 }
 
+/**
+ * The layout a start puts in place — the restored one, or a fresh start's
+ * first terminal — with every terminal already in the store kept in it.
+ *
+ * A start begins with no terminals, and its layout used to replace `tabs`
+ * along with the placeholder group: a terminal made while it ran vanished
+ * from the screen with its shell still running. New terminals now wait for
+ * the start (see `spawnTab`); this keeps one made before it began, or any
+ * that gets past that wait, rather than dropping it. It goes into the active
+ * pane of the group on screen and is shown, as a new terminal is.
+ *
+ * A restore keeps the tab ids it saved, and the counter starts from one on
+ * every launch, so a terminal made before the restore can hold an id a
+ * restored one is about to take. Two tabs with one id would share one xterm
+ * (the registry keys on it), so the restored terminal takes a new id instead.
+ *
+ * `layout` is `{ tabs, groups, activeGroupId, activeTabId }`; so is what
+ * comes back, ready for `set()`.
+ */
+function keepTabsMadeMeanwhile(state, layout) {
+  const kept = state.tabs;
+  if (kept.length === 0) return layout;
+
+  const taken = new Set(kept.map((t) => t.id));
+  const ids = new Map(layout.tabs.map((t) => [t.id, taken.has(t.id) ? makeTabId() : t.id]));
+  const layoutTabs = layout.tabs.map((t) => ({ ...t, id: ids.get(t.id) }));
+  const groups = layout.groups.map((g) => ({ ...g, tree: remapTreeTabIds(g.tree, ids) }));
+  const active = groups.find((g) => g.id === layout.activeGroupId) || groups[0];
+  const tree = kept.reduce((t, tab) => addTabToPane(t, active.activePaneId, tab.id), active.tree);
+  return settle(state, {
+    tabs: [...layoutTabs, ...kept],
+    groups: groups.map((g) => (g === active ? { ...g, tree } : g)),
+    activeGroupId: active.id,
+    activeTabId: kept[kept.length - 1].id,
+  });
+}
+
 /** Give every pane in a tree a brand-new id, so the same layout can be loaded twice. */
 function regeneratePaneIds(node, idMap = new Map()) {
   if (!node) return null;
@@ -1222,6 +1259,15 @@ export const useTerminalStore = create((set, get, api) => {
    * finished spawning.
    */
   const spawnTab = async (title = null, cwd = null, shell = null) => {
+    // A terminal asked for while the store is starting — the empty pane's New
+    // Terminal, a shortcut, the menu — is made once the start is over. Made
+    // beside it, it was dropped when the restore put its layout in place, its
+    // shell left running; it could take the id of a terminal being restored,
+    // as the counter moves past the saved ids only once they are all back;
+    // and one asked for before the start had reaped the previous page's
+    // shells was reaped with them. A start that fails lets it through all
+    // the same.
+    if (initInFlight) await initInFlight.catch(() => {});
     try {
       // Nothing asked for a directory -> the `terminal.integrated.cwd`
       // setting decides, and `null` hands it back to the backend's own
@@ -2493,14 +2539,24 @@ export const useTerminalStore = create((set, get, api) => {
 
       const newPaneId = makePaneId();
       set((state) => {
-        // The group can have gone away while the PTY was spawning.
-        if (!state.groups.some((g) => g.id === group.id)) return {};
+        // What was to be split can be gone by the time the shell is up: the
+        // pane closed, its group with it, or — asked for while the store was
+        // starting — the placeholder layout replaced by the restore. The split
+        // then goes where it would with nothing asked for: beside the active
+        // pane of that group, or of the group on screen once the group is
+        // gone. Splitting a pane that was not there any more changed nothing
+        // and left the new terminal in no pane, its shell running unseen.
+        const target = state.groups.find((g) => g.id === group.id) ?? resolveGroup(state, null, null);
+        if (!target) return {};
+        const at = collectLeaves(target.tree).some((l) => l.id === targetPaneId)
+          ? targetPaneId
+          : target.activePaneId;
         const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [newTab.id], activeTabId: newTab.id };
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) =>
+          groups: updateGroup(state, target.id, (g) =>
             withoutZoom({
               ...g,
-              tree: splitAt(g.tree, targetPaneId, newLeaf, direction, false),
+              tree: splitAt(g.tree, at, newLeaf, direction, false),
             })
           ),
         });
@@ -2509,13 +2565,15 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
-     * Split the active group's active pane and focus the newly created one.
+     * Split the active group's active pane and focus the newly created one —
+     * by the pane alone, which names its group: a split whose group went away
+     * while its shell started lands in another one (see `splitPane`).
      */
     splitActivePane: async (direction = 'horizontal') => {
       const group = get().getActiveGroup();
       if (!group) return null;
       const newPaneId = await get().splitPane(group.activePaneId, direction, group.id);
-      if (newPaneId) get().setActivePane(newPaneId, group.id);
+      if (newPaneId) get().setActivePane(newPaneId);
       return newPaneId;
     },
 
@@ -3049,10 +3107,14 @@ export const useTerminalStore = create((set, get, api) => {
         // leaked shell per reload, measured as 1 → 2 → 3 → 4 child shells over
         // three reloads with a single terminal on screen.
         //
-        // We claim nothing, because nothing has been spawned yet: this store
-        // only reaches `bootstrap` when it holds no terminals at all.
+        // We claim what this store holds, which is normally nothing: a page
+        // load starts it with no terminals, and one asked for while this runs
+        // waits for it (`spawnTab`). One made before the start began is kept
+        // by it (`keepTabsMadeMeanwhile`), so its shell must not be reaped.
         try {
-          const reaped = await invoke('pty_retain_only', { session_ids: [] });
+          const reaped = await invoke('pty_retain_only', {
+            session_ids: get().tabs.map((t) => t.sessionId).filter(Boolean),
+          });
           if (reaped) {
             console.info(`[TerminalStore] Reaped ${reaped} terminal session(s) left by a previous page load.`);
           }
@@ -3084,19 +3146,21 @@ export const useTerminalStore = create((set, get, api) => {
         }
 
         if (restored) {
-          set({
-            tabs: restored.tabs,
-            activeTabId: restored.activeTabId,
+          set((state) => ({
+            ...keepTabsMadeMeanwhile(state, {
+              tabs: restored.tabs,
+              groups: restored.groups,
+              activeGroupId: restored.activeGroupId,
+              activeTabId: restored.activeTabId,
+            }),
             cwd: restored.cwd,
             isInitialized: true,
-            groups: restored.groups,
-            activeGroupId: restored.activeGroupId,
             // The session's name is saved with its layout and comes back with
             // it. It used to be read and dropped: every launch was "Default"
             // again, and the first save after it wrote that over the name the
             // user had given.
             workspaceName: restored.workspaceName,
-          });
+          }));
           return;
         }
 
@@ -3138,14 +3202,16 @@ export const useTerminalStore = create((set, get, api) => {
         };
         const group = makeGroup({ name: 'Group 1', tabIds: [initialTab.id] });
 
-        set({
-          tabs: [initialTab],
-          activeTabId: initialTab.id,
+        set((state) => ({
+          ...keepTabsMadeMeanwhile(state, {
+            tabs: [initialTab],
+            groups: [group],
+            activeGroupId: group.id,
+            activeTabId: initialTab.id,
+          }),
           cwd: initialTab.cwd,
           isInitialized: true,
-          groups: [group],
-          activeGroupId: group.id,
-        });
+        }));
       } catch (err) {
         console.error('[TerminalStore] Failed to initialize terminal session:', err);
       }
@@ -3177,7 +3243,13 @@ export const useTerminalStore = create((set, get, api) => {
       if (!newTab) return null;
 
       set((state) => {
-        const group = resolveGroup(state, groupId, paneId);
+        // The pane asked for can be gone by the time the shell is up — closed,
+        // or, asked for while the store was starting, replaced along with the
+        // whole placeholder layout — and its group with it. The terminal then
+        // goes where one goes when nothing is asked for: the active pane of
+        // the group on screen. It used to go nowhere, a shell running with no
+        // pane to show it until the next launch reaped it.
+        const group = resolveGroup(state, groupId, paneId) ?? resolveGroup(state, null, null);
         if (!group) return {};
         const targetPaneId = collectLeaves(group.tree).some((l) => l.id === paneId)
           ? paneId

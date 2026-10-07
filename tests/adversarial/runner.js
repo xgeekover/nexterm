@@ -75,6 +75,7 @@ import './terminal_right_click_headless.test.js';
 import './agent_resume_opencode.test.js';
 import './confirm_dialog.test.js';
 import './workspace_names.test.js';
+import './startup_restore.test.js';
 
 async function run() {
   console.log('====================================================');

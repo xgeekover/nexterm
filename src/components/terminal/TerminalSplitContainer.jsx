@@ -1633,12 +1633,13 @@ export function TerminalSplitContainer({ headerSlot = null }) {
 
   // Split whichever pane's own button was clicked, then focus the pane it
   // creates — a clear, visible sign the click did something, even when the
-  // pane split wasn't already the focused one.
+  // pane split wasn't already the focused one. Focused by the pane alone,
+  // which names its group: a split whose group went away while its shell
+  // started lands in another one (see the store's `splitPane`).
   const handleSplit = useCallback(
     async (paneId, direction) => {
-      const groupId = activeGroupIdRef.current;
-      const newPaneId = await splitPane(paneId, direction, groupId);
-      if (newPaneId) setActivePane(newPaneId, groupId);
+      const newPaneId = await splitPane(paneId, direction, activeGroupIdRef.current);
+      if (newPaneId) setActivePane(newPaneId);
     },
     [splitPane, setActivePane]
   );
