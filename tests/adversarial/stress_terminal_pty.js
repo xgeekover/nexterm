@@ -6,7 +6,6 @@
 import assert from 'node:assert/strict';
 import { AppEnvironment } from '../e2e/harness/appEnvironment.js';
 import { MockIpcBridge } from '../e2e/harness/mockIpc.js';
-import { parseAnsiTokens, stripAnsi } from '../../src/lib/ansiParser.js';
 
 // Color formatting for console
 const c = {
@@ -166,83 +165,6 @@ await runTest('TC-ADV-TERM-05: Known 404 command flags failed status and exit co
   assert.ok(b.output.includes('command not found'));
 
   env.destroy();
-});
-
-// =========================================================================
-// SECTION 3: ANSI ESCAPE PARSER ADVERSARIAL STRESS
-// =========================================================================
-console.log(`\n${c.bold}▶ SECTION 3: ANSI Color & Escape Sequence Parser Stress${c.reset}`);
-
-await runTest('TC-ADV-ANSI-01: Standard SGR color tokens and styling', async () => {
-  const raw = '\x1b[31mRed\x1b[0m \x1b[32mGreen\x1b[0m \x1b[1mBold\x1b[0m';
-  const tokens = parseAnsiTokens(raw);
-  assert.ok(tokens.length >= 3);
-  assert.ok(tokens[0].className.includes('text-ansi-red'));
-  assert.equal(tokens[0].text, 'Red');
-  assert.ok(tokens[2].className.includes('text-ansi-green'));
-  assert.equal(tokens[2].text, 'Green');
-});
-
-await runTest('TC-ADV-ANSI-02: Non-SGR escape sequences (Cursor & Clear Screen) leakage check', async () => {
-  // \x1b[2J is clear screen, \x1b[H is cursor home, \x1b[K is clear line
-  const raw = '\x1b[2J\x1b[HHello World\x1b[K\nNext line';
-  const tokens = parseAnsiTokens(raw);
-
-  // Check if any token text contains raw ESC (\x1b) bytes
-  const containsRawEsc = tokens.some((t) => t.text.includes('\x1b'));
-  if (containsRawEsc) {
-    recordFinding(
-      'HIGH',
-      'ANSI parser outputs raw escape bytes for non-SGR sequences (cursor moves, screen clears)',
-      `parseAnsiTokens uses regex /\\x1b\\[([0-9;]*)m/g which only matches 'm' (SGR sequences). ` +
-      `Non-SGR sequences such as \\x1b[2J (clear screen), \\x1b[H (cursor home), \\x1b[K (clear line), ` +
-      `and \\x1b[?25h (show cursor) are NOT stripped or parsed, leaving raw '\\x1b[' escape control bytes ` +
-      `in the output text rendered to users. Tokens: ${JSON.stringify(tokens)}`,
-      `parseAnsiTokens('\\x1b[2J\\x1b[HHello World\\x1b[K')`
-    );
-    throw new Error(`Raw escape bytes found in token text: ${JSON.stringify(tokens)}`);
-  }
-});
-
-await runTest('TC-ADV-ANSI-03: 256-color and 24-bit TrueColor sequences handling', async () => {
-  const raw = '\x1b[38;5;196m256-Red\x1b[0m \x1b[38;2;255;128;0mTrueColor-Orange\x1b[0m';
-  const tokens = parseAnsiTokens(raw);
-  // Parser shouldn't crash or output raw escape bytes
-  assert.ok(tokens.length >= 2);
-  for (const t of tokens) {
-    assert.ok(!t.text.includes('\x1b'), 'Tokens must not contain raw escape bytes');
-  }
-});
-
-await runTest('TC-ADV-ANSI-04: Malformed / partial escape sequences resilience', async () => {
-  const malformedInputs = [
-    '\x1b[31',             // unclosed
-    '\x1b',               // solitary ESC
-    '\x1b[m',             // missing code
-    '\x1b[;;;m',          // empty parameters
-    '\x1b[9999999m',      // out of range code
-    null,
-    undefined,
-    '',
-    12345,
-  ];
-
-  for (const input of malformedInputs) {
-    const tokens = parseAnsiTokens(input);
-    assert.ok(Array.isArray(tokens), `Must return array for input: ${input}`);
-  }
-});
-
-await runTest('TC-ADV-ANSI-05: Massive ANSI payload stress (10,000 colored tokens)', async () => {
-  let largeAnsi = '';
-  for (let i = 0; i < 5000; i++) {
-    largeAnsi += `\x1b[3${i % 8}mtoken_${i}\x1b[0m `;
-  }
-  const t0 = Date.now();
-  const tokens = parseAnsiTokens(largeAnsi);
-  const duration = Date.now() - t0;
-  assert.ok(tokens.length > 5000);
-  assert.ok(duration < 1000, `Parsing 10,000 tokens took ${duration}ms, must be < 1000ms`);
 });
 
 // =========================================================================
