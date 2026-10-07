@@ -67,13 +67,14 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       subtitle: 'Fill the group with the active pane, or show every pane again',
       hint: hint('toggle-pane-zoom'),
     },
+    // No hint: nothing is bound to Save All. It used to show Save's chord,
+    // which writes the active tab and leaves every other one unsaved.
     {
       type: 'command',
       id: 'cmd-save-all',
       command: 'save_all',
       title: 'Save All Files',
       subtitle: 'Writes all dirty editor buffers to disk',
-      hint: hint('save'),
     },
   ];
 }

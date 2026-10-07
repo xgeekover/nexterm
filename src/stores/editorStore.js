@@ -849,8 +849,29 @@ export const useEditorStore = create((set, get) => ({
 
   // --- Editor split tree: panes, drag-and-drop placement ------------------
 
-  /** Mark a pane as the active one (called on click/focus of a pane). */
-  setActiveEditorPane: (paneId) => set({ activeEditorPaneId: paneId }),
+  /**
+   * Make a pane the active one — a click or focus anywhere in it — and the
+   * tab it shows the active tab.
+   *
+   * Save (the keys and the menu) and the Explorer's highlight go by
+   * `activeTabId`. This used to move only `activeEditorPaneId`, so after a
+   * file was opened in a second group, typing in the first and pressing
+   * Ctrl+S saved the file in the second, untouched, and left the edited one
+   * unsaved. A group with no file leaves no tab active: there is nothing in
+   * it to save. The tab is the one the group draws, its first when the one it
+   * remembers is gone (see EditorPane).
+   *
+   * Runs on every mousedown in the editor, so a click that changes nothing
+   * leaves the state alone rather than waking every subscriber.
+   */
+  setActiveEditorPane: (paneId) =>
+    set((state) => {
+      const leaf = collectLeaves(state.editorSplitTree).find((l) => l.id === paneId);
+      if (!leaf) return state;
+      const tabId = leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0] ?? null;
+      if (state.activeEditorPaneId === paneId && state.activeTabId === tabId) return state;
+      return { activeEditorPaneId: paneId, activeTabId: tabId };
+    }),
 
   /**
    * Split a leaf pane into two children (horizontal or vertical). The new
