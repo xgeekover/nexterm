@@ -667,7 +667,9 @@ Windows: checked with the suites and the browser mock.
 - Edit a file without saving, then Alt+F4: the window comes forward if it was
   behind and asks. Cancel keeps everything. Alt+F4 again, Don't Save: the
   window closes, with no second "Leave site?" question.
-- The same with the title bar's ✕ double-clicked: one question, not a close.
+- The same with the title bar's ✕ double-clicked: one question, not a close,
+  and it stays up (the second press does not cancel it). Cancel, then press
+  Enter: nothing happens — the keyboard is back in the editor, not on ✕.
 - The same with nothing unsaved: Alt+F4 closes at once.
 - Edit a file, then Ctrl+R or F5 with the editor focused: a "Leave site?"
   question (or nothing at all, if WebView2 already swallows the key — say
@@ -688,6 +690,10 @@ an administrator. Junctions are copied as junctions now. Never run on Windows.
   `.<name>.copying` folder appears and becomes `<name> copy` at the end.
 - In the copy, `dir node_modules` shows `<JUNCTION>` entries, and the project
   runs (`pnpm test` or similar).
+- A relative folder symlink in the source (made with Developer Mode on:
+  `mklink /D shared ..\libs\shared` inside `packages\app`), pasted with it
+  off: in the copy, `packages\app\shared` is a `<JUNCTION>` that opens the
+  copy's own `libs\shared` — not a `.…copying` folder that no longer exists.
 - Close NexTerm in the middle of a big paste: what is left is the
   `.<name>.copying` folder, never a half-filled `<name> copy`.
 
@@ -711,6 +717,8 @@ that machine. Never run on Windows.
   does not list anything under it; Search in Files finds nothing under it;
   opening `docs\…` from a terminal link says "Path goes through a link to
   another machine".
+- The same through a second link: `mklink /D via docs` — `via` does not
+  expand either, and nothing under it is listed, searched or opened.
 
 ## What the first run found
 
