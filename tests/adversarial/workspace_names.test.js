@@ -1,12 +1,18 @@
 /**
  * What the session and its groups are called.
  *
- * Names the app hands out on its own, and which went wrong where nobody was
- * looking: a new group was named `Group ${groups.length + 1}`, which reuses a
- * number the moment a group in the middle closes — Group 1, 2 and 3, close
- * Group 2, make another, and there are two "Group 3"s. Renaming already
- * numbered by the lowest free number (`nextDefaultGroupName`); new groups did
- * not.
+ * Both are names the app hands out or carries over on its own, and both went
+ * wrong where nobody was looking:
+ *
+ *   - a new group was named `Group ${groups.length + 1}`, which reuses a number
+ *     the moment a group in the middle closes — Group 1, 2 and 3, close Group 2,
+ *     make another, and there are two "Group 3"s. Renaming already numbered by
+ *     the lowest free number (`nextDefaultGroupName`); new groups did not.
+ *   - loading a saved workspace in place of the session handed its name to
+ *     `settle`, which returns the layout and nothing else, so the session kept
+ *     its old name — and Save All Groups… then offered that one.
+ *   - the session's name is saved with the layout and read back on launch, and
+ *     was then dropped: every relaunch was "Default" again.
  */
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
 
@@ -98,6 +104,46 @@ describe('Workspace names: a new group takes the lowest number nobody uses', () 
     // The name a caller asks for still wins.
     await S.getState().createGroup({ name: '  Build  ' });
     assert.equal(names().at(-1), 'Build');
+  });
+});
+
+describe('Workspace names: the session is called what it is', () => {
+  let release;
+  beforeEach(async () => {
+    release = borrowStorage();
+    await launch();
+  });
+  afterEach(() => release());
+
+  test('WN-04: loading a workspace in place of the session takes its name', async () => {
+    S.getState().renameWorkspace('Gamma');
+    const entry = S.getState().saveWorkspace('Beta');
+    assert.equal(entry.name, 'Beta');
+    assert.equal(S.getState().workspaceName, 'Gamma', 'saving a copy does not rename the session');
+
+    await S.getState().loadWorkspace(entry.id, { mode: 'replace' });
+    assert.equal(S.getState().workspaceName, 'Beta', 'you are now IN that workspace');
+
+    // And Save All Groups… offers the name of the workspace you are in.
+    assert.equal(S.getState().saveWorkspace().name, 'Beta');
+  });
+
+  test('WN-05: loading one alongside keeps the session\'s own name', async () => {
+    S.getState().renameWorkspace('Gamma');
+    const entry = S.getState().saveWorkspace('Beta');
+    await S.getState().loadWorkspace(entry.id, { mode: 'append' });
+    assert.equal(S.getState().workspaceName, 'Gamma');
+  });
+
+  test('WN-06: the name comes back on the next launch', async () => {
+    S.getState().renameWorkspace('Release work');
+    await launch({ keepStorage: true });
+    assert.equal(S.getState().tabs.length, 1, 'the layout came back');
+    assert.equal(S.getState().workspaceName, 'Release work');
+
+    // …and is saved again as it is, not overwritten with the new store's own.
+    await launch({ keepStorage: true });
+    assert.equal(S.getState().workspaceName, 'Release work');
   });
 });
 

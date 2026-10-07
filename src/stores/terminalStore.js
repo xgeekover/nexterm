@@ -2390,15 +2390,17 @@ export const useTerminalStore = create((set, get, api) => {
       const newGroups = made.map((m) => m.group);
       const active = newGroups[Math.min(entry.activeIndex ?? 0, newGroups.length - 1)];
 
-      set((state) =>
-        settle(state, {
+      set((state) => ({
+        ...settle(state, {
           groups: mode === 'replace' ? newGroups : [...state.groups, ...newGroups],
           activeGroupId: active.id,
           activeTabId: collectLeaves(active.tree)[0]?.activeTabId ?? null,
-          // Replacing the session means you are now IN that workspace.
-          ...(mode === 'replace' && entry.name ? { workspaceName: entry.name } : {}),
-        })
-      );
+        }),
+        // Replacing the session means you are now IN that workspace. Beside
+        // `settle`, not through it: it hands back the layout and nothing else,
+        // so a name in its patch was dropped and the session kept its old one.
+        ...(mode === 'replace' && entry.name ? { workspaceName: entry.name } : {}),
+      }));
 
       runStartupCommands(made.flatMap((m) => m.startups));
       for (const tabId of doomed) await killTabIfOrphaned(tabId);
@@ -3089,6 +3091,11 @@ export const useTerminalStore = create((set, get, api) => {
             isInitialized: true,
             groups: restored.groups,
             activeGroupId: restored.activeGroupId,
+            // The session's name is saved with its layout and comes back with
+            // it. It used to be read and dropped: every launch was "Default"
+            // again, and the first save after it wrote that over the name the
+            // user had given.
+            workspaceName: restored.workspaceName,
           });
           return;
         }
