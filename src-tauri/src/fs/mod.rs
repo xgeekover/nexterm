@@ -870,13 +870,65 @@ pub fn is_network_path(path: &str) -> bool {
     }
 }
 
-/// Whether `path` is a link whose target is spelled as a path on another
-/// machine (`is_network_path`) — read without following it. Following one,
-/// even only to ask whether it is a folder, is what connects to the host and
-/// signs in. A link that leads to another link is judged by its first step;
-/// a git checkout or an unpacked archive makes the direct kind.
+/// Whether following the links in `path` — any part of it, along any chain
+/// of them — reaches a path on another machine (`is_network_path`). Found
+/// out without following any: each part is looked at in turn, outermost
+/// first, and a link's target is read and looked at the same way before
+/// anything goes through it. Following one, even only to ask whether it is a
+/// folder, is what connects to the host and signs in.
+///
+/// Its first step alone was judged before, and `via -> docs -> \\host\share`
+/// went through: a git checkout or an unpacked archive makes a chain as
+/// easily as a direct link. A chain too long to be anything but a loop
+/// counts as leading off the machine — it is never followed either way.
 pub fn link_leads_off_machine(path: &Path) -> bool {
-    fs::read_link(path).is_ok_and(|target| is_network_path(&target.to_string_lossy()))
+    let mut hops = MAX_LINK_HOPS;
+    reaches_off_machine(path, &mut hops)
+}
+
+/// Links followed in one `link_leads_off_machine` before it gives up.
+const MAX_LINK_HOPS: u32 = 40;
+
+fn reaches_off_machine(path: &Path, hops: &mut u32) -> bool {
+    if is_network_path(&path.to_string_lossy()) {
+        return true;
+    }
+    let mut walked = PathBuf::new();
+    for part in path.components() {
+        walked.push(part);
+        // A drive or the root is no link, and `C:` on its own is a drive's
+        // current folder rather than anything in this path.
+        if matches!(part, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        // Everything above `walked` has been looked at already, so asking
+        // about `walked` itself follows nothing that is not known to be here.
+        let Ok(meta) = fs::symlink_metadata(&walked) else {
+            // Not there (yet): there is nothing below it to follow.
+            return false;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        if *hops == 0 {
+            return true;
+        }
+        *hops -= 1;
+        let Ok(target) = fs::read_link(&walked) else {
+            return true;
+        };
+        if is_network_path(&target.to_string_lossy()) {
+            return true;
+        }
+        let next = match walked.parent() {
+            Some(parent) if target.is_relative() => parent.join(&target),
+            _ => target,
+        };
+        if reaches_off_machine(&next, hops) {
+            return true;
+        }
+    }
+    false
 }
 
 /// `path` without a verbatim prefix that a plainer spelling means the same
@@ -1005,13 +1057,8 @@ fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
 fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, String> {
     // Resolving follows every link in the path, and one that leads to
     // another machine connects to it (see `link_leads_off_machine`): looked
-    // for first, at each step below the open folder, outermost first — asking
-    // about a deeper step would follow the links above it.
-    let steps: Vec<&Path> = path
-        .ancestors()
-        .take_while(|step| step.starts_with(root) && *step != root)
-        .collect();
-    if steps.into_iter().rev().any(link_leads_off_machine) {
+    // for first, along every link in the path and every chain of them.
+    if link_leads_off_machine(path) {
         return Err(format!("Path goes through a link to another machine: {path_str}"));
     }
     // Canonicalize the deepest part that exists so a symlink cannot point out
@@ -2103,5 +2150,61 @@ mod off_machine_link_tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&reachable);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod off_machine_chain_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-off-chain-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dunce::canonicalize(&dir).unwrap()
+    }
+
+    /// Found in the last review: only a link's first step was judged, so
+    /// `via -> docs -> //host/share` was followed — by the Explorer listing
+    /// the folder, by Go to File and by search, by opening a file through it.
+    /// (`//…` is a local path on Unix, which is what lets a followed chain be
+    /// seen here; on Windows following it signs in to the host.)
+    #[test]
+    fn a_chain_of_links_to_another_machine_is_never_followed() {
+        let root = scratch("root");
+        let share = scratch("share");
+        fs::write(share.join("doc.md"), "TOKEN on the share\n").unwrap();
+        std::os::unix::fs::symlink(format!("/{}", share.display()), root.join("docs")).unwrap();
+        std::os::unix::fs::symlink("docs", root.join("via")).unwrap();
+        // A link whose own target is local but goes through one that is not.
+        std::os::unix::fs::symlink("docs/doc.md", root.join("through.md")).unwrap();
+        // And one that stays here, which still works.
+        fs::write(root.join("real.md"), "TOKEN here\n").unwrap();
+        std::os::unix::fs::symlink("real.md", root.join("alias.md")).unwrap();
+
+        for name in ["docs", "via", "through.md"] {
+            assert!(link_leads_off_machine(&root.join(name)), "{name} was taken for a link that stays here");
+        }
+        assert!(!link_leads_off_machine(&root.join("alias.md")));
+        assert!(!link_leads_off_machine(&root.join("real.md")));
+
+        let tree = read_dir_hierarchy(&root.to_string_lossy(), Some(5)).unwrap();
+        let via = tree.iter().find(|n| n.name == "via").unwrap();
+        assert!(!via.is_dir, "the chain was walked into as a folder");
+        for asked in ["via/doc.md", "through.md"] {
+            let err = confine_to(&root, asked).unwrap_err();
+            assert!(err.contains("link to another machine"), "{asked}: {err}");
+        }
+        assert!(confine_to(&root, "alias.md").is_ok(), "a link inside still opens");
+
+        let listed: Vec<String> = crate::fs::search::list_files(&root, 100)
+            .files
+            .iter()
+            .map(|f| Path::new(f).file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(listed, vec!["alias.md", "real.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&share);
     }
 }
