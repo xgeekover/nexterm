@@ -89,6 +89,11 @@ export function Sidebar() {
       <div className="flex flex-col">
         <button
           type="button"
+          // A click leaves focus where it was — the terminal or the editor —
+          // so that Settings, which gives focus back to whatever had it when
+          // it opened, gives it back there rather than to this icon. Tab
+          // still reaches it.
+          onMouseDown={(e) => e.preventDefault()}
           onClick={() => setSettingsModalOpen(true)}
           title="Settings"
           className="w-full h-activitybar flex items-center justify-center text-vsc-activitybar-muted hover:text-vsc-activitybar-fg transition-colors"
