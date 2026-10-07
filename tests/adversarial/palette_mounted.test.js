@@ -38,12 +38,10 @@ const STAND_INS = {
       isCommandPaletteOpen: false,
       commandPaletteMode: 'all',
       keybindings: {},
-      activeView: 'terminal',
       setCommandPaletteOpen: (open, mode = 'all') =>
         set({ isCommandPaletteOpen: open, commandPaletteMode: open ? mode : 'all' }),
-      setActiveView: (activeView) => {
-        calls.push(['setActiveView', activeView]);
-        set({ activeView });
+      setActiveView: (view) => {
+        calls.push(['setActiveView', view]);
       },
     }));`,
   editorStore: `

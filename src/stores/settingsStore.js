@@ -242,8 +242,6 @@ export function isViewShown(state, view) {
 }
 
 export const useSettingsStore = create((set, get) => ({
-  activeView: 'terminal', // 'terminal' | 'editor' | 'agents' | 'chat' | 'all' — legacy, mapped onto shell flags below
-  layoutMode: 'split', // 'split' | 'single'
   isCommandPaletteOpen: false,
   commandPaletteMode: 'all', // 'all' | 'files' (⌘P quick open)
   isSettingsModalOpen: false,
@@ -258,8 +256,7 @@ export const useSettingsStore = create((set, get) => ({
   // VS Code Dark Modern shell regions
   sidebarVisible: true, // primary sidebar (Explorer)
   panelVisible: true, // bottom panel (terminal)
-  secondarySidebarVisible: true, // secondary sidebar (Agents)
-  secondaryTab: 'agents', // 'agents' (AI Chat was removed)
+  secondarySidebarVisible: true, // secondary sidebar (Terminals)
 
   // Which region ('left' | 'right' | 'bottom') each draggable view currently
   // lives in. Not persisted — resets to the default VS Code-style layout on
@@ -280,23 +277,15 @@ export const useSettingsStore = create((set, get) => ({
   chooseView: (region, view) =>
     set((state) => ({ chosenViews: { ...state.chosenViews, [region]: view } })),
 
-  // Legacy view switcher — kept because other subsystems still call it to
-  // bring their own region into view. It no longer hides everything else;
-  // it just maps the old view name onto the new shell flags.
-  setActiveView: (activeView) => {
-    set({ activeView });
-    switch (activeView) {
+  // Bring the region a view lives in on screen: the palette opens a file
+  // ('editor') or a terminal ('terminal') where it can be seen.
+  setActiveView: (view) => {
+    switch (view) {
       case 'editor':
         set({ sidebarVisible: true });
         break;
       case 'terminal':
         set({ panelVisible: true });
-        break;
-      case 'chat':
-        set({ secondarySidebarVisible: true, secondaryTab: 'agents' });
-        break;
-      case 'agents':
-        set({ secondarySidebarVisible: true, secondaryTab: 'agents' });
         break;
       case 'all':
         set({ sidebarVisible: true, panelVisible: true, secondarySidebarVisible: true });
@@ -305,26 +294,11 @@ export const useSettingsStore = create((set, get) => ({
         break;
     }
   },
-  setLayoutMode: (layoutMode) => set({ layoutMode }),
 
   toggleSidebar: () => set((state) => ({ sidebarVisible: !state.sidebarVisible })),
   togglePanel: () => set((state) => ({ panelVisible: !state.panelVisible })),
 
-  // No tab: plain visibility toggle. With a tab: open on that tab if closed,
-  // switch to that tab if open on a different one, or close if already open
-  // on that exact tab (VS Code's activity-bar-click behaviour).
-  toggleSecondarySidebar: (tab) => {
-    set((state) => {
-      if (!tab) {
-        return { secondarySidebarVisible: !state.secondarySidebarVisible };
-      }
-      if (state.secondarySidebarVisible && state.secondaryTab === tab) {
-        return { secondarySidebarVisible: false };
-      }
-      return { secondarySidebarVisible: true, secondaryTab: tab };
-    });
-  },
-  setSecondaryTab: (tab) => set({ secondaryTab: tab }),
+  toggleSecondarySidebar: () => set((state) => ({ secondarySidebarVisible: !state.secondarySidebarVisible })),
 
   /**
    * Bring one view on screen and make it the visible one in its region.

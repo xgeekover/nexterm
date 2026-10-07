@@ -178,14 +178,12 @@ export class AppEnvironment {
       fileTree: [],
       rootPath: '/workspace',
       expandedFolders: new Set(['/workspace']),
-      diffView: null,
       pendingClose: null,
       pendingOverwrite: null,
     });
     useSettingsStore.setState({
       isCommandPaletteOpen: false,
       commandPaletteMode: 'all',
-      activeView: 'terminal',
     });
 
     this.ipc = new RecordingBridge(mockBridge);

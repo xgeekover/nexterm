@@ -423,7 +423,6 @@ async function enterRoot(set, get, root) {
       expandedFolders: new Set([root]),
       tabs: [],
       activeTabId: null,
-      diffView: null,
       editorSplitTree: emptyEditorTree(),
       activeEditorPaneId: 'editor-pane-root',
     });
@@ -444,7 +443,6 @@ export const useEditorStore = create((set, get) => ({
   // False until init() has asked the backend for the real root; until then
   // `rootPath` is only the browser mock's placeholder. See FileExplorer.
   rootResolved: false,
-  diffView: null,
 
   // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
   // See the "Editor split tree" comment near the top of this file.
@@ -1378,23 +1376,6 @@ export const useEditorStore = create((set, get) => ({
   // documented no-op instead of adding a new Rust command out of scope here.
   revealPath: async (path) => {
     console.warn(`[EditorStore] Reveal in Finder/Explorer is not supported by the current IPC surface (requested for ${path}).`);
-  },
-
-  openDiffView: ({ original, modified, title, onAccept, onReject }) => {
-    set({
-      diffView: {
-        open: true,
-        original,
-        modified,
-        title: title || 'Code Diff Review',
-        onAccept,
-        onReject,
-      },
-    });
-  },
-
-  closeDiffView: () => {
-    set({ diffView: null });
   },
 
   getActiveTab: () => {

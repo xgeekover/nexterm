@@ -11,7 +11,6 @@ import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs, EditorDragContext, markEditorDragEnded, stripSlotAt } from './EditorTabs.jsx';
-import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
 import { segmentsBelow } from '../../lib/paths.js';
@@ -628,7 +627,6 @@ function SplitNode({ node, onSplit, onClose, canClose }) {
  * WKWebView/pointer-events rationale).
  */
 export function EditorPanel() {
-  const diffView = useEditorStore((s) => s.diffView);
   const editorSplitTree = useEditorStore((s) => s.editorSplitTree);
   const splitEditorPane = useEditorStore((s) => s.splitEditorPane);
   const requestCloseEditorPane = useEditorStore((s) => s.requestCloseEditorPane);
@@ -751,15 +749,6 @@ export function EditorPanel() {
           document.body
         )
       : null;
-
-  if (diffView && diffView.open) {
-    return (
-      <>
-        <DiffViewer />
-        {prompts}
-      </>
-    );
-  }
 
   if (!editorSplitTree) return null;
 

@@ -8,7 +8,6 @@ import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
-import { useTheme } from './hooks/useTheme.js';
 import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
@@ -24,7 +23,6 @@ if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debu
 
 export default function App() {
   // Initialize global theme and keyboard shortcuts
-  useTheme();
   useKeybindings();
   useMenuEvents();
   // Closing the window or quitting asks about unsaved editor tabs first.
