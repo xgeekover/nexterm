@@ -79,6 +79,9 @@ import './activity_bar.test.js';
 import './workspace_names.test.js';
 import './startup_restore.test.js';
 import './hyperlinks.test.js';
+import './palette_results.test.js';
+import './explorer_deep_folders.test.js';
+import './palette_mounted.test.js';
 
 async function run() {
   console.log('====================================================');

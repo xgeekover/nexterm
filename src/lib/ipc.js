@@ -533,6 +533,22 @@ class BrowserMockBridge {
         return { files, total_matches: total, files_searched: searched, truncated: false };
       }
 
+      // Every file under the open folder, for Go to File — which used to list
+      // only the Explorer's tree, five levels deep. The real one walks the
+      // disk (src-tauri) and answers in this shape: paths in path order,
+      // without the folders the Explorer skips, at most `limit` of them, and
+      // `truncated` when there were more. The mock's folder is always open.
+      case 'fs_list_files': {
+        const root = (this.root ?? '/workspace').replace(/\/+$/, '');
+        const limit = Number.isInteger(args?.limit) && args.limit > 0 ? args.limit : 20000;
+        const SKIPPED = ['.git', 'node_modules', 'target', '.agents', 'dist'];
+        const all = [...this.files.keys()]
+          .filter((path) => path.startsWith(`${root}/`))
+          .filter((path) => !path.slice(root.length + 1).split('/').slice(0, -1).some((dir) => SKIPPED.includes(dir)))
+          .sort();
+        return { files: all.slice(0, limit), truncated: all.length > limit };
+      }
+
       case 'fs_write_file': {
         const { path, content } = args;
         this.files.set(path, content);

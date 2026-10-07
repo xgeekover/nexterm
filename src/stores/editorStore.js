@@ -11,12 +11,27 @@ import {
   stripTrailingSep,
   withSepOf,
 } from '../lib/paths.js';
-import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
+import { findNode, frontierOf, placeUnder, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
 import { useGitStore } from './gitStore.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
 const loadingDirs = new Set();
+
+/**
+ * How many levels `refreshExplorer` reads below the open folder, and how
+ * many `readDir` reads below a folder being opened. A folder on the last
+ * level of either comes back with no children, read or not (`frontierOf`).
+ */
+const TREE_LEVELS = 5;
+const FOLDER_LEVELS = 2;
+
+/**
+ * Counts `refreshExplorer` calls. Each reads more than once now, and two can
+ * overlap — the 300 ms one after a change and a direct one after a create —
+ * so one that finishes after a newer one has started leaves its tree alone.
+ */
+let treeGeneration = 0;
 
 let unlisteners = [];
 let listening = false;
@@ -197,6 +212,86 @@ async function freeNameIn(dirPath, name, isDir, mustDiffer) {
   return candidate;
 }
 
+// --- The Explorer's tree ----------------------------------------------------
+
+/**
+ * `nodes`, a read `levels` deep, with every folder the user has open below
+ * that read in as well — and the open folders below those, and so on.
+ *
+ * Everything is read before anything is shown, so a refresh puts the tree
+ * on screen once, with every open folder full. `refreshExplorer` used to put
+ * up its five-level read alone, and a folder the user had opened further
+ * down — `src/main/java/com/acme` — stayed open and showed nothing until it
+ * was closed and opened again; a refresh comes 300 ms after any change on
+ * disk, saving the file being edited included. Folders open inside a closed
+ * one are read too: opening the parent only shows what is already in the
+ * tree, so it would show them empty.
+ *
+ * The folders at one level are read together; each level waits for the one
+ * above it, as it must. Which folders are open is asked again after every
+ * level, so one opened while the reads were out is read too, and once
+ * nothing is left the caller has the tree before anything else can run.
+ */
+async function readOpenFolders(get, nodes, levels) {
+  let tree = nodes;
+  let unread = frontierOf(nodes, levels);
+  for (;;) {
+    const open = get().expandedFolders;
+    const due = unread.filter((path) => open.has(path));
+    if (due.length === 0) return tree;
+    const listings = await Promise.all(due.map((path) => get().readDir(path)));
+    const read = new Set(due);
+    due.forEach((path, i) => {
+      tree = setChildrenAt(tree, path, listings[i]);
+    });
+    unread = [
+      ...unread.filter((path) => !read.has(path)),
+      ...listings.flatMap((listing) => frontierOf(listing, FOLDER_LEVELS)),
+    ];
+  }
+}
+
+// --- Files the backend will not read ---------------------------------------
+
+/** A failure's words: Tauri rejects with the command's own string, the browser mock with an Error. */
+function errorText(err) {
+  return typeof err === 'string' ? err : String(err?.message ?? err ?? '');
+}
+
+/**
+ * Whether `fs_read_file` failed because nothing is at the path: the one
+ * failure that the backend and the browser mock both word "File not found:
+ * <path>".
+ */
+export function isFileNotFound(err) {
+  return errorText(err).startsWith('File not found: ');
+}
+
+/**
+ * The fixed words `read_file` refuses a file with (src-tauri/src/fs/mod.rs),
+ * each followed by ": <path>" — the path as it resolved it, links followed
+ * and in the disk's own case, which need not be how it was asked for.
+ */
+const READ_REFUSAL = /^(File not found|File is not UTF-8 text|File is too large to open \([^)]*\)): /;
+
+/**
+ * Why `fs_read_file` would not read `path`, for the user to read: the
+ * backend's own words — "File is too large to open (60.1 MB; the limit is
+ * 50 MB)" — without the path they end with, which whatever shows them names
+ * already.
+ */
+export function readFailureReason(err, path) {
+  const text = errorText(err).trim();
+  if (path && text.endsWith(`: ${path}`) && text.length > path.length + 2) {
+    return text.slice(0, -(path.length + 2));
+  }
+  const refusal = READ_REFUSAL.exec(text);
+  if (refusal) return refusal[1];
+  const failed = /^Failed to read file '.*': (.+)$/s.exec(text);
+  if (failed) return `Failed to read file: ${failed[1]}`;
+  return text || 'Unknown error';
+}
+
 // --- Unsaved edits ---------------------------------------------------------
 
 /**
@@ -268,16 +363,24 @@ async function writeTab(set, get, targetId, { force = false } = {}) {
   // `tab.content` over that silently destroys the newer version.
   if (!force) {
     let onDisk = null;
+    let unreadable = null;
     try {
       onDisk = await invoke('fs_read_file', { path: tab.filePath });
-    } catch {
-      // Gone or unreadable — writing recreates it, which is the expected
-      // outcome of saving, so fall through.
+    } catch (err) {
+      // Only a file that is not there is saved without asking: writing
+      // makes it again, which is what saving a deleted file should do. Any
+      // other failure leaves what is on disk unknown. Every failure used to
+      // count as gone: a log opened under the 50 MB the backend reads, and
+      // appended to past it since, was refused here as too large and then
+      // overwritten with the tab's older, shorter text, unasked.
+      if (!isFileNotFound(err)) unreadable = readFailureReason(err, tab.filePath);
     }
-    if (onDisk !== null && onDisk !== tab.savedContent) {
-      set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk } });
+    if (unreadable !== null || (onDisk !== null && onDisk !== tab.savedContent)) {
+      set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk, unreadable } });
       const err = new Error(
-        `${tab.fileName} has changed on disk since it was opened.`
+        unreadable === null
+          ? `${tab.fileName} has changed on disk since it was opened.`
+          : `${tab.fileName} could not be read back to see whether it changed on disk: ${unreadable}`
       );
       err.code = 'EXTERNAL_CHANGE';
       throw err;
@@ -361,8 +464,13 @@ export const useEditorStore = create((set, get) => ({
   // silently. `proceed` does what was asked once the edits are saved or
   // given up; `abandon` settles the asker's promise when nothing will be.
   pendingClose: null,   // { kind: 'tab' | 'pane' | 'root' | 'window' | 'quit', id, tabIds: [], names: [], proceed, abandon } | null
-  // A save refused because the file changed on disk after this tab read it.
-  pendingOverwrite: null, // { tabId, fileName, diskContent } | null
+  // A save refused because the file changed on disk after this tab read it,
+  // or could not be read back to tell (`unreadable`: why, else null — and
+  // then there is no `diskContent` to take instead).
+  pendingOverwrite: null, // { tabId, fileName, diskContent, unreadable } | null
+  // The last file that would not open, and why — on screen until dismissed
+  // or a file opens (OpenFailureNotice).
+  openFailure: null, // { path, fileName, reason } | null
   renamingPath: null,   // path currently rendered as an inline rename input
 
   // Event listeners are attached once and can be torn down (HMR, unmount)
@@ -430,12 +538,17 @@ export const useEditorStore = create((set, get) => ({
    *
    * `refreshExplorer` only walks a few levels deep, and a directory at that
    * limit comes back with an empty `children` that is indistinguishable from a
-   * genuinely empty one. The tree calls this the first time such a folder is
-   * expanded instead of claiming it is empty.
+   * genuinely empty one. The tree calls this when such a folder is opened
+   * instead of claiming it is empty, and a refresh for each one still open
+   * (`readOpenFolders`).
+   *
+   * Named under `path`, the way the tree reached the folder, rather than
+   * where the backend found it (see `placeUnder`): through a link, those
+   * differ.
    */
   readDir: async (path) => {
     try {
-      return (await invoke('fs_read_dir', { path, max_depth: 2 })) || [];
+      return placeUnder((await invoke('fs_read_dir', { path, max_depth: FOLDER_LEVELS })) || [], path);
     } catch (err) {
       console.error(`[EditorStore] Failed to read ${path}:`, err);
       return [];
@@ -443,6 +556,7 @@ export const useEditorStore = create((set, get) => ({
   },
 
   refreshExplorer: async () => {
+    const generation = ++treeGeneration;
     // No folder open: there is no tree to read, and the backend would refuse.
     if (!get().rootPath) {
       set({ fileTree: [], isLoadingTree: false });
@@ -450,14 +564,16 @@ export const useEditorStore = create((set, get) => ({
     }
     set({ isLoadingTree: true });
     try {
-      const tree = await invoke('fs_read_dir', {
+      const nodes = await invoke('fs_read_dir', {
         path: get().rootPath,
-        max_depth: 5,
+        max_depth: TREE_LEVELS,
       });
-      set({ fileTree: tree || [], isLoadingTree: false });
+      const tree = await readOpenFolders(get, nodes || [], TREE_LEVELS);
+      if (generation !== treeGeneration) return;
+      set({ fileTree: tree, isLoadingTree: false });
     } catch (err) {
       console.error('[EditorStore] Failed to read directory:', err);
-      set({ isLoadingTree: false });
+      if (generation === treeGeneration) set({ isLoadingTree: false });
     }
   },
 
@@ -569,7 +685,10 @@ export const useEditorStore = create((set, get) => ({
     get().toggleFolder(folderPath);
   },
 
-  /** Read a folder's entries into the tree if they are not there yet. */
+  /**
+   * Read a folder's entries into the tree if they are not there yet, with
+   * whatever below it was left open when it was closed (`readOpenFolders`).
+   */
   ensureChildrenLoaded: async (folderPath) => {
     const node = findNode(get().fileTree, folderPath);
     if (!node || !node.is_dir) return;
@@ -577,7 +696,7 @@ export const useEditorStore = create((set, get) => ({
     if (loadingDirs.has(folderPath)) return;
     loadingDirs.add(folderPath);
     try {
-      const children = await get().readDir(folderPath);
+      const children = await readOpenFolders(get, await get().readDir(folderPath), FOLDER_LEVELS);
       set((state) => ({ fileTree: setChildrenAt(state.fileTree, folderPath, children) }));
     } finally {
       loadingDirs.delete(folderPath);
@@ -609,6 +728,18 @@ export const useEditorStore = create((set, get) => ({
   /** Applied — or abandoned, if nothing could show it. */
   clearReveal: () => set({ pendingReveal: null }),
 
+  /**
+   * Give the active tab's editor the keyboard, leaving its caret where it
+   * is: a file picked in Go to File, or the keyboard handed back as a prompt
+   * closes (src/lib/workspaceFocus.js). A file just opened has no editor
+   * yet, so this too is parked in `pendingReveal` — with no line — for
+   * EditorPanel to apply once it has one.
+   */
+  focusEditor: () => {
+    const tab = get().getActiveTab();
+    if (tab) set({ pendingReveal: { filePath: tab.filePath, line: null, column: null } });
+  },
+
   openFile: async (requestedPath) => {
     // Written the way the backend writes the open folder, so that a link
     // printed in a terminal and a click in the Explorer name the same file
@@ -630,7 +761,7 @@ export const useEditorStore = create((set, get) => ({
               n.type === 'leaf' && n.id === holder.id ? { ...n, activeTabId: existing.id } : n
             )
           : addTabToPane(state.editorSplitTree, paneId, existing.id);
-        return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree };
+        return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree, openFailure: null };
       });
       return existing;
     }
@@ -656,14 +787,23 @@ export const useEditorStore = create((set, get) => ({
         activeTabId: tabId,
         // A newly opened file joins the active group so it is visible immediately.
         editorSplitTree: addTabToPane(state.editorSplitTree, state.activeEditorPaneId, tabId),
+        openFailure: null,
       }));
 
       return newTab;
     } catch (err) {
       console.error(`[EditorStore] Failed to open file ${filePath}:`, err);
+      // Said on screen as well. Every way of opening a file comes through
+      // here — the Explorer, Go to File, a link in a terminal, a search
+      // result — and a file the backend would not read, a 60 MB log or a
+      // binary, opened nothing and said nothing anywhere but the console.
+      set({ openFailure: { path: filePath, fileName: basename(filePath), reason: readFailureReason(err, filePath) } });
       throw err;
     }
   },
+
+  /** The notice of a file that would not open, closed. */
+  dismissOpenFailure: () => set({ openFailure: null }),
 
   editBuffer: (tabId, newContent) => {
     set((state) => ({
@@ -849,8 +989,29 @@ export const useEditorStore = create((set, get) => ({
 
   // --- Editor split tree: panes, drag-and-drop placement ------------------
 
-  /** Mark a pane as the active one (called on click/focus of a pane). */
-  setActiveEditorPane: (paneId) => set({ activeEditorPaneId: paneId }),
+  /**
+   * Make a pane the active one — a click or focus anywhere in it — and the
+   * tab it shows the active tab.
+   *
+   * Save (the keys and the menu) and the Explorer's highlight go by
+   * `activeTabId`. This used to move only `activeEditorPaneId`, so after a
+   * file was opened in a second group, typing in the first and pressing
+   * Ctrl+S saved the file in the second, untouched, and left the edited one
+   * unsaved. A group with no file leaves no tab active: there is nothing in
+   * it to save. The tab is the one the group draws, its first when the one it
+   * remembers is gone (see EditorPane).
+   *
+   * Runs on every mousedown in the editor, so a click that changes nothing
+   * leaves the state alone rather than waking every subscriber.
+   */
+  setActiveEditorPane: (paneId) =>
+    set((state) => {
+      const leaf = collectLeaves(state.editorSplitTree).find((l) => l.id === paneId);
+      if (!leaf) return state;
+      const tabId = leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0] ?? null;
+      if (state.activeEditorPaneId === paneId && state.activeTabId === tabId) return state;
+      return { activeEditorPaneId: paneId, activeTabId: tabId };
+    }),
 
   /**
    * Split a leaf pane into two children (horizontal or vertical). The new

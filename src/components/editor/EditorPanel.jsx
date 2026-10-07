@@ -15,6 +15,7 @@ import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
 import { segmentsBelow } from '../../lib/paths.js';
+import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
@@ -373,6 +374,23 @@ function DragPreview({ drag }) {
 }
 
 /**
+ * Keep `editor`, a group's Monaco editor, in `ref` for as long as it lives.
+ *
+ * Each tab a group shows gets an editor of its own (the `key` on <Editor>
+ * below), and the one before is disposed. Left in the ref, it was handed the
+ * next request meant for the new one — Go to File asking for the keyboard, a
+ * terminal link's line — before the new one had mounted: a disposed editor
+ * moves no caret and takes no focus, and the request was spent on it.
+ * Let go, the request waits for the new editor's `onMount`.
+ */
+export function holdEditor(ref, editor) {
+  ref.current = editor;
+  editor.onDidDispose?.(() => {
+    if (ref.current === editor) ref.current = null;
+  });
+}
+
+/**
  * What the Save / Don't Save / Cancel prompt says. Opening another folder
  * also says why it is asking: nothing about choosing a folder suggests that
  * every editor tab is about to close.
@@ -386,6 +404,31 @@ function unsavedPromptText({ kind, names }) {
       ? `${names.join(', ')} have unsaved changes. ${reason}Your changes will be lost if you don't save them.`
       : `${reason}Your changes to ${names[0]} will be lost if you don't save them.`,
     confirmLabel: many ? 'Save All' : 'Save',
+  };
+}
+
+/**
+ * What the prompt over a save that would replace the file on disk says.
+ *
+ * Usually the file has changed since the tab read it, and what is on disk
+ * can be taken instead. When it could not be read back at all (`unreadable`)
+ * — grown past the 50 MB the editor opens, a log appended to; no longer
+ * text; behind a link that leads nowhere — whether it changed cannot be
+ * known, and there is no version on disk to take: it says why, and offers
+ * only to overwrite or not.
+ */
+export function overwritePromptText({ fileName, unreadable = null }) {
+  if (unreadable == null) {
+    return {
+      title: 'File Changed on Disk',
+      message: `${fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`,
+      altLabel: 'Use Disk Version',
+    };
+  }
+  return {
+    title: 'File on Disk Could Not Be Read',
+    message: `${fileName} could not be read back to see whether it changed on disk since you opened it: ${String(unreadable).replace(/\.$/, '')}. Saving now would replace whatever is there with this tab's version.`,
+    altLabel: null,
   };
 }
 
@@ -430,6 +473,12 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
     (editor, filePath) => {
       const reveal = useEditorStore.getState().pendingReveal;
       if (!editor || !reveal || reveal.filePath !== filePath) return;
+      // Only the keyboard was asked for (`focusEditor`): the caret stays.
+      if (reveal.line == null) {
+        editor.focus();
+        clearReveal();
+        return;
+      }
       const lineCount = editor.getModel()?.getLineCount?.() ?? reveal.line;
       // A stack trace can name a line past the end of a file that has since
       // been edited. Land on the last line rather than refusing to move.
@@ -509,7 +558,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               value={activeTab.content}
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
               onMount={(editor) => {
-                editorRef.current = editor;
+                holdEditor(editorRef, editor);
                 applyPendingReveal(editor, activeTab.filePath);
               }}
               options={monacoOptions}
@@ -630,6 +679,12 @@ export function EditorPanel() {
     requestCloseEditorPane(paneId);
   }, [requestCloseEditorPane]);
 
+  // Where the keyboard goes when a prompt closes and what had it is gone —
+  // the tab's own ✕, which Chromium focuses when it is clicked and which
+  // goes with the tab it closed: the file now in front, or the terminal
+  // when no file is left open.
+  const focusAfterPrompt = () => focusWorkspace('editor');
+
   const unsavedText = pendingClose ? unsavedPromptText(pendingClose) : null;
   const unsavedPrompt = pendingClose ? (
     <ConfirmDialog
@@ -651,17 +706,19 @@ export function EditorPanel() {
         );
       }}
       onCancel={cancelPendingClose}
+      fallbackFocus={focusAfterPrompt}
     />
   ) : null;
 
+  const overwriteText = pendingOverwrite ? overwritePromptText(pendingOverwrite) : null;
   const overwritePrompt = pendingOverwrite ? (
     <ConfirmDialog
       open
-      title="File Changed on Disk"
-      message={`${pendingOverwrite.fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`}
+      title={overwriteText.title}
+      message={overwriteText.message}
       confirmLabel="Overwrite"
       danger
-      altLabel="Use Disk Version"
+      altLabel={overwriteText.altLabel}
       cancelLabel="Cancel"
       onConfirm={() => {
         confirmPendingOverwrite().catch((err) =>
@@ -674,6 +731,7 @@ export function EditorPanel() {
         );
       }}
       onCancel={cancelPendingOverwrite}
+      fallbackFocus={focusAfterPrompt}
     />
   ) : null;
 

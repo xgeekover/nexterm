@@ -491,6 +491,50 @@ scenario(
   }
 );
 
+// ---- Go to File in a big folder ---------------------------------------------
+
+scenario(
+  'RN-44',
+  'Go to File in a folder of 1,000 files draws a screenful of rows and says how many more matched',
+  () => {
+    reset();
+    useEditorStore.setState({
+      fileTree: Array.from({ length: 1000 }, (_, i) => ({ name: `f${i}.js`, path: `/workspace/f${i}.js`, is_dir: false })),
+    });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'files' });
+  },
+  (html) => {
+    // Every file row ends in its "File" hint.
+    const rows = html.match(/>File<\/kbd>/g)?.length ?? 0;
+    expectThat(rows === 200, `${rows} file rows drawn for an empty query`);
+    expectText(html, '800 more — keep typing to narrow the list');
+    expectText(html, 'f0.js');
+  }
+);
+
+// ---- A file that would not open ----------------------------------------------
+
+scenario(
+  'RN-45',
+  'a file the backend would not open says which and why, over the corner of the window',
+  () => {
+    reset();
+    useEditorStore.setState({
+      openFailure: {
+        path: '/workspace/logs/app.log',
+        fileName: 'app.log',
+        reason: 'File is too large to open (60.1 MB; the limit is 50 MB)',
+      },
+    });
+  },
+  (html) => {
+    expectText(html, 'Could not open app.log');
+    expectText(html, 'File is too large to open (60.1 MB; the limit is 50 MB)');
+    expectThat(/<div\b[^>]*\srole="alert"/.test(html), 'the reason is not announced');
+    expectThat(buttonsIn(html).some((b) => b.title === 'Dismiss'), 'nothing to close it with');
+  }
+);
+
 // ---- A command that finished without a code --------------------------------
 
 /** The class list of the status bar's notification badge, or null when it is not drawn. */
