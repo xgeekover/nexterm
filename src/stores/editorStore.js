@@ -991,18 +991,27 @@ export const useEditorStore = create((set, get) => ({
   closeTab: (tabId) => {
     set((state) => {
       const nextTabs = state.tabs.filter((t) => t.id !== tabId);
-      let nextActive = state.activeTabId;
-      if (state.activeTabId === tabId) {
-        nextActive = nextTabs[0]?.id || null;
-      }
       // Drop it from its group too, collapsing the group if it was the last tab.
       const editorSplitTree = pruneTree(removeTabFromTree(state.editorSplitTree, tabId)) || emptyEditorTree();
       const paneStillThere = collectLeaves(editorSplitTree).some((l) => l.id === state.activeEditorPaneId);
+      const activeEditorPaneId = paneStillThere
+        ? state.activeEditorPaneId
+        : firstLeafId(editorSplitTree) || 'editor-pane-root';
+      // The tab the active group now shows, as `setActiveEditorPane` picks it.
+      // The first tab of the whole list was another group's file as often as
+      // not, or one no group shows: Save then wrote that one, and the
+      // keyboard, given back after "Save X?", went to the other group.
+      let nextActive = state.activeTabId;
+      if (state.activeTabId === tabId) {
+        const leaf = collectLeaves(editorSplitTree).find((l) => l.id === activeEditorPaneId);
+        const open = (leaf?.tabIds ?? []).filter((id) => nextTabs.some((t) => t.id === id));
+        nextActive = open.includes(leaf?.activeTabId) ? leaf.activeTabId : open[0] ?? null;
+      }
       return {
         tabs: nextTabs,
         activeTabId: nextActive,
         editorSplitTree,
-        activeEditorPaneId: paneStillThere ? state.activeEditorPaneId : firstLeafId(editorSplitTree) || 'editor-pane-root',
+        activeEditorPaneId,
       };
     });
   },

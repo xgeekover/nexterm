@@ -182,6 +182,10 @@ export class AppEnvironment {
       expandedFolders: new Set(['/workspace']),
       pendingClose: null,
       pendingOverwrite: null,
+      // The groups too: left as they were, they held the last case's tab ids,
+      // and a tab closed here could hand its place to one that is not open.
+      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
+      activeEditorPaneId: 'editor-pane-root',
     });
     useSettingsStore.setState({
       isCommandPaletteOpen: false,

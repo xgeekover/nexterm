@@ -261,4 +261,34 @@ describe('Editor layout: the group being typed in is the one Save writes', () =>
     S.getState().setActiveEditorPane('editor-pane-root');
     assert.equal(S.getState(), before, 'a click that changes nothing still replaced the state');
   });
+
+  test('EL-15: closing the active tab makes the tab its group now shows active — not the first file of all', async () => {
+    // Found in review: closeTab took the first tab of the whole list. With
+    // two groups that was the other group's file, which Save then wrote and
+    // the keyboard went to after "Save X?" was answered.
+    const a = (await S.getState().openFile(files[0])).id;
+    const b1 = (await S.getState().openFile(files[1])).id;
+    S.getState().dropEditorTabOnPane(b1, 'editor-pane-root', 'right');
+    const right = leafOf(b1).id;
+    S.getState().setActiveEditorPane(right);
+    const b2 = (await S.getState().openFile(files[2])).id;
+    assert.deepEqual([leafOf(a).id, leafOf(b2).id], ['editor-pane-root', right], 'setup: a on the left, b1 and b2 on the right');
+    assert.equal(S.getState().activeTabId, b2);
+
+    S.getState().closeTab(b2);
+    assert.equal(S.getState().activeEditorPaneId, right);
+    assert.equal(S.getState().activeTabId, b1, 'the right group shows b1 now, and b1 is what Save writes');
+
+    // Open again and closed again: the one active is the one the group draws.
+    const again = (await S.getState().openFile(files[2])).id;
+    S.getState().closeTab(again);
+    assert.equal(S.getState().activeTabId, leafOf(b1).activeTabId);
+
+    // The last tab of a group: the group goes, and the other group's shown tab is active.
+    S.getState().closeTab(b1);
+    assert.equal(leaves().length, 1);
+    assert.equal(S.getState().activeTabId, a);
+    S.getState().closeTab(a);
+    assert.equal(S.getState().activeTabId, null);
+  });
 });
