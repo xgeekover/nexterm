@@ -183,6 +183,52 @@ describe('Settings: Escape while a shortcut is being recorded', () => {
   });
 });
 
+/** A page as far as `focusAfterClose` looks at one. */
+function page() {
+  const body = { focus() {} };
+  const nodes = new Set([body]);
+  const doc = {
+    body,
+    documentElement: {},
+    activeElement: body,
+    contains: (node) => nodes.has(node),
+  };
+  const add = () => {
+    const node = { focus() { doc.activeElement = node; } };
+    nodes.add(node);
+    return node;
+  };
+  return { doc, add, remove: (node) => nodes.delete(node) };
+}
+
+describe('Settings: closing gives focus back', () => {
+  test('SW-08: focus goes back to the terminal that had it when the window opened', async () => {
+    // With focus left on the page, the terminal got no keys until clicked,
+    // and off macOS a Ctrl+W meant for the shell ran Close Pane instead.
+    const focusAfterClose = await exported('focusAfterClose');
+    const { doc, add } = page();
+    const terminal = add();
+    assert.equal(focusAfterClose(terminal, doc), terminal);
+  });
+
+  test('SW-09: …unless it has gone, was nothing, or something else has focus now', async () => {
+    const focusAfterClose = await exported('focusAfterClose');
+    const { doc, add, remove } = page();
+
+    const closedTerminal = add();
+    remove(closedTerminal);
+    assert.equal(focusAfterClose(closedTerminal, doc), null, 'a terminal closed meanwhile');
+
+    assert.equal(focusAfterClose(doc.body, doc), null, 'the window opened with nothing focused');
+    assert.equal(focusAfterClose(null, doc), null);
+
+    const terminal = add();
+    const editor = add();
+    editor.focus();
+    assert.equal(focusAfterClose(terminal, doc), null, 'the editor took focus since; it keeps it');
+  });
+});
+
 describe('Settings: what a focused terminal never sees', () => {
   test('SW-10: the note above the shortcuts names every command claimed over a terminal, and no other', async () => {
     // It said "only the two side-bar toggles are claimed" while ten were —

@@ -40,6 +40,23 @@ export function settingsWindowKey(e) {
   return null;
 }
 
+/**
+ * Where focus goes once the Settings window has closed: back to `opener`,
+ * what had it when the window opened — the terminal or the editor, as a rule
+ * — if it is still on the page and nothing else has taken focus since.
+ * Otherwise null, and focus is left where it is.
+ *
+ * Left alone, focus fell to the page with the window's controls: the terminal
+ * behind got no keys until it was clicked, and off macOS a Ctrl+W meant for
+ * the shell reached the window's own Close Pane instead.
+ */
+export function focusAfterClose(opener, doc) {
+  if (!opener || !doc || opener === doc.body || opener === doc.documentElement) return null;
+  if (!doc.contains(opener)) return null;
+  if (doc.activeElement && doc.activeElement !== doc.body) return null;
+  return typeof opener.focus === 'function' ? opener : null;
+}
+
 const SECTIONS = [
   { id: 'keyboard', label: 'Keyboard Shortcuts' },
   { id: 'editor', label: 'Text Editor' },
@@ -565,6 +582,16 @@ export function SettingsWindow() {
     return () => cancelAnimationFrame(raf);
   }, [isOpen]);
 
+  // Note what has focus as the window opens — the search box takes it a frame
+  // later — and give it back when the window closes, however it closes.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const opener = document.activeElement;
+    return () => {
+      focusAfterClose(opener, document)?.focus();
+    };
+  }, [isOpen]);
+
   // Escape to close + a focus trap that keeps Tab cycling inside the window.
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -661,7 +688,12 @@ export function SettingsWindow() {
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) setOpen(false);
+        if (e.target !== e.currentTarget) return;
+        // The window closes during this press and gives focus back; the
+        // press's own default would then move focus to what was clicked —
+        // nothing — and take it away again.
+        e.preventDefault();
+        setOpen(false);
       }}
     >
       <div
