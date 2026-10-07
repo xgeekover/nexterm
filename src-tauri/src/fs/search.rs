@@ -11,8 +11,9 @@
 //!      to `e` in a large repository is not an answer — it is a hang, then a
 //!      megabyte of JSON the webview has to render. What was cut is reported,
 //!      never silently dropped.
-//!   2. **It skips what the Explorer skips.** The same `is_ignored` the tree
-//!      and the file watcher use, so search results and the tree agree about
+//!   2. **It skips what the Explorer skips.** The same folder list the tree
+//!      and the file watcher use, matched below the open folder only
+//!      (`is_ignored_below`), so search results and the tree agree about
 //!      what is in the project. (A consequence worth knowing: `.gitignore` is
 //!      NOT read — only the fixed folder list. A project whose build output
 //!      lives somewhere unusual will see it here.)
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::fs::watcher::is_ignored;
+use crate::fs::watcher::is_ignored_below;
 
 /// A file bigger than this is not something anyone greps for a phrase; it is a
 /// build artifact, a lockfile dump or a log, and reading it costs more than the
@@ -168,7 +169,7 @@ pub fn search(root: &Path, query: &str, options: SearchOptions) -> Result<Search
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !is_ignored(e.path()))
+        .filter_entry(|e| !is_ignored_below(root, e.path()))
         .filter_map(Result::ok)
     {
         if results.files.len() >= MAX_FILES || total >= MAX_TOTAL_MATCHES {
@@ -295,6 +296,26 @@ mod tests {
             out.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A dependency opened from `node_modules` to read it: every path in it
+    /// has `node_modules` in it, and the walk used to be cut at the open
+    /// folder itself — nothing searched, "No results".
+    #[test]
+    fn a_folder_opened_inside_node_modules_is_searched() {
+        let base = scratch("inside-node-modules");
+        let root = base.join("node_modules").join("lib");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("node_modules").join("dep")).unwrap();
+        fs::write(root.join("src").join("index.js"), "needle\n").unwrap();
+        fs::write(root.join("node_modules").join("dep").join("index.js"), "needle\n").unwrap();
+
+        let out = search(&root, "needle", opts()).unwrap();
+
+        let found: Vec<&str> = out.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(out.files.len(), 1, "{found:?}");
+        assert!(found[0].ends_with("index.js") && found[0].contains("src"), "{found:?}");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
