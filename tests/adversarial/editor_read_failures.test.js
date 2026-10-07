@@ -244,6 +244,28 @@ describe('Saving a file that cannot be read back first', () => {
     assert.equal(S.getState().pendingOverwrite?.tabId, tab.id);
   });
 
+  test("RF-10: a file the tab's own last save took past 50 MB is saved again without asking", async () => {
+    // Found in review: every save after that one was refused as unreadable
+    // and asked, as if someone else had grown the file — and Save in the
+    // close prompt turned into that question, abandoning the close.
+    const { path, tab } = await openEdited();
+    const big = 'x'.repeat(50 * 1024 * 1024 + 1);
+    S.setState((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, savedContent: big, content: `${big}more`, isDirty: true } : t)),
+    }));
+    const seen = [];
+    await withInvoke(refusing(path, TOO_LARGE(path), seen), () => S.getState().saveFile(tab.id));
+    assert.equal(S.getState().pendingOverwrite, null, 'asked about its own bytes');
+    assert.deepEqual(writes(seen), ['fs_write_file']);
+    assert.equal(S.getState().tabs.find((t) => t.id === tab.id).isDirty, false);
+
+    // Under the limit when last saved: grown past it by someone else — asked.
+    S.setState(emptyEditor());
+    const other = await openEdited();
+    const err = await withInvoke(refusing(other.path, TOO_LARGE(other.path)), () => outcome(S.getState().saveFile(other.tab.id)));
+    assert.equal(err?.code, 'EXTERNAL_CHANGE');
+  });
+
   test('RF-09: teardown', () => {
     S.setState(emptyEditor());
     assert.equal(S.getState().openFailure, null);

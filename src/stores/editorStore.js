@@ -274,6 +274,24 @@ export function isFileNotFound(err) {
  */
 const READ_REFUSAL = /^(File not found|File is not UTF-8 text|File is too large to open \([^)]*\)): /;
 
+/** The most `read_file` opens (`MAX_OPEN_BYTES` in src-tauri/src/fs/mod.rs). */
+const MAX_OPEN_BYTES = 50 * 1024 * 1024;
+
+/** How many bytes `text` takes as UTF-8, counted without encoding it. */
+function utf8Length(text) {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      bytes += 4;
+      i += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
 /**
  * Why `fs_read_file` would not read `path`, for the user to read: the
  * backend's own words — "File is too large to open (60.1 MB; the limit is
@@ -397,7 +415,14 @@ async function writeTab(set, get, targetId, { force = false } = {}) {
       // count as gone: a log opened under the 50 MB the backend reads, and
       // appended to past it since, was refused here as too large and then
       // overwritten with the tab's older, shorter text, unasked.
-      if (!isFileNotFound(err)) unreadable = readFailureReason(err, tab.filePath);
+      //
+      // Except a file too large that this tab made so: what it last saved is
+      // itself past the limit, and nothing past it is ever opened, so the
+      // bytes on disk are its own. Asked as if someone else had grown it, a
+      // file the user's own edits took past 50 MB asked on every save after.
+      const ownTooLarge =
+        errorText(err).startsWith('File is too large to open ') && utf8Length(tab.savedContent ?? '') > MAX_OPEN_BYTES;
+      if (!isFileNotFound(err) && !ownTooLarge) unreadable = readFailureReason(err, tab.filePath);
     }
     if (unreadable !== null || (onDisk !== null && onDisk !== tab.savedContent)) {
       set({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: onDisk, unreadable } });
