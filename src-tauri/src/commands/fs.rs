@@ -142,10 +142,20 @@ pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {
 ///
 /// `pick_folder` hands the choice back on whatever thread the dialog lives on,
 /// so the result comes through a channel instead and nothing blocks anywhere.
+///
+/// The dialog belongs to the window that asked. Without an owner it did not
+/// hold the window on Windows: unsaved edits were asked about before the
+/// picker opened, and anything typed while it was open was dropped without a
+/// question when the folder changed. With one, the window waits for the
+/// dialog there as it already did on macOS, where the picker is now a sheet.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn fs_pick_root(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub async fn fs_pick_root(
+    app: AppHandle,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folder(move |picked| {
+    app.dialog().file().set_parent(&window).pick_folder(move |picked| {
         // The receiver is only dropped if the command was cancelled, and then
         // there is nobody left to tell.
         let _ = tx.send(picked);
@@ -461,6 +471,12 @@ mod dispatch_tests {
         assert!(
             src.contains("pub async fn fs_pick_root"),
             "fs_pick_root has to be async to await the picker's answer"
+        );
+        // Found in review: with no owner, the picker did not hold the window
+        // on Windows, and edits typed while it was open were dropped.
+        assert!(
+            code.contains(".file().set_parent(&window).pick_folder("),
+            "the folder picker has to belong to the window that asked"
         );
     }
 }
