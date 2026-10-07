@@ -308,6 +308,30 @@ const savesInFlight = new Map(); // tabId -> promise of its last save
 /** The prompt whose Save is writing files right now — see `savePendingClose`. */
 let savingClose = null;
 
+/** What a prompt holds that ends the window, the app or the open folder. */
+const LEAVING = new Set(['window', 'quit', 'root']);
+
+/** How long leaving waits for saves still writing (`savesSettled`). */
+const SAVE_SETTLE_MS = 5000;
+
+/**
+ * Every save still writing, settled: each tab's latest, which itself waits
+ * for the ones before it. Leaving waits for them — an earlier prompt's Save
+ * that a newer prompt replaced, a Ctrl+S — because a process that ends while
+ * a write is under way can leave the file cut short, the old text and the new
+ * both lost. Bounded, so that a write that never returns (a stalled network
+ * drive) cannot keep the window open for good.
+ */
+function savesSettled() {
+  const writing = [...savesInFlight.values()];
+  if (writing.length === 0) return Promise.resolve();
+  let timer = null;
+  const bound = new Promise((resolve) => {
+    timer = setTimeout(resolve, SAVE_SETTLE_MS);
+  });
+  return Promise.race([Promise.allSettled(writing), bound]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Hold `proceed` behind the Save / Don't Save / Cancel prompt for `dirty`.
  *
@@ -923,6 +947,7 @@ export const useEditorStore = create((set, get) => ({
     // has not finished can leave the file cut short.
     if (!pending || savingClose === pending) return;
     set({ pendingClose: null });
+    if (LEAVING.has(pending.kind)) await savesSettled();
     await pending.proceed();
   },
 
@@ -959,6 +984,7 @@ export const useEditorStore = create((set, get) => ({
     // written: the saves stand, and nothing else happens.
     if (get().pendingClose !== pending) return;
     set({ pendingClose: null });
+    if (LEAVING.has(pending.kind)) await savesSettled();
     await pending.proceed();
   },
 

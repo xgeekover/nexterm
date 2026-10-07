@@ -46,6 +46,56 @@ async function openDirtyFile(content = 'on disk', edited = 'edited in the buffer
   return { path, tab: S.getState().tabs.find((t) => t.id === tab.id) };
 }
 
+describe('Leaving while a save is still writing', () => {
+  beforeEach(() => {
+    S.setState({
+      tabs: [],
+      activeTabId: null,
+      pendingClose: null,
+      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
+      activeEditorPaneId: 'editor-pane-root',
+    });
+  });
+
+  test("ES-13: Don't Save on a newer prompt waits for the older prompt's Save to finish writing", async () => {
+    // Found in review: the window is closed, Save is pressed, the write is
+    // slow; a second close replaces the prompt and Don't Save closed the
+    // window — ending the process — while the file was still being written.
+    const { path } = await openDirtyFile('on disk', 'saved by the first prompt');
+    const events = [];
+    const write = signal();
+    await withInvoke(
+      async (command, args, real) => {
+        if (command === 'fs_write_file' && args?.path === path) {
+          events.push('write starts');
+          await write.fired;
+          const done = await real();
+          events.push('write ends');
+          return done;
+        }
+        return real();
+      },
+      async () => {
+        S.getState().askBeforeLeaving('window', () => events.push('window closed (first)'));
+        const saving = S.getState().savePendingClose();
+        for (let i = 0; i < 20 && !events.includes('write starts'); i += 1) await new Promise((r) => setTimeout(r, 1));
+        assert.deepEqual(events, ['write starts'], 'setup: the first Save is writing');
+
+        S.getState().askBeforeLeaving('window', () => events.push('window closed'));
+        const leaving = S.getState().discardPendingClose();
+        await new Promise((r) => setTimeout(r, 10));
+        assert.deepEqual(events, ['write starts'], 'the window went while the file was being written');
+
+        write.fire();
+        await leaving;
+        await saving;
+      }
+    );
+    assert.deepEqual(events, ['write starts', 'write ends', 'window closed']);
+    assert.equal(await invoke('fs_read_file', { path }), 'saved by the first prompt');
+  });
+});
+
 describe('Closing an editor tab with unsaved edits', () => {
   beforeEach(() => {
     S.setState({
