@@ -656,6 +656,62 @@ output can claim a directory (OSC 7). Never run on Windows.
 - A folder on a mapped drive letter (`Z:\…`) is a local path and works as
   before.
 
+### V29 — closing with unsaved edits asks, and a dead page cannot hold the window
+
+The backend decides every close now (src-tauri/src/commands/app.rs): with
+nothing unsaved the window closes at once; with an unsaved editor tab it asks
+the page, which shows Save / Don't Save / Cancel. A page that does not answer
+within 2 s — crashed, hung — no longer keeps the window open. Never run on
+Windows: checked with the suites and the browser mock.
+
+- Edit a file without saving, then Alt+F4: the window comes forward if it was
+  behind and asks. Cancel keeps everything. Alt+F4 again, Don't Save: the
+  window closes, with no second "Leave site?" question.
+- The same with the title bar's ✕ double-clicked: one question, not a close.
+- The same with nothing unsaved: Alt+F4 closes at once.
+- Edit a file, then Ctrl+R or F5 with the editor focused: a "Leave site?"
+  question (or nothing at all, if WebView2 already swallows the key — say
+  which); the edit is still there afterwards.
+- Known and not fixed: shutting down, signing out or a restart for an update
+  with unsaved edits loses them without asking (tao ignores
+  WM_QUERYENDSESSION).
+
+### V30 — pasting a pnpm or npm-workspaces project without Developer Mode
+
+A copy of a folder whose node_modules is full of junctions failed at the first
+one and rolled the whole paste back, because a symlink needs Developer Mode or
+an administrator. Junctions are copied as junctions now. Never run on Windows.
+
+- With Developer Mode off, in the Explorer copy a pnpm project (or any folder
+  with a junction: `mklink /J link target`) and paste it beside itself. While
+  it copies the Explorer says "Copying '…'…" and Paste is greyed; a hidden
+  `.<name>.copying` folder appears and becomes `<name> copy` at the end.
+- In the copy, `dir node_modules` shows `<JUNCTION>` entries, and the project
+  runs (`pnpm test` or similar).
+- Close NexTerm in the middle of a big paste: what is left is the
+  `.<name>.copying` folder, never a half-filled `<name> copy`.
+
+### V31 — Open Folder holds the window while the picker is open
+
+The folder picker belongs to the window now. Never run on Windows.
+
+- File ▸ Open Folder…: while the picker is open, clicking NexTerm does
+  nothing (it is disabled behind the dialog), so nothing can be typed into a
+  tab the folder switch would then close without asking.
+
+### V32 — a link to another machine inside a project is never followed
+
+With Developer Mode on (or a repository checked out with
+`core.symlinks=true`), a link inside the open folder whose target is a share
+(`mklink /D docs \\localhost\C$\Windows`) was followed — by the Explorer, Go to
+File, search and opening a file through it — and following one signs in to
+that machine. Never run on Windows.
+
+- Open the folder: `docs` is listed as a link and does not expand. Go to File
+  does not list anything under it; Search in Files finds nothing under it;
+  opening `docs\…` from a terminal link says "Path goes through a link to
+  another machine".
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
