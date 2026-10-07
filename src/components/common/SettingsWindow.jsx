@@ -309,6 +309,24 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
 const inputClass =
   'h-[26px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui px-2';
 
+/**
+ * What a number field commits when focus leaves it: the number typed, held
+ * to the field's range — or, when nothing readable was typed, the saved
+ * value, which commits nothing.
+ *
+ * A blank field is not 0. `Number('')` is, and it used to be clamped to the
+ * minimum and saved: clear Scrollback to type a new value, click anywhere,
+ * and it was 100 — applied live, so every open terminal dropped all but its
+ * last 100 lines, for good. Font sizes went to 8 the same way, and Notify
+ * After to 0, which turns it off. A type="number" input also reports '' for
+ * text it cannot read, so that arrives here as a blank too.
+ */
+export function numberToCommit(text, { min, max }, saved) {
+  const typed = String(text ?? '').trim();
+  const n = typed === '' ? NaN : Number(typed);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : saved;
+}
+
 /** Number/text controls commit on blur or Enter so mid-typing digits never
  * get clobbered by a live re-clamp — but there is still no Save button
  * anywhere in the window; every field takes effect the moment you leave it. */
@@ -321,10 +339,9 @@ function TextLikeControl({ item, value, onCommit }) {
 
   const commit = () => {
     if (item.control === 'number') {
-      const n = Number(text);
-      const clamped = Number.isFinite(n) ? Math.min(item.max, Math.max(item.min, n)) : value;
-      setText(String(clamped));
-      if (clamped !== value) onCommit(clamped);
+      const next = numberToCommit(text, item, value);
+      setText(String(next ?? ''));
+      if (next !== value) onCommit(next);
     } else {
       onCommit(text);
     }
@@ -482,6 +499,9 @@ export function SettingsWindow() {
   const sectionNodeRefs = useRef({});
   const titleId = useId();
 
+  // Read again each time the window opens rather than once: `isOpen` is the
+  // reason to look again, not something the reading uses.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const monoPlaceholder = useMemo(() => readInheritedMonoStack(), [isOpen]);
   const detectedShells = useSystemStore((s) => s.shells);
   const homeDir = useSystemStore((s) => s.homeDir);
