@@ -180,3 +180,22 @@ describe('Command palette: which command comes first', () => {
     assert.deepEqual(commands('').map((c) => c.id), paletteCommands(DEFAULT_RESOLVED).map((c) => c.id));
   });
 });
+
+describe('Command palette: a path pasted whole', () => {
+  // Found in review: Copy Path in the Explorer, or a path out of a terminal,
+  // pasted into Go to File matched nothing — a file is matched by its path
+  // below the open folder, and the folder's own part matched no file.
+  test('PR-14: an absolute path inside the open folder finds its file, first', () => {
+    const files = ['/Users/me/proj/src/App.jsx', '/Users/me/proj/src/app/main.js', '/Users/me/proj/README.md'];
+    const found = (query, rootPath = '/Users/me/proj', list = files) =>
+      buildPaletteGroups({ files: list, rootPath, query, mode: 'files' })
+        .find((g) => g.label === 'files')
+        ?.items.map((row) => row.path) ?? [];
+    assert.deepEqual(found('/Users/me/proj/src/App.jsx')[0], '/Users/me/proj/src/App.jsx');
+    assert.deepEqual(found('/users/me/proj/SRC/app.jsx')[0], '/Users/me/proj/src/App.jsx', 'in any case');
+    const win = ['C:\\proj\\src\\App.jsx', 'C:\\proj\\README.md'];
+    assert.deepEqual(found('C:\\proj\\src\\App.jsx', 'C:\\proj', win)[0], 'C:\\proj\\src\\App.jsx', 'a Windows path');
+    // Typed as before, it ranks as before.
+    assert.deepEqual(found('app')[0], '/Users/me/proj/src/App.jsx');
+  });
+});

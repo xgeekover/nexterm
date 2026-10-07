@@ -8,7 +8,7 @@
  */
 
 import { fuzzyMatch } from './utils.js';
-import { basename, isInside, relativeTo, toPosix } from './paths.js';
+import { basename, isInside, relativeTo, stripTrailingSep, toPosix } from './paths.js';
 import { isMac } from './platform.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
 
@@ -186,7 +186,11 @@ export function buildPaletteGroups({
   }
 
   // A path typed with either separator: the paths are matched with `/`.
-  const found = matchFiles(fileCandidates(files ?? fileTree, files ? 'paths' : 'tree', rootPath), toPosix(q), limit);
+  const found = matchFiles(
+    fileCandidates(files ?? fileTree, files ? 'paths' : 'tree', rootPath),
+    belowRoot(toPosix(q), rootPath),
+    limit
+  );
   const fileRows = found.entries.map((entry) => ({
     type: 'file',
     id: `file-${entry.path}`,
@@ -241,6 +245,18 @@ function fileCandidates(source, kind, rootPath) {
   return entries;
 }
 
+/**
+ * A query that is a whole path inside the open folder — Copy Path in the
+ * Explorer, a path out of a terminal — as the part below the folder, which is
+ * what a file's path is matched by (`fileCandidates`). Pasted whole it matched
+ * nothing. `query` is lowercased and uses `/`.
+ */
+function belowRoot(query, rootPath) {
+  if (!rootPath) return query;
+  const root = toPosix(stripTrailingSep(rootPath)).toLowerCase();
+  return query.startsWith(`${root}/`) ? query.slice(root.length + 1) : query;
+}
+
 /** Whether the letters of `needle` appear in `text` in order. Both already lowercased. */
 function inOrder(needle, text) {
   let at = 0;
@@ -261,7 +277,7 @@ function inOrder(needle, text) {
  * `App.jsx` could come last.
  */
 function fileRank(entry, q) {
-  if (!q || entry.lowerName.startsWith(q)) return 0;
+  if (!q || entry.lowerName.startsWith(q) || entry.lowerPath === q) return 0;
   if (entry.lowerName.includes(q)) return 1;
   if (inOrder(q, entry.lowerName)) return 2;
   return inOrder(q, entry.lowerPath) ? 3 : -1;
