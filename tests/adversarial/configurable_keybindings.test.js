@@ -26,6 +26,7 @@ import {
   DEFAULT_RESOLVED,
   resolveKeybindings,
   findConflicts,
+  describeConflict,
   configurableCommands,
   keysFor,
   findBinding,
@@ -102,7 +103,13 @@ describe('Configurable keybindings', () => {
   });
 
   test('CK-06: the shipped defaults do not fight each other', () => {
-    assert.deepEqual(findConflicts(DEFAULT_RESOLVED), [], 'two commands share a chord out of the box');
+    for (const isMac of [true, false]) {
+      assert.deepEqual(
+        findConflicts(DEFAULT_RESOLVED, { isMac }),
+        [],
+        `${isMac ? 'macOS' : 'Windows'}: two commands share a chord out of the box`
+      );
+    }
     for (const entry of DEFAULT_KEYBINDINGS) {
       assert.ok(COMMANDS[entry.command], `${entry.command} has a default chord but no command`);
       assert.ok(parseChord(entry.key), `${entry.command}: ${entry.key} does not parse`);
@@ -222,5 +229,142 @@ describe('Configurable keybindings', () => {
     const fired = dispatchKeydown(e, ctx(e, 'macos', { bindings, toggleSidebar: () => calls.push('toggled') }));
     assert.equal(fired, 'toggle-sidebar');
     assert.deepEqual(calls, ['prevented', 'toggled']);
+  });
+});
+
+/**
+ * The keydown a real keypress of `key` produces on `platform`, built from the
+ * chord rather than from the matcher, so the matcher is free to be wrong.
+ */
+function pressOn(key, platform) {
+  const chord = parseChord(key);
+  assert.ok(chord, `not a chord: ${key}`);
+  const mac = platform === 'macos';
+  const GLYPH = { Backquote: '`', Comma: ',', Minus: '-', Equal: '=' };
+  return ev({
+    ctrlKey: Boolean(chord.ctrl || (chord.mod && !mac)),
+    metaKey: Boolean(chord.cmd || (chord.mod && mac)),
+    shiftKey: Boolean(chord.shift),
+    altKey: Boolean(chord.alt),
+    key: chord.code ? GLYPH[chord.code] : chord.key,
+    code: chord.code ?? (chord.key.length === 1 ? `Key${chord.key.toUpperCase()}` : chord.key),
+  });
+}
+
+/** The command a keypress of `key` runs on `platform`, as the window's listener finds it. */
+function runsOn(key, platform, bindings) {
+  const e = pressOn(key, platform);
+  return findBinding(e, ctx(e, platform, { bindings }))?.command ?? null;
+}
+
+describe('Conflicts are found by the keys pressed, not by how a chord is spelled', () => {
+  test('CK-15: Windows — mod+alt+d and ctrl+alt+d are one keypress, and it is reported', () => {
+    // The recorder stores what Ctrl+Alt+D is pressed as there: `mod+alt+d`.
+    // Split Right's default is `ctrl+alt+d`. Compared as text the two never
+    // met; pressed, Ctrl+Alt+D ran Open Recent and Split Right had lost its
+    // only chord that works off macOS, with no warning.
+    const { bindings } = resolveKeybindings({ 'open-recent': 'mod+alt+d' });
+    assert.equal(runsOn('ctrl+alt+d', 'windows', bindings), 'open-recent', 'the premise: one of them is dead');
+
+    const conflicts = findConflicts(bindings, { isMac: false });
+    assert.equal(conflicts.length, 1, `expected one conflict, got ${JSON.stringify(conflicts)}`);
+    assert.deepEqual(conflicts[0].commands.slice().sort(), ['open-recent', 'split-right']);
+
+    // On macOS they are ⌥⌘D and ⌃⌥D, two keypresses: nothing to report there.
+    assert.deepEqual(findConflicts(bindings, { isMac: true }), []);
+  });
+
+  test('CK-16: macOS — mod+d and cmd+d are one keypress, and it is reported', () => {
+    // Close Pane rebound to ⌘D: Split Right's `cmd+d` already answers it.
+    const { bindings } = resolveKeybindings({ 'close-pane': 'mod+d' });
+    const conflicts = findConflicts(bindings, { isMac: true });
+    assert.equal(conflicts.length, 1, `expected one conflict, got ${JSON.stringify(conflicts)}`);
+    assert.deepEqual(conflicts[0].commands.slice().sort(), ['close-pane', 'split-right']);
+
+    // Off macOS `mod+d` is Ctrl+D and `cmd+d` needs the Windows key: two keypresses.
+    assert.deepEqual(findConflicts(bindings, { isMac: false }), []);
+  });
+
+  test('CK-17: the command named as winning is the one the keypress runs', () => {
+    // Open Recent is listed above Open Folder in Settings, but Open Folder
+    // comes first in the bindings, so it is the one Ctrl/⌘+Shift+O runs. The
+    // banner used to say "whichever is listed first wins".
+    const cases = [
+      [{ 'open-recent': 'mod+shift+o' }, 'open-folder', 'open-recent'],
+      [{ 'open-recent': 'mod+alt+d' }, 'open-recent', 'split-right', 'windows'],
+      [{ 'close-pane': 'mod+d' }, 'split-right', 'close-pane', 'macos'],
+      [{ 'toggle-sidebar': 'mod+k' }, 'command-palette', 'toggle-sidebar'],
+      [{ 'zoom-reset': 'f5' }, 'zoom-reset', 'reload-guard'],
+    ];
+    for (const [overrides, winner, loser, only] of cases) {
+      const { bindings } = resolveKeybindings(overrides);
+      for (const platform of only ? [only] : ['macos', 'windows']) {
+        const conflicts = findConflicts(bindings, { isMac: platform === 'macos' });
+        assert.equal(conflicts.length, 1, `${platform} ${JSON.stringify(overrides)}: ${JSON.stringify(conflicts)}`);
+        const [conflict] = conflicts;
+        assert.equal(conflict.winner, winner, `${platform} ${JSON.stringify(overrides)}`);
+        assert.equal(conflict.command, loser, `${platform} ${JSON.stringify(overrides)}`);
+        assert.equal(conflict.commands[0], winner, 'the one that runs comes first');
+        // And it is the truth: press either chord, and the winner runs.
+        for (const key of [conflict.key, conflict.winnerKey]) {
+          assert.equal(runsOn(key, platform, bindings), winner, `${platform}: ${key}`);
+        }
+      }
+    }
+  });
+
+  test('CK-18: two chords of one command are not a conflict', () => {
+    // Zoom In answers both ⌘= and ⌘⇧=; a command holding the same keypress
+    // twice loses nothing.
+    const { bindings } = resolveKeybindings({ 'toggle-sidebar': ['mod+b', 'ctrl+b'] });
+    assert.deepEqual(findConflicts(bindings, { isMac: false }), []);
+  });
+
+  test('CK-19: the warning names the chord, the command it runs and the one it does not', () => {
+    const { bindings } = resolveKeybindings({ 'open-recent': 'mod+alt+d' });
+    const [conflict] = findConflicts(bindings, { isMac: false });
+    assert.equal(
+      describeConflict(conflict, { isMac: false }),
+      'Ctrl+Alt+D runs Open Recent…, never Split Pane Right'
+    );
+
+    const folder = findConflicts(resolveKeybindings({ 'open-recent': 'mod+shift+o' }).bindings, { isMac: true })[0];
+    assert.equal(describeConflict(folder, { isMac: true }), '⇧⌘O runs Open Folder…, never Open Recent…');
+  });
+
+  test('CK-28: whatever is rebound, a conflict is reported exactly when a binding\'s keypress runs another command', () => {
+    // A seeded walk over rebinds, spelled the ways the recorder and a hand
+    // edit spell them, checked against the window's own lookup. `blockReload`
+    // arms the reload guard, as in a packaged build, so every binding can run.
+    let seed = 20261007;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const pick = (list) => list[Math.floor(random() * list.length)];
+    const CHORDS = [
+      ...new Set(DEFAULT_KEYBINDINGS.map((b) => b.key)),
+      'mod+alt+d', 'mod+d', 'mod+ctrl+j', 'mod+j', 'mod+cmd+j', 'ctrl+j', 'cmd+j', 'ctrl+b',
+      'alt+a', 'shift+f5', 'mod+tab', 'ctrl+tab', 'mod+shift+backquote', 'ctrl+comma',
+    ];
+    const ids = configurableCommands().map((c) => c.id);
+    for (let walk = 0; walk < 300; walk += 1) {
+      const overrides = {};
+      for (let n = 1 + Math.floor(random() * 4); n > 0; n -= 1) {
+        overrides[pick(ids)] = random() < 0.3 ? [pick(CHORDS), pick(CHORDS)] : pick(CHORDS);
+      }
+      const { bindings } = resolveKeybindings(overrides);
+      for (const platform of ['macos', 'windows']) {
+        const conflicts = findConflicts(bindings, { isMac: platform === 'macos' });
+        for (const binding of bindings) {
+          const e = pressOn(binding.key, platform);
+          const runs = findBinding(e, ctx(e, platform, { bindings, blockReload: true }))?.command;
+          const reported = conflicts.find((c) => c.command === binding.command && c.key === binding.key);
+          const where = `${platform} ${JSON.stringify(overrides)} ${binding.command}:${binding.key}`;
+          if (runs === binding.command) assert.equal(reported, undefined, `${where} runs, yet is reported`);
+          else assert.equal(reported?.winner, runs, `${where} runs ${runs}`);
+        }
+      }
+    }
   });
 });

@@ -696,6 +696,34 @@ for (const [id, value] of [
   );
 }
 
+// ---- Keyboard Shortcuts -----------------------------------------------------
+
+scenario(
+  'RN-60',
+  'a keypress bound to two commands is reported, naming the one that runs',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+    // Open Folder's chord given to Open Recent too. Open Folder comes first in
+    // the bindings, so it is the one the keypress runs — though Open Recent
+    // is listed above it, and the banner used to say "whichever is listed
+    // first wins".
+    useSettingsStore.getState().setSetting('keybindings', { 'open-recent': 'mod+shift+o' });
+  },
+  (html) => {
+    expectText(html, 'One shortcut never runs');
+    expectText(html, 'runs Open Folder…, never Open Recent…');
+    expectThat(!visibleText(html).includes('Whichever is listed first wins'), 'the banner still names no winner');
+    // Both rows' chords are marked, and each says what happens.
+    const marked = [...html.matchAll(/<kbd\b[^>]*\stitle="([^"]*)"[^>]*\sclass="[^"]*border-vsc-error/g)]
+      .map((m) => visibleText(m[1]));
+    expectThat(
+      marked.length === 2 && marked.every((t) => t.includes('runs Open Folder…, never Open Recent…')),
+      `the marked chords say ${JSON.stringify(marked)}`
+    );
+  }
+);
+
 // ---- Dragging an editor tab over a tab strip ---------------------------------
 
 /**

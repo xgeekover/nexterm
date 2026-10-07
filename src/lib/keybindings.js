@@ -245,9 +245,10 @@ export const COMMANDS = {
 /**
  * The chords each command answers to out of the box.
  *
- * Order decides nothing — every chord matches exactly, and `findConflicts`
- * refuses two commands on one chord — but reading order is kept roughly menu
- * order.
+ * Order decides nothing here — no two commands share a keypress, which
+ * CK-06 holds on both platforms — but reading order is kept roughly menu
+ * order. Once a user binds one keypress twice, the binding listed first runs;
+ * `findConflicts` says which.
  */
 export const DEFAULT_KEYBINDINGS = [
   { command: 'quick-open', key: 'mod+p' },
@@ -366,23 +367,84 @@ export function resolveKeybindings(overrides = {}) {
 }
 
 /**
- * Chords claimed by more than one command.
+ * What `event.key` is for the punctuation keys a chord matches on `code`, as
+ * a US layout reports them — so that the press built from `mod+comma` also
+ * reaches a chord spelled `mod+,`.
+ */
+const PUNCTUATION_KEY = {
+  Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+};
+
+/**
+ * The keydown pressing `chord` produces on one platform: `mod` held as ⌘ on
+ * macOS and as Ctrl elsewhere, every other modifier as written.
+ */
+function pressOf(chord, isMac) {
+  return {
+    ctrlKey: Boolean(chord.ctrl || (chord.mod && !isMac)),
+    metaKey: Boolean(chord.cmd || (chord.mod && isMac)),
+    shiftKey: Boolean(chord.shift),
+    altKey: Boolean(chord.alt),
+    key: chord.code ? PUNCTUATION_KEY[chord.code] ?? '' : chord.key,
+    code: chord.code ?? '',
+  };
+}
+
+/**
+ * Bindings that never run on this platform, because the keypress that is
+ * their chord runs another command first.
+ *
+ * Asked of the keys pressed, not of the text: off macOS `mod+alt+d` and
+ * `ctrl+alt+d` are both Ctrl+Alt+D, and on macOS `mod+d` and `cmd+d` are both
+ * ⌘D. Compared as strings those never met, so recording Ctrl+Alt+D for Open
+ * Recent took Split Right's only chord off macOS with no warning. Each
+ * binding's own keypress goes to the matcher `findBinding` uses, in the order
+ * it uses them, and the first binding to match is the one that runs — so
+ * what this reports is what the keyboard does.
  *
  * Reported rather than resolved: letting whichever came first win is how a
  * shortcut silently changes meaning when an unrelated line moves.
+ *
+ * Each conflict is `{ key, command }`, the binding that never runs,
+ * `{ winner, winnerKey }`, the one that runs instead, and `commands`, the
+ * two of them with the winner first.
  */
-export function findConflicts(bindings) {
-  const seen = new Map();
+export function findConflicts(bindings, { isMac = false } = {}) {
   const conflicts = [];
   for (const binding of bindings) {
-    const existing = seen.get(binding.key);
-    if (existing && existing !== binding.command) {
-      conflicts.push({ key: binding.key, commands: [existing, binding.command] });
-    } else if (!existing) {
-      seen.set(binding.key, binding.command);
-    }
+    const press = pressOf(binding.chord, isMac);
+    const isMod = isMac ? press.metaKey : press.ctrlKey;
+    const first = bindings.find((b) => chordMatches(b.chord, press, isMod));
+    if (!first || first.command === binding.command) continue;
+    conflicts.push({
+      key: binding.key,
+      command: binding.command,
+      winner: first.command,
+      winnerKey: first.key,
+      commands: [first.command, binding.command],
+    });
   }
   return conflicts;
+}
+
+/**
+ * One conflict in words: the keypress, the command it runs and the one it
+ * never runs — "Ctrl+Alt+D runs Open Recent…, never Split Pane Right".
+ *
+ * The keypress is written as it is pressed, `mod` spelled out as the key it
+ * is here, so `mod+alt+d` and `ctrl+alt+d` read as the one chord they are.
+ */
+export function describeConflict(conflict, { isMac = false } = {}) {
+  const chord = parseChord(conflict.key);
+  const pressed = chord && {
+    ...chord,
+    mod: false,
+    ctrl: Boolean(chord.ctrl || (chord.mod && !isMac)),
+    cmd: Boolean(chord.cmd || (chord.mod && isMac)),
+  };
+  const title = (id) => COMMANDS[id]?.title ?? id;
+  return `${displayChord(pressed, { isMac })} runs ${title(conflict.winner)}, never ${title(conflict.command)}`;
 }
 
 /** The bindings in force when nobody has overridden anything. */

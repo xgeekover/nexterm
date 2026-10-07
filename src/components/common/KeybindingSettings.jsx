@@ -5,11 +5,14 @@ import { isMac } from '../../lib/platform.js';
 import { chordFromEvent, displayChord, stringifyChord } from '../../lib/chords.js';
 import {
   configurableCommands,
+  describeConflict,
   resolveKeybindings,
   findConflicts,
   keysFor,
 } from '../../lib/keybindings.js';
 import { cn } from '../../lib/utils.js';
+
+const NO_NOTES = new Map();
 
 /**
  * One row: a command, the chord bound to it, and a way to change it.
@@ -18,8 +21,10 @@ import { cn } from '../../lib/utils.js';
  * because nobody wants to learn a spelling to rebind a key. The chord that
  * comes back is the same shape the matcher uses, so what you pressed is
  * exactly what gets bound.
+ *
+ * `notes` holds, per chord of this command, the conflicts it is part of.
  */
-function KeybindingRow({ command, keys, conflictKeys, onBind, onUnbind, onReset, isDefault }) {
+function KeybindingRow({ command, keys, notes, onBind, onUnbind, onReset, isDefault }) {
   const [recording, setRecording] = useState(false);
 
   const record = (e) => {
@@ -45,20 +50,23 @@ function KeybindingRow({ command, keys, conflictKeys, onBind, onUnbind, onReset,
           <span className="text-ui-sm text-vsc-muted italic px-2">Unassigned</span>
         )}
         {!recording &&
-          keys.map((key) => (
-            <kbd
-              key={key}
-              title={conflictKeys.has(key) ? 'Another command uses this chord' : key}
-              className={cn(
-                'px-1.5 py-0.5 rounded-sm border font-mono text-ui-sm',
-                conflictKeys.has(key)
-                  ? 'border-vsc-error text-vsc-error'
-                  : 'bg-vsc-button-secondary border-vsc-border text-vsc-fg'
-              )}
-            >
-              {displayChord(key, { isMac })}
-            </kbd>
-          ))}
+          keys.map((key) => {
+            const note = notes.get(key);
+            return (
+              <kbd
+                key={key}
+                title={note ?? key}
+                className={cn(
+                  'px-1.5 py-0.5 rounded-sm border font-mono text-ui-sm',
+                  note
+                    ? 'border-vsc-error text-vsc-error'
+                    : 'bg-vsc-button-secondary border-vsc-border text-vsc-fg'
+                )}
+              >
+                {displayChord(key, { isMac })}
+              </kbd>
+            );
+          })}
         {recording && (
           <input
             autoFocus
@@ -115,9 +123,25 @@ export function KeybindingSettings({ query = '' }) {
   const setSetting = useSettingsStore((s) => s.setSetting);
 
   const { bindings } = useMemo(() => resolveKeybindings(overrides), [overrides]);
-  const conflicts = useMemo(() => findConflicts(bindings), [bindings]);
-  const conflictKeys = useMemo(() => new Set(conflicts.map((c) => c.key)), [conflicts]);
+  const conflicts = useMemo(() => findConflicts(bindings, { isMac }), [bindings]);
   const defaults = useMemo(() => resolveKeybindings({}).bindings, []);
+
+  // Per command, per chord: the conflicts that chord is in. Both sides are
+  // marked — the chord that never runs, and the one that runs in its place.
+  const notesByCommand = useMemo(() => {
+    const notes = new Map();
+    const add = (command, key, text) => {
+      if (!notes.has(command)) notes.set(command, new Map());
+      const byKey = notes.get(command);
+      byKey.set(key, byKey.has(key) ? `${byKey.get(key)}\n${text}` : text);
+    };
+    for (const conflict of conflicts) {
+      const text = describeConflict(conflict, { isMac });
+      add(conflict.command, conflict.key, text);
+      add(conflict.winner, conflict.winnerKey, text);
+    }
+    return notes;
+  }, [conflicts]);
 
   const commands = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -152,12 +176,19 @@ export function KeybindingSettings({ query = '' }) {
           className="flex items-start gap-2 mt-2 px-2 py-1.5 rounded-sm border border-vsc-error text-ui-sm text-vsc-error"
         >
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-          <span>
-            {conflicts.length === 1 ? 'One chord is' : `${conflicts.length} chords are`} bound to
-            more than one command. Whichever is listed first wins, which is rarely what anyone
-            means:{' '}
-            {conflicts.map((c) => displayChord(c.key, { isMac })).join(', ')}
-          </span>
+          <div>
+            <p>
+              {conflicts.length === 1 ? 'One shortcut never runs' : `${conflicts.length} shortcuts never run`},
+              because another command takes the same keys first:
+            </p>
+            <ul>
+              {conflicts.map((conflict) => (
+                <li key={`${conflict.command}\u0000${conflict.key}`}>
+                  {describeConflict(conflict, { isMac })}
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
       )}
 
@@ -176,7 +207,7 @@ export function KeybindingSettings({ query = '' }) {
             key={command.id}
             command={command}
             keys={keys}
-            conflictKeys={conflictKeys}
+            notes={notesByCommand.get(command.id) ?? NO_NOTES}
             isDefault={isDefault}
             onBind={(key) => update(command.id, key)}
             onUnbind={() => update(command.id, null)}
