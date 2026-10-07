@@ -251,6 +251,38 @@ async function readOpenFolders(get, nodes, levels) {
   }
 }
 
+// --- Files the backend will not read ---------------------------------------
+
+/** A failure's words: Tauri rejects with the command's own string, the browser mock with an Error. */
+function errorText(err) {
+  return typeof err === 'string' ? err : String(err?.message ?? err ?? '');
+}
+
+/**
+ * The fixed words `read_file` refuses a file with (src-tauri/src/fs/mod.rs),
+ * each followed by ": <path>" — the path as it resolved it, links followed
+ * and in the disk's own case, which need not be how it was asked for.
+ */
+const READ_REFUSAL = /^(File not found|File is not UTF-8 text|File is too large to open \([^)]*\)): /;
+
+/**
+ * Why `fs_read_file` would not read `path`, for the user to read: the
+ * backend's own words — "File is too large to open (60.1 MB; the limit is
+ * 50 MB)" — without the path they end with, which whatever shows them names
+ * already.
+ */
+export function readFailureReason(err, path) {
+  const text = errorText(err).trim();
+  if (path && text.endsWith(`: ${path}`) && text.length > path.length + 2) {
+    return text.slice(0, -(path.length + 2));
+  }
+  const refusal = READ_REFUSAL.exec(text);
+  if (refusal) return refusal[1];
+  const failed = /^Failed to read file '.*': (.+)$/s.exec(text);
+  if (failed) return `Failed to read file: ${failed[1]}`;
+  return text || 'Unknown error';
+}
+
 // --- Unsaved edits ---------------------------------------------------------
 
 /**
@@ -417,6 +449,9 @@ export const useEditorStore = create((set, get) => ({
   pendingClose: null,   // { kind: 'tab' | 'pane' | 'root' | 'window' | 'quit', id, tabIds: [], names: [], proceed, abandon } | null
   // A save refused because the file changed on disk after this tab read it.
   pendingOverwrite: null, // { tabId, fileName, diskContent } | null
+  // The last file that would not open, and why — on screen until dismissed
+  // or a file opens (OpenFailureNotice).
+  openFailure: null, // { path, fileName, reason } | null
   renamingPath: null,   // path currently rendered as an inline rename input
 
   // Event listeners are attached once and can be torn down (HMR, unmount)
@@ -707,7 +742,7 @@ export const useEditorStore = create((set, get) => ({
               n.type === 'leaf' && n.id === holder.id ? { ...n, activeTabId: existing.id } : n
             )
           : addTabToPane(state.editorSplitTree, paneId, existing.id);
-        return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree };
+        return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree, openFailure: null };
       });
       return existing;
     }
@@ -733,14 +768,23 @@ export const useEditorStore = create((set, get) => ({
         activeTabId: tabId,
         // A newly opened file joins the active group so it is visible immediately.
         editorSplitTree: addTabToPane(state.editorSplitTree, state.activeEditorPaneId, tabId),
+        openFailure: null,
       }));
 
       return newTab;
     } catch (err) {
       console.error(`[EditorStore] Failed to open file ${filePath}:`, err);
+      // Said on screen as well. Every way of opening a file comes through
+      // here — the Explorer, Go to File, a link in a terminal, a search
+      // result — and a file the backend would not read, a 60 MB log or a
+      // binary, opened nothing and said nothing anywhere but the console.
+      set({ openFailure: { path: filePath, fileName: basename(filePath), reason: readFailureReason(err, filePath) } });
       throw err;
     }
   },
+
+  /** The notice of a file that would not open, closed. */
+  dismissOpenFailure: () => set({ openFailure: null }),
 
   editBuffer: (tabId, newContent) => {
     set((state) => ({

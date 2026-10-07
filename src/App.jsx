@@ -5,6 +5,7 @@ import { StatusBar } from './components/layout/StatusBar.jsx';
 import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { SettingsWindow } from './components/common/SettingsWindow.jsx';
+import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useTheme } from './hooks/useTheme.js';
@@ -65,6 +66,9 @@ export default function App() {
 
       {/* Persistent Bottom Status Bar */}
       <StatusBar />
+
+      {/* Why a file that was asked for did not open */}
+      <OpenFailureNotice />
 
       {/* Global ⌘K Command Palette */}
       <CommandPalette />
