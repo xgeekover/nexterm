@@ -29,9 +29,6 @@
 import { expandHome } from './paths.js';
 import { isNetworkPath } from './terminalLinks.js';
 
-/** The values `terminal.integrated.cwd` may hold. */
-export const CWD_MODES = ['workspace', 'home', 'active', 'custom'];
-
 /** What Settings says about a custom directory on another machine. */
 export const NETWORK_START_DIR =
   'That directory is on another machine, and a terminal never starts in one: opening it signs in to that machine. Map it to a drive letter to use it. New terminals will fall back to the workspace root, or your home directory if no folder is open.';
@@ -39,7 +36,7 @@ export const NETWORK_START_DIR =
 /**
  * @param {object} input
  * @param {string|null} input.requested  what the caller asked for, if anything
- * @param {string} input.mode            the setting
+ * @param {string} input.mode            the setting: 'workspace', 'home', 'active' or 'custom'
  * @param {string} input.customPath      the setting's path, for `custom`
  * @param {string|null} input.homeDir    this machine's home directory
  * @param {string|null} input.activeCwd  the active terminal's live directory

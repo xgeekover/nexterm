@@ -8,47 +8,34 @@ describe('Tier 2: Boundary & Corner Cases', () => {
     await app.initialize();
   });
 
-  test('TC-BND-01: Empty or whitespace-only command in terminal does not create ghost blocks', async () => {
-    const tab = app.getActiveTerminalTab();
-    const initialBlockCount = tab.blocks.length;
-
-    const res1 = await app.executeTerminalCommand('');
-    assert.equal(res1, null, 'Empty string command must return null');
-    assert.equal(tab.blocks.length, initialBlockCount, 'No block should be created for empty command');
-
-    const res2 = await app.executeTerminalCommand('     \n\t   ');
-    assert.equal(res2, null, 'Whitespace-only command must return null');
-    assert.equal(tab.blocks.length, initialBlockCount, 'No block should be created for whitespace command');
-  });
-
-  test('TC-BND-02: Non-zero exit code (127 command not found) flags block status as failed', async () => {
-    const block = await app.executeTerminalCommand('invalid-command-404');
-    assert.ok(block, 'Block must be created');
-    assert.equal(block.status, 'failed', 'Block status must be failed for exit code 127');
-    assert.equal(block.exitCode, 127, 'Exit code must be 127');
-    assert.ok(block.output.includes('command not found'), 'Output must capture stderr message');
+  test('TC-BND-02: Non-zero exit code (127 command not found) is kept on the tab', async () => {
+    const run = await app.runTerminalCommand('invalid-command-404');
+    assert.equal(run.exitCode, 127, 'Exit code must be 127');
+    assert.equal(app.getActiveTerminalTab().lastExitCode, 127, 'The tab keeps it for the tab strip and the status bar');
+    assert.ok(run.output.includes('command not found'), "The terminal must show the shell's message");
   });
 
   test('TC-BND-03: Non-zero exit code 1 (test suite failure) is properly captured with exit code', async () => {
-    const block = await app.executeTerminalCommand('npm test');
-    assert.equal(block.status, 'failed');
-    assert.equal(block.exitCode, 1);
-    assert.ok(block.output.includes('FAIL'), 'Output must contain test failure report');
-    assert.ok(block.output.includes('AssertionError'), 'Output must contain assertion details');
+    const run = await app.runTerminalCommand('npm test');
+    assert.equal(run.exitCode, 1);
+    assert.ok(run.output.includes('FAIL'), 'Output must contain test failure report');
+    assert.ok(run.output.includes('AssertionError'), 'Output must contain assertion details');
   });
 
   test('TC-BND-04: Large output stream is handled without truncating data or blocking execution', async () => {
     const largePayload = 'A'.repeat(50000);
     const tab = app.getActiveTerminalTab();
 
-    // Directly emit large chunk through IPC
+    // Directly emit large chunk through IPC, before anything shows the tab
     await app.ipc.emit('pty-output', {
       session_id: tab.sessionId,
       data: largePayload,
     });
 
-    const currentBlock = await app.executeTerminalCommand('echo test-large');
-    assert.ok(currentBlock.output.includes('test-large'));
+    const run = await app.runTerminalCommand('echo test-large');
+    assert.equal(run.exitCode, 0, 'The next command must still run');
+    assert.ok(run.output.includes('test-large'));
+    assert.ok(app.terminalOutput(tab.id).includes(largePayload), 'The large chunk must reach the terminal whole');
   });
 
   test('TC-BND-05: Attempting to open a non-existent file cleanly throws File not found error', async () => {

@@ -29,10 +29,9 @@ describe('Tier 3: Cross-Feature Combinations (Pairwise Interactions)', () => {
     assert.equal(diskContent, fixedCode, 'Filesystem must be updated with saved content');
 
     // 4. Run tests in Terminal
-    const testBlock = await app.executeTerminalCommand('npm test');
-    assert.equal(testBlock.status, 'completed');
-    assert.equal(testBlock.exitCode, 0, 'Test must exit with 0 code after fix is saved');
-    assert.ok(testBlock.output.includes('PASS'));
+    const testRun = await app.runTerminalCommand('npm test');
+    assert.equal(testRun.exitCode, 0, 'Test must exit with 0 code after fix is saved');
+    assert.ok(testRun.output.includes('PASS'));
   });
 
   test('TC-XF-04: Command Palette Open File -> Edit in Monaco -> Quick Palette Action Save All', async () => {
@@ -65,15 +64,16 @@ describe('Tier 3: Cross-Feature Combinations (Pairwise Interactions)', () => {
 
     // 2. Open an editor tab and execute a terminal command
     await app.openFile('/workspace/src/App.jsx');
-    const block = await app.executeTerminalCommand('ls');
-    assert.equal(block.status, 'completed');
+    const run = await app.runTerminalCommand('ls');
+    assert.equal(run.exitCode, 0);
 
     // 3. Theme is still dark — there is no toggle to invoke
     assert.equal(app.theme, 'dark');
     assert.equal(app.monacoTheme, 'nexterm-dark', 'Monaco must remain nexterm-dark');
 
     // 4. Terminal remains interactive
-    const secondBlock = await app.executeTerminalCommand('pwd');
-    assert.equal(secondBlock.status, 'completed');
+    const secondRun = await app.runTerminalCommand('pwd');
+    assert.equal(secondRun.exitCode, 0);
+    assert.ok(secondRun.output.includes('/workspace'));
   });
 });
