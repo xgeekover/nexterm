@@ -244,26 +244,43 @@ describe('Saving a file that cannot be read back first', () => {
     assert.equal(S.getState().pendingOverwrite?.tabId, tab.id);
   });
 
-  test("RF-10: a file the tab's own last save took past 50 MB is saved again without asking", async () => {
+  test("RF-10: a file the tab's own last save took past 50 MB is saved again without asking — and asks once anyone else grows it", async () => {
     // Found in review: every save after that one was refused as unreadable
     // and asked, as if someone else had grown the file — and Save in the
-    // close prompt turned into that question, abandoning the close.
-    const { path, tab } = await openEdited();
+    // close prompt turned into that question, abandoning the close. Then
+    // (last review) the fix wrote over a file another program had appended
+    // to since: the size on disk has to be exactly what the tab last saved.
     const big = 'x'.repeat(50 * 1024 * 1024 + 1);
-    S.setState((state) => ({
-      tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, savedContent: big, content: `${big}more`, isDirty: true } : t)),
-    }));
+    const sizing = (path, bytes, seen) => (command, args, real) =>
+      command === 'fs_file_size' && args?.path === path ? Promise.resolve(bytes) : refusing(path, TOO_LARGE(path), seen)(command, args, real);
+    const editedPastLimit = async () => {
+      const { path, tab } = await openEdited();
+      S.setState((state) => ({
+        tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, savedContent: big, content: `${big}more`, isDirty: true } : t)),
+      }));
+      return { path, tab };
+    };
+
+    const own = await editedPastLimit();
     const seen = [];
-    await withInvoke(refusing(path, TOO_LARGE(path), seen), () => S.getState().saveFile(tab.id));
+    await withInvoke(sizing(own.path, big.length, seen), () => S.getState().saveFile(own.tab.id));
     assert.equal(S.getState().pendingOverwrite, null, 'asked about its own bytes');
     assert.deepEqual(writes(seen), ['fs_write_file']);
-    assert.equal(S.getState().tabs.find((t) => t.id === tab.id).isDirty, false);
+    assert.equal(S.getState().tabs.find((t) => t.id === own.tab.id).isDirty, false);
+
+    // Ten bytes more on disk than the tab wrote: someone else appended. Ask.
+    S.setState(emptyEditor());
+    const grown = await editedPastLimit();
+    const grownSeen = [];
+    const err = await withInvoke(sizing(grown.path, big.length + 10, grownSeen), () => outcome(S.getState().saveFile(grown.tab.id)));
+    assert.equal(err?.code, 'EXTERNAL_CHANGE');
+    assert.deepEqual(writes(grownSeen), [], 'written over what another program added');
 
     // Under the limit when last saved: grown past it by someone else — asked.
     S.setState(emptyEditor());
     const other = await openEdited();
-    const err = await withInvoke(refusing(other.path, TOO_LARGE(other.path)), () => outcome(S.getState().saveFile(other.tab.id)));
-    assert.equal(err?.code, 'EXTERNAL_CHANGE');
+    const err2 = await withInvoke(refusing(other.path, TOO_LARGE(other.path)), () => outcome(S.getState().saveFile(other.tab.id)));
+    assert.equal(err2?.code, 'EXTERNAL_CHANGE');
   });
 
   test('RF-09: teardown', () => {

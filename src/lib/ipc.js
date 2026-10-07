@@ -493,6 +493,14 @@ class BrowserMockBridge {
         return this.files.get(path);
       }
 
+      case 'fs_file_size': {
+        const { path } = args;
+        if (!this.files.has(path)) {
+          throw new Error(`Failed to read the size of '${path}': No such file or directory`);
+        }
+        return new TextEncoder().encode(this.files.get(path)).length;
+      }
+
       // 8. fs_write_file
       // The real one walks the disk in Rust (src-tauri/src/fs/search.rs) with
       // caps and the Explorer's ignore list. This searches the virtual files

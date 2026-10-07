@@ -277,6 +277,21 @@ const READ_REFUSAL = /^(File not found|File is not UTF-8 text|File is too large 
 /** The most `read_file` opens (`MAX_OPEN_BYTES` in src-tauri/src/fs/mod.rs). */
 const MAX_OPEN_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Whether the file of `tab` holds exactly the bytes the tab last saved, as
+ * far as its size says — asked only of a file too large to read back, which
+ * only the tab's own save can have made one (nothing past the limit opens).
+ */
+async function isOwnLastSave(tab) {
+  const saved = utf8Length(tab.savedContent ?? '');
+  if (saved <= MAX_OPEN_BYTES) return false;
+  try {
+    return (await invoke('fs_file_size', { path: tab.filePath })) === saved;
+  } catch {
+    return false;
+  }
+}
+
 /** How many bytes `text` takes as UTF-8, counted without encoding it. */
 function utf8Length(text) {
   let bytes = 0;
@@ -416,12 +431,13 @@ async function writeTab(set, get, targetId, { force = false } = {}) {
       // appended to past it since, was refused here as too large and then
       // overwritten with the tab's older, shorter text, unasked.
       //
-      // Except a file too large that this tab made so: what it last saved is
-      // itself past the limit, and nothing past it is ever opened, so the
-      // bytes on disk are its own. Asked as if someone else had grown it, a
-      // file the user's own edits took past 50 MB asked on every save after.
+      // Except a file too large that this tab made so, and nobody has
+      // touched since: what it last saved is itself past the limit, and the
+      // file holds exactly as many bytes as that. Asked as if someone else
+      // had grown it, a file the user's own edits took past 50 MB asked on
+      // every save after; grown by anyone else, even by a line, it asks.
       const ownTooLarge =
-        errorText(err).startsWith('File is too large to open ') && utf8Length(tab.savedContent ?? '') > MAX_OPEN_BYTES;
+        errorText(err).startsWith('File is too large to open ') && (await isOwnLastSave(tab));
       if (!isFileNotFound(err) && !ownTooLarge) unreadable = readFailureReason(err, tab.filePath);
     }
     if (unreadable !== null || (onDisk !== null && onDisk !== tab.savedContent)) {

@@ -226,6 +226,22 @@ pub fn fs_read_file(state: State<AppState>, path: String) -> Result<String, Stri
     fs::read_file(&confined(&state, &path)?)
 }
 
+/// How many bytes the file at `path` holds. A save asks before writing over a
+/// file it cannot read back, and the one it cannot read because it is too
+/// large may be exactly what the tab itself last wrote — this tells which
+/// (`writeTab` in src/stores/editorStore.js).
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn fs_file_size(state: State<AppState>, path: String) -> Result<u64, String> {
+    size_in(&state.workspace, &path)
+}
+
+fn size_in(workspace: &fs::Workspace, path: &str) -> Result<u64, String> {
+    let resolved = workspace.confine(path)?;
+    std::fs::metadata(&resolved)
+        .map(|meta| meta.len())
+        .map_err(|e| format!("Failed to read the size of '{path}': {e}"))
+}
+
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_write_file(state: State<AppState>, path: String, content: String) -> Result<(), String> {
     write_in(&state.workspace, &path, &content)
@@ -492,7 +508,7 @@ mod dispatch_tests {
 /// passed to `write_file` as a name still free.
 #[cfg(test)]
 mod entry_tests {
-    use super::{copy_in, create_in, delete_in, rename_in, write_in};
+    use super::{copy_in, create_in, delete_in, rename_in, size_in, write_in};
     use crate::fs::Workspace;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -893,6 +909,20 @@ mod entry_tests {
         assert_eq!(copied, tree_of(&proj));
         assert!(copied.iter().any(|(rel, _)| rel == Path::new("empty")), "an empty folder too");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// What a save checks a file it cannot read back against: the exact
+    /// number of bytes, confined like every other command.
+    #[test]
+    fn a_files_size_is_its_bytes_and_only_inside_the_folder() {
+        let (workspace, root) = open_folder("size");
+        let outside = outside_folder("size");
+        fs::write(root.join("a.bin"), PNG).unwrap();
+        assert_eq!(size_in(&workspace, "a.bin").unwrap(), PNG.len() as u64);
+        assert!(size_in(&workspace, "missing.bin").unwrap_err().contains("missing.bin"));
+        assert!(size_in(&workspace, &s(&outside.join("secret.txt"))).is_err(), "outside the open folder");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     /// Checked before anything is written: a paste can neither overwrite a
