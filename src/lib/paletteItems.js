@@ -89,6 +89,34 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
 }
 
 /**
+ * Where the keyboard goes once the palette has closed on `item`, or on
+ * nothing (null: Escape, a click outside, its chord again):
+ *
+ *   'terminal'  a command line from history, typed into the active terminal:
+ *               the Enter that runs it is the user's, and has to land there
+ *               wherever the palette was opened from
+ *   'editor'    a file: the editor it opens in
+ *   'opener'    anything else, and nothing: back where it was when the
+ *               palette opened (`canHaveFocusBack`)
+ */
+export function focusAfterPalette(item) {
+  if (item?.type === 'history') return 'terminal';
+  if (item?.type === 'file') return 'editor';
+  return 'opener';
+}
+
+/**
+ * Whether `opener`, what had the keyboard when the palette opened, can have
+ * it back: an element still on the page (`onPage`), not the page itself
+ * (`body`), and not a button. Chromium focuses a button that is clicked, so
+ * the title bar's search box would have it back and the next Enter would
+ * open the palette again; the terminal on screen takes it instead.
+ */
+export function canHaveFocusBack(opener, { body, onPage }) {
+  return Boolean(opener) && opener !== body && opener.tagName !== 'BUTTON' && onPage(opener);
+}
+
+/**
  * The palette's result groups for `query`, in display order.
  *
  * `mode` is 'all' (⌘K — files and commands), 'files' (⌘P — files only) or

@@ -784,6 +784,221 @@ describe('ConfirmDialog: mounted, on a page that dispatches like a browser', () 
   });
 });
 
+// ---- Where the keyboard goes when it closes ------------------------------------
+
+/**
+ * A dialog that closes itself on any answer, as every caller's does: the
+ * answer clears the state that draws it.
+ */
+function SelfClosing({ log, props }) {
+  const [open, setOpen] = React.useState(true);
+  const answer = (what) => () => {
+    log.push(what);
+    setOpen(false);
+  };
+  return h(ui.ConfirmDialog, { ...props, open, onConfirm: answer('confirm'), onCancel: answer('cancel'), onAlt: answer('alt') });
+}
+
+/**
+ * Closing a dialog unmounted the button that had focus, and focus fell to
+ * the page: the terminal it was asked over took no keys until it was
+ * clicked, and on Windows and Linux the next Ctrl+W reached the app's Close
+ * Pane instead of the shell.
+ */
+describe('ConfirmDialog: the keyboard goes back where it was when it closes', () => {
+  beforeEach(loadUi);
+
+  test('CD-19: answered with Enter, Escape or a click, it gives the keyboard back to the terminal it was asked over', async () => {
+    await onPage((p) => {
+      const log = [];
+      for (const [how, answer] of [
+        ['Enter on Delete', () => p.press('Enter')],
+        ['Escape', () => p.press('Escape')],
+        ['a click on Cancel', () => ReactDOM.flushSync(() => p.button('Cancel').click())],
+      ]) {
+        p.terminal.focus();
+        p.render(h(SelfClosing, { key: how, log, props: deleteFolder(log) }));
+        assert.equal(p.focus(), 'Delete', `${how}: precondition`);
+        answer();
+        assert.deepEqual(p.buttons(), [], `${how}: closed`);
+        assert.equal(p.focus(), 'terminal', `${how}: the keyboard was left on the page`);
+      }
+      assert.deepEqual(log, ['confirm', 'cancel', 'cancel']);
+    });
+  });
+
+  test('CD-20: two open — the one on top closing gives the keyboard to the one beneath, on the button that had it; that one closing, to the terminal', async () => {
+    await onPage((p) => {
+      const log = [];
+      const dialogs = (save, overwrite) =>
+        h(React.StrictMode, null,
+          h(ui.ConfirmDialog, saveBeforeClose(log, 'save', { open: save })),
+          h(ui.ConfirmDialog, fileChangedOnDisk(log, 'overwrite', { open: overwrite })));
+      p.terminal.focus();
+      p.render(dialogs(true, false));
+      p.render(dialogs(true, true));
+      assert.equal(p.focus(), 'Overwrite', 'precondition: the new dialog on top took focus');
+      p.render(dialogs(true, false));
+      assert.equal(p.focus(), 'Save', 'back to the dialog beneath');
+      p.render(dialogs(false, false));
+      assert.equal(p.focus(), 'terminal', 'and from it to the terminal');
+    });
+  });
+
+  test('CD-21: the one beneath closing first leaves the keyboard in the one on top — which then gives it back to the terminal, not to a button that is gone', async () => {
+    await onPage((p) => {
+      const log = [];
+      // "Save a.js?" ran into a change on disk: "File Changed on Disk" opens
+      // over it, and the question beneath is withdrawn while it stays.
+      const dialogs = (save, overwrite) =>
+        h(React.StrictMode, null,
+          h(ui.ConfirmDialog, saveBeforeClose(log, 'save', { open: save })),
+          h(ui.ConfirmDialog, fileChangedOnDisk(log, 'overwrite', { open: overwrite })));
+      p.terminal.focus();
+      p.render(dialogs(true, false));
+      p.render(dialogs(true, true));
+      p.render(dialogs(false, true));
+      assert.equal(p.focus(), 'Overwrite', 'the keyboard stays in the dialog still open');
+      p.render(dialogs(false, false));
+      assert.equal(p.focus(), 'terminal');
+    });
+  });
+
+  test('CD-22: opened with nothing to give back — from a menu that has gone — the caller says where the keyboard goes', async () => {
+    await onPage((p) => {
+      const log = [];
+      const props = deleteFolder(log, 'delete', { fallbackFocus: () => p.behind.focus() });
+      p.document.focused = null;
+      p.render(h(SelfClosing, { log, props }));
+      p.press('Escape');
+      assert.equal(p.focus(), 'Behind');
+
+      // What had the keyboard went while the dialog was open.
+      const gone = p.document.body.appendChild(p.document.createElement('button'));
+      gone.focus();
+      p.render(h(SelfClosing, { key: 'second', log, props }));
+      p.document.body.removeChild(gone);
+      p.press('Escape');
+      assert.equal(p.focus(), 'Behind', 'what had it is not on the page any more');
+    });
+  });
+
+  test('CD-23: something that took the keyboard on purpose while the dialog was open keeps it', async () => {
+    await onPage((p) => {
+      const log = [];
+      p.terminal.focus();
+      p.render(h(ui.ConfirmDialog, deleteFolder(log)));
+      p.behind.focus();
+      p.render(h(ui.ConfirmDialog, deleteFolder(log, 'delete', { open: false })));
+      assert.equal(p.focus(), 'Behind', 'focus was moved back to the terminal behind its back');
+    });
+  });
+
+  test('CD-24: under StrictMode, as the dev app runs, it still remembers the terminal and not its own button', async () => {
+    await onPage((p) => {
+      const log = [];
+      p.terminal.focus();
+      p.render(h(React.StrictMode, null, h(SelfClosing, { log, props: deleteFolder(log) })));
+      assert.equal(p.focus(), 'Delete');
+      p.press('Enter');
+      assert.equal(p.focus(), 'terminal');
+    });
+  });
+
+  test('CD-25: the keyboard is given back without scrolling what takes it into view — xterm\'s textarea follows the cursor', async () => {
+    await onPage((p) => {
+      const log = [];
+      p.terminal.focus();
+      const asked = [];
+      const focusTerminal = p.terminal.focus.bind(p.terminal);
+      p.terminal.focus = (options) => {
+        asked.push(options);
+        focusTerminal();
+      };
+      p.render(h(SelfClosing, { log, props: deleteFolder(log) }));
+      p.press('Escape');
+      assert.equal(p.focus(), 'terminal');
+      assert.deepEqual(asked, [{ preventScroll: true }]);
+    });
+  });
+});
+
+/** An element, by name, for the pure cases: only ever compared. */
+const element = (name) => ({ name });
+
+/** A dialog as the stack holds it: its box holds its buttons, the confirm last. */
+function openDialog(returnTo, buttons) {
+  const box = { contains: (el) => buttons.includes(el) };
+  return { returnTo, box, confirm: buttons[buttons.length - 1] };
+}
+
+describe('ConfirmDialog: where the keyboard goes as one closes (pure)', () => {
+  beforeEach(loadUi);
+
+  const body = element('page');
+  const terminal = element('terminal');
+  const elsewhere = element('the find bar');
+  const gone = element('a menu that has closed');
+  const onPage = (el) => el !== gone;
+  const closing = (stack, entry, focused) => exported('focusOnClose')(stack, entry, { focused, body, onPage });
+
+  test('CD-26: one open — back to what had it while that is on the page, else the caller\'s fallback; something that took it meanwhile keeps it', () => {
+    const one = (returnTo) => openDialog(returnTo, [element('Cancel'), element('Delete')]);
+
+    let d = one(terminal);
+    let stack = [d];
+    assert.equal(closing(stack, d, body), terminal, 'lost on the page');
+    assert.deepEqual(stack, [], 'and it is off the stack');
+    d = one(terminal);
+    assert.equal(closing([d], d, null), terminal, 'nothing focused at all');
+    d = one(terminal);
+    assert.equal(closing([d], d, d.confirm), terminal, 'still on its own button: a close that left the button on the page (StrictMode)');
+    d = one(terminal);
+    assert.equal(closing([d], d, elsewhere), null, 'taken on purpose meanwhile: left there');
+
+    for (const [what, returnTo] of [['gone from the page', gone], ['the page itself', body], ['nothing', null]]) {
+      d = one(returnTo);
+      assert.equal(closing([d], d, body), 'fallback', `what had it: ${what}`);
+    }
+
+    d = one(terminal);
+    const other = one(terminal);
+    stack = [other];
+    assert.equal(closing(stack, d, body), null, 'not on the stack: closed already');
+    assert.deepEqual(stack, [other], 'and the stack is left alone');
+  });
+
+  test('CD-27: two open — the top one gives the keyboard back into the one beneath; the one beneath closing first hands what it would have given back to the one on top', () => {
+    const save = element('Save');
+    const saveBox = [element("Don't Save"), element('Cancel'), save];
+    const overwrite = element('Overwrite');
+    const overwriteBox = [element('Use Disk Version'), element('Cancel'), overwrite];
+
+    // "Save a.js?" asked over the terminal; Save ran into a change on disk.
+    let beneath = openDialog(terminal, saveBox);
+    let top = openDialog(save, overwriteBox);
+    let stack = [beneath, top];
+    assert.equal(closing(stack, top, body), save, 'back on the button beneath that had it');
+    assert.deepEqual(stack, [beneath]);
+    assert.equal(closing(stack, beneath, body), terminal, 'and from there to the terminal');
+
+    // What the top one took it from left the page: the confirm beneath.
+    beneath = openDialog(terminal, saveBox);
+    top = openDialog(gone, overwriteBox);
+    stack = [beneath, top];
+    assert.equal(closing(stack, top, body), save);
+
+    // The question beneath withdrawn first, the one on top staying.
+    beneath = openDialog(terminal, saveBox);
+    top = openDialog(save, overwriteBox);
+    stack = [beneath, top];
+    assert.equal(closing(stack, beneath, overwrite), null, 'the keyboard stays in the dialog on top');
+    assert.deepEqual(stack, [top]);
+    assert.equal(top.returnTo, terminal, 'its button beneath is going: it gives back what that dialog would have');
+    assert.equal(closing(stack, top, body), terminal);
+  });
+});
+
 // ---- As drawn ------------------------------------------------------------------
 
 /** The buttons in the markup, in order: [label (✕ by its title), classes]. */

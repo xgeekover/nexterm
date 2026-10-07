@@ -61,7 +61,48 @@ export function nextButton(at, count, backwards) {
 // open at once when EditorPanel's "Save X?" runs into a change on disk:
 // "File Changed on Disk" opens over it, and one Enter used to confirm both,
 // a plain save and a forced overwrite racing each other.
+//
+// Each is `{ returnTo, box, confirm }`: what had the keyboard when it opened,
+// its own box and its confirm button — what `focusOnClose` needs.
 const openDialogs = [];
+
+/**
+ * Take `entry` off `stack`, the dialogs open (oldest first), as its dialog
+ * closes, and say where the keyboard goes: an element to focus, null to
+ * leave it where it is, or 'fallback' when there is nothing to give it back
+ * to and the caller's `fallbackFocus` decides.
+ *
+ * Closing a dialog unmounts the button that had focus, and focus fell to the
+ * page: the terminal it was asked over took no keys until it was clicked,
+ * and the app's chords answered keys meant for the shell — Ctrl+W, a word
+ * erased in bash, closed the pane. So it goes back to what had it when the
+ * dialog opened, when that is still on the page; else into the dialog still
+ * open beneath, on its confirm button, as when that one opened.
+ *
+ * Only a dialog on top hands it anywhere: under another, the keyboard is in
+ * that one. But the one on top took what it gives back from inside this
+ * one, which is going, so it gives back what this one would have instead.
+ * And only while the keyboard is lost — on the page itself, or still in this
+ * dialog: something that took it on purpose meanwhile keeps it.
+ *
+ * `focused` is what has focus now, `body` the page, and `onPage(el)` whether
+ * an element is still in it.
+ */
+export function focusOnClose(stack, entry, { focused, body, onPage }) {
+  const at = stack.indexOf(entry);
+  if (at === -1) return null;
+  stack.splice(at, 1);
+  for (const above of stack.slice(at)) {
+    if (above.returnTo && entry.box?.contains(above.returnTo)) above.returnTo = entry.returnTo;
+  }
+  if (at < stack.length) return null;
+  const lost = !focused || focused === body || Boolean(entry.box?.contains(focused));
+  if (!lost) return null;
+  if (entry.returnTo && entry.returnTo !== body && onPage(entry.returnTo)) return entry.returnTo;
+  const beneath = stack[stack.length - 1];
+  if (beneath?.confirm && onPage(beneath.confirm)) return beneath.confirm;
+  return 'fallback';
+}
 
 /**
  * VS Code-style modal confirmation. Replaces the native `confirm()` which
@@ -81,6 +122,10 @@ export function ConfirmDialog({
   altDanger = false,
   onConfirm,
   onCancel,
+  // Where the keyboard goes when this closes and nothing had it before, or
+  // what had it has gone — the menu the dialog was chosen from, say. Puts it
+  // there itself. See `focusOnClose`.
+  fallbackFocus = null,
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
@@ -88,6 +133,12 @@ export function ConfirmDialog({
   // callers pass a new arrow on every render.
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
+  const fallbackFocusRef = useRef(fallbackFocus);
+  fallbackFocusRef.current = fallbackFocus;
+  // What had the keyboard when this opened, kept across StrictMode's second
+  // run of the effect below, which can find it still on this dialog's own
+  // button when there was nothing to give it back to.
+  const returnToRef = useRef(null);
 
   // Once per opening: the confirm button takes focus and the keys are
   // listened for. This used to run again whenever a callback changed, which
@@ -96,7 +147,10 @@ export function ConfirmDialog({
   // agent writes, so focus slid off Cancel by itself.
   useEffect(() => {
     if (!open) return undefined;
-    const self = {};
+    const box = dialogRef.current;
+    const focused = document.activeElement;
+    if (!box?.contains(focused)) returnToRef.current = focused;
+    const self = { returnTo: returnToRef.current, box, confirm: confirmRef.current };
     openDialogs.push(self);
     confirmRef.current?.focus();
 
@@ -118,7 +172,13 @@ export function ConfirmDialog({
     window.addEventListener('keydown', onKey, true);
     return () => {
       window.removeEventListener('keydown', onKey, true);
-      openDialogs.splice(openDialogs.indexOf(self), 1);
+      const next = focusOnClose(openDialogs, self, {
+        focused: document.activeElement,
+        body: document.body,
+        onPage: (el) => document.contains(el),
+      });
+      if (next === 'fallback') fallbackFocusRef.current?.();
+      else next?.focus({ preventScroll: true });
     };
   }, [open]);
 

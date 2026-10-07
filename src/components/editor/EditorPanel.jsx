@@ -15,6 +15,7 @@ import { DiffViewer } from './DiffViewer.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
 import { segmentsBelow } from '../../lib/paths.js';
+import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
@@ -373,6 +374,23 @@ function DragPreview({ drag }) {
 }
 
 /**
+ * Keep `editor`, a group's Monaco editor, in `ref` for as long as it lives.
+ *
+ * Each tab a group shows gets an editor of its own (the `key` on <Editor>
+ * below), and the one before is disposed. Left in the ref, it was handed the
+ * next request meant for the new one — Go to File asking for the keyboard, a
+ * terminal link's line — before the new one had mounted: a disposed editor
+ * moves no caret and takes no focus, and the request was spent on it.
+ * Let go, the request waits for the new editor's `onMount`.
+ */
+export function holdEditor(ref, editor) {
+  ref.current = editor;
+  editor.onDidDispose?.(() => {
+    if (ref.current === editor) ref.current = null;
+  });
+}
+
+/**
  * What the Save / Don't Save / Cancel prompt says. Opening another folder
  * also says why it is asking: nothing about choosing a folder suggests that
  * every editor tab is about to close.
@@ -430,6 +448,12 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
     (editor, filePath) => {
       const reveal = useEditorStore.getState().pendingReveal;
       if (!editor || !reveal || reveal.filePath !== filePath) return;
+      // Only the keyboard was asked for (`focusEditor`): the caret stays.
+      if (reveal.line == null) {
+        editor.focus();
+        clearReveal();
+        return;
+      }
       const lineCount = editor.getModel()?.getLineCount?.() ?? reveal.line;
       // A stack trace can name a line past the end of a file that has since
       // been edited. Land on the last line rather than refusing to move.
@@ -509,7 +533,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
               value={activeTab.content}
               onChange={(value) => editBuffer(activeTab.id, value ?? '')}
               onMount={(editor) => {
-                editorRef.current = editor;
+                holdEditor(editorRef, editor);
                 applyPendingReveal(editor, activeTab.filePath);
               }}
               options={monacoOptions}
@@ -630,6 +654,12 @@ export function EditorPanel() {
     requestCloseEditorPane(paneId);
   }, [requestCloseEditorPane]);
 
+  // Where the keyboard goes when a prompt closes and what had it is gone —
+  // the tab's own ✕, which Chromium focuses when it is clicked and which
+  // goes with the tab it closed: the file now in front, or the terminal
+  // when no file is left open.
+  const focusAfterPrompt = () => focusWorkspace('editor');
+
   const unsavedText = pendingClose ? unsavedPromptText(pendingClose) : null;
   const unsavedPrompt = pendingClose ? (
     <ConfirmDialog
@@ -651,6 +681,7 @@ export function EditorPanel() {
         );
       }}
       onCancel={cancelPendingClose}
+      fallbackFocus={focusAfterPrompt}
     />
   ) : null;
 
@@ -674,6 +705,7 @@ export function EditorPanel() {
         );
       }}
       onCancel={cancelPendingOverwrite}
+      fallbackFocus={focusAfterPrompt}
     />
   ) : null;
 

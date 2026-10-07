@@ -10,7 +10,7 @@
  * levels down: nothing in `src/main/java/com/acme` was ever offered.
  */
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { buildPaletteGroups, paletteCommands, FILE_RESULT_LIMIT } from '../../src/lib/paletteItems.js';
+import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette, paletteCommands, FILE_RESULT_LIMIT } from '../../src/lib/paletteItems.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from '../../src/lib/keybindings.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 
@@ -103,6 +103,36 @@ describe('Command palette: Go to File', () => {
     assert.deepEqual(groups.map((g) => g.label), ['files', 'commands']);
     assert.equal(groups[1].items.length, paletteCommands().length);
     assert.equal(buildPaletteGroups({ fileTree, rootPath: ROOT, mode: 'files' }).some((g) => g.label === 'commands'), false);
+  });
+});
+
+describe('Command palette: where the keyboard goes when it closes', () => {
+  test('PR-11: a command from history — the terminal it was typed into; a file — its editor; anything else, or nothing chosen — back where it was', () => {
+    const groups = (mode, extra = {}) => buildPaletteGroups({ mode, rootPath: ROOT, ...extra });
+    const [historyRow] = groups('history', { history: [{ command: 'npm test', count: 1 }] })[0].items;
+    const [fileRow] = groups('files', { files: [`${ROOT}/a.js`] })[0].items;
+    const [recentRow] = groups('recent', { recentRoots: ['/x/alpha'] })[0].items;
+    assert.equal(focusAfterPalette(historyRow), 'terminal');
+    assert.equal(focusAfterPalette(fileRow), 'editor');
+    assert.equal(focusAfterPalette(recentRow), 'opener');
+    for (const command of paletteCommands()) assert.equal(focusAfterPalette(command), 'opener', command.command);
+    assert.equal(focusAfterPalette(null), 'opener', 'closed without a choice');
+  });
+
+  test('PR-12: what had the keyboard has it back while it is on the page — not the page itself, and not a button', () => {
+    const body = { tagName: 'BODY' };
+    const terminal = { tagName: 'TEXTAREA' };
+    const rename = { tagName: 'INPUT' };
+    const searchBox = { tagName: 'BUTTON' };
+    const onPage = (el) => el !== rename; // the rename field closed meanwhile
+    const back = (opener) => canHaveFocusBack(opener, { body, onPage });
+    assert.equal(back(terminal), true);
+    assert.equal(back(rename), false, 'it has left the page');
+    assert.equal(back(body), false, 'nothing had it');
+    assert.equal(back(null), false);
+    // Chromium focuses a button that is clicked: the title bar's search box,
+    // given it back, would open the palette again on the next Enter.
+    assert.equal(back(searchBox), false);
   });
 });
 

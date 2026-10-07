@@ -13,8 +13,9 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { invoke, listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
-import { buildPaletteGroups } from '../../lib/paletteItems.js';
+import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
 import { commandHistory } from '../../lib/commandIndex.js';
+import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 /** How many files Go to File asks the backend for — its own default, said out loud. */
@@ -95,6 +96,19 @@ function useFileListing(wanted, rootPath) {
 }
 
 /**
+ * Give the keyboard back to `opener`, what had it when the palette opened —
+ * or, when that cannot have it (`canHaveFocusBack`), to the terminal on
+ * screen, or the open file when there is no terminal.
+ */
+function giveFocusBack(opener) {
+  if (canHaveFocusBack(opener, { body: document.body, onPage: (el) => document.contains(el) })) {
+    opener.focus({ preventScroll: true });
+  } else {
+    focusWorkspace('terminal');
+  }
+}
+
+/**
  * One result. Kept as it is while its own props are: moving the mouse over
  * the list changes which row is selected and nothing else, and used to draw
  * every row again for each row the pointer crossed.
@@ -140,6 +154,7 @@ export function CommandPalette() {
   const fileTree = useEditorStore((s) => s.fileTree);
   const rootPath = useEditorStore((s) => s.rootPath);
   const openFile = useEditorStore((s) => s.openFile);
+  const focusEditor = useEditorStore((s) => s.focusEditor);
   const recentRoots = useEditorStore((s) => s.recentRoots);
   const openRoot = useEditorStore((s) => s.openRoot);
   const saveAll = useEditorStore((s) => s.saveAll);
@@ -156,16 +171,46 @@ export function CommandPalette() {
   const { bindings } = useShortcuts();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
+  // What had the keyboard when the palette opened, and whether the palette
+  // closed itself — `close` hands the keyboard on then.
+  const openerRef = useRef(null);
+  const closedItselfRef = useRef(false);
 
   const listing = useFileListing(isOpen && (paletteMode === 'all' || paletteMode === 'files'), rootPath);
 
+  // Closing the palette unmounts its input, and the keyboard fell to the
+  // page: a command picked from history was typed into the prompt and Enter
+  // then ran nothing until the terminal was clicked, and on Windows and
+  // Linux the next Ctrl+W — a word erased in the shell — reached the app's
+  // Close Pane instead. So it goes back where it was (`close`), or to where
+  // what was chosen put it (`handleSelect`).
   useEffect(() => {
-    if (isOpen) {
-      setQuery('');
-      setSelectedIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
+    if (!isOpen) return undefined;
+    openerRef.current = document.activeElement;
+    closedItselfRef.current = false;
+    setQuery('');
+    setSelectedIndex(0);
+    const focusInput = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => {
+      clearTimeout(focusInput);
+      // Closed by something else — its own chord, pressed again — with the
+      // keyboard left on the page.
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (!closedItselfRef.current && lost) giveFocusBack(openerRef.current);
+    };
   }, [isOpen]);
+
+  /**
+   * Close, handing the keyboard back where it was — at once, before the
+   * chosen item runs, so that a question it asks (Open Recent's "Save
+   * a.js?") remembers the right place to give it back to — unless the item
+   * puts it somewhere itself (`focusAfterPalette`).
+   */
+  const close = (handOff = 'opener') => {
+    closedItselfRef.current = true;
+    if (handOff === 'opener') giveFocusBack(openerRef.current);
+    setOpen(false);
+  };
 
   // Read when the palette opens, not subscribed to: history changes on every
   // Enter in every terminal, and a list that reshuffles under the cursor while
@@ -247,11 +292,21 @@ export function CommandPalette() {
 
   const handleSelect = async (item) => {
     if (!item) return;
-    setOpen(false);
+    const handOff = focusAfterPalette(item);
+    close(handOff);
     try {
       await runItem(item);
+      if (handOff === 'terminal') {
+        // Hidden, the terminal panel is shown again and its terminal takes
+        // the keyboard as it mounts; with no terminal at all, back it goes.
+        if (!focusTerminal()) giveFocusBack(openerRef.current);
+      } else if (handOff === 'editor') {
+        focusEditor?.();
+      }
     } catch (err) {
       console.error('Error executing palette item:', err);
+      // Nothing opened to take the keyboard.
+      if (handOff !== 'opener') giveFocusBack(openerRef.current);
     }
   };
 
@@ -278,7 +333,7 @@ export function CommandPalette() {
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      setOpen(false);
+      close();
     }
   };
 
@@ -286,7 +341,7 @@ export function CommandPalette() {
 
   return (
     <div
-      onClick={() => setOpen(false)}
+      onClick={() => close()}
       className="fixed inset-0 z-50 select-none"
     >
       <div

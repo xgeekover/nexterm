@@ -674,6 +674,18 @@ export const useEditorStore = create((set, get) => ({
   /** Applied — or abandoned, if nothing could show it. */
   clearReveal: () => set({ pendingReveal: null }),
 
+  /**
+   * Give the active tab's editor the keyboard, leaving its caret where it
+   * is: a file picked in Go to File, or the keyboard handed back as a prompt
+   * closes (src/lib/workspaceFocus.js). A file just opened has no editor
+   * yet, so this too is parked in `pendingReveal` — with no line — for
+   * EditorPanel to apply once it has one.
+   */
+  focusEditor: () => {
+    const tab = get().getActiveTab();
+    if (tab) set({ pendingReveal: { filePath: tab.filePath, line: null, column: null } });
+  },
+
   openFile: async (requestedPath) => {
     // Written the way the backend writes the open folder, so that a link
     // printed in a terminal and a click in the Explorer name the same file

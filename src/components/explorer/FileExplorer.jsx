@@ -16,6 +16,7 @@ import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
+import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
 
 async function writeToSystemClipboard(text) {
@@ -589,6 +590,14 @@ export function FileExplorer() {
                 deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(err.message));
               }}
               onCancel={() => setDeleteConfirm(null)}
+              // Chosen from the context menu, which has gone by the time
+              // this opens, so nothing had the keyboard to give it back to:
+              // the tree it was chosen in takes it, as it had it before the
+              // menu opened.
+              fallbackFocus={() => {
+                if (treeRef.current) treeRef.current.focus({ preventScroll: true });
+                else focusWorkspace('terminal');
+              }}
             />,
             document.body
           )

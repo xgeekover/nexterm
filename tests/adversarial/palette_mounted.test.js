@@ -49,10 +49,13 @@ const STAND_INS = {
   editorStore: `
     import { create } from 'zustand';
     import { calls } from 'stand-in:calls';
-    export const useEditorStore = create(() => ({
+    export const useEditorStore = create((set, get) => ({
       fileTree: [],
       rootPath: '/w',
       recentRoots: [],
+      tabs: [],
+      activeTabId: null,
+      getActiveTab: () => get().tabs.find((t) => t.id === get().activeTabId) || null,
       openFile: async (path) => {
         calls.push(['openFile', path]);
         return { id: 'tab-1', filePath: path };
@@ -186,9 +189,9 @@ let ui = null;
 /** Every case starts from a closed palette, a backend with no file list, and nothing called. */
 async function fresh() {
   ui = await loadPalette();
-  ui.useSettingsStore.setState({ isCommandPaletteOpen: false, commandPaletteMode: 'all', activeView: 'terminal' });
-  ui.useEditorStore.setState({ fileTree: [], rootPath: '/w', recentRoots: [] });
-  ui.useTerminalStore.setState({ activeTabId: 't1', activeGroupId: 'g1', groups: [{ id: 'g1', activePaneId: 'pane-1' }] });
+  for (const store of [ui.useSettingsStore, ui.useEditorStore, ui.useTerminalStore]) {
+    store.setState(store.getInitialState(), true);
+  }
   ui.bridge.answer = null;
   ui.bridge.asked.length = 0;
   ui.bridge.listeners.clear();
@@ -321,6 +324,235 @@ describe('Command palette, mounted: the files Go to File lists', () => {
       await openPalette(p, 'files');
       assert.deepEqual(rowTitles(p), ['a.js']);
       assert.ok(p.document.body.textContent.includes('Only the first 20,000 files in this folder are searched'));
+    });
+  });
+});
+
+// ---- Where the keyboard goes when it closes ----------------------------------
+
+/**
+ * The terminal pane and the editor as the app draws them — what the palette
+ * gives the keyboard to — and the title bar's search box, which opens it.
+ */
+function workspace(p) {
+  const pane = p.el('div', { 'data-pane-body': 'pane-1' });
+  const xterm = p.el('div', { class: 'xterm' }, pane);
+  const terminal = p.el('textarea', { class: 'xterm-helper-textarea' }, xterm);
+  const monaco = p.el('div', { class: 'monaco-editor' });
+  const editor = p.el('textarea', { class: 'inputarea' }, monaco);
+  const searchBox = p.el('button', { title: 'Search NexTerm' });
+  return { terminal, editor, searchBox };
+}
+
+/**
+ * What has the keyboard, by name: one of `named`, 'page' for nothing, or a
+ * tag. Never the element itself in an assertion — a failing one would print
+ * it, React's whole tree hanging off it, at a depth that runs Node out of
+ * memory.
+ */
+function focusIs(p, named) {
+  const el = p.document.activeElement;
+  for (const [name, node] of Object.entries(named)) if (node === el) return name;
+  return el === p.document.body ? 'page' : el.tagName;
+}
+const called = (name) => ui.calls.filter(([c]) => c === name);
+
+/**
+ * Closing the palette unmounted its input, and the keyboard fell to the
+ * page. A command picked from history was typed into the prompt and Enter
+ * then ran nothing until the terminal was clicked; on Windows and Linux the
+ * next Ctrl+W, a word erased in the shell, reached the app's Close Pane.
+ */
+describe('Command palette, mounted: the keyboard after it closes', () => {
+  beforeEach(fresh);
+
+  test('PM-07: Escape gives the keyboard back to the terminal the palette was opened from', async () => {
+    await onPage(async (p) => {
+      const { terminal } = workspace(p);
+      terminal.focus();
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'files');
+      assert.equal(focusIs(p, { terminal }), 'INPUT', 'precondition: the palette has the keyboard');
+      p.keydown('Escape');
+      assert.equal(focusIs(p, { terminal }), 'terminal');
+    });
+  });
+
+  test('PM-08: a command picked from history is typed into the active terminal, and the keyboard goes there — even from the editor', async () => {
+    await onPage(async (p) => {
+      ui.historyEntries.push({ command: 'npm test', cwd: '/w', count: 3 });
+      const { terminal, editor } = workspace(p);
+      editor.focus();
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'history');
+      p.keydown('Enter');
+      await letItRun();
+      assert.deepEqual(called('writeRaw'), [['writeRaw', 't1', 'npm test']]);
+      assert.equal(focusIs(p, { terminal, editor }), 'terminal', 'Enter would not run it — and in the editor it would start a new line');
+    });
+  });
+
+  test('PM-09: a file picked: its editor is asked for the keyboard once it is open, and the terminal is not handed it on the way', async () => {
+    await onPage(async (p) => {
+      const { terminal } = workspace(p);
+      terminal.focus();
+      let handed = 0;
+      const focusTerminal = terminal.focus.bind(terminal);
+      terminal.focus = () => {
+        handed += 1;
+        focusTerminal();
+      };
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'files');
+      p.keydown('Enter');
+      await letItRun();
+      assert.deepEqual(ui.calls.map(([c]) => c).filter((c) => c === 'openFile' || c === 'focusEditor'), ['openFile', 'focusEditor']);
+      assert.equal(handed, 0, 'a program in the terminal was told it had focus, then that it had lost it');
+    });
+  });
+
+  test('PM-10: a file that cannot be opened gives the keyboard back where it was', async () => {
+    await onPage(async (p) => {
+      const { terminal } = workspace(p);
+      terminal.focus();
+      ui.bridge.answer = listing(['/w/huge.min.js']);
+      ui.useEditorStore.setState({
+        openFile: async (path) => {
+          ui.calls.push(['openFile', path]);
+          throw new Error('File is too large to open');
+        },
+      });
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'files');
+      const report = console.error;
+      console.error = () => {};
+      try {
+        p.keydown('Enter');
+        await letItRun();
+      } finally {
+        console.error = report;
+      }
+      assert.deepEqual(called('focusEditor'), []);
+      assert.equal(focusIs(p, { terminal }), 'terminal');
+    });
+  });
+
+  test('PM-11: closed from outside — the chord that opens it, pressed again — the keyboard goes back too', async () => {
+    await onPage(async (p) => {
+      const { terminal } = workspace(p);
+      terminal.focus();
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'all');
+      p.settled(() => ui.useSettingsStore.getState().setCommandPaletteOpen(false));
+      assert.equal(focusIs(p, { terminal }), 'terminal');
+    });
+  });
+
+  test('PM-12: a click outside the box closes it and gives the keyboard back', async () => {
+    await onPage(async (p) => {
+      const { terminal } = workspace(p);
+      terminal.focus();
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'files');
+      const backdrop = p.document.querySelectorAll('div').find((d) => (d.getAttribute('class') || '').startsWith('fixed inset-0'));
+      p.click(backdrop);
+      assert.equal(ui.useSettingsStore.getState().isCommandPaletteOpen, false);
+      assert.equal(focusIs(p, { terminal }), 'terminal');
+    });
+  });
+
+  test('PM-13: opened from the title bar\'s search box, or with what had the keyboard gone, it goes to the active terminal', async () => {
+    await onPage(async (p) => {
+      const { terminal, searchBox } = workspace(p);
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+
+      // Chromium focuses a button that is clicked: given it back, the next
+      // Enter would open the palette again.
+      searchBox.focus();
+      await openPalette(p, 'all');
+      p.keydown('Escape');
+      assert.equal(focusIs(p, { terminal, searchBox }), 'terminal');
+
+      const rename = p.el('input');
+      rename.focus();
+      await openPalette(p, 'all');
+      rename.parentNode.removeChild(rename);
+      p.keydown('Escape');
+      assert.equal(focusIs(p, { terminal }), 'terminal', 'what had it left the page');
+    });
+  });
+
+  test('PM-14: a folder from Open Recent: the keyboard is back where it was before the folder opens — so a question it asks gives it back there', async () => {
+    await onPage(async (p) => {
+      const { terminal } = workspace(p);
+      terminal.focus();
+      ui.useEditorStore.setState({
+        recentRoots: ['/x/alpha'],
+        openRoot: async (path) => {
+          // "Save a.js?" opens here, and remembers what has the keyboard.
+          ui.calls.push(['openRoot', path, focusIs(p, { terminal })]);
+          return path;
+        },
+      });
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'recent');
+      p.keydown('Enter');
+      await letItRun();
+      const [[, path, heldBy]] = called('openRoot');
+      assert.equal(path, '/x/alpha');
+      assert.equal(heldBy, 'terminal', 'what had the keyboard when the folder was opened');
+    });
+  });
+
+  test('PM-15: with no terminal on screen and nothing to give it back to, the file open in the editor takes the keyboard — and with neither, nothing is asked', async () => {
+    await onPage(async (p) => {
+      // The terminal panel hidden: no pane drawn. Opened from the title bar.
+      const searchBox = p.el('button', { title: 'Search NexTerm' });
+      ui.useEditorStore.setState({ tabs: [{ id: 'e1', filePath: '/w/a.js' }], activeTabId: 'e1' });
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+      searchBox.focus();
+      await openPalette(p, 'all');
+      p.keydown('Escape');
+      assert.deepEqual(called('focusEditor'), [['focusEditor']], 'the keyboard was left on the page');
+
+      ui.useEditorStore.setState({ tabs: [], activeTabId: null });
+      searchBox.focus();
+      await openPalette(p, 'all');
+      p.keydown('Escape');
+      assert.deepEqual(called('focusEditor'), [['focusEditor']], 'no file is open, so there is no editor to ask');
+      assert.equal(focusIs(p, { searchBox }), 'page');
+    });
+  });
+
+  test('PM-16: the terminal is given the keyboard without scrolling it into view, as xterm gives it itself', async () => {
+    await onPage(async (p) => {
+      ui.historyEntries.push({ command: 'npm test', cwd: '/w', count: 3 });
+      const { terminal } = workspace(p);
+      terminal.focus();
+      const asked = [];
+      const focusTerminal = terminal.focus.bind(terminal);
+      terminal.focus = (options) => {
+        asked.push(options);
+        focusTerminal();
+      };
+      ui.bridge.answer = listing(['/w/a.js']);
+      p.render(h(ui.CommandPalette));
+
+      await openPalette(p, 'files');
+      p.keydown('Escape');
+      await openPalette(p, 'history');
+      p.keydown('Enter');
+      await letItRun();
+      assert.equal(focusIs(p, { terminal }), 'terminal');
+      // The textarea xterm types through follows the cursor: brought into
+      // view, it scrolled the terminal's box.
+      assert.deepEqual(asked, [{ preventScroll: true }, { preventScroll: true }]);
     });
   });
 });
