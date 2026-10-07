@@ -78,54 +78,57 @@ pub struct SearchOptions {
 
 /// What to look for, compiled once for the whole walk.
 enum Matcher {
-    /// Plain text. `needle` is already lowercased when the search is
-    /// case-insensitive, and the haystack is lowered to match.
-    Plain { needle: String, case_sensitive: bool },
+    /// Plain text, case included: the one search a substring find answers.
+    Exact(String),
+    /// Everything else — a pattern, a whole word, or text in any case.
     Regex(regex::Regex),
 }
 
 impl Matcher {
+    /// Text in any case is a regex too, of the text escaped. It used to be
+    /// found by lowercasing the line and the query, and that gave the match's
+    /// offset in the LOWERCASED line. Lowercasing changes some characters'
+    /// length in bytes — the Kelvin sign (3 bytes) becomes `k` (1), the
+    /// Turkish İ (2) becomes `i̇` (3) — so the offset, applied to the line as
+    /// written, could land inside a character, which panicked and left the
+    /// search unanswered, or past the end of the line. A regex match says
+    /// where it is in the line itself.
     fn build(query: &str, options: SearchOptions) -> Result<Self, String> {
-        if options.regex || options.whole_word {
-            let escaped = if options.regex {
-                query.to_string()
-            } else {
-                regex::escape(query)
-            };
-            // `\b` on both sides is what "whole word" means, and it composes
-            // with a user-supplied pattern the same way.
-            let pattern = if options.whole_word {
-                format!(r"\b(?:{escaped})\b")
-            } else {
-                escaped
-            };
-            let built = regex::RegexBuilder::new(&pattern)
-                .case_insensitive(!options.case_sensitive)
-                .size_limit(1 << 20)
-                .build()
-                .map_err(|e| format!("bad pattern: {e}"))?;
-            return Ok(Matcher::Regex(built));
+        if options.case_sensitive && !options.regex && !options.whole_word {
+            return Ok(Matcher::Exact(query.to_string()));
         }
-        Ok(Matcher::Plain {
-            needle: if options.case_sensitive {
-                query.to_string()
-            } else {
-                query.to_lowercase()
-            },
-            case_sensitive: options.case_sensitive,
-        })
+        let escaped = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        // `\b` on both sides is what "whole word" means, and it composes
+        // with a user-supplied pattern the same way.
+        let pattern = if options.whole_word {
+            format!(r"\b(?:{escaped})\b")
+        } else {
+            escaped
+        };
+        let built = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!options.case_sensitive)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|e| {
+                // Escaped text is always a valid pattern; all it can do is
+                // outgrow the size limit, at several thousand characters.
+                if options.regex {
+                    format!("bad pattern: {e}")
+                } else {
+                    format!("search text too long: {e}")
+                }
+            })?;
+        Ok(Matcher::Regex(built))
     }
 
     /// The 0-based byte offset of the first match in `line`, if any.
     fn find(&self, line: &str) -> Option<usize> {
         match self {
-            Matcher::Plain { needle, case_sensitive } => {
-                if *case_sensitive {
-                    line.find(needle.as_str())
-                } else {
-                    line.to_lowercase().find(needle.as_str())
-                }
-            }
+            Matcher::Exact(needle) => line.find(needle.as_str()),
             Matcher::Regex(re) => re.find(line).map(|m| m.start()),
         }
     }
@@ -355,6 +358,56 @@ mod tests {
         fs::write(dir.join("a.txt"), "한글이 있는 줄 needle\n").unwrap();
         let out = search(&dir, "needle", opts()).unwrap();
         assert_eq!(out.files[0].matches[0].column, 10);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Lowercasing changes some characters' length in bytes: the Kelvin sign
+    /// (3 bytes) becomes `k` (1), the Turkish İ (2) becomes `i̇` (3). The match
+    /// was found in a lowercased copy of the line and its offset used on the
+    /// line as written, which landed inside a character — a panic, and a
+    /// search that never answered — or past the end of the line, or a column
+    /// or two off.
+    #[test]
+    fn case_folding_that_changes_byte_lengths_neither_panics_nor_moves_the_column() {
+        let dir = scratch("folding");
+        fs::write(dir.join("kelvin.txt"), "\u{212A} needle\n").unwrap();
+        fs::write(dir.join("turkish.txt"), "İİİab\nİ needle\n").unwrap();
+        let column = |out: &SearchResults, file: &str, line: u32| {
+            out.files
+                .iter()
+                .find(|f| f.path.ends_with(file))
+                .and_then(|f| f.matches.iter().find(|m| m.line == line))
+                .map(|m| m.column)
+                .unwrap_or_else(|| panic!("no match on {file}:{line}: {out:?}"))
+        };
+
+        let out = search(&dir, "needle", opts()).unwrap();
+        assert_eq!(column(&out, "kelvin.txt", 1), 3, "after `K `");
+        assert_eq!(column(&out, "turkish.txt", 2), 3, "after `İ `");
+
+        let out = search(&dir, "AB", opts()).unwrap();
+        assert_eq!(column(&out, "turkish.txt", 1), 4, "after `İİİ`");
+
+        // The Kelvin sign is a capital K to Unicode, and any-case text is
+        // found in any case.
+        let out = search(&dir, "k needle", opts()).unwrap();
+        assert_eq!(column(&out, "kelvin.txt", 1), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Text in any case is compiled, and past some thousands of characters
+    /// it outgrows the regex size limit. That is the only way escaped text
+    /// fails to compile, and "bad pattern" would blame a pattern nobody wrote.
+    #[test]
+    fn text_too_long_to_search_for_says_so() {
+        let dir = fixture("toolong");
+        let query = "needle ".repeat(10_000);
+        let err = search(&dir, &query, opts()).unwrap_err();
+        assert!(err.contains("too long"), "unexpected error: {err}");
+        assert!(!err.contains("bad pattern"), "{err}");
+        // A few hundred characters is an ordinary search.
+        let out = search(&dir, &"x".repeat(500), opts()).unwrap();
+        assert!(out.files.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
