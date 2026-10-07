@@ -20,7 +20,12 @@ import { describe, test, assert } from '../e2e/harness/testFramework.js';
 // fail one by one instead of the file failing to load.
 import * as external from '../../src/lib/openExternal.js';
 
-const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
+// As written, whatever line endings the checkout gave it: on Windows git
+// writes CRLF, and a function's end is looked for by "\n}\n".
+const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8').replace(
+  /\r\n/g,
+  '\n'
+);
 
 /** One top-level function of the registry, by name, as written there. */
 function cut(name) {
