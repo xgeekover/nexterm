@@ -247,4 +247,62 @@ describe('A terminal whose shell has exited', () => {
     assert.match(registry, /entry\.term\.write\(exitNotice\(/, 'on the exit event');
     assert.match(registry, /if \(exited && sessionId\) \{\s*entry\.exited = true;\s*term\.write\(exitNotice\(/, 'and when the tab is first shown');
   });
+
+  // Found in review (R3): closing reads the tab's session before it awaits the
+  // kill, so a new shell the restart installed meanwhile went on running with
+  // no tab to show it.
+  const leaves = (node) => (node.children ? node.children.flatMap(leaves) : [node]);
+  for (const [id, how, setup] of [
+    [
+      'SR-10',
+      'closed',
+      async () => {
+        const tab = await liveTerminal();
+        return { tab, close: () => T.getState().closeTab(tab.id) };
+      },
+    ],
+    [
+      'SR-11',
+      'taken with its pane',
+      async () => {
+        await T.getState().init();
+        const group = T.getState().getActiveGroup();
+        const paneId = await T.getState().splitPane(group.activePaneId, 'horizontal', group.id);
+        const pane = leaves(T.getState().groups.find((g) => g.id === group.id).tree).find((l) => l.id === paneId);
+        assert.equal(pane?.tabIds.length, 1, 'setup: a pane holding only this terminal');
+        return { tab: tabById(pane.tabIds[0]), close: () => T.getState().closePane(paneId, group.id) };
+      },
+    ],
+  ]) {
+    test(`${id}: a terminal ${how} while it is still ending its old shell takes the new one with it`, async () => {
+      const { tab, close } = await setup();
+      await exits(tab, 1);
+      const old = tab.sessionId;
+      const before = new Set(mockBridge.ptySessions.keys());
+      const calls = await recording(
+        async () => {
+          const restart = T.getState().writeRaw(tab.id, '\r');
+          await sleep(35);
+          // The restart's spawn resolves while this close still waits on its kill.
+          const closing = close();
+          await restart;
+          await closing;
+          // A shell ended in passing is ended without waiting for it.
+          await sleep(60);
+        },
+        async (command) => {
+          if (command === 'pty_kill') await sleep(30);
+          if (command === 'pty_spawn') await sleep(10);
+          return undefined;
+        }
+      );
+      assert.equal(tabById(tab.id), undefined, 'the terminal is gone');
+      assert.equal(calls.filter((c) => c.command === 'pty_spawn').length, 1, 'setup: a new shell was started');
+      const alive = [...mockBridge.ptySessions.keys()];
+      assert.ok(!alive.includes(old), 'the old session is gone');
+      const started = alive.filter((sid) => !before.has(sid));
+      const orphans = started.filter((sid) => !T.getState().tabs.some((t) => t.sessionId === sid));
+      assert.deepEqual(orphans, [], `no shell runs without a terminal: ${JSON.stringify(orphans)}`);
+    });
+  }
 });

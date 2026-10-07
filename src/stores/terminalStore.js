@@ -1002,6 +1002,13 @@ const resolveTimers = new Map();
 const restarting = new Set();
 
 /**
+ * Tab ids on their way out (`closeTab`, `killTabIfOrphaned`). Each holds the
+ * session it read before awaiting the kill, so a new shell `restartShell`
+ * installed meanwhile would outlive the tab, running with nothing to show it.
+ */
+const closingTabs = new Set();
+
+/**
  * How long a title has to stay before its conversation is looked up. opencode
  * sends the same title two or three times in a row as it draws (measured),
  * and switching conversations quickly should cost one lookup, not five.
@@ -1548,20 +1555,25 @@ export const useTerminalStore = create((set, get, api) => {
     if (groupOfTab(get(), tabId)) return;
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
+    closingTabs.add(tabId);
     try {
-      await invoke('pty_kill', { session_id: tab.sessionId });
-    } catch (e) {
-      console.warn('[TerminalStore] pty_kill failed:', e);
+      try {
+        await invoke('pty_kill', { session_id: tab.sessionId });
+      } catch (e) {
+        console.warn('[TerminalStore] pty_kill failed:', e);
+      }
+      await disposeTerminalView(tabId);
+      typedLines.delete(tabId);
+      forgetAgentTitle(tabId);
+      // Whatever its shell printed that no terminal ever showed goes with it, as
+      // in `closeTab`. Closing a pane, a group or the whole workspace comes this
+      // way, and a tab of theirs never brought forward kept up to BACKLOG_LIMIT
+      // characters for the life of the app.
+      forgetOutput(tab.sessionId);
+      set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
+    } finally {
+      closingTabs.delete(tabId);
     }
-    await disposeTerminalView(tabId);
-    typedLines.delete(tabId);
-    forgetAgentTitle(tabId);
-    // Whatever its shell printed that no terminal ever showed goes with it, as
-    // in `closeTab`. Closing a pane, a group or the whole workspace comes this
-    // way, and a tab of theirs never brought forward kept up to BACKLOG_LIMIT
-    // characters for the life of the app.
-    forgetOutput(tab.sessionId);
-    set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
   };
 
   /**
@@ -3257,26 +3269,31 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       if (!tab) return;
 
+      closingTabs.add(tabId);
       try {
-        await invoke('pty_kill', { session_id: tab.sessionId });
-      } catch (e) {
-        console.warn('[TerminalStore] pty_kill failed:', e);
-      }
-      await disposeTerminalView(tabId);
-      typedLines.delete(tabId);
-      forgetAgentTitle(tabId);
-      // Whatever its shell printed that no terminal ever showed goes with it.
-      forgetOutput(tab.sessionId);
+        try {
+          await invoke('pty_kill', { session_id: tab.sessionId });
+        } catch (e) {
+          console.warn('[TerminalStore] pty_kill failed:', e);
+        }
+        await disposeTerminalView(tabId);
+        typedLines.delete(tabId);
+        forgetAgentTitle(tabId);
+        // Whatever its shell printed that no terminal ever showed goes with it.
+        forgetOutput(tab.sessionId);
 
-      // `settle` sweeps a dropped tab id out of EVERY group (not just one
-      // tree), prunes whichever pane it emptied, and drops a group that ends
-      // up with nothing — keeping the last group as an empty one.
-      set((state) =>
-        settle(state, {
-          tabs: state.tabs.filter((t) => t.id !== tabId),
-          activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
-        })
-      );
+        // `settle` sweeps a dropped tab id out of EVERY group (not just one
+        // tree), prunes whichever pane it emptied, and drops a group that ends
+        // up with nothing — keeping the last group as an empty one.
+        set((state) =>
+          settle(state, {
+            tabs: state.tabs.filter((t) => t.id !== tabId),
+            activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
+          })
+        );
+      } finally {
+        closingTabs.delete(tabId);
+      }
     },
 
     executeCommand: async (commandText, tabId = null) => {
@@ -3643,7 +3660,7 @@ export const useTerminalStore = create((set, get, api) => {
      */
     restartShell: async (tabId) => {
       const tab = get().tabs.find((t) => t.id === tabId);
-      if (!tab || !tab.exited || restarting.has(tabId)) return false;
+      if (!tab || !tab.exited || restarting.has(tabId) || closingTabs.has(tabId)) return false;
       restarting.add(tabId);
       try {
         try {
@@ -3661,8 +3678,9 @@ export const useTerminalStore = create((set, get, api) => {
           if (startDir === null) throw err;
           ptySession = await spawnAt(null);
         }
-        if (!get().tabs.some((t) => t.id === tabId)) {
-          // Closed while the new shell started: it must not outlive the tab.
+        if (!get().tabs.some((t) => t.id === tabId) || closingTabs.has(tabId)) {
+          // Closed, or being closed, while the new shell started: it must not
+          // outlive the tab.
           invoke('pty_kill', { session_id: ptySession.session_id }).catch(() => {});
           return false;
         }
