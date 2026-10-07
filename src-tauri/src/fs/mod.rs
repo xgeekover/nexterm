@@ -560,7 +560,7 @@ fn copy_folder(from: &Path, to: &Path) -> Result<(), String> {
             staging.display()
         )),
     };
-    if let Err(error) = fill_folder(from, &staging) {
+    if let Err(error) = fill_folder(from, &staging, to) {
         return discard(error);
     }
     // `to` was free when the copy began; something may have taken it since.
@@ -592,25 +592,29 @@ fn staging_beside(to: &Path) -> Result<PathBuf, String> {
     Err(format!("Cannot copy to '{}': too many unfinished copies beside it", to.display()))
 }
 
-fn fill_folder(from: &Path, to: &Path) -> Result<(), String> {
-    // Folders still to copy, as (source, copy). A list rather than recursion:
-    // a deep tree would be a deep stack, on a blocking-pool thread with a
-    // small one.
-    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
-    while let Some((source, copy)) = pending.pop() {
+/// Copy what is in `from` into `to`, which will be renamed `published` once
+/// the copy is complete (`copy_folder`): where a copied link has to name an
+/// absolute place, it names the place it will be.
+fn fill_folder(from: &Path, to: &Path, published: &Path) -> Result<(), String> {
+    // Folders still to copy, as (source, copy, the copy's final name). A list
+    // rather than recursion: a deep tree would be a deep stack, on a
+    // blocking-pool thread with a small one.
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf(), published.to_path_buf())];
+    while let Some((source, copy, final_copy)) = pending.pop() {
         let unreadable = |e: std::io::Error| format!("Failed to read '{}': {e}", source.display());
         for entry in fs::read_dir(&source).map_err(unreadable)? {
             let entry = entry.map_err(unreadable)?;
             let (from_entry, to_entry) = (entry.path(), copy.join(entry.file_name()));
+            let final_entry = final_copy.join(entry.file_name());
             // The entry itself: a link is not followed.
             let file_type = entry.file_type().map_err(unreadable)?;
             if file_type.is_symlink() {
-                copy_link(&from_entry, &to_entry, file_type)
+                copy_link(&from_entry, &to_entry, &final_entry, file_type)
                     .map_err(|e| format!("Failed to copy the link '{}': {e}", from_entry.display()))?;
             } else if file_type.is_dir() {
                 fs::create_dir(&to_entry)
                     .map_err(|e| format!("Failed to create '{}': {e}", to_entry.display()))?;
-                pending.push((from_entry, to_entry));
+                pending.push((from_entry, to_entry, final_entry));
             } else if file_type.is_file() {
                 fs::copy(&from_entry, &to_entry)
                     .map_err(|e| format!("Failed to copy '{}': {e}", from_entry.display()))?;
@@ -620,9 +624,20 @@ fn fill_folder(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a junction standing in for a folder symlink to `target` should
+/// point, for a link that will be at `published`: an absolute target as it
+/// is, a relative one read from the folder the link will be in.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn junction_target(target: &Path, published: &Path) -> PathBuf {
+    match published.parent() {
+        Some(parent) if target.is_relative() => lexical_normalize(&parent.join(target)),
+        _ => target.to_path_buf(),
+    }
+}
+
 /// Make `to` a link spelled exactly like the link `from`.
 #[cfg(unix)]
-fn copy_link(from: &Path, to: &Path, _: fs::FileType) -> std::io::Result<()> {
+fn copy_link(from: &Path, to: &Path, _published: &Path, _: fs::FileType) -> std::io::Result<()> {
     std::os::unix::fs::symlink(fs::read_link(from)?, to)
 }
 
@@ -633,8 +648,13 @@ fn copy_link(from: &Path, to: &Path, _: fs::FileType) -> std::io::Result<()> {
 /// junction, and a folder symlink Windows will not make becomes one too, to
 /// the same folder (a relative target read from where the copy is). A file
 /// symlink has no such stand-in, so the copy gets the file it leads to.
+///
+/// A junction holds an absolute path, so a relative target is read from
+/// where the link will be once the copy has its name (`published`), not from
+/// where it is being filled: read from there, it pointed into the hidden
+/// `.<name>.copying` folder and broke the moment that was renamed.
 #[cfg(windows)]
-fn copy_link(from: &Path, to: &Path, file_type: fs::FileType) -> std::io::Result<()> {
+fn copy_link(from: &Path, to: &Path, published: &Path, file_type: fs::FileType) -> std::io::Result<()> {
     /// ERROR_PRIVILEGE_NOT_HELD
     const NO_PRIVILEGE: i32 = 1314;
     let target = fs::read_link(from)?;
@@ -643,13 +663,7 @@ fn copy_link(from: &Path, to: &Path, file_type: fs::FileType) -> std::io::Result
             return junction::create(&target, to);
         }
         return match std::os::windows::fs::symlink_dir(&target, to) {
-            Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => {
-                let absolute = match to.parent() {
-                    Some(parent) if target.is_relative() => parent.join(&target),
-                    _ => target,
-                };
-                junction::create(absolute, to)
-            }
+            Err(e) if e.raw_os_error() == Some(NO_PRIVILEGE) => junction::create(junction_target(&target, published), to),
             made => made,
         };
     }
@@ -2206,5 +2220,26 @@ mod off_machine_chain_tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&share);
+    }
+}
+
+#[cfg(test)]
+mod junction_target_tests {
+    use super::*;
+
+    /// Found in the last review: a folder symlink copied without the
+    /// privilege a symlink needs became a junction to a target read from the
+    /// hidden folder the copy fills — and broke when that was renamed.
+    #[test]
+    fn a_relative_folder_link_is_read_from_where_the_copy_will_be() {
+        let published = Path::new("/w/proj copy/packages/app/shared");
+        assert_eq!(
+            junction_target(Path::new("../../libs/shared"), published),
+            PathBuf::from("/w/proj copy/libs/shared"),
+            "inside the copy, by its final name"
+        );
+        assert_eq!(junction_target(Path::new("../../../elsewhere"), published), PathBuf::from("/w/elsewhere"));
+        assert_eq!(junction_target(Path::new("/abs/target"), published), PathBuf::from("/abs/target"));
+        assert!(!junction_target(Path::new("x"), published).to_string_lossy().contains(".copying"));
     }
 }
