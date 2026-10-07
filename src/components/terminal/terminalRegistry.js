@@ -58,7 +58,7 @@ import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { attachOutput, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
-import { exitNotice } from '../../lib/shellExit.js';
+import { exitNotice, freshScreen } from '../../lib/shellExit.js';
 
 const instances = new Map();
 
@@ -715,9 +715,16 @@ function hyperlinkHandler(container) {
  */
 function bindSession(entry, sessionId) {
   entry.stopPtyListener?.();
-  // A shell this instance no longer shows is gone (a restore respawned it):
-  // nothing it left waiting will ever be written anywhere.
-  if (entry.sessionId && entry.sessionId !== sessionId) forgetOutput(entry.sessionId);
+  if (entry.sessionId && entry.sessionId !== sessionId) {
+    // A shell this instance no longer shows is gone (a restore respawned it,
+    // or Enter started a new one after it exited): nothing it left waiting
+    // will ever be written anywhere.
+    forgetOutput(entry.sessionId);
+    // Nor is what its programs left on the screen any business of the new
+    // one. Written before the new shell's output is attached, so before any
+    // of it. See `freshScreen`.
+    if (sessionId) entry.term.write(freshScreen(entry.term.rows));
+  }
   entry.sessionId = sessionId;
   entry.exited = false;
 
@@ -735,7 +742,8 @@ function bindSession(entry, sessionId) {
     // When the shell exits, say so — with the code as Windows documents it —
     // and that Enter starts a new one (the store's `restartShell`). The pane
     // used to keep a blinking cursor and swallow every keystroke, then print
-    // a failed write for each one.
+    // a failed write for each one. What its last program left switched on
+    // goes off first, so a drag selects text again (see `exitNotice`).
     listen('pty-exit', (payload) => {
       const { session_id, exit_code } = payload || {};
       if (session_id !== sessionId || entry.exited) return;

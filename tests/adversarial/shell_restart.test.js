@@ -11,8 +11,19 @@
  * backend's own words, and `pty_kill` emits the exit as the backend does.
  */
 import { readFileSync } from 'node:fs';
+import headless from '@xterm/headless';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { CTRL_C_EXIT, describeExitCode, exitNotice, restartsShell, sessionIsGone } from '../../src/lib/shellExit.js';
+import {
+  CTRL_C_EXIT,
+  describeExitCode,
+  exitNotice,
+  freshScreen,
+  parseSize,
+  restartsShell,
+  sessionIsGone,
+} from '../../src/lib/shellExit.js';
+import { installModifyOtherKeys } from '../../src/lib/modifyOtherKeys.js';
+import { resolveStartDir } from '../../src/lib/terminalCwd.js';
 import { useTerminalStore as T } from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
@@ -110,7 +121,7 @@ describe('A terminal whose shell has exited', () => {
     }
   });
 
-  test('SR-04: Enter starts a new shell in its place — same shell, same directory, a fresh size', async () => {
+  test('SR-04: Enter starts a new shell in its place — same shell, same directory, same size', async () => {
     const tab = await liveTerminal();
     try {
       T.setState((s) => ({
@@ -130,11 +141,14 @@ describe('A terminal whose shell has exited', () => {
       assert.ok(spawn, 'a new shell was started');
       assert.equal(spawn.args.shell, '/bin/zsh');
       assert.equal(spawn.args.cwd, '/workspace/src');
+      // Not 80×24 and a resize after: ConPTY redraws on a resize from where it
+      // believes its cursor is.
+      assert.deepEqual([spawn.args.cols, spawn.args.rows], [120, 40], 'at the size the terminal has');
       assert.equal(calls.some((c) => c.command === 'pty_write'), false, 'the Enter itself is not typed into the new shell');
       const now = tabById(tab.id);
       assert.notEqual(now.sessionId, old);
       assert.equal(now.exited, null);
-      assert.equal(now.lastSize, null, 'resizePty must not think the new PTY already has the old size');
+      assert.equal(now.lastSize, '120x40', 'and resizePty knows the new PTY has it');
       assert.equal(now.agent, null);
       assert.equal(now.commandLine, null);
 
@@ -246,5 +260,229 @@ describe('A terminal whose shell has exited', () => {
     const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
     assert.match(registry, /entry\.term\.write\(exitNotice\(/, 'on the exit event');
     assert.match(registry, /if \(exited && sessionId\) \{\s*entry\.exited = true;\s*term\.write\(exitNotice\(/, 'and when the tab is first shown');
+    // A new shell in a terminal that showed another: the screen made ready for
+    // it before its output is attached, so before any of it is written.
+    const bind = registry.slice(registry.indexOf('function bindSession('), registry.indexOf('export function getOrCreateTerminal('));
+    const fresh = bind.indexOf('entry.term.write(freshScreen(entry.term.rows))');
+    assert.ok(fresh > 0, 'bindSession writes freshScreen');
+    assert.ok(fresh < bind.indexOf('attachOutput('), 'before the new output is attached');
+    assert.match(bind, /if \(entry\.sessionId && entry\.sessionId !== sessionId\) \{[\s\S]*?if \(sessionId\) entry\.term\.write\(freshScreen/, 'only when it replaces a shell');
+  });
+
+  // Found in review (R3): closing reads the tab's session before it awaits the
+  // kill, so a new shell the restart installed meanwhile went on running with
+  // no tab to show it.
+  const leaves = (node) => (node.children ? node.children.flatMap(leaves) : [node]);
+  for (const [id, how, setup] of [
+    [
+      'SR-10',
+      'closed',
+      async () => {
+        const tab = await liveTerminal();
+        return { tab, close: () => T.getState().closeTab(tab.id) };
+      },
+    ],
+    [
+      'SR-11',
+      'taken with its pane',
+      async () => {
+        await T.getState().init();
+        const group = T.getState().getActiveGroup();
+        const paneId = await T.getState().splitPane(group.activePaneId, 'horizontal', group.id);
+        const pane = leaves(T.getState().groups.find((g) => g.id === group.id).tree).find((l) => l.id === paneId);
+        assert.equal(pane?.tabIds.length, 1, 'setup: a pane holding only this terminal');
+        return { tab: tabById(pane.tabIds[0]), close: () => T.getState().closePane(paneId, group.id) };
+      },
+    ],
+  ]) {
+    test(`${id}: a terminal ${how} while it is still ending its old shell takes the new one with it`, async () => {
+      const { tab, close } = await setup();
+      await exits(tab, 1);
+      const old = tab.sessionId;
+      const before = new Set(mockBridge.ptySessions.keys());
+      const calls = await recording(
+        async () => {
+          const restart = T.getState().writeRaw(tab.id, '\r');
+          await sleep(35);
+          // The restart's spawn resolves while this close still waits on its kill.
+          const closing = close();
+          await restart;
+          await closing;
+          // A shell ended in passing is ended without waiting for it.
+          await sleep(60);
+        },
+        async (command) => {
+          if (command === 'pty_kill') await sleep(30);
+          if (command === 'pty_spawn') await sleep(10);
+          return undefined;
+        }
+      );
+      assert.equal(tabById(tab.id), undefined, 'the terminal is gone');
+      assert.equal(calls.filter((c) => c.command === 'pty_spawn').length, 1, 'setup: a new shell was started');
+      const alive = [...mockBridge.ptySessions.keys()];
+      assert.ok(!alive.includes(old), 'the old session is gone');
+      const started = alive.filter((sid) => !before.has(sid));
+      const orphans = started.filter((sid) => !T.getState().tabs.some((t) => t.sessionId === sid));
+      assert.deepEqual(orphans, [], `no shell runs without a terminal: ${JSON.stringify(orphans)}`);
+    });
+  }
+
+  test('SR-12: a size asked for just before Enter reaches the new shell, not the old one', async () => {
+    const tab = await liveTerminal();
+    try {
+      T.setState((s) => ({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, lastSize: '100x30' } : t)) }));
+      await exits(tab, 1);
+      const calls = await recording(async () => {
+        // Still settling (resizePty waits for a drag to stop) when Enter comes.
+        const resized = T.getState().resizePty(tab.id, 132, 43);
+        await T.getState().writeRaw(tab.id, '\r');
+        await resized;
+      });
+      const now = tabById(tab.id);
+      const spawn = calls.find((c) => c.command === 'pty_spawn');
+      assert.deepEqual([spawn.args.cols, spawn.args.rows], [100, 30], 'started at the size it had');
+      const resize = calls.find((c) => c.command === 'pty_resize');
+      assert.ok(resize, 'the new size was sent');
+      assert.equal(resize.args.session_id, now.sessionId, 'to the new shell');
+      assert.deepEqual([resize.args.cols, resize.args.rows], [132, 43]);
+      assert.equal(now.lastSize, '132x43');
+    } finally {
+      await T.getState().closeTab(tab.id);
+    }
+  });
+
+  test('SR-13: a size is read only in the form the store writes it', () => {
+    assert.deepEqual(parseSize('120x40'), { cols: 120, rows: 40 });
+    for (const bad of [null, undefined, '', '120', 'x40', '0x40', '120x0', '120x40x1', ' 120x40', '-1x40', 120]) {
+      assert.equal(parseSize(bad), null, JSON.stringify(bad));
+    }
+  });
+});
+
+describe('What a dead program left on the screen (real xterm)', () => {
+  const { Terminal } = headless;
+  const write = (term, data) => new Promise((resolve) => term.write(data, resolve));
+  const line = (term, y) => term.buffer.active.getLine(y)?.translateToString(true) ?? '';
+  const screen = (term) => {
+    const b = term.buffer.active;
+    return Array.from({ length: term.rows }, (_, i) => line(term, b.baseY + i));
+  };
+  // What a full-screen program turns on: the alternate screen, SGR mouse
+  // reporting, focus reports, bracketed paste, application cursor keys, a
+  // hidden cursor, modifyOtherKeys, synchronized output, a scroll region.
+  const PROGRAM_ON = '\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[>4;2m\x1b[?2026h\x1b[5;10r';
+
+  test('SR-14: the exit notice switches off what the program left on, and leaves its screen', async () => {
+    const term = new Terminal({ cols: 100, rows: 12, allowProposedApi: true });
+    const keys = installModifyOtherKeys(term);
+    try {
+      await write(term, 'before the program\r\n');
+      await write(term, PROGRAM_ON + '\x1b[Hthe program\'s last frame');
+      assert.equal(term.modes.mouseTrackingMode, 'vt200', 'setup');
+      assert.equal(keys.level, 2, 'setup');
+
+      await write(term, exitNotice(CTRL_C_EXIT));
+      assert.equal(term.modes.mouseTrackingMode, 'none', 'a drag selects again');
+      assert.equal(term.modes.sendFocusMode, false);
+      assert.equal(term.modes.bracketedPasteMode, false);
+      assert.equal(term.modes.applicationCursorKeysMode, false);
+      assert.equal(term.modes.synchronizedOutputMode, false);
+      assert.equal(keys.level, 0, 'Shift+Enter is Enter again');
+      assert.equal(term.buffer.active.type, 'alternate', 'what the program showed stays until Enter');
+      const shown = screen(term).join('\n');
+      assert.ok(shown.includes("the program's last frame"), shown);
+      assert.ok(shown.includes('[process exited with code 3221225786 (0xC000013A, ended by Ctrl+C)]'), shown);
+    } finally {
+      term.dispose();
+    }
+  });
+
+  test('SR-15: a new shell finds the normal screen, its old lines above it, and the cursor at the top left', async () => {
+    const term = new Terminal({ cols: 60, rows: 12, allowProposedApi: true });
+    const keys = installModifyOtherKeys(term);
+    try {
+      await write(term, 'one\r\ntwo\r\nthree\r\n');
+      await write(term, PROGRAM_ON + '\x1b[Hthe program');
+      await write(term, exitNotice(1));
+      await write(term, freshScreen(term.rows));
+
+      const b = term.buffer.active;
+      assert.equal(b.type, 'normal', 'off the dead program\'s alternate screen');
+      assert.equal(term.modes.mouseTrackingMode, 'none');
+      assert.equal(term.modes.bracketedPasteMode, false);
+      assert.equal(term.modes.applicationCursorKeysMode, false);
+      assert.equal(keys.level, 0);
+      assert.deepEqual([b.cursorX, b.cursorY], [0, 0], 'where the backend tells ConPTY the cursor is');
+      assert.deepEqual(screen(term), Array(12).fill(''), 'on an empty screen');
+      const kept = Array.from({ length: b.baseY }, (_, i) => line(term, i));
+      assert.deepEqual(kept.slice(0, 3), ['one', 'two', 'three'], 'what the shell printed is in the scrollback, in order');
+
+      // The new shell's first line lands at the top, with no colour or mode left over.
+      await write(term, 'C:\\Users\\dev>');
+      assert.equal(line(term, b.baseY), 'C:\\Users\\dev>');
+    } finally {
+      term.dispose();
+    }
+  });
+
+  test('SR-16: on the normal screen the cursor does not jump to a position saved long before', async () => {
+    const term = new Terminal({ cols: 40, rows: 8, allowProposedApi: true });
+    try {
+      // A position saved at the top (ESC 7), then a screenful of output, a
+      // partial line where the shell died, and the notice.
+      await write(term, '\x1b7');
+      for (let i = 1; i <= 10; i += 1) await write(term, `line ${i}\r\n`);
+      await write(term, 'C:\\>partial');
+      await write(term, exitNotice(null));
+      const before = term.buffer.active.baseY;
+      await write(term, freshScreen(term.rows));
+
+      const b = term.buffer.active;
+      const all = Array.from({ length: b.baseY + term.rows }, (_, i) => line(term, i));
+      for (let i = 1; i <= 10; i += 1) assert.ok(all.includes(`line ${i}`), `line ${i} kept: ${JSON.stringify(all)}`);
+      assert.ok(all.includes('C:\\>partial'), 'the line it died on is kept');
+      assert.ok(all.includes('[process exited]'), 'and the notice');
+      assert.ok(b.baseY > before, 'pushed up, not written over');
+      assert.deepEqual([b.cursorX, b.cursorY], [0, 0]);
+      assert.deepEqual(screen(term), Array(8).fill(''));
+    } finally {
+      term.dispose();
+    }
+  });
+});
+
+describe('Where a new shell starts', () => {
+  // Found in review (S2): anything a program prints can report a directory
+  // (OSC 7), and the one a terminal reported is where Enter starts its new
+  // shell and where a session restores it. On Windows, starting in — or only
+  // resolving — `\\host\share` connects to the host and signs in.
+  test('SR-17: a directory on another machine is never asked for on a shell\'s word', () => {
+    for (const net of ['//attacker/share/proj', '\\\\attacker\\share', '\\\\?\\UNC\\attacker\\share', '/??/UNC/attacker/share']) {
+      assert.equal(resolveStartDir({ requested: net, mode: 'workspace' }), null, `asked: ${net}`);
+      assert.equal(resolveStartDir({ requested: net, mode: 'home', homeDir: '/Users/dev' }), '/Users/dev', `asked: ${net}`);
+      assert.equal(resolveStartDir({ mode: 'active', activeCwd: net }), null, `active: ${net}`);
+    }
+    // The setting is the user's own, typed: honoured as it was.
+    assert.equal(resolveStartDir({ mode: 'custom', customPath: '//nas/projects' }), '//nas/projects');
+    // This machine's directories, as before — a verbatim drive path included.
+    assert.equal(resolveStartDir({ requested: 'C:\\Users\\dev' }), 'C:\\Users\\dev');
+    assert.equal(resolveStartDir({ requested: '\\\\?\\C:\\Users\\dev' }), '\\\\?\\C:\\Users\\dev');
+    assert.equal(resolveStartDir({ requested: '/Users/dev/src' }), '/Users/dev/src');
+  });
+
+  test('SR-18: Enter in a terminal whose shell reported such a directory starts the new one by the setting', async () => {
+    const tab = await liveTerminal();
+    try {
+      T.setState((s) => ({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, cwd: '//attacker/share/proj' } : t)) }));
+      await exits(tab, 1);
+      const calls = await recording(async () => {
+        await T.getState().writeRaw(tab.id, '\r');
+      });
+      const spawns = calls.filter((c) => c.command === 'pty_spawn');
+      assert.ok(spawns.length >= 1, 'a new shell was started');
+      for (const spawn of spawns) assert.notEqual(spawn.args.cwd, '//attacker/share/proj');
+    } finally {
+      await T.getState().closeTab(tab.id);
+    }
   });
 });

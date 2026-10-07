@@ -43,9 +43,15 @@ import { withoutVerbatimPrefix } from './terminalCompat.js';
  * keeps the second slash of `//host/share/x.py:1` from being a start, which
  * read a network path as a local `/host/share/x.py`. A drive letter may still
  * follow a separator, for the verbatim `\\?\C:\…` Windows tools print.
+ *
+ * The one place a path may start right after a slash is a `file://` URI's
+ * own: `at file:///Users/me/a.mjs:12:7` is how Node prints an ES module's
+ * stack frame, and Deno and tsx print the same — the path starts at the
+ * third slash. Only a third slash: `file:////host/share` and
+ * `file://host/share` name another machine and are not offered.
  */
 const PATH_WITH_POSITION =
-  /(?:(?<![\w.@~+-])[A-Za-z]:|(?<![\w.@~+\-\\/]))[\\/]?(?:[\w.@~+-]+[\\/])*[\w.@~+-]+\.[A-Za-z]\w{0,9}:\d+(?::\d+)?/g;
+  /(?:(?<![\w.@~+-])[A-Za-z]:|(?<![\w.@~+\-\\/])|(?<=file:\/\/)(?=\/[^\\/]))[\\/]?(?:[\w.@~+-]+[\\/])*[\w.@~+-]+\.[A-Za-z]\w{0,9}:\d+(?::\d+)?/g;
 
 /**
  * Python's traceback shape, which names the same thing in a different order:

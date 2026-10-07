@@ -16,8 +16,16 @@
  * backend already decides it (`Workspace::spawn_dir`), it is the only side
  * that knows the canonical root, and duplicating the fallback in the frontend
  * is how the two ends drift apart.
+ *
+ * A directory on another machine is taken only from the setting, which the
+ * user typed. The one asked for and the active terminal's come from what a
+ * shell reported (OSC 7) — saved with the session, or live — and anything a
+ * program prints can report one. Starting a shell in `\\host\share`, or only
+ * resolving it, has Windows connect to the host and sign in with the user's
+ * credentials; such a directory falls through to the next step instead.
  */
 import { expandHome } from './paths.js';
+import { isNetworkPath } from './terminalLinks.js';
 
 /** The values `terminal.integrated.cwd` may hold. */
 export const CWD_MODES = ['workspace', 'home', 'active', 'custom'];
@@ -39,7 +47,7 @@ export function resolveStartDir({
   activeCwd = null,
 } = {}) {
   const asked = typeof requested === 'string' ? requested.trim() : '';
-  if (asked) return asked;
+  if (asked && !isNetworkPath(asked)) return asked;
 
   switch (mode) {
     case 'home':
@@ -50,7 +58,7 @@ export function resolveStartDir({
       const live = typeof activeCwd === 'string' ? activeCwd.trim() : '';
       // The first terminal of a session has no sibling to copy. That is not a
       // failure; it is just the case where the fallback is the answer.
-      return live || null;
+      return live && !isNetworkPath(live) ? live : null;
     }
     case 'custom': {
       const typed = typeof customPath === 'string' ? customPath.trim() : '';
