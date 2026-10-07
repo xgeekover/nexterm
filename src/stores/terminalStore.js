@@ -3099,6 +3099,12 @@ export const useTerminalStore = create((set, get, api) => {
         set({ savedGroups: loadSavedGroups(), savedWorkspaces: loadSavedWorkspaces() });
 
         const saved = loadWorkspacePayload();
+        // The session's name is saved with its layout, and comes back even
+        // when the layout does not: a session closed down to no terminals at
+        // all, or one whose every terminal fails to start, takes the fresh
+        // start below — which kept "Default" and saved it over the name.
+        const savedName =
+          typeof saved?.workspaceName === 'string' && saved.workspaceName.trim() ? saved.workspaceName.trim() : null;
         let restored = null;
         if (saved) {
           try {
@@ -3176,6 +3182,7 @@ export const useTerminalStore = create((set, get, api) => {
           }),
           cwd: initialTab.cwd,
           isInitialized: true,
+          ...(savedName ? { workspaceName: savedName } : {}),
         }));
       } catch (err) {
         console.error('[TerminalStore] Failed to initialize terminal session:', err);

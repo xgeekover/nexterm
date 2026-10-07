@@ -145,6 +145,21 @@ describe('Workspace names: the session is called what it is', () => {
     await launch({ keepStorage: true });
     assert.equal(S.getState().workspaceName, 'Release work');
   });
+
+  test('WN-07: the name comes back after a session closed down to no terminals', async () => {
+    // Found in review: with nothing to restore the start is a fresh one, and
+    // that kept "Default" — then saved it over the name.
+    S.getState().renameWorkspace('Release work');
+    for (const tab of [...S.getState().tabs]) await S.getState().closeTab(tab.id);
+    assert.equal(S.getState().tabs.length, 0, 'setup: no terminals left');
+
+    await launch({ keepStorage: true });
+    assert.equal(S.getState().tabs.length, 1, 'a fresh start: one new terminal');
+    assert.equal(S.getState().workspaceName, 'Release work');
+
+    await launch({ keepStorage: true });
+    assert.equal(S.getState().workspaceName, 'Release work', 'and it was saved as it is');
+  });
 });
 
 describe('Workspace names: teardown', () => {
