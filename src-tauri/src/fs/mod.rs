@@ -93,9 +93,11 @@ fn read_dir_recursive(
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // `file_type` describes the entry itself; `is_dir` follows a link.
+        // `file_type` describes the entry itself; `is_dir` follows a link —
+        // except one to another machine, which is listed as what it is, a
+        // link, and never followed.
         let is_symlink = entry.file_type().is_ok_and(|t| t.is_symlink());
-        let is_dir = path.is_dir();
+        let is_dir = !(is_symlink && link_leads_off_machine(&path)) && path.is_dir();
         if is_dir && SKIPPED_FOLDERS.contains(&name.as_str()) {
             continue;
         }
@@ -868,6 +870,15 @@ pub fn is_network_path(path: &str) -> bool {
     }
 }
 
+/// Whether `path` is a link whose target is spelled as a path on another
+/// machine (`is_network_path`) — read without following it. Following one,
+/// even only to ask whether it is a folder, is what connects to the host and
+/// signs in. A link that leads to another link is judged by its first step;
+/// a git checkout or an unpacked archive makes the direct kind.
+pub fn link_leads_off_machine(path: &Path) -> bool {
+    fs::read_link(path).is_ok_and(|target| is_network_path(&target.to_string_lossy()))
+}
+
 /// `path` without a verbatim prefix that a plainer spelling means the same
 /// as: `\\?\UNC\host\share` is `\\host\share`, `\\?\C:\x` is `C:\x`.
 fn without_verbatim_prefix(path: &str) -> Cow<'_, str> {
@@ -992,6 +1003,17 @@ fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
 /// or a New File then wrote through it, making its target wherever it
 /// pointed, outside the open folder as easily as in it.
 fn resolve_inside(root: &Path, path: &Path, path_str: &str) -> Result<PathBuf, String> {
+    // Resolving follows every link in the path, and one that leads to
+    // another machine connects to it (see `link_leads_off_machine`): looked
+    // for first, at each step below the open folder, outermost first — asking
+    // about a deeper step would follow the links above it.
+    let steps: Vec<&Path> = path
+        .ancestors()
+        .take_while(|step| step.starts_with(root) && *step != root)
+        .collect();
+    if steps.into_iter().rev().any(link_leads_off_machine) {
+        return Err(format!("Path goes through a link to another machine: {path_str}"));
+    }
     // Canonicalize the deepest part that exists so a symlink cannot point out
     // of the root; segments that do not exist yet are re-appended afterwards.
     let mut cursor = path;
@@ -2035,5 +2057,51 @@ mod copy_tests {
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod off_machine_link_tests {
+    use super::*;
+
+    /// A folder holding `docs`, a link spelled as a folder on another machine
+    /// (`//…`, a local path on Unix, so the link would reach a real folder
+    /// here if it were followed), and the open folder canonical, as
+    /// `set_root` makes it.
+    fn folder_with_off_machine_link(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("nexterm-off-machine-{tag}-{}", std::process::id()));
+        let reachable = std::env::temp_dir().join(format!("nexterm-off-machine-{tag}-share-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&reachable);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&reachable).unwrap();
+        fs::write(reachable.join("doc.md"), "on the share").unwrap();
+        let spelled = format!("/{}", dunce::canonicalize(&reachable).unwrap().display());
+        assert!(is_network_path(&spelled), "premise: {spelled} reads as another machine");
+        std::os::unix::fs::symlink(&spelled, root.join("docs")).unwrap();
+        (dunce::canonicalize(&root).unwrap(), reachable)
+    }
+
+    /// Found in review: the refusal of paths on another machine looked only
+    /// at how a path was spelled, and a link inside the open folder that
+    /// leads to one was followed — on Windows, connecting to the host and
+    /// signing in — by the Explorer, by opening a file through it, by Quick
+    /// Open and by search.
+    #[test]
+    fn a_link_to_another_machine_is_never_followed() {
+        let (root, reachable) = folder_with_off_machine_link("follow");
+
+        let err = confine_to(&root, &root.join("docs").join("doc.md").to_string_lossy()).unwrap_err();
+        assert!(err.contains("link to another machine"), "{err}");
+        let err = confine_to(&root, "docs/doc.md").unwrap_err();
+        assert!(err.contains("link to another machine"), "{err}");
+
+        let tree = read_dir_hierarchy(&root.to_string_lossy(), Some(3)).unwrap();
+        let docs = tree.iter().find(|n| n.name == "docs").expect("the link is listed");
+        assert!(!docs.is_dir, "listed as a link, not walked into as a folder");
+        assert!(docs.children.as_ref().is_none_or(Vec::is_empty));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&reachable);
     }
 }

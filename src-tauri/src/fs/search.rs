@@ -28,8 +28,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use std::collections::VecDeque;
+
 use crate::fs::watcher::is_ignored_below;
-use crate::fs::Canonical;
+use crate::fs::{link_leads_off_machine, Canonical};
 
 /// A file bigger than this is not something anyone greps for a phrase; it is a
 /// build artifact, a lockfile dump or a log, and reading it costs more than the
@@ -193,6 +195,13 @@ pub fn search(root: &Path, query: &str, options: SearchOptions) -> Result<Search
             break;
         }
         let path = entry.path();
+        // A link is read only when it leads to a file inside the open folder,
+        // as Quick Open lists it and confinement opens it: following one that
+        // leads out returned that file's lines under a path inside, and one
+        // to another machine connects to it.
+        if entry.path_is_symlink() && !link_opens_inside(root, path) {
+            continue;
+        }
         if !searchable(path) {
             continue;
         }
@@ -258,35 +267,61 @@ fn visible(root: &Path, walker: WalkDir) -> impl Iterator<Item = walkdir::DirEnt
         .filter_map(Result::ok)
 }
 
+/// Whether the link at `path` leads to a file inside `root` — resolved as
+/// confinement resolves it, and in its spelling — so that the editor would
+/// open it. One that leads out, or nowhere, or to another machine (never
+/// followed, see `link_leads_off_machine`) is a file it would refuse.
+fn link_opens_inside(root: &Path, path: &Path) -> bool {
+    !link_leads_off_machine(path)
+        && path.canonical().is_ok_and(|target| target.starts_with(root) && target.is_file())
+}
+
 /// Every file under `root` the editor could open, for Quick Open: at most
 /// `limit` (and never more than `MAX_LIST_LIMIT`), with `truncated` saying
 /// whether there were more.
 ///
-/// The walk is in name order, so the files kept when there are too many are
-/// the same ones each time rather than whichever the disk listed first. A
-/// link is listed when it leads to a file inside the open folder; one that
-/// leads out, or nowhere, is a file the editor would refuse to open.
+/// Level by level, each folder in name order: when there are too many, the
+/// ones kept are those nearest the top, the same ones each time. A walk that
+/// finished each folder before the next spent the whole budget on the first
+/// big one — a `.venv`, an `app/build` — and `src/main.py` and `README.md`
+/// were not in the list at all. A link is listed when it leads to a file
+/// inside the open folder (`link_opens_inside`).
 pub fn list_files(root: &Path, limit: usize) -> FileList {
     let limit = limit.min(MAX_LIST_LIMIT);
     let mut list = FileList::default();
-    for entry in visible(root, WalkDir::new(root).sort_by_file_name()) {
-        let opens = if entry.path_is_symlink() {
-            // Resolved as confinement resolves it, and in its spelling.
-            entry
-                .path()
-                .canonical()
-                .is_ok_and(|target| target.starts_with(root) && target.is_file())
-        } else {
-            entry.file_type().is_file()
-        };
-        if !opens {
+    let mut folders = VecDeque::from([root.to_path_buf()]);
+    'walk: while let Some(folder) = folders.pop_front() {
+        let Ok(read) = std::fs::read_dir(&folder) else {
             continue;
+        };
+        let mut entries: Vec<std::fs::DirEntry> = read.filter_map(Result::ok).collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            if is_ignored_below(root, &path) {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let opens = if kind.is_symlink() {
+                link_opens_inside(root, &path)
+            } else if kind.is_dir() {
+                // A link to a folder is not walked into, as nowhere else is.
+                folders.push_back(path);
+                continue;
+            } else {
+                kind.is_file()
+            };
+            if !opens {
+                continue;
+            }
+            if list.files.len() >= limit {
+                list.truncated = true;
+                break 'walk;
+            }
+            list.files.push(path.to_string_lossy().to_string());
         }
-        if list.files.len() >= limit {
-            list.truncated = true;
-            break;
-        }
-        list.files.push(entry.path().to_string_lossy().to_string());
     }
     list.files.sort();
     list
@@ -578,6 +613,88 @@ mod tests {
         assert_eq!(names, vec!["AGENTS.md", "CLAUDE.md", "src/a.js"]);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// Found in review: the list was cut wherever a folder-at-a-time walk
+    /// had got to, so one big folder that sorts early — a `.venv`, an
+    /// `app/build` — took the whole budget and the project's own files were
+    /// not in it.
+    #[test]
+    fn a_big_folder_that_sorts_first_does_not_crowd_out_the_project() {
+        let dir = scratch("list-crowded");
+        let deep = dir.join(".venv").join("lib").join("site-packages").join("torch");
+        fs::create_dir_all(&deep).unwrap();
+        for i in 0..20 {
+            fs::write(deep.join(format!("m{i:02}.py")), "").unwrap();
+        }
+        // And one that sorts last, so neither end of the order can win.
+        let cache = dir.join("~cache").join("a").join("b");
+        fs::create_dir_all(&cache).unwrap();
+        for i in 0..20 {
+            fs::write(cache.join(format!("c{i:02}.bin")), "").unwrap();
+        }
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src").join("main.py"), "").unwrap();
+        fs::write(dir.join("README.md"), "").unwrap();
+        fs::write(dir.join("pyproject.toml"), "").unwrap();
+
+        let list = list_files(&dir, 10);
+
+        assert!(list.truncated);
+        assert_eq!(list.files.len(), 10);
+        for kept in [dir.join("README.md"), dir.join("pyproject.toml"), dir.join("src").join("main.py")] {
+            let kept = kept.to_string_lossy().to_string();
+            assert!(list.files.contains(&kept), "{kept} was left out: {:?}", list.files);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Found in review: search followed a link to a file outside the open
+    /// folder and returned that file's lines under the link's path inside —
+    /// which Quick Open leaves out and opening refuses.
+    #[cfg(unix)]
+    #[test]
+    fn search_never_reads_through_a_link_that_leads_out() {
+        use std::os::unix::fs::symlink;
+        let dir = dunce::canonicalize(scratch("search-link-out")).unwrap();
+        let outside = scratch("search-link-out-outside");
+        fs::write(outside.join("credentials"), "TOKEN=hunter2\n").unwrap();
+        symlink(outside.join("credentials"), dir.join("notes.txt")).unwrap();
+        fs::write(dir.join("CLAUDE.md"), "TOKEN in the folder\n").unwrap();
+        symlink("CLAUDE.md", dir.join("AGENTS.md")).unwrap();
+
+        let results = search(&dir, "TOKEN", SearchOptions::default()).unwrap();
+
+        let mut found: Vec<String> =
+            results.files.iter().map(|f| Path::new(&f.path).file_name().unwrap().to_string_lossy().to_string()).collect();
+        found.sort();
+        assert_eq!(found, vec!["AGENTS.md", "CLAUDE.md"], "a link inside is still searched");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// A link to another machine is never followed, not even to ask what it
+    /// is: on Windows that alone connects to the host and signs in. (`//…` is
+    /// a local path on Unix, which is what lets this run here: this one leads
+    /// to a file inside the open folder, which a link that was followed would
+    /// have put in the list and the results.)
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_another_machine_is_never_listed_or_searched() {
+        use std::os::unix::fs::symlink;
+        let dir = dunce::canonicalize(scratch("list-link-off-machine")).unwrap();
+        fs::write(dir.join("real.md"), "TOKEN in the folder\n").unwrap();
+        let spelled = format!("/{}", dir.join("real.md").display());
+        assert!(spelled.starts_with("//"), "premise: spelled as a network path");
+        symlink(&spelled, dir.join("docs.md")).unwrap();
+        assert!(crate::fs::link_leads_off_machine(&dir.join("docs.md")));
+
+        let listed = list_files(&dir, DEFAULT_LIST_LIMIT).files;
+        assert_eq!(listed, vec![dir.join("real.md").to_string_lossy().to_string()]);
+        let found: Vec<String> =
+            search(&dir, "TOKEN", SearchOptions::default()).unwrap().files.into_iter().map(|f| f.path).collect();
+        assert_eq!(found, vec![dir.join("real.md").to_string_lossy().to_string()]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
