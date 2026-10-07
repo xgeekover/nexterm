@@ -491,6 +491,27 @@ scenario(
   }
 );
 
+// ---- Go to File in a big folder ---------------------------------------------
+
+scenario(
+  'RN-44',
+  'Go to File in a folder of 1,000 files draws a screenful of rows and says how many more matched',
+  () => {
+    reset();
+    useEditorStore.setState({
+      fileTree: Array.from({ length: 1000 }, (_, i) => ({ name: `f${i}.js`, path: `/workspace/f${i}.js`, is_dir: false })),
+    });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'files' });
+  },
+  (html) => {
+    // Every file row ends in its "File" hint.
+    const rows = html.match(/>File<\/kbd>/g)?.length ?? 0;
+    expectThat(rows === 200, `${rows} file rows drawn for an empty query`);
+    expectText(html, '800 more — keep typing to narrow the list');
+    expectText(html, 'f0.js');
+  }
+);
+
 // ---- A command that finished without a code --------------------------------
 
 /** The class list of the status bar's notification badge, or null when it is not drawn. */

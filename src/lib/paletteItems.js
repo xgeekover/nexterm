@@ -8,9 +8,18 @@
  */
 
 import { fuzzyMatch } from './utils.js';
-import { basename } from './paths.js';
+import { basename, isInside, relativeTo, toPosix } from './paths.js';
 import { isMac } from './platform.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
+
+/**
+ * The most files the palette lists for one query. An empty query matches
+ * every file, and every row drawn costs: ten thousand of them, in a folder
+ * with a `vendor/` or a `.venv`, made each key and each move of the mouse
+ * wait for all of them. More than a screenful is typed away, not scrolled
+ * through; the rest are counted (`more`) so the list can say so.
+ */
+export const FILE_RESULT_LIMIT = 200;
 
 /**
  * Every file in an explorer tree, at any depth.
@@ -87,14 +96,25 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
  * shortcut each command advertises.
  * Empty groups are dropped so the rendered list and the keyboard selection
  * always run over exactly the same items.
+ *
+ * The files are `files` — every file under the open folder, as the backend
+ * lists them (`fs_list_files`), `filesTruncated` when it stopped short —
+ * or, while there is no such list, the files in the Explorer's `fileTree`,
+ * which stops five levels down. At most `limit` are listed, best match
+ * first; the files group says how many `more` matched, and whether the list
+ * it came from was `truncated`.
  */
 export function buildPaletteGroups({
   fileTree = [],
+  files = null,
+  filesTruncated = false,
+  rootPath = null,
   query = '',
   mode = 'all',
   bindings = DEFAULT_RESOLVED,
   recentRoots = [],
   history = [],
+  limit = FILE_RESULT_LIMIT,
 } = {}) {
   const q = (query || '').toLowerCase().trim();
 
@@ -137,16 +157,16 @@ export function buildPaletteGroups({
     return rows.length > 0 ? [{ label: 'history', items: rows }] : [];
   }
 
-  const files = flattenFileNodes(fileTree)
-    .filter((node) => fuzzyMatch(q, node.path) || fuzzyMatch(q, node.name))
-    .map((node) => ({
-      type: 'file',
-      id: `file-${node.path}`,
-      title: node.name,
-      subtitle: node.path,
-      path: node.path,
-      hint: 'File',
-    }));
+  // A path typed with either separator: the paths are matched with `/`.
+  const found = matchFiles(fileCandidates(files ?? fileTree, files ? 'paths' : 'tree', rootPath), toPosix(q), limit);
+  const fileRows = found.entries.map((entry) => ({
+    type: 'file',
+    id: `file-${entry.path}`,
+    title: entry.name,
+    subtitle: entry.path,
+    path: entry.path,
+    hint: 'File',
+  }));
 
   const commands =
     mode === 'files'
@@ -156,7 +176,76 @@ export function buildPaletteGroups({
         );
 
   return [
-    { label: 'files', items: files },
+    { label: 'files', items: fileRows, more: found.more, truncated: files ? filesTruncated === true : false },
     { label: 'commands', items: commands },
   ].filter((group) => group.items.length > 0);
+}
+
+/** Each source's files, readied for matching, kept until the source is replaced. */
+const candidateCache = new WeakMap();
+
+/**
+ * Every file in `source` — the backend's list of paths, or the Explorer's
+ * tree — with what matching needs worked out once per list rather than once
+ * per file per key: the name, and the path below the open folder, both
+ * lowercased, with `/` for a separator.
+ */
+function fileCandidates(source, kind, rootPath) {
+  if (!Array.isArray(source)) return [];
+  const cached = candidateCache.get(source);
+  if (cached && cached.rootPath === rootPath) return cached.entries;
+  const nodes =
+    kind === 'paths'
+      ? source.filter((path) => typeof path === 'string' && path).map((path) => ({ path, name: basename(path) }))
+      : flattenFileNodes(source).filter((node) => typeof node.path === 'string');
+  const entries = nodes.map(({ path, name }) => {
+    const below = rootPath && isInside(rootPath, path) ? relativeTo(rootPath, path) : path;
+    return { path, name, lowerName: String(name).toLowerCase(), lowerPath: toPosix(below).toLowerCase() };
+  });
+  candidateCache.set(source, { rootPath, entries });
+  return entries;
+}
+
+/** Whether the letters of `needle` appear in `text` in order. Both already lowercased. */
+function inOrder(needle, text) {
+  let at = 0;
+  for (let i = 0; i < text.length && at < needle.length; i += 1) {
+    if (text[i] === needle[at]) at += 1;
+  }
+  return at === needle.length;
+}
+
+/**
+ * How well a file answers `q`: 0 when its name starts with it, 1 when its
+ * name has it, 2 when its name has its letters in order, 3 when only its
+ * path below the folder does, -1 not at all.
+ *
+ * The whole path was matched before, the open folder's own location
+ * included, so the letters of `/Users/me/projects` matched almost any query
+ * against every file, and with every match equal the file actually called
+ * `App.jsx` could come last.
+ */
+function fileRank(entry, q) {
+  if (!q || entry.lowerName.startsWith(q)) return 0;
+  if (entry.lowerName.includes(q)) return 1;
+  if (inOrder(q, entry.lowerName)) return 2;
+  return inOrder(q, entry.lowerPath) ? 3 : -1;
+}
+
+/**
+ * The best `limit` files for `q`, best first and otherwise in the order they
+ * came (path order), and how many more matched. One pass, no sort: twenty
+ * thousand files are ranked on every key.
+ */
+function matchFiles(candidates, q, limit) {
+  const ranked = [[], [], [], []];
+  let matched = 0;
+  for (const entry of candidates) {
+    const rank = fileRank(entry, q);
+    if (rank < 0) continue;
+    matched += 1;
+    if (ranked[rank].length < limit) ranked[rank].push(entry);
+  }
+  const entries = ranked.flat().slice(0, limit);
+  return { entries, more: matched - entries.length };
 }
