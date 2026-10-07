@@ -62,8 +62,6 @@ class BrowserMockBridge {
       default_shell: '/bin/zsh',
       home_dir: '/Users/developer',
       app_version: '0.1.5',
-      tauri_version: '2.0.0',
-      rust_version: '1.80.0',
     };
     // What `show_desktop_notification` was asked to show, oldest first. There
     // is no desktop here; the suites read this instead.

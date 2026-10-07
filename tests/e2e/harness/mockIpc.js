@@ -56,8 +56,6 @@ export class MockIpcBridge {
       os: 'macos',
       arch: 'aarch64',
       app_version: '0.1.0',
-      tauri_version: '2.0.0',
-      rust_version: '1.80.0',
     };
   }
 

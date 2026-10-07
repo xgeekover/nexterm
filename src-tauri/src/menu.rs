@@ -18,9 +18,9 @@
 //! Windows/Linux apps don't have an app-named menu at all. There we fold the
 //! items that would otherwise live there (Settings…, Quit) into the File
 //! menu instead, VS-Code-style. The custom ids are the same on every
-//! platform apart from `close-window`, which only macOS needs, and
-//! every platform (see `every_custom_id_is_unique_and_matches_the_frontend_contract`),
-//! so the frontend's id-based event handling in `useMenuEvents.js` needs no
+//! platform apart from `close-window`, which only macOS needs (see
+//! `every_custom_id_is_unique_and_matches_the_frontend_contract`), so the
+//! frontend's id-based event handling in `useMenuEvents.js` needs no
 //! platform branching.
 
 use std::collections::HashMap;
@@ -42,7 +42,6 @@ pub enum Predefined {
     HideOthers,
     ShowAll,
     Quit,
-    CloseWindow,
     Undo,
     Redo,
     Cut,
@@ -156,7 +155,7 @@ pub fn spec() -> Vec<Submenu> {
                 Sep,
                 terminal_safe("save", "Save", "CmdOrCtrl+S"),
                 Sep,
-                // Deliberately NOT `P(CloseWindow)`: muda gives that ⌘W on
+                // Deliberately not muda's predefined Close Window: it takes ⌘W on
                 // macOS, and two items claiming one key equivalent means AppKit
                 // drops the accelerator from the later one — Terminal ▸ Close
                 // Pane ended up with no shortcut at all, and ⌘W closed the whole
@@ -241,33 +240,11 @@ pub fn spec() -> Vec<Submenu> {
         ],
     });
 
-    // `CloseWindow` lives in the macOS File menu (above); fold it into
-    // Window on other platforms, which is where it conventionally lives.
-    let window_items = {
-        #[cfg(target_os = "macos")]
-        {
-            vec![P(Minimize), P(Maximize)]
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            vec![P(Minimize), P(Maximize)]
-        }
-    };
-    submenus.push(Submenu { title: "Window", items: window_items });
+    // Closing the window is File ▸ Close Window on macOS (above) and the
+    // app's own title bar elsewhere.
+    submenus.push(Submenu { title: "Window", items: vec![P(Minimize), P(Maximize)] });
 
     submenus
-}
-
-/// Every app-specific item id, in menu order.
-pub fn custom_ids() -> Vec<&'static str> {
-    spec()
-        .iter()
-        .flat_map(|s| s.items.iter())
-        .filter_map(|i| match i {
-            Item::Custom { id, .. } => Some(*id),
-            _ => None,
-        })
-        .collect()
 }
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -311,7 +288,6 @@ pub fn build_with<R: Runtime>(
                     Predefined::HideOthers => b.hide_others(),
                     Predefined::ShowAll => b.show_all(),
                     Predefined::Quit => b.quit(),
-                    Predefined::CloseWindow => b.close_window(),
                     Predefined::Undo => b.undo(),
                     Predefined::Redo => b.redo(),
                     Predefined::Cut => b.cut(),
@@ -341,6 +317,18 @@ pub fn forward_to_webview<R: Runtime>(app: &AppHandle<R>, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every app-specific item id, in menu order.
+    fn custom_ids() -> Vec<&'static str> {
+        spec()
+            .iter()
+            .flat_map(|s| s.items.iter())
+            .filter_map(|i| match i {
+                Item::Custom { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
     use std::collections::HashSet;
 
     #[test]
