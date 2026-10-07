@@ -508,3 +508,50 @@ describe('Recording a shortcut takes only something that can be one', () => {
     for (const { id, title } of commandsOverTerminal()) assert.equal(title, COMMANDS[id].title);
   });
 });
+
+describe('Configurable keybindings: what the old recorder left behind', () => {
+  // Found in review. The recorder now refuses a key with no Ctrl, ⌘ or Alt,
+  // but one it saved before — Tab or Enter recorded on the way out of the
+  // field — was still bound, and took that key from every shell for good.
+  test('CK-29: a saved shortcut with no modifier is dropped, and the command keeps its own', () => {
+    const { bindings, problems } = resolveKeybindings({
+      'find-in-terminal': 'tab',
+      'toggle-sidebar': ['enter'],
+      'zoom-in': 'f9',
+      'close-pane': ['tab', 'mod+alt+w'],
+    });
+    assert.deepEqual(keysFor('find-in-terminal', bindings), keysFor('find-in-terminal', DEFAULT_RESOLVED), 'its own shortcut, not none');
+    assert.deepEqual(keysFor('toggle-sidebar', bindings), keysFor('toggle-sidebar', DEFAULT_RESOLVED));
+    assert.deepEqual(keysFor('zoom-in', bindings), ['f9'], 'an F-key needs nothing held');
+    assert.deepEqual(keysFor('close-pane', bindings), ['mod+alt+w'], 'the good one of two is kept');
+    assert.deepEqual(
+      problems.map((p) => `${p.command}:${p.key}`).sort(),
+      ['close-pane:tab', 'find-in-terminal:tab', 'toggle-sidebar:enter'],
+      'and each one dropped says why'
+    );
+    const tab = ev({ key: 'Tab', code: 'Tab' });
+    assert.equal(findBinding(tab, ctx(tab, 'windows', { bindings })), null, 'Tab is the shell\'s again');
+  });
+
+  // Found in review: F5 or Ctrl+Shift+R recorded for a command that lets keys
+  // through in the editor came before the reload guard — and in the editor
+  // the key went on, and WebView2 reloaded the page.
+  test('CK-30: a key a command lets through in the editor still never reloads the page', () => {
+    const { bindings } = resolveKeybindings({ 'close-pane': 'f5' });
+    const press = () => {
+      const e = ev({ key: 'F5', code: 'F5' });
+      e.defaultPrevented = false;
+      e.preventDefault = () => {
+        e.defaultPrevented = true;
+      };
+      return e;
+    };
+    assert.equal(COMMANDS['close-pane'].passThrough?.({ isInMonacoEditor: true }), true, 'setup: close-pane lets keys through in the editor');
+    const packaged = press();
+    assert.equal(dispatchKeydown(packaged, ctx(packaged, 'windows', { bindings, blockReload: true, isInMonacoEditor: true })), 'pass:close-pane');
+    assert.equal(packaged.defaultPrevented, true, 'the reload is still blocked');
+    const dev = press();
+    dispatchKeydown(dev, ctx(dev, 'windows', { bindings, blockReload: false, isInMonacoEditor: true }));
+    assert.equal(dev.defaultPrevented, false, 'in development reloading is the point');
+  });
+});

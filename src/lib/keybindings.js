@@ -388,6 +388,11 @@ export function recordKeydown(e, { isMac = false } = {}) {
  * Returns `{ bindings, problems }`. Nothing here reads a store, so the settings
  * window can resolve a candidate and show its conflicts before saving anything.
  */
+/** Whether a chord holds Ctrl, ⌘ or Alt, or is an F-key — what a shortcut needs. */
+function heldOrFKey(chord) {
+  return Boolean(chord.mod || chord.ctrl || chord.cmd || chord.alt) || /^f\d+$/i.test(chord.key ?? '');
+}
+
 export function resolveKeybindings(overrides = {}) {
   const problems = [];
   const byCommand = new Map();
@@ -413,10 +418,24 @@ export function resolveKeybindings(overrides = {}) {
     }
     const keys = (Array.isArray(value) ? value : [value]).filter((k) => typeof k === 'string');
     const usable = [];
+    let bare = false;
     for (const key of keys) {
-      if (parseChord(key)) usable.push(key);
-      else problems.push({ command, key, reason: 'not a chord' });
+      const chord = parseChord(key);
+      if (!chord) {
+        problems.push({ command, key, reason: 'not a chord' });
+      } else if (!heldOrFKey(chord)) {
+        // What the recorder refuses (`recordKeydown`), and what it saved
+        // before it did: Tab or Enter recorded on the way out of the field.
+        // Bound, it took that key from every shell and agent for good.
+        bare = true;
+        problems.push({ command, key, reason: 'needs Ctrl, ⌘ or Alt, or an F-key' });
+      } else {
+        usable.push(key);
+      }
     }
+    // Nothing left but such keys: the command keeps its own shortcut rather
+    // than having none.
+    if (usable.length === 0 && bare) continue;
     byCommand.set(command, usable);
   }
 
@@ -527,6 +546,14 @@ export function findBinding(e, ctx) {
   return null;
 }
 
+/** Whether the reload guard, enabled, would have claimed `e` (see `dispatchKeydown`). */
+function reloadGuardMatches(e, ctx) {
+  const guard = COMMANDS['reload-guard'];
+  if (guard.enabled && !guard.enabled(ctx)) return false;
+  const bindings = ctx?.bindings ?? DEFAULT_RESOLVED;
+  return bindings.some((b) => b.command === 'reload-guard' && chordMatches(b.chord, e, ctx?.isMod));
+}
+
 /**
  * Run whatever `e` maps to. Returns the command id when it acted, the id
  * prefixed with `pass:` when it deliberately let the key through, and null
@@ -536,7 +563,13 @@ export function dispatchKeydown(e, ctx) {
   const binding = findBinding(e, ctx);
   if (!binding) return null;
   const { spec } = binding;
-  if (spec.passThrough?.(ctx, binding)) return `pass:${binding.command}`;
+  if (spec.passThrough?.(ctx, binding)) {
+    // The key goes on to the editor, but not on to a reload: a command bound
+    // to F5 or Ctrl+Shift+R comes before the guard and let it through in the
+    // editor, and WebView2 reloaded the page — every shell reaped with it.
+    if (reloadGuardMatches(e, ctx)) e.preventDefault();
+    return `pass:${binding.command}`;
+  }
   if (spec.preventDefault !== false) e.preventDefault();
   spec.run(ctx);
   return binding.command;
