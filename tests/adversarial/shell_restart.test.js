@@ -23,6 +23,7 @@ import {
   sessionIsGone,
 } from '../../src/lib/shellExit.js';
 import { installModifyOtherKeys } from '../../src/lib/modifyOtherKeys.js';
+import { resolveStartDir } from '../../src/lib/terminalCwd.js';
 import { useTerminalStore as T } from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
@@ -446,6 +447,42 @@ describe('What a dead program left on the screen (real xterm)', () => {
       assert.deepEqual(screen(term), Array(8).fill(''));
     } finally {
       term.dispose();
+    }
+  });
+});
+
+describe('Where a new shell starts', () => {
+  // Found in review (S2): anything a program prints can report a directory
+  // (OSC 7), and the one a terminal reported is where Enter starts its new
+  // shell and where a session restores it. On Windows, starting in — or only
+  // resolving — `\\host\share` connects to the host and signs in.
+  test('SR-17: a directory on another machine is never asked for on a shell\'s word', () => {
+    for (const net of ['//attacker/share/proj', '\\\\attacker\\share', '\\\\?\\UNC\\attacker\\share', '/??/UNC/attacker/share']) {
+      assert.equal(resolveStartDir({ requested: net, mode: 'workspace' }), null, `asked: ${net}`);
+      assert.equal(resolveStartDir({ requested: net, mode: 'home', homeDir: '/Users/dev' }), '/Users/dev', `asked: ${net}`);
+      assert.equal(resolveStartDir({ mode: 'active', activeCwd: net }), null, `active: ${net}`);
+    }
+    // The setting is the user's own, typed: honoured as it was.
+    assert.equal(resolveStartDir({ mode: 'custom', customPath: '//nas/projects' }), '//nas/projects');
+    // This machine's directories, as before — a verbatim drive path included.
+    assert.equal(resolveStartDir({ requested: 'C:\\Users\\dev' }), 'C:\\Users\\dev');
+    assert.equal(resolveStartDir({ requested: '\\\\?\\C:\\Users\\dev' }), '\\\\?\\C:\\Users\\dev');
+    assert.equal(resolveStartDir({ requested: '/Users/dev/src' }), '/Users/dev/src');
+  });
+
+  test('SR-18: Enter in a terminal whose shell reported such a directory starts the new one by the setting', async () => {
+    const tab = await liveTerminal();
+    try {
+      T.setState((s) => ({ tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, cwd: '//attacker/share/proj' } : t)) }));
+      await exits(tab, 1);
+      const calls = await recording(async () => {
+        await T.getState().writeRaw(tab.id, '\r');
+      });
+      const spawns = calls.filter((c) => c.command === 'pty_spawn');
+      assert.ok(spawns.length >= 1, 'a new shell was started');
+      for (const spawn of spawns) assert.notEqual(spawn.args.cwd, '//attacker/share/proj');
+    } finally {
+      await T.getState().closeTab(tab.id);
     }
   });
 });
