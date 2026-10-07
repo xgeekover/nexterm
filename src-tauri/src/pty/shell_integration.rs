@@ -436,9 +436,13 @@ __nexterm_precmd() {
   __nexterm_pending_preexec=1
 }
 
-# First in PROMPT_COMMAND. Called with "$_" as its last argument, it leaves
-# $_ as the user's command left it, as every call leaves $_ holding its last
-# argument.
+# First in PROMPT_COMMAND, as `__nexterm_prompt_begin "$_" && __nexterm_return
+# 0 "$_"`. Every call leaves $_ holding its last argument, so $_ is still what
+# the user's command left, and the status this returns is the one the user's
+# commands see. Under `set -e` that status can be a failure the shell let
+# pass — `[ -f x ] && …`, a line given up with Ctrl+C — and returned by a
+# command on its own it ended the shell. The first command of an && list is
+# one `set -e` lets fail, as in plain bash.
 __nexterm_prompt_begin() {
   __nexterm_exit_status=$?
   __nexterm_pending_preexec=0
@@ -470,7 +474,8 @@ __nexterm_debug() {
     if [[ -n "${__nexterm_exit_status-}" ]]; then
       local PROMPT_COMMAND=$BASH_COMMAND
     fi
-    __nexterm_return "$__nexterm_code" "$__nexterm_last"
+    # In an && list for `set -e`, as in __nexterm_prompt_begin's caller.
+    __nexterm_return "$__nexterm_code" "$__nexterm_last" && __nexterm_return 0 "$__nexterm_last"
     builtin eval -- "$__nexterm_user_debug_trap"
     __nexterm_verdict=$?
   fi
@@ -501,11 +506,18 @@ __nexterm_wrap_prompt_command() {
   if [[ "${PROMPT_COMMAND[*]-}" == *__nexterm_precmd* ]]; then
     return 0
   fi
+  local __nexterm_begin='__nexterm_prompt_begin "$_" && __nexterm_return 0 "$_"'
   if [[ "$(builtin declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]] &&
     (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-    PROMPT_COMMAND=('__nexterm_prompt_begin "$_"' "${PROMPT_COMMAND[@]}" __nexterm_precmd)
+    PROMPT_COMMAND=("$__nexterm_begin" "${PROMPT_COMMAND[@]}" __nexterm_precmd)
   else
-    PROMPT_COMMAND="__nexterm_prompt_begin \"\$_\";${PROMPT_COMMAND-}"$'\n'"__nexterm_precmd"
+    # `PROMPT_COMMAND="$PROMPT_COMMAND;history -a"`, run while it was empty,
+    # leaves a `;` first. After ours that is `;;`, a syntax error, and bash
+    # skips the rest of a string that has one — the markers with it. (bash
+    # on its own complains before every prompt; here the command runs.)
+    local __nexterm_user=${PROMPT_COMMAND-}
+    __nexterm_user=${__nexterm_user#"${__nexterm_user%%[![:space:];]*}"}
+    PROMPT_COMMAND="$__nexterm_begin;$__nexterm_user"$'\n'"__nexterm_precmd"
   fi
 }
 
@@ -1367,6 +1379,67 @@ fi
             assert_eq!(combined.matches("direnv-hook\n").count(), prompts, "login={login}: {combined:?}");
             assert_eq!(combined.matches("starship-precmd:").count(), prompts, "login={login}: {combined:?}");
             assert!(combined.contains("starship-precmd:1\n"), "login={login}: {combined:?}");
+        }
+    }
+
+    /// `set -e` in ~/.bashrc. A failure the shell lets pass — the first
+    /// command of an && list, or a line given up with Ctrl+C — still reaches
+    /// the prompt with its status, and the hooks that hand it on to the
+    /// user's PROMPT_COMMAND and DEBUG trap ended the shell there. Plain bash
+    /// lives on. A string PROMPT_COMMAND and an array one.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_with_errexit_lives_through_a_failure_it_lets_pass() {
+        let as_array = USER_BASHRC.replace("PROMPT_COMMAND=__user_prompt", "PROMPT_COMMAND=(__user_prompt)");
+        assert_ne!(as_array, USER_BASHRC, "setup: the user's PROMPT_COMMAND as an array");
+        for user in [USER_BASHRC, as_array.as_str()] {
+            let bashrc = format!("set -e\n{user}");
+            for login in [false, true] {
+                let Some(combined) = run_real_bash(
+                    login,
+                    &[(".bashrc", &bashrc)],
+                    "[ -f /nonexistent ] && echo x\necho alive-after-prompt\n\
+                     [ -f /nonexistent ] && echo x; echo alive-after-trap\nexit\n",
+                ) else {
+                    eprintln!("bash not installed; skipping");
+                    return;
+                };
+
+                assert!(
+                    combined.contains("alive-after-prompt\n"),
+                    "login={login}: the prompt hook ended the shell: {combined:?}"
+                );
+                assert!(
+                    combined.contains("alive-after-trap\n"),
+                    "login={login}: the DEBUG trap ended the shell: {combined:?}"
+                );
+                assert!(combined.contains("\x1b]133;D;1\x07"), "login={login}: {combined:?}");
+                assert!(
+                    combined.contains("user-prompt-command:1\n"),
+                    "login={login}: the user's PROMPT_COMMAND no longer sees the status: {combined:?}"
+                );
+            }
+        }
+    }
+
+    /// `PROMPT_COMMAND="$PROMPT_COMMAND; …"` run while it was empty leaves a
+    /// `;` first, which after ours made `;;` — a syntax error that cost every
+    /// marker, and the user's command with them.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_takes_a_prompt_command_that_starts_with_a_semicolon() {
+        let bashrc = "PROMPT_COMMAND=\"$PROMPT_COMMAND; builtin printf 'user-prompt-command\\n'\"\n";
+        for login in [false, true] {
+            let Some(combined) = run_real_bash(login, &[(".bashrc", bashrc)], "false\nexit\n") else {
+                eprintln!("bash not installed; skipping");
+                return;
+            };
+
+            assert!(!combined.contains("syntax error"), "login={login}: {combined:?}");
+            assert!(combined.contains("\x1b]133;D;1\x07"), "login={login}: no D;1 marker: {combined:?}");
+            let prompts = combined.matches("\x1b]133;A\x07").count();
+            assert_eq!(prompts, 2, "login={login}: startup, after `false`: {combined:?}");
+            assert_eq!(combined.matches("user-prompt-command\n").count(), prompts, "login={login}: {combined:?}");
         }
     }
 
