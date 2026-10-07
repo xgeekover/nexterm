@@ -621,6 +621,41 @@ in the suites with the browser mock.
   `PTY session …` lines means the notice was never reached — note the exit
   code printed, if any.
 
+### V27 — Clear Terminal clears it, and stays cleared
+
+Clear Terminal (palette, Terminal menu, Ctrl+L with the focus outside a
+terminal) used to do nothing at all. It now clears xterm's screen and
+scrollback; ConPTY is not told (portable-pty has no ClearPseudoConsole), so
+the risk on Windows is ConPTY painting the old screen back on its next full
+redraw. Never run on Windows: checked with the browser mock.
+
+- In cmd, run `dir /s C:\Windows\System32\drivers` (a few screens). Click the
+  Explorer, then Ctrl+L: the terminal is empty but for the prompt line at the
+  top, and the scrollbar shows no scrollback.
+- Drag a divider to resize the pane, then maximize and restore the window:
+  the old output does not come back. Type `dir`: it prints below the prompt.
+- Ctrl+L with the terminal focused is cmd's (nothing happens in cmd; in
+  PowerShell it clears the screen itself) — NexTerm does not take it there.
+- Palette: type `save all` — the first row is *Save All Files*, not *Clear
+  Terminal*.
+
+### V28 — no terminal starts on another machine
+
+A directory on another machine (`\\host\share`) is never where a terminal
+starts: starting a shell there, or only resolving the path, makes Windows
+connect to the host and sign in with your credentials — and any program's
+output can claim a directory (OSC 7). Never run on Windows.
+
+- Settings ▸ Terminal ▸ Working Directory ▸ Custom path, type
+  `\\localhost\C$\Windows`: the field says the directory is on another machine
+  and a terminal never starts in one. Open a new terminal: it starts in the
+  open folder (or your home directory), not there.
+- In PowerShell, `cd \\localhost\C$\Windows`, then quit the shell with `exit`
+  and press Enter: the new shell starts where the terminal was before the
+  `cd`, not on the share. The same after closing and reopening NexTerm.
+- A folder on a mapped drive letter (`Z:\…`) is a local path and works as
+  before.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
