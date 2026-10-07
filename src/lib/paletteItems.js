@@ -205,7 +205,10 @@ export function buildPaletteGroups({
   return [
     { label: 'files', items: fileRows, more: found.more, truncated: files ? filesTruncated === true : false },
     { label: 'commands', items: commands },
-  ].filter((group) => group.items.length > 0);
+    // A cut list keeps its group, rows or none, for the note that says it was
+    // cut: with nothing matching, the note went with the group, and a file
+    // past the cut read as no file at all.
+  ].filter((group) => group.items.length > 0 || group.truncated);
 }
 
 /**

@@ -199,3 +199,22 @@ describe('Command palette: a path pasted whole', () => {
     assert.deepEqual(found('app')[0], '/Users/me/proj/src/App.jsx');
   });
 });
+
+describe('Command palette: a cut list says so', () => {
+  // Found in review: when nothing in a list the backend had cut matched, the
+  // files group was dropped, and its note with it — a file past the cut read
+  // as "No matching commands or files".
+  test('PR-15: with nothing matching, a cut list still shows that it was cut', () => {
+    const groups = buildPaletteGroups({
+      files: ['/w/a.js', '/w/b.js'],
+      filesTruncated: true,
+      rootPath: '/w',
+      query: 'nothing-like-this',
+      mode: 'files',
+    });
+    assert.deepEqual(groups.map((g) => [g.label, g.items.length, g.truncated]), [['files', 0, true]]);
+    // A list that was not cut, and a tree, say nothing when nothing matches.
+    assert.deepEqual(buildPaletteGroups({ files: ['/w/a.js'], rootPath: '/w', query: 'zzz', mode: 'files' }), []);
+    assert.deepEqual(buildPaletteGroups({ fileTree: [], rootPath: '/w', query: 'zzz', mode: 'files' }), []);
+  });
+});
