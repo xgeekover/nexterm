@@ -9,7 +9,7 @@
  * Pure functions only: no React, no store.
  */
 
-import { join, samePath } from '../../lib/paths.js';
+import { samePath, stripTrailingSep } from '../../lib/paths.js';
 
 /**
  * The rows to render, top to bottom.
@@ -155,19 +155,38 @@ export function frontierOf(nodes, levels) {
  * keep open or refresh. Each entry is named by the path the tree reached it
  * by instead. For any other folder that is the path the backend gave, and
  * the listing comes back as it was.
+ *
+ * Only the part before the folder is swapped; each name stays exactly as the
+ * backend spelled it. Rebuilding the path from the name with `join` dropped a
+ * leading `\` — a legal character in a name off Windows — so a folder named
+ * `\..` became `<folder>/..`, and deleting it removed the folder above.
  */
 export function placeUnder(nodes, folderPath) {
   if (!Array.isArray(nodes)) return nodes;
-  let moved = false;
-  const placed = nodes.map((node) => {
-    if (!node || typeof node !== 'object') return node;
-    const path = join(folderPath, node.name);
-    const children = Array.isArray(node.children) ? placeUnder(node.children, path) : node.children;
-    if (path === node.path && children === node.children) return node;
-    moved = true;
+  const from = folderReadBy(nodes);
+  const to = stripTrailingSep(folderPath);
+  if (from === null || from === to) return nodes;
+  return reroot(nodes, from, to);
+}
+
+/** The folder a listing's entries are named under: each path is it, then a name. */
+function folderReadBy(nodes) {
+  for (const node of nodes) {
+    if (node && typeof node.path === 'string' && typeof node.name === 'string' && node.name && node.path.endsWith(node.name)) {
+      return stripTrailingSep(node.path.slice(0, node.path.length - node.name.length));
+    }
+  }
+  return null;
+}
+
+/** `nodes` with the leading `from` of every path, at any depth, made `to`. */
+function reroot(nodes, from, to) {
+  return nodes.map((node) => {
+    if (!node || typeof node !== 'object' || typeof node.path !== 'string' || !node.path.startsWith(from)) return node;
+    const path = to + node.path.slice(from.length);
+    const children = Array.isArray(node.children) ? reroot(node.children, from, to) : node.children;
     return { ...node, ...(node.id === undefined ? {} : { id: path }), path, ...(children === undefined ? {} : { children }) };
   });
-  return moved ? placed : nodes;
 }
 
 /**

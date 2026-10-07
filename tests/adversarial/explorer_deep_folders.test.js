@@ -330,4 +330,23 @@ describe('Explorer tree helpers (pure)', () => {
       ['C:\\proj\\link\\App.jsx']
     );
   });
+
+  test('ED-11: a name is kept as the backend spelled it — a leading backslash is part of the name off Windows', () => {
+    // Found in review: the path was rebuilt from the name with `join`, which
+    // drops a leading separator. A folder named `\..` under `acme` became
+    // `acme/..` — opening it showed `com`, and deleting it removed `com`.
+    const listing = [
+      { id: '/r/com/acme/\\..', name: '\\..', path: '/r/com/acme/\\..', is_dir: true, children: [] },
+      { id: '/r/com/acme/\\notes.txt', name: '\\notes.txt', path: '/r/com/acme/\\notes.txt', is_dir: false },
+      { id: '/r/com/acme/notes.txt', name: 'notes.txt', path: '/r/com/acme/notes.txt', is_dir: false },
+    ];
+    assert.equal(placeUnder(listing, '/r/com/acme'), listing, 'read where it is shown: untouched');
+    assert.deepEqual(
+      placeUnder(listing, '/r/link').map((n) => n.path),
+      ['/r/link/\\..', '/r/link/\\notes.txt', '/r/link/notes.txt'],
+      'read through a link: only the folder part changes'
+    );
+    // The root itself, with its separator kept.
+    assert.deepEqual(placeUnder([{ name: 'etc', path: '/etc', is_dir: true }], '/').map((n) => n.path), ['/etc']);
+  });
 });
