@@ -9,7 +9,7 @@
  * Pure functions only: no React, no store.
  */
 
-import { samePath } from '../../lib/paths.js';
+import { join, samePath } from '../../lib/paths.js';
 
 /**
  * The rows to render, top to bottom.
@@ -119,6 +119,55 @@ export function findNode(nodes, path) {
     }
   }
   return null;
+}
+
+/**
+ * The folders a read `levels` deep left unread: those on its last level.
+ *
+ * The backend stops at the depth it is asked for and hands each folder there
+ * back with `children: []`, whether or not it has anything in it, so the
+ * tree cannot tell them from empty folders by looking. Their paths, in tree
+ * order. A folder on a shallower level was read, empty or not.
+ */
+export function frontierOf(nodes, levels) {
+  const unread = [];
+  const walk = (list, level) => {
+    if (!Array.isArray(list)) return;
+    for (const node of list) {
+      if (!node?.is_dir) continue;
+      if (level >= levels) unread.push(node.path);
+      else walk(node.children, level + 1);
+    }
+  };
+  if (levels >= 1) walk(nodes, 1);
+  return unread;
+}
+
+/**
+ * A listing read from the folder at `folderPath`, with every entry named
+ * under `folderPath`.
+ *
+ * The backend resolves the folder it is asked to read, links included, and
+ * names what it finds by where that really is. For a folder reached through
+ * a link — `packages/shared` leading to `libs/shared` — that is the link's
+ * target, so `libs/shared/src` landed in the tree under `packages/shared`:
+ * a path the tree had never shown, which it could not find again to open,
+ * keep open or refresh. Each entry is named by the path the tree reached it
+ * by instead. For any other folder that is the path the backend gave, and
+ * the listing comes back as it was.
+ */
+export function placeUnder(nodes, folderPath) {
+  if (!Array.isArray(nodes)) return nodes;
+  let moved = false;
+  const placed = nodes.map((node) => {
+    if (!node || typeof node !== 'object') return node;
+    const path = join(folderPath, node.name);
+    const children = Array.isArray(node.children) ? placeUnder(node.children, path) : node.children;
+    if (path === node.path && children === node.children) return node;
+    moved = true;
+    return { ...node, ...(node.id === undefined ? {} : { id: path }), path, ...(children === undefined ? {} : { children }) };
+  });
+  return moved ? placed : nodes;
 }
 
 /**

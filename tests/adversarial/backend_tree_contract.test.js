@@ -17,7 +17,7 @@ import { describe, test, assert, skip } from '../e2e/harness/testFramework.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { flattenVisible } from '../../src/components/explorer/treeRows.js';
+import { flattenVisible, placeUnder } from '../../src/components/explorer/treeRows.js';
 import { basename, isDirectChild, isInside, relativeTo, sepOf } from '../../src/lib/paths.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +144,20 @@ describe('Backend → explorer contract, against a real filesystem listing', () 
     } else {
       // Not a failure — a note that this run proves nothing about Windows.
       assert.equal(fixture.separator, '/', `${fixture.platform} fixture uses forward slashes`);
+    }
+  });
+
+  test('BT-05: a folder\'s listing placed under the folder\'s own path comes back untouched — the names the backend gave, on this platform', () => {
+    if (!available) skip('no tests/fixtures/backend-tree.json — run `cd src-tauri && cargo test` first');
+    // The store names what it reads in under the path the tree reached the
+    // folder by, which only differs through a link (placeUnder). For every
+    // other folder it must give back exactly the backend's own paths, in its
+    // own separator, or every folder opened below the first five levels
+    // would land in the tree under names nothing else uses.
+    assert.equal(placeUnder(fixture.nodes, fixture.root), fixture.nodes, 'the root listing');
+    for (const node of allNodes(fixture.nodes)) {
+      if (!node.is_dir || !Array.isArray(node.children)) continue;
+      assert.equal(placeUnder(node.children, node.path), node.children, `the listing of ${node.path}`);
     }
   });
 });

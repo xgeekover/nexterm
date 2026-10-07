@@ -11,12 +11,27 @@ import {
   stripTrailingSep,
   withSepOf,
 } from '../lib/paths.js';
-import { findNode, setChildrenAt } from '../components/explorer/treeRows.js';
+import { findNode, frontierOf, placeUnder, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
 import { useGitStore } from './gitStore.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
 const loadingDirs = new Set();
+
+/**
+ * How many levels `refreshExplorer` reads below the open folder, and how
+ * many `readDir` reads below a folder being opened. A folder on the last
+ * level of either comes back with no children, read or not (`frontierOf`).
+ */
+const TREE_LEVELS = 5;
+const FOLDER_LEVELS = 2;
+
+/**
+ * Counts `refreshExplorer` calls. Each reads more than once now, and two can
+ * overlap — the 300 ms one after a change and a direct one after a create —
+ * so one that finishes after a newer one has started leaves its tree alone.
+ */
+let treeGeneration = 0;
 
 let unlisteners = [];
 let listening = false;
@@ -195,6 +210,45 @@ async function freeNameIn(dirPath, name, isDir, mustDiffer) {
     candidate = `${base} copy ${attempt}${ext}`;
   }
   return candidate;
+}
+
+// --- The Explorer's tree ----------------------------------------------------
+
+/**
+ * `nodes`, a read `levels` deep, with every folder the user has open below
+ * that read in as well — and the open folders below those, and so on.
+ *
+ * Everything is read before anything is shown, so a refresh puts the tree
+ * on screen once, with every open folder full. `refreshExplorer` used to put
+ * up its five-level read alone, and a folder the user had opened further
+ * down — `src/main/java/com/acme` — stayed open and showed nothing until it
+ * was closed and opened again; a refresh comes 300 ms after any change on
+ * disk, saving the file being edited included. Folders open inside a closed
+ * one are read too: opening the parent only shows what is already in the
+ * tree, so it would show them empty.
+ *
+ * The folders at one level are read together; each level waits for the one
+ * above it, as it must. Which folders are open is asked again after every
+ * level, so one opened while the reads were out is read too, and once
+ * nothing is left the caller has the tree before anything else can run.
+ */
+async function readOpenFolders(get, nodes, levels) {
+  let tree = nodes;
+  let unread = frontierOf(nodes, levels);
+  for (;;) {
+    const open = get().expandedFolders;
+    const due = unread.filter((path) => open.has(path));
+    if (due.length === 0) return tree;
+    const listings = await Promise.all(due.map((path) => get().readDir(path)));
+    const read = new Set(due);
+    due.forEach((path, i) => {
+      tree = setChildrenAt(tree, path, listings[i]);
+    });
+    unread = [
+      ...unread.filter((path) => !read.has(path)),
+      ...listings.flatMap((listing) => frontierOf(listing, FOLDER_LEVELS)),
+    ];
+  }
 }
 
 // --- Unsaved edits ---------------------------------------------------------
@@ -430,12 +484,17 @@ export const useEditorStore = create((set, get) => ({
    *
    * `refreshExplorer` only walks a few levels deep, and a directory at that
    * limit comes back with an empty `children` that is indistinguishable from a
-   * genuinely empty one. The tree calls this the first time such a folder is
-   * expanded instead of claiming it is empty.
+   * genuinely empty one. The tree calls this when such a folder is opened
+   * instead of claiming it is empty, and a refresh for each one still open
+   * (`readOpenFolders`).
+   *
+   * Named under `path`, the way the tree reached the folder, rather than
+   * where the backend found it (see `placeUnder`): through a link, those
+   * differ.
    */
   readDir: async (path) => {
     try {
-      return (await invoke('fs_read_dir', { path, max_depth: 2 })) || [];
+      return placeUnder((await invoke('fs_read_dir', { path, max_depth: FOLDER_LEVELS })) || [], path);
     } catch (err) {
       console.error(`[EditorStore] Failed to read ${path}:`, err);
       return [];
@@ -443,6 +502,7 @@ export const useEditorStore = create((set, get) => ({
   },
 
   refreshExplorer: async () => {
+    const generation = ++treeGeneration;
     // No folder open: there is no tree to read, and the backend would refuse.
     if (!get().rootPath) {
       set({ fileTree: [], isLoadingTree: false });
@@ -450,14 +510,16 @@ export const useEditorStore = create((set, get) => ({
     }
     set({ isLoadingTree: true });
     try {
-      const tree = await invoke('fs_read_dir', {
+      const nodes = await invoke('fs_read_dir', {
         path: get().rootPath,
-        max_depth: 5,
+        max_depth: TREE_LEVELS,
       });
-      set({ fileTree: tree || [], isLoadingTree: false });
+      const tree = await readOpenFolders(get, nodes || [], TREE_LEVELS);
+      if (generation !== treeGeneration) return;
+      set({ fileTree: tree, isLoadingTree: false });
     } catch (err) {
       console.error('[EditorStore] Failed to read directory:', err);
-      set({ isLoadingTree: false });
+      if (generation === treeGeneration) set({ isLoadingTree: false });
     }
   },
 
@@ -569,7 +631,10 @@ export const useEditorStore = create((set, get) => ({
     get().toggleFolder(folderPath);
   },
 
-  /** Read a folder's entries into the tree if they are not there yet. */
+  /**
+   * Read a folder's entries into the tree if they are not there yet, with
+   * whatever below it was left open when it was closed (`readOpenFolders`).
+   */
   ensureChildrenLoaded: async (folderPath) => {
     const node = findNode(get().fileTree, folderPath);
     if (!node || !node.is_dir) return;
@@ -577,7 +642,7 @@ export const useEditorStore = create((set, get) => ({
     if (loadingDirs.has(folderPath)) return;
     loadingDirs.add(folderPath);
     try {
-      const children = await get().readDir(folderPath);
+      const children = await readOpenFolders(get, await get().readDir(folderPath), FOLDER_LEVELS);
       set((state) => ({ fileTree: setChildrenAt(state.fileTree, folderPath, children) }));
     } finally {
       loadingDirs.delete(folderPath);
