@@ -76,9 +76,12 @@ class BrowserMockBridge {
     // `opencode session list --format json` prints — `directory` included,
     // which the backend narrows by and does not hand back.
     this.agentSessions = [];
-    // What `app_set_unsaved` was last told, and how often `app_quit` was
-    // asked for. Nothing quits here; the suites read these.
+    // What `app_set_unsaved` was last told, the questions `app_close_ack`
+    // said were heard, and how often `app_close_window` and `app_quit` were
+    // asked for. Nothing closes or quits here; the suites read these.
     this.unsaved = false;
+    this.closeAcks = [];
+    this.windowCloses = 0;
     this.quitRequests = 0;
   }
 
@@ -693,12 +696,21 @@ class BrowserMockBridge {
           .map(({ id, title, updated, created }) => ({ id, title, updated, created }));
       }
 
-      // 22. app_set_unsaved / app_quit — the backend keeps whether an editor
-      // tab is unsaved, so that a macOS quit can stop to ask
-      // (src-tauri/src/commands/app.rs), and quits once the user has
-      // answered.
+      // 22. app_set_unsaved / app_close_ack / app_close_window / app_quit —
+      // the backend keeps whether an editor tab is unsaved, holds a close or
+      // a quit while one is and asks the page, waits only for a page that
+      // says it heard, and closes or quits once the user has answered
+      // (src-tauri/src/commands/app.rs).
       case 'app_set_unsaved': {
         this.unsaved = args?.unsaved === true;
+        return null;
+      }
+      case 'app_close_ack': {
+        this.closeAcks.push(args?.id);
+        return null;
+      }
+      case 'app_close_window': {
+        this.windowCloses += 1;
         return null;
       }
       case 'app_quit': {
