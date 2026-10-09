@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { invoke, listen } from '../lib/ipc.js';
+import { invoke, listen, revealInFileManager } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
 import {
   basename,
@@ -1465,12 +1465,14 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
-  // "Reveal in Finder/Explorer" needs a shell/OS command the current IPC
-  // surface does not expose (no fs_reveal_path-style command). Kept as a
-  // documented no-op instead of adding a new Rust command out of scope here.
-  revealPath: async (path) => {
-    console.warn(`[EditorStore] Reveal in Finder/Explorer is not supported by the current IPC surface (requested for ${path}).`);
-  },
+  // Show `path` in the OS file manager — Finder, Explorer, the desktop's own:
+  // a folder opened there, anything else selected in its folder and never
+  // opened, which would run a program (`fs_reveal_path`,
+  // src-tauri/src/fs/reveal.rs). A Cmd/Ctrl+click on a name in a terminal's
+  // output comes here (src/lib/revealLinks.js). Rejects with the backend's
+  // reason — gone, on another machine — for the caller to tell the user
+  // where they are looking.
+  revealPath: (path) => revealInFileManager(path),
 
   getActiveTab: () => {
     const { tabs, activeTabId } = get();

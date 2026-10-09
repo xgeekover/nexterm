@@ -284,9 +284,11 @@ describe('Explorer context menu — selection, inline create and rename UI state
   });
 });
 
-describe('Explorer context menu — Reveal in Finder/Explorer (documented no-op)', () => {
-  test('revealPath resolves without throwing since no reveal IPC command exists', async () => {
+describe('Explorer context menu — Reveal in Finder/Explorer (fs_reveal_path)', () => {
+  test('revealPath resolves without throwing for a file that exists, and asks the backend to show it', async () => {
+    const before = mockBridge.revealed.length;
     await assert.doesNotReject(() => useEditorStore.getState().revealPath('/workspace/README.md'));
+    assert.deepEqual(mockBridge.revealed.slice(before), [{ path: '/workspace/README.md', kind: 'file' }]);
   });
 
   test('copying a folder duplicates every level of it', async () => {

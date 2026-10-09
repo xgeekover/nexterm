@@ -40,6 +40,24 @@ function resolvePath(baseDir, relOrAbs) {
   return normalizePath(`${baseDir.replace(/\/+$/, '')}/${relOrAbs}`);
 }
 
+/**
+ * Another machine, by spelling — the backend's `is_network_path`
+ * (src-tauri/src/fs/mod.rs) and terminalLinks.js's `isNetworkPath`, restated
+ * so the mock imports nothing of the app's.
+ */
+function namesAnotherMachine(path) {
+  const plain = path.startsWith('\\\\?\\UNC\\')
+    ? `\\\\${path.slice(8)}`
+    : /^\\\\\?\\[A-Za-z]:/.test(path)
+      ? path.slice(4)
+      : path;
+  return /^(?:[\\/]{2}|[\\/]\?\?[\\/])/.test(plain);
+}
+
+/** At most this many paths per `fs_path_kinds`, and this many bytes each — the backend's limits (src-tauri/src/fs/reveal.rs). */
+const MOCK_MAX_KIND_PATHS = 64;
+const MOCK_MAX_KIND_PATH_BYTES = 4096;
+
 
 export function isTauri() {
   if (typeof window === 'undefined') return false;
@@ -81,6 +99,27 @@ class BrowserMockBridge {
     this.closeAcks = [];
     this.windowCloses = 0;
     this.quitRequests = 0;
+    // What `fs_reveal_path` was asked to show, oldest first, as `{ path,
+    // kind }`. There is no file manager here; the suites read this.
+    this.revealed = [];
+  }
+
+  /**
+   * What `fs_path_kinds` answers for one path: 'dir', 'file' or null, from
+   * the virtual tree — the backend's rules (src-tauri/src/fs/reveal.rs): an
+   * absolute path of a sane length, never one on another machine, and not
+   * confined to the open folder. Outside the tree the mock knows the two
+   * folders `fs_dir_exists` knows: the filesystem root and the home.
+   */
+  kindOf(path) {
+    if (typeof path !== 'string' || !path) return null;
+    if (new TextEncoder().encode(path).length > MOCK_MAX_KIND_PATH_BYTES) return null;
+    if (namesAnotherMachine(path) || !path.startsWith('/')) return null;
+    const target = normalizePath(path);
+    if (this.files.has(target)) return 'file';
+    if (target === '/' || target === this.systemInfo.home_dir) return 'dir';
+    const isDir = this.directories.has(target) || [...this.files.keys()].some((f) => f.startsWith(`${target}/`));
+    return isDir ? 'dir' : null;
   }
 
   listen(event, callback) {
@@ -403,6 +442,29 @@ class BrowserMockBridge {
           this.directories.has(target)
           || [...this.files.keys()].some((f) => f.startsWith(target + '/'))
         );
+      }
+
+      // fs_path_kinds / fs_reveal_path — the names in a terminal's output
+      // that a Cmd/Ctrl+click shows in the file manager (src/lib/outputPaths.js,
+      // src-tauri/src/fs/reveal.rs). Kinds come from the virtual tree
+      // (`kindOf`); more than one call's worth of paths is refused whole, as
+      // there. A reveal is refused for what the backend refuses and otherwise
+      // recorded in `revealed`, nothing being there to show it.
+      case 'fs_path_kinds': {
+        const paths = Array.isArray(args?.paths) ? args.paths : [];
+        if (paths.length > MOCK_MAX_KIND_PATHS) {
+          throw new Error(`At most ${MOCK_MAX_KIND_PATHS} paths can be asked about at once, not ${paths.length}`);
+        }
+        return paths.map((p) => this.kindOf(p));
+      }
+      case 'fs_reveal_path': {
+        const path = String(args?.path ?? '');
+        if (namesAnotherMachine(path)) throw new Error(`Path is on another machine or a device: ${path}`);
+        if (!path.startsWith('/')) throw new Error(`Not an absolute path: ${path}`);
+        const kind = this.kindOf(path);
+        if (!kind) throw new Error(`Cannot show '${path}': No such file or directory`);
+        this.revealed.push({ path, kind });
+        return null;
       }
 
       // 6. fs_read_dir
@@ -799,6 +861,25 @@ export async function invoke(command, args = {}) {
     return core.invoke(command, args);
   }
   return mockBridge.invoke(command, args);
+}
+
+/**
+ * Whether each of `paths` exists, and as what: 'file', 'dir' or null each, in
+ * order (`fs_path_kinds`). Absolute paths only, MAX_KIND_PATHS at most
+ * (src/lib/outputPaths.js), and null for one on another machine, which is
+ * never looked at.
+ */
+export function pathKinds(paths) {
+  return invoke('fs_path_kinds', { paths });
+}
+
+/**
+ * Show `path` in the file manager (`fs_reveal_path`): a folder opened there,
+ * anything else selected in its folder — never opened. Rejects with the
+ * backend's reason when it cannot.
+ */
+export function revealInFileManager(path) {
+  return invoke('fs_reveal_path', { path });
 }
 
 const unwrap = (callback) => (evt) => callback(evt?.payload !== undefined ? evt.payload : evt);

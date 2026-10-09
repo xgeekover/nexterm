@@ -1,6 +1,7 @@
 pub mod git;
 pub mod watcher;
 pub mod search;
+pub mod reveal;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;

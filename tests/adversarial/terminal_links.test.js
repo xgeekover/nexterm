@@ -230,7 +230,12 @@ function noise(n) {
   return out;
 }
 
-/** An xterm-shaped buffer of one line wrapped over `rows` rows, counting the rows read. */
+/**
+ * An xterm-shaped buffer of one line wrapped over `rows` rows, counting the
+ * rows read. Its lines are xterm's IBufferLine as far as `linksAtRow` reads
+ * one — `length`, and `getCell` loading a cell for each column — with every
+ * character one cell wide, as `text` here only ever holds ASCII.
+ */
 function wrappedBuffer(text, cols) {
   const rows = [];
   for (let i = 0; i < text.length; i += cols) rows.push(text.slice(i, i + cols).padEnd(cols, ' '));
@@ -240,7 +245,17 @@ function wrappedBuffer(text, cols) {
     getLine(y) {
       if (y < 0 || y >= rows.length) return undefined;
       buffer.reads += 1;
-      return { isWrapped: y > 0, translateToString: () => rows[y] };
+      const row = rows[y];
+      return {
+        isWrapped: y > 0,
+        length: row.length,
+        getCell(x, cell = { ch: '', getChars: () => cell.ch, getWidth: () => 1 }) {
+          if (x < 0 || x >= row.length) return undefined;
+          cell.ch = row[x];
+          return cell;
+        },
+        translateToString: () => row,
+      };
     },
   };
   return buffer;

@@ -117,6 +117,47 @@ pub fn fs_dir_exists(state: State<AppState>, path: String) -> bool {
     state.workspace.can_start_in(&path)
 }
 
+/// Which of `paths` exist, and as what: `"dir"`, `"file"` or `null` each, in
+/// order — the names in a terminal's output a Cmd/Ctrl+click can show in the
+/// file manager (src/lib/outputPaths.js asks, one row of output at a time).
+///
+/// Not confined to the open folder, on purpose: `ls ~` prints names outside
+/// it and that is the use case, and the shell in the same window can list
+/// them anyway. It says whether a local path exists and is a folder, nothing
+/// of what is in it. A path on another machine, or through a link to one, is
+/// `null` without being looked at — see `fs::reveal`.
+///
+/// Not `#[tauri::command(async)]`, for the reason `fs_list_files` gives: a
+/// name on a slow drive must not hold one of the async runtime's worker
+/// threads while it is looked up. (The webview asks only while Cmd/Ctrl is
+/// held over a terminal row — src/lib/revealLinks.js.)
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fs_path_kinds(paths: Vec<String>) -> Result<Vec<Option<String>>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs::reveal::path_kinds(&paths).map(|kinds| kinds.into_iter().map(|kind| kind.map(str::to_string)).collect())
+    })
+    .await
+    .map_err(|e| format!("Looking the paths up stopped unexpectedly: {e}"))?
+}
+
+/// Show `path` in the file manager: a folder opens there on macOS and
+/// Windows, anything else is selected in its folder — never opened, which
+/// would run a program (`fs::reveal::reveal_target` decides, `fs::reveal::show`
+/// says how). Refused for a path on another machine, through a link to one,
+/// a device, relative, or gone.
+///
+/// On the blocking pool, like `fs_path_kinds`: the lookup can wait on a slow
+/// drive and the file manager's own call on the shell.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fs_reveal_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (target, action) = fs::reveal::reveal_target(&path)?;
+        fs::reveal::show(&target, action).map_err(|e| format!("Could not show '{path}' in the file manager: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Showing the path stopped unexpectedly: {e}"))?
+}
+
 /// The open folder, or `null` until one has been opened.
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {
@@ -359,6 +400,8 @@ mod dispatch_tests {
         "fs_set_root",
         "fs_pick_root",
         "fs_dir_exists",
+        "fs_path_kinds",
+        "fs_reveal_path",
     ];
 
     fn source() -> String {
@@ -442,11 +485,12 @@ mod dispatch_tests {
     /// is big, and so does listing every file in it, so `fs_copy_path` and
     /// `fs_list_files` hand their work to the blocking pool themselves, and
     /// turning either into an attribute-`async` command would quietly undo
-    /// that.
+    /// that. The same for the two the pointer reaches in a terminal's output,
+    /// `fs_path_kinds` and `fs_reveal_path`: a name on a slow drive waits.
     #[test]
     fn the_copy_and_the_listing_run_on_the_blocking_pool() {
         let src = source();
-        for name in ["fs_copy_path", "fs_list_files"] {
+        for name in ["fs_copy_path", "fs_list_files", "fs_path_kinds", "fs_reveal_path"] {
             // By line, so a checkout with CRLF endings reads the same, and
             // from a line that starts with the signature, so this test's own
             // text is never taken for it.

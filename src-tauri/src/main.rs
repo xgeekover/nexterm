@@ -160,6 +160,8 @@ fn main() {
             commands::fs::git_status,
             commands::fs::fs_search,
             commands::fs::fs_list_files,
+            commands::fs::fs_path_kinds,
+            commands::fs::fs_reveal_path,
             commands::system::system_get_info,
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
