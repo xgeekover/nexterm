@@ -41,6 +41,8 @@ import { ActivityDot } from './ActivityDot.jsx';
 import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { copyText } from '../../lib/copyText.js';
+import { usePathDropStore } from '../../stores/pathDropStore.js';
+import { pathDropLabel } from '../../lib/terminalFileDrop.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -443,6 +445,36 @@ function DropIndicator({ zone }) {
   );
 }
 
+/**
+ * Files dragged over this pane — from the OS file manager or the Explorer —
+ * would be inserted into its terminal: say so, and how many.
+ *
+ * Drawn inside the pane body, over the terminal, and never in the way: the
+ * pointer goes straight through it, so the pane under it is still the one
+ * found under the pointer. Only a pane whose terminal would take the paths
+ * is highlighted (see `planPathInsert`); dropped anywhere else, nothing
+ * happens, and nothing promised it would. Fades in with the region drop
+ * overlays' animation, which Reduced motion turns off (index.css).
+ */
+function PathDropHighlight({ paneId }) {
+  const count = usePathDropStore((s) => (s.target?.paneId === paneId ? s.target.count : 0));
+  if (!count) return null;
+  return (
+    <div
+      aria-hidden="true"
+      data-path-drop-target={paneId}
+      className={cn(
+        'absolute inset-0 z-20 pointer-events-none flex items-center justify-center',
+        'outline outline-2 -outline-offset-2 outline-vsc-focus animate-overlay-in',
+        'bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
+      )}
+    >
+      <span className="px-2 py-0.5 rounded-sm bg-vsc-accent text-vsc-accent-fg text-ui-sm font-medium shadow-widget">
+        {pathDropLabel(count)}
+      </span>
+    </div>
+  );
+}
 
 /**
  * The thin bar that says where a dragged chip will land in a row of chips.
@@ -949,6 +981,7 @@ function TerminalPane({
         {/* While dragging, swallow pointer events so the xterm cannot eat them. */}
         {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
         <DropIndicator zone={dropZone} />
+        <PathDropHighlight paneId={paneId} />
       </div>
     </div>
   );

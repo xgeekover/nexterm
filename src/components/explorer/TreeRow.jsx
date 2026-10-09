@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { fileIconFor, folderIconFor } from './fileIcons.jsx';
+import { clickActivates } from '../../lib/explorerDrag.js';
 
 /** VS Code's own geometry: 22px rows, 8px per level, a 16px twisty gutter. */
 export const ROW_HEIGHT = 22;
@@ -109,9 +110,11 @@ export function TreeRow({
   isSelected,
   isFocused,
   isCut,
+  onSelect,
   onActivate,
   onToggle,
   onContextMenu,
+  onPathDragPress,
   renaming,
   onRenameCommit,
   onRenameCancel,
@@ -127,9 +130,17 @@ export function TreeRow({
       aria-expanded={isFolder ? isExpanded : undefined}
       aria-selected={isSelected}
       data-path={node.path}
+      // The press may be the start of dragging this row onto a terminal, so
+      // it only selects; the press's own release opens the row when it was
+      // a click (src/lib/explorerDrag.js). The DOM click opens it only when
+      // no pointer made it — the keyboard, or assistive technology.
+      onPointerDown={(e) => onPathDragPress?.(e, row, { renaming })}
       onMouseDown={(e) => {
         // Left button only; the context menu handles the right one.
-        if (e.button === 0) onActivate(row, e);
+        if (e.button === 0) onSelect(row, e);
+      }}
+      onClick={(e) => {
+        if (clickActivates(e)) onActivate(row, e);
       }}
       onContextMenu={(e) => onContextMenu(e, row)}
       style={{ paddingLeft, height: ROW_HEIGHT }}
@@ -158,6 +169,11 @@ export function TreeRow({
       <span
         className="shrink-0 flex items-center justify-center"
         style={{ width: TWISTY_WIDTH }}
+        // A folder's twisty is a control of its own: it toggles on the press,
+        // and that press is no gesture of the row's — it neither drags nor,
+        // released over the row, opens it (which would toggle the folder
+        // straight back).
+        data-no-path-drag={isFolder ? '' : undefined}
         onMouseDown={(e) => {
           if (!isFolder) return;
           e.stopPropagation();

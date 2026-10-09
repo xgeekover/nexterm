@@ -15,13 +15,14 @@
  *    handed out as LIVE VIEWS that re-read the store by id on every property
  *    access — see `liveView`.
  *  - The stores are module singletons, but each test builds a fresh
- *    `AppEnvironment`. The constructor resets all three stores and the mock
+ *    `AppEnvironment`. The constructor resets the stores and the mock
  *    backend, so cases stay independent.
  */
 
 import { useTerminalStore } from '../../../src/stores/terminalStore.js';
 import { useEditorStore } from '../../../src/stores/editorStore.js';
 import { useSettingsStore } from '../../../src/stores/settingsStore.js';
+import { usePathDropStore } from '../../../src/stores/pathDropStore.js';
 import { mockBridge } from '../../../src/lib/ipc.js';
 import { attachOutput, resetPtyOutputBus } from '../../../src/lib/ptyOutputBus.js';
 import { buildPaletteGroups } from '../../../src/lib/paletteItems.js';
@@ -191,6 +192,8 @@ export class AppEnvironment {
       isCommandPaletteOpen: false,
       commandPaletteMode: 'all',
     });
+    // No pane is highlighted for a drop of files a previous case left mid-drag.
+    usePathDropStore.setState({ target: null });
 
     this.ipc = new RecordingBridge(mockBridge);
 

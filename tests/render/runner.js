@@ -82,9 +82,10 @@ const { useTerminalStore } = await import('../../src/stores/terminalStore.js');
 const { useEditorStore } = await import('../../src/stores/editorStore.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
+const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
 const { default: App } = await import('../../src/App.jsx');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -1084,6 +1085,61 @@ scenario(
     const strips = attrOrder(html, 'data-tab-strip');
     expectThat(strips.length === 3, `drew ${JSON.stringify(strips)}`);
     expectThat(zoomedChip(html) === null, 'a chip for a zoom that cannot be');
+  }
+);
+
+// ---- Files dropped on a terminal ------------------------------------------------
+
+/** Markup of the pane body for `paneId`, up to the next pane's strip or body. */
+function paneBody(html, paneId) {
+  const start = html.indexOf(`data-pane-body="${paneId}"`);
+  if (start === -1) return null;
+  const rest = html.slice(start + 1);
+  const next = rest.search(/data-(?:pane-body|tab-strip)="/);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+scenario(
+  'RN-64',
+  'files dragged over one pane of three: that pane alone says it will insert them, and how many',
+  () => {
+    arrangeThreePanes();
+    usePathDropStore.setState({ target: { paneId: 'pane-c', count: 3 } });
+  },
+  (html) => {
+    const targets = attrOrder(html, 'data-path-drop-target');
+    expectThat(JSON.stringify(targets) === '["pane-c"]', `highlighted ${JSON.stringify(targets)}, not just pane-c`);
+    expectThat(paneBody(html, 'pane-c')?.includes('data-path-drop-target="pane-c"'), 'the highlight is not inside the pane body');
+    expectText(html, 'Insert 3 paths');
+    const overlay = /<div\b[^>]*\sdata-path-drop-target="pane-c"[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(/pointer-events-none/.test(overlay), 'the highlight takes the pointer — the pane under it could no longer be found');
+    expectThat(/aria-hidden="true"/.test(overlay), 'the highlight is read out');
+  }
+);
+
+scenario(
+  'RN-65',
+  'one path dragged over a pane reads "Insert path"',
+  () => {
+    reset();
+    usePathDropStore.setState({ target: { paneId: 'pane-1', count: 1 } });
+  },
+  (html) => {
+    expectText(html, 'Insert path');
+    expectThat(!visibleText(html).includes('Insert 1 paths'), 'counted one path as many');
+  }
+);
+
+scenario(
+  'RN-66',
+  'a highlight for a pane that is not on screen draws nothing',
+  () => {
+    arrangeThreePanes({ zoomedPaneId: 'pane-b' });
+    usePathDropStore.setState({ target: { paneId: 'pane-a', count: 2 } });
+  },
+  (html) => {
+    expectThat(attrOrder(html, 'data-path-drop-target').length === 0, 'a hidden pane drew a highlight');
+    expectThat(!visibleText(html).includes('Insert 2 paths'), 'the label is on screen');
   }
 );
 

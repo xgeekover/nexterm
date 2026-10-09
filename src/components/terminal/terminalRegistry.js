@@ -1039,6 +1039,29 @@ export function clearTerminal(tabId) {
   return true;
 }
 
+/**
+ * Hand `text` to a tab's terminal as a paste and give that terminal the
+ * keyboard — what dropping files on a pane ends in (the text is written by
+ * src/lib/dropPaths.js). Through xterm's own `paste`, as Ctrl+V and a
+ * right-click paste go (`pasteClipboard` in terminalRightClick.js): bracketed
+ * when the program asked for that, so OpenCode or Claude Code take the paths
+ * as one pasted string rather than as keys typed one by one.
+ *
+ * Returns whether there was a live terminal to take it. A tab never shown
+ * has none, and then nothing is sent: written to the shell unseen, the paths
+ * would turn up later in a prompt nobody remembers typing into. Nothing is
+ * pasted for empty text either — an EMPTY bracketed paste is what Ctrl+V
+ * sends for an image-only clipboard, and OpenCode attaches the clipboard's
+ * image when it reads one.
+ */
+export function pasteIntoTerminal(tabId, text) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed || typeof text !== 'string' || text === '') return false;
+  entry.term.paste(text);
+  entry.term.focus();
+  return true;
+}
+
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;

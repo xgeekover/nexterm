@@ -9,6 +9,7 @@ import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
+import { useTerminalFileDrop } from './hooks/useTerminalFileDrop.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
@@ -27,6 +28,8 @@ export default function App() {
   useMenuEvents();
   // Closing the window or quitting asks about unsaved editor tabs first.
   useUnsavedGuard();
+  // Files dropped from the OS on a terminal pane go in as their paths.
+  useTerminalFileDrop();
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
