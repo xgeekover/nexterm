@@ -575,9 +575,12 @@ mod tests {
         for path in [r"C:\x\a.{bad}", r"C:\x\notes.{1234}", r"C:\x\{645FF040-5081-101B-9F08-00AA002F954E}", r"C:\x\plain.txt"] {
             assert!(!names_a_shell_folder(path), "{path}");
         }
-        // The Windows rules are Windows': elsewhere such a name is a name.
-        assert_eq!(refusal("/x/nul", false), None);
-        assert_eq!(refusal("/x/Fake.{645FF040-5081-101B-9F08-00AA002F954E}", false), None);
+        // The Windows rules are Windows': elsewhere such a name is a name. The
+        // path has to be absolute on the machine running the test, or it is
+        // refused for that first — `/x/nul` is not absolute on Windows.
+        let root = if cfg!(windows) { r"C:\x\" } else { "/x/" };
+        assert_eq!(refusal(&format!("{root}nul"), false), None);
+        assert_eq!(refusal(&format!("{root}Fake.{{645FF040-5081-101B-9F08-00AA002F954E}}"), false), None);
     }
 
     #[test]
