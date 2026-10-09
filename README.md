@@ -210,6 +210,20 @@ every program. Paste with `⌘V` on macOS, `Ctrl+V` on Windows — see the table
 below. A program that asked for bracketed paste gets the text bracketed, so a
 multi-line paste into a shell or an agent is not run line by line.
 
+**Drop a file to type its path.** Drag files or folders from Windows Explorer
+or Finder — or a row from NexTerm's own Explorer — onto a terminal, and their
+full paths are typed into that pane's active terminal: quoted only when
+needed and the way its shell reads them (`"…"` for cmd, `'…'` for PowerShell
+and bash), one space between them, no trailing space, nothing run. Git Bash
+and Cygwin get `C:/…`, WSL gets `/mnt/c/…`. It arrives as a paste, so a
+program that asked for bracketed paste — OpenCode, Claude Code — gets one
+paste, not keystrokes. The pane lights up while something is over it;
+dropping anywhere else does nothing, and nothing is ever moved or copied. A
+name holding a newline or another control character is left out rather than
+typed, because in a shell without bracketed paste it would run whatever
+followed. In a shell NexTerm does not recognise, only paths that need no
+quoting are typed.
+
 **Find something in the scrollback.** `⌘F` opens a find bar over the focused
 terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
 `Esc` to close. Match case, whole word and regular expressions are there, every

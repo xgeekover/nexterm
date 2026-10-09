@@ -720,6 +720,33 @@ that machine. Never run on Windows.
 - The same through a second link: `mklink /D via docs` — `via` does not
   expand either, and nothing under it is listed, searched or opened.
 
+### V33 — a file dropped onto a terminal is typed as its path
+
+Dropping files onto a terminal types their paths into that pane's active
+terminal, quoted for its shell, as one paste. Windows-only parts that the
+Mac cannot check: WebView2 reports the drop position in PHYSICAL pixels (the
+Mac reports points), the Explorer drag runs on Chromium's click rules, and
+cmd's quoting rules are only checked against documentation. Never run on
+Windows.
+
+- At 125% and 150% display scaling, split a group into four panes and drag a
+  file from Windows Explorer across them: the highlight ("Insert path") is on
+  the pane under the pointer, including near the dividers and right under the
+  title bar. Drop it: the path appears once, in that pane, with nothing run.
+- cmd: drop `C:\Users\<you>\My Pics\a.png` → `"C:\Users\<you>\My Pics\a.png"`;
+  a file named `100%done.txt` → quoted; drop two files → two quoted words, one
+  space, no trailing space. PowerShell: `'…'`. Git Bash: `C:/Users/…`. WSL
+  (`wsl.exe`): `/mnt/c/Users/…`.
+- With OpenCode running under cmd, drop one PNG whose path has a space: it
+  attaches as `[Image 1]` (OpenCode strips the quotes). Two files arrive as
+  text.
+- NexTerm's own Explorer: drag a file onto a pane → path typed, file NOT
+  opened, terminal focused. Then: a plain click opens a file; a double click
+  opens it once; a folder's arrow toggles once; Esc during a drag, then
+  release a second later anywhere → nothing opens and nothing is typed; F2,
+  then drag-select inside the name and release over the row → only the text
+  is selected.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

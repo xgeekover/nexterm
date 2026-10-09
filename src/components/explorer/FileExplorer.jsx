@@ -12,6 +12,7 @@ import { Filter,
 import { useEditorStore } from '../../stores/editorStore.js';
 import { TreeRow, NameInput, indentFor, ROW_HEIGHT } from './TreeRow.jsx';
 import { deletePromptMessage, filterTree, flattenVisible, navigate } from './treeRows.js';
+import { fileIconFor, folderIconFor } from './fileIcons.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
@@ -19,6 +20,32 @@ import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
 import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
+import { useExplorerPathDrag } from '../../hooks/useExplorerPathDrag.js';
+
+/**
+ * The chip that follows the pointer while a row is dragged towards a
+ * terminal, naming what will be inserted. Portaled onto <body>, as the tab
+ * strip's drag preview is: the side bar keeps the transform its mount
+ * animation ends on, which would make it the containing block of a `fixed`
+ * chip and draw the chip away from the pointer. Placed by
+ * `useExplorerPathDrag` through `ghostRef`, so a move costs no render.
+ */
+function ExplorerDragGhost({ ghost, ghostRef }) {
+  return createPortal(
+    <div
+      ref={ghostRef}
+      aria-hidden="true"
+      className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
+                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
+    >
+      <span className="shrink-0 flex items-center">
+        {ghost.isFolder ? folderIconFor(ghost.name, false, 14) : fileIconFor(ghost.name, 14)}
+      </span>
+      <span className="truncate max-w-[200px]">{ghost.name}</span>
+    </div>,
+    document.body
+  );
+}
 
 export function FileExplorer() {
   const fileTree = useEditorStore((s) => s.fileTree);
@@ -270,6 +297,23 @@ export function FileExplorer() {
     },
     [setSelectedPath, toggleFolder, openFile]
   );
+
+  // The release that opens a pressed row can come after the row has left the
+  // tree (the watcher saw it deleted, a filter or a collapse hid it). Opening
+  // then would only report that the file cannot be read, so a release opens
+  // only a row that is still listed.
+  const activatePressedRow = useCallback(
+    (row) => {
+      if (rows.some((r) => samePath(r.node.path, row.node.path))) activateRow(row);
+    },
+    [rows, activateRow]
+  );
+
+  // A row can be dragged onto a terminal pane to insert its path there. The
+  // press selects the row; its own release opens it when the press was a
+  // click (see src/lib/explorerDrag.js).
+  const { onRowPointerDown, ghost, ghostRef } = useExplorerPathDrag({ onActivate: activatePressedRow });
+  const selectRow = useCallback((row) => setSelectedPath(row.node.path), [setSelectedPath]);
 
   const handleTreeKeyDown = (e) => {
     // While an inline input is open it owns the keyboard.
@@ -542,7 +586,9 @@ export function FileExplorer() {
                     }
                     isFocused={treeFocused}
                     isCut={clipboard?.mode === 'cut' && samePath(clipboard.path, row.node.path)}
+                    onSelect={selectRow}
                     onActivate={activateRow}
+                    onPathDragPress={onRowPointerDown}
                     onToggle={(r) => toggleFolder(r.node.path)}
                     onContextMenu={(e, r) =>
                       handleTreeContextMenu(e, {
@@ -564,6 +610,9 @@ export function FileExplorer() {
           )}
         </div>
       )}
+
+      {/* Only while a row is being dragged: renderToString cannot draw a portal. */}
+      {ghost ? <ExplorerDragGhost ghost={ghost} ghostRef={ghostRef} /> : null}
 
       <ContextMenu
         open={Boolean(contextMenu)}

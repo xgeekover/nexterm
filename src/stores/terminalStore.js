@@ -1046,6 +1046,17 @@ const restarting = new Set();
 const closingTabs = new Set();
 
 /**
+ * Whether `tabId` is on its way out (see `closingTabs`), for code outside the
+ * store that must not hand anything to a terminal about to go — a drop of
+ * file paths, for one: pasted into a shell being killed, it would be lost
+ * with no sign it had gone anywhere. Read-only on purpose: only `closeTab`
+ * and `killTabIfOrphaned` decide what is closing.
+ */
+export function isTabClosing(tabId) {
+  return closingTabs.has(tabId);
+}
+
+/**
  * How long a title has to stay before its conversation is looked up. opencode
  * sends the same title two or three times in a row as it draws (measured),
  * and switching conversations quickly should cost one lookup, not five.

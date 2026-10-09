@@ -84,6 +84,9 @@ import './explorer_deep_folders.test.js';
 import './palette_mounted.test.js';
 import './editor_panel_logic.test.js';
 import './editor_read_failures.test.js';
+import './drop_paths.test.js';
+import './drop_paths_spec.test.js';
+import './terminal_file_drop.test.js';
 
 async function run() {
   console.log('====================================================');
