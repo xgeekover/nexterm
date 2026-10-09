@@ -177,6 +177,21 @@ workspace root, so a `cargo` run inside `src-tauri/` lands on the right file.
 `http://` and `https://` addresses open in your browser; nothing else is ever
 offered as a link, and a path without a line number is left as plain text so
 ordinary output does not fill up with underlines.
+
+**Show a listed file or folder in Explorer or Finder.** Hold `Ctrl` (`⌘` on
+macOS) and point at a name in the output — from `ls`, `ls -l`, `dir`, `find`
+or `git status` — and it is underlined if it exists; click and Explorer or
+Finder opens that folder, or the file's folder with the file selected (on
+Linux a folder is shown selected in the folder above it). A file is never
+opened or run, and an app bundle is shown, not launched. A name is read
+against the directory the terminal was in when the line was printed, and
+against `dir`'s ` Directory of …` heading above it. Where NexTerm knows the
+command — zsh, bash and PowerShell report it, and cmd's prompt line shows it
+— it also follows an `ls -R` heading and the one folder an `ls` or `dir` was
+given, and offers no names at all in output from `ssh`, `docker exec` or
+`wsl`, which are another machine's. Nothing is looked up until the key is
+held, and plain clicks and selection work as before.
+
 **See what the other terminals are doing.** A tab shows a blue dot while a
 command is running in it and a red one when the last command failed, and a
 group's chip shows the same for every terminal inside it. The point is the ones
