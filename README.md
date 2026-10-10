@@ -145,7 +145,11 @@ Shell picks what a plain new terminal opens, and still takes a typed path.
 
 **Split.** Use the split buttons in the panel header, `⌘D` (right) / `⌘⇧D`
 (down), or drag a tab onto an edge of any pane. While dragging, the target
-quarter lights up so you can see where it will land before you let go.
+quarter lights up so you can see where it will land before you let go. A
+split carries on from the terminal being split: it opens in that terminal's
+current folder, in the same shell — a Git Bash split stays Git Bash, in the
+same directory. Settings ▸ Terminal ▸ *Split Directory* makes splits start
+like any new terminal instead (VS Code's `terminal.integrated.splitCwd`).
 
 **Zoom a pane.** In a split group, `⌘⇧Enter` (`Ctrl+Shift+Enter` on Windows
 and Linux), the ⤢ button in a pane's tab strip, Terminal → *Toggle Pane Zoom*

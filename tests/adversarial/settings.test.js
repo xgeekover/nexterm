@@ -11,7 +11,7 @@ import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { useSystemStore } from '../../src/stores/systemStore.js';
 import { useTerminalStore as T, PERSIST_KEY } from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
-import { resolveStartDir } from '../../src/lib/terminalCwd.js';
+import { resolveStartDir, splitStartFor, startableCwd } from '../../src/lib/terminalCwd.js';
 
 if (!globalThis.localStorage) {
   const backing = new Map();
@@ -46,6 +46,7 @@ const SETTINGS_KEYS = [
   'terminalDefaultShell',
   'terminalDefaultCwd',
   'terminalDefaultCwdPath',
+  'terminalSplitCwd',
   'terminalNotifyAfterSeconds',
   'terminalProgramNotifications',
   'editorFontSize',
@@ -481,6 +482,128 @@ describe('Every new terminal follows the setting, however it is made', () => {
       assert.equal(await mockBridge.invoke('fs_dir_exists', { path }), true, `${path} is a directory`);
     }
     assert.equal(await mockBridge.invoke('fs_dir_exists', { path: '/nowhere/at/all' }), false);
+  });
+
+  /** Every `pty_spawn` while `fn` ran: the directory and the shell it asked for. */
+  async function spawnArgsDuring(fn) {
+    const original = mockBridge.invoke;
+    const sent = [];
+    mockBridge.invoke = function (command, args, ...rest) {
+      if (command === 'pty_spawn') sent.push({ cwd: args?.cwd ?? null, shell: args?.shell ?? null });
+      return original.call(this, command, args, ...rest);
+    };
+    try {
+      await fn();
+    } finally {
+      mockBridge.invoke = original;
+    }
+    return sent;
+  }
+
+  /** Give terminal `id` these fields, as the backend and OSC 7 would have. */
+  const setTab = (id, fields) =>
+    T.setState((state) => ({ tabs: state.tabs.map((t) => (t.id === id ? { ...t, ...fields } : t)) }));
+
+  test('SPL-01: a split continues the terminal being split — its directory and its shell — whatever Default Directory says', async () => {
+    // VS Code's `terminal.integrated.splitCwd: inherited`. A split used to
+    // open at the workspace root (or the custom directory), in the default
+    // shell, and had to be walked back to where the work was.
+    for (const mode of ['workspace', 'home', 'custom']) {
+      await freshStart();
+      await wanderOff();
+      setTab(T.getState().getActiveTab().id, { shell: '/opt/homebrew/bin/fish' });
+      await withSetting({ mode, path: '/workspace/src' }, async () => {
+        const sent = await spawnArgsDuring(() => T.getState().splitActivePane('horizontal'));
+        assert.deepEqual(sent, [{ cwd: '/workspace/tests', shell: '/opt/homebrew/bin/fish' }], `Default Directory "${mode}"`);
+      });
+    }
+  });
+
+  test('SPL-02: Split Directory "Same as a new terminal" starts a split like New Terminal', async () => {
+    await freshStart();
+    await wanderOff();
+    setTab(T.getState().getActiveTab().id, { shell: '/opt/homebrew/bin/fish' });
+    settings().setSetting('terminalSplitCwd', 'default');
+    try {
+      await withSetting({ mode: 'workspace' }, async () => {
+        const sent = await spawnArgsDuring(async () => {
+          await T.getState().createTab();
+          await T.getState().splitActivePane('horizontal');
+        });
+        assert.deepEqual(sent[1], sent[0], 'a split and a new terminal disagree');
+        assert.equal(sent[1].cwd, null, 'the Default Directory decides');
+        assert.equal(sent[1].shell, settings().terminalDefaultShell, 'the Default Shell decides');
+      });
+    } finally {
+      settings().setSetting('terminalSplitCwd', 'inherited');
+    }
+  });
+
+  test('SPL-03: splitting a pane that is not the active one continues THAT pane\'s terminal', async () => {
+    await freshStart();
+    const group = T.getState().getActiveGroup();
+    const first = group.activePaneId;
+    const second = await T.getState().splitPane(first, 'horizontal', group.id);
+    const leafOf = (paneId) =>
+      (function walk(node) {
+        if (node.type === 'leaf') return node.id === paneId ? node : null;
+        return node.children.map(walk).find(Boolean) ?? null;
+      })(T.getState().getActiveGroup().tree);
+    const secondTab = T.getState().tabs.find((t) => t.id === leafOf(second).activeTabId);
+    await mockBridge.emit('pty-cwd', { session_id: secondTab.sessionId, cwd: '/workspace/src' });
+    T.getState().setActivePane(first);
+    const sent = await spawnArgsDuring(() => T.getState().splitPane(second, 'vertical', group.id));
+    assert.equal(sent[0].cwd, '/workspace/src', 'the split pane\'s terminal, not the active one');
+  });
+
+  test('SPL-04: a terminal with no directory, or one on another machine, hands none on', async () => {
+    for (const cwd of [null, '//fileserver/share/project', '\\\\fileserver\\share']) {
+      await freshStart();
+      setTab(T.getState().getActiveTab().id, { cwd });
+      await withSetting({ mode: 'workspace' }, async () => {
+        const sent = await spawnArgsDuring(() => T.getState().splitActivePane('horizontal'));
+        assert.equal(sent[0].cwd, null, `cwd ${JSON.stringify(cwd)}: the Default Directory decides`);
+      });
+    }
+  });
+
+  test('SPL-05: on Windows a Git Bash terminal\'s `/c/…` is handed on as `C:\\…` — to a split and to a copy', async () => {
+    // Git Bash reports its directory as `/c/Users/me` (OSC 7 keeps it as it
+    // came). Handed on as it was, the backend found no such directory and the
+    // new terminal fell back to the workspace root.
+    await freshStart();
+    const tab = T.getState().getActiveTab();
+    setTab(tab.id, { cwd: '/c/Users/me/project', shell: 'C:\\Program Files\\Git\\bin\\bash.exe' });
+    await withSetting({ mode: 'workspace' }, async () => {
+      useSystemStore.setState({ os: 'windows' });
+      const sent = await spawnArgsDuring(async () => {
+        await T.getState().splitActivePane('horizontal');
+        await T.getState().duplicateTab(tab.id);
+      });
+      assert.deepEqual(
+        sent.map((s) => s.cwd),
+        ['C:\\Users\\me\\project', 'C:\\Users\\me\\project'],
+        'split, then copy'
+      );
+      assert.equal(sent[0].shell, 'C:\\Program Files\\Git\\bin\\bash.exe', 'the split stays Git Bash');
+    });
+  });
+
+  test('SPL-06: startableCwd and splitStartFor, the rule itself', () => {
+    const gitBash = 'C:\\Program Files\\Git\\bin\\bash.exe';
+    assert.equal(startableCwd({ cwd: '/c/Users/me', shell: gitBash }, 'windows'), 'C:\\Users\\me');
+    assert.equal(startableCwd({ cwd: '/cygdrive/d/w', shell: 'C:\\cygwin64\\bin\\bash.exe' }, 'windows'), 'D:\\w');
+    assert.equal(startableCwd({ cwd: '/c', shell: gitBash }, 'windows'), 'C:\\', 'a reported directory may be a drive');
+    assert.equal(startableCwd({ cwd: '/usr/bin', shell: gitBash }, 'windows'), '/usr/bin', 'inside Git Bash: left alone');
+    assert.equal(startableCwd({ cwd: '/c/x', shell: 'C:\\Windows\\System32\\cmd.exe' }, 'windows'), '/c/x', 'only an MSYS shell spells drives that way');
+    assert.equal(startableCwd({ cwd: '/c/x', shell: '/bin/zsh' }, 'macos'), '/c/x', 'a POSIX path elsewhere');
+    assert.equal(startableCwd({ cwd: '  ' }, 'macos'), null);
+    assert.equal(startableCwd({ cwd: '\\\\host\\share' }, 'windows'), null);
+    assert.equal(startableCwd(null, 'windows'), null);
+    assert.deepEqual(splitStartFor({ cwd: '/a', shell: '/bin/zsh' }), { cwd: '/a', shell: '/bin/zsh' }, 'inherited is the default');
+    assert.deepEqual(splitStartFor({ cwd: '/a', shell: '/bin/zsh' }, { mode: 'default' }), { cwd: null, shell: null });
+    assert.deepEqual(splitStartFor(null), { cwd: null, shell: null }, 'nothing to continue');
+    assert.deepEqual(splitStartFor({ cwd: '/a', shell: ' ' }), { cwd: '/a', shell: null });
   });
 
   test('SET-25: teardown — leave the terminals disposed and nothing persisted', () => {

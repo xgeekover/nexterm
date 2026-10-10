@@ -28,6 +28,8 @@
  */
 import { expandHome } from './paths.js';
 import { isNetworkPath } from './terminalLinks.js';
+import { shellKindFor } from './dropPaths.js';
+import { fromMsysPath } from './outputPaths.js';
 
 /** What Settings says about a custom directory on another machine. */
 export const NETWORK_START_DIR =
@@ -73,4 +75,49 @@ export function resolveStartDir({
     default:
       return null;
   }
+}
+
+/**
+ * The directory a terminal is in, as a new shell can be started there — or
+ * null when there is none to give.
+ *
+ * `tab.cwd` is what the shell reported (OSC 7), spelled the shell's way. Git
+ * Bash and Cygwin report `/c/Users/me`, which Windows cannot start anything
+ * in: the backend found no such directory and quietly fell back, so a copy of
+ * a Git Bash terminal opened in the workspace root. Their spelling is read as
+ * the drive it names (`fromMsysPath`), and only theirs — in any other shell
+ * `/c/x` is not a Windows path at all. A directory on another machine is
+ * never handed on (see the top of this file).
+ */
+export function startableCwd(tab, os = null) {
+  const cwd = typeof tab?.cwd === 'string' ? tab.cwd.trim() : '';
+  if (!cwd || isNetworkPath(cwd)) return null;
+  if (os === 'windows') {
+    const kind = shellKindFor(tab?.shell, 'windows');
+    if (kind === 'msys' || kind === 'cygwin') return fromMsysPath(cwd);
+  }
+  return cwd;
+}
+
+/**
+ * What a new pane made by splitting starts as, by the `terminalSplitCwd`
+ * setting (VS Code's `terminal.integrated.splitCwd`):
+ *
+ *   - `inherited` (the default) — a continuation of the terminal being split:
+ *     its live directory and its shell. Splitting is how a second terminal
+ *     for the same piece of work is made, and one that opened at the
+ *     workspace root, or in cmd beside a PowerShell, had to be walked back
+ *     by hand every time. The shell goes with the directory because the
+ *     directory is spelled in that shell's terms, and because VS Code's split
+ *     keeps the profile too.
+ *   - `default` — a new terminal like any other: the Default Shell and the
+ *     Default Directory settings decide.
+ *
+ * `tab` is the terminal shown in the pane being split. Returns
+ * `{ cwd, shell }`, either of which may be null for "as a new terminal would".
+ */
+export function splitStartFor(tab, { mode = 'inherited', os = null } = {}) {
+  if (mode !== 'inherited' || !tab) return { cwd: null, shell: null };
+  const shell = typeof tab.shell === 'string' && tab.shell.trim() ? tab.shell : null;
+  return { cwd: startableCwd(tab, os), shell };
 }

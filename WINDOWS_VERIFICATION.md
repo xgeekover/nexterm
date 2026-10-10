@@ -775,6 +775,20 @@ in Node only. Never run on Windows.
 - A path on an empty card reader or DVD drive, hovered with Ctrl: no
   "insert a disk" box.
 
+### V35 — a split opens where the terminal being split is, in its shell
+
+A split used to open at the workspace root in the default shell. It now
+continues the terminal being split. Git Bash reports its directory as
+`/c/Users/…`, which has to be handed to Windows as `C:\Users\…`; that was
+checked only against the browser mock. Never run on Windows.
+
+- cmd: `cd C:\Windows`, then Ctrl+D → the new pane is cmd, at `C:\Windows`.
+- PowerShell (from a profile) → the split is PowerShell, same folder.
+- Git Bash: `cd /c/Users` → the split is Git Bash at `/c/Users`. *Duplicate
+  Tab* on it opens there too (it used to fall back to the workspace root).
+- Settings ▸ Terminal ▸ Split Directory ▸ *Same as a new terminal*: the
+  split opens where New Terminal does, in the Default Shell.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
