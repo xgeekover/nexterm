@@ -1274,13 +1274,20 @@ mod confine_tests {
         }
         // A path is no longer trimmed (`spelled_in`), so one that only
         // starts with spaces before `\\host` is a name in the open folder —
-        // a folder named by the spaces — and never reaches a host.
+        // a folder named by the spaces — and never reaches a host. On Windows
+        // that name is refused outright: Windows drops trailing spaces, so a
+        // name made of them is no name it would keep (`windows_drops_part_of`).
         for (what, result) in [
             ("confine_to", confine_to(&root, r"  \\host\share\x.txt")),
             ("confine_entry_to", confine_entry_to(&root, r"  \\host\share\x.txt")),
         ] {
-            let inside = result.unwrap_or_else(|e| panic!("{what}: {e}"));
-            assert!(inside.starts_with(&root) && !is_network_path(&inside.to_string_lossy()), "{what}: {inside:?}");
+            if cfg!(windows) {
+                let err = result.expect_err(&format!("{what}: a name of spaces is no name on Windows"));
+                assert!(err.contains("ends in a dot or a space"), "{what}: {err}");
+            } else {
+                let inside = result.unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert!(inside.starts_with(&root) && !is_network_path(&inside.to_string_lossy()), "{what}: {inside:?}");
+            }
         }
         // Local paths, in the spellings Windows allows, are still judged by
         // where they lead.
