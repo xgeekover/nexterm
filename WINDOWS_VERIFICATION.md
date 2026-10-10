@@ -789,6 +789,66 @@ checked only against the browser mock. Never run on Windows.
 - Settings ▸ Terminal ▸ Split Directory ▸ *Same as a new terminal*: the
   split opens where New Terminal does, in the Default Shell.
 
+### V36 — cmd's "Terminate batch job (Y/N)?" is answered Y, and nothing else is
+
+Matched on the cursor row after the user's Ctrl+C, by cmd's `^C` echo or its
+English/Korean wording. Real ConPTY output in a Korean locale never seen.
+Never run on Windows.
+
+- `opencode` in cmd, Ctrl+C → the question appears and is answered `Y`; cmd
+  is still alive at its prompt. Quit OpenCode slowly (wait a few seconds after
+  Ctrl+C): still answered.
+- `del *.*`, then at its "(Y/N)?" press Ctrl+C → no `Y` is typed.
+- A batch file that runs `choice` (or any program asking "(Y/N)?") right after
+  a Ctrl+C → no `Y`. Ctrl+C, then paste anything → no `Y`.
+- PowerShell: nothing is ever answered. Setting off: the question stays.
+
+### V37 — Delete moves to the Recycle Bin, and never deletes for good unasked
+
+The drive, size and policy checks read the registry
+(`HKCU\…\Explorer\BitBucket\Volume\{GUID}`, `KnownFolder`, the
+`NoRecycleFiles` / `RecycleBinSize` policies) — written from documentation,
+never run.
+
+- First, the sanity check: opening, saving, renaming and deleting ordinary
+  files and folders in the Explorer all still work. Every path is now refused
+  when Windows would read it differently from how it is spelled (a name ending
+  in `.` or a space can otherwise hit the folder above it), and a case that
+  check did not anticipate would refuse ordinary paths too.
+- Report `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume /s`
+  on this profile. With no key for a drive, deletes there still go to the
+  Recycle Bin (Windows' default); only a key that exists but cannot be read
+  leads to *Delete Permanently?*.
+- On C:: a file and a folder → in the Recycle Bin, restorable. A junction → removed
+  as a link, its target untouched. A junction on a USB stick pointing into C:
+  → removed as a link, not trashed.
+- A folder bigger than the Recycle Bin's maximum size → *Delete Permanently?*
+  ("too big for the Recycle Bin"), Cancel focused; Cancel keeps it.
+- A mapped network drive, a USB stick, a `subst` drive, C: with "Don't move
+  files to the Recycle Bin" → *Delete Permanently?* with the reason.
+- A folder listed in the Explorer, then replaced by a junction from a
+  terminal, then deleted → *Delete Permanently?* in link wording; only the
+  junction goes.
+- A USB stick or exFAT volume with 64 KiB clusters: a folder of many small
+  files near the Recycle Bin's size → "too big for the Recycle Bin". A nearly
+  full drive asks sooner (the 5% guess is taken of free space).
+- Two failing deletes one after the other → two separate questions, each for
+  its own item. Setting off → the old one-question permanent delete.
+
+### V38 — pasting several lines asks first
+
+Only a synthetic paste in Chromium was tested; WebView2's Ctrl+V and
+Shift+Insert never pressed.
+
+- cmd: Ctrl+V, Shift+Insert and a right-click paste of two lines → asked.
+  *Paste* runs both, *Paste as One Line* runs one line, *Cancel* sends nothing.
+  Ctrl+V then Enter at once → nothing pasted (Cancel has focus).
+- One line with a trailing newline → not asked. OpenCode / pwsh 7 (bracketed
+  paste) → not asked under Auto; a paste containing `ESC[201~` → asked.
+- An image-only clipboard into OpenCode still attaches; a dropped file still
+  types its path. Right-click paste from the find field, then Cancel → focus
+  back in the find field. Ctrl+W while asked → the question closes.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
