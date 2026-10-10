@@ -27,7 +27,9 @@ dunce = "1.0.5"
 tauri-plugin-dialog = "2"
 # Hands a URL to the system browser for the links in terminal output. Scoped to
 # http/https in capabilities/default.json — see src/lib/openExternal.js for why
-# that matters when the text came from a program's output.
+# that matters when the text came from a program's output. Also shows a path
+# from the output in the file manager, from Rust only (`fs_reveal_path`,
+# src/fs/reveal.rs): the webview is granted none of the plugin's path commands.
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 # Desktop notifications for what a program in a terminal asks to be told about
@@ -52,10 +54,25 @@ clipboard-win = "5.4"
 # Copying a folder link without the privilege a symlink needs (fs/mod.rs
 # `copy_link`): std can read a junction but not make one.
 junction = "2"
+# Showing a path from a terminal's output in Explorer (src/fs/reveal.rs): a
+# folder opened by the verb only folders have, a mapped network drive left
+# alone, no "insert a disk" box. Already in the tree through tauri and wry.
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Registry",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # Whether an image is on the pasteboard, without reading it
 # (src/commands/clipboard.rs). arboard reads the text through these already.
+# NSWorkspace opens a folder from a terminal's output in a Finder window
+# (src/fs/reveal.rs) — never by `open`, which launches what LaunchServices
+# takes for an application.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSWorkspace"] }

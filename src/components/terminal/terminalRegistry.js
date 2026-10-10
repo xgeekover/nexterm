@@ -20,7 +20,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
 import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
 import '@xterm/xterm/css/xterm.css';
-import { listen } from '../../lib/ipc.js';
+import { listen, pathKinds } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
@@ -49,6 +49,11 @@ import { useSystemStore } from '../../stores/systemStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
+import { createKindLookup } from '../../lib/outputPaths.js';
+import { trackDirectories } from '../../lib/outputContext.js';
+import { createModifierTracker, installRevealLinks } from '../../lib/revealLinks.js';
+import { shellKindFor } from '../../lib/dropPaths.js';
+import { shellPathOf } from '../../lib/terminalFileDrop.js';
 import { trackCommandMarks } from '../../lib/stickyCommand.js';
 import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
@@ -657,6 +662,70 @@ function registerLinks(term, tabId) {
 }
 
 /**
+ * Make the names of files and folders in the output — `ls`, `dir`, `find`,
+ * `git status` — show in the file manager on Cmd+click (macOS) or Ctrl+click
+ * (Windows, Linux): a folder opened, a file selected in its folder, never a
+ * file opened. Looked up and underlined only while the modifier is down;
+ * without it nothing is different, the links above keep their plain click,
+ * and a double-click still selects a word. Which words, which directory and
+ * the rest of the rules are src/lib/outputPaths.js, src/lib/outputContext.js
+ * and src/lib/revealLinks.js; this says where the tab is and what a click
+ * does.
+ *
+ * The modifier is followed once for the window, and what exists is
+ * remembered for every terminal for a few seconds: a path is a path whichever
+ * terminal printed it. A relative name is read against the directory the
+ * tab was in when the row was printed: every change of `tab.cwd` (`pty-cwd`)
+ * is marked on the row the cursor is on once the output before it has been
+ * written, a reset starting it again (`trackDirectories`), and the shell's
+ * command marks say which command printed it (`entry.commandMarks`,
+ * stickyCommand.js).
+ */
+let revealModifier = null;
+const revealKinds = createKindLookup({ ask: pathKinds });
+
+function registerRevealLinks(term, tabId, container) {
+  if (!revealModifier) {
+    revealModifier = createModifierTracker(typeof window === 'undefined' ? null : window, () => useSystemStore.getState().os);
+  }
+  const tabOf = (state) => state.tabs.find((t) => t.id === tabId);
+  const startedIn = tabOf(useTerminalStore.getState())?.cwd || useEditorStore.getState().rootPath || null;
+  const liveCwd = () => tabOf(useTerminalStore.getState())?.cwd || useEditorStore.getState().rootPath || null;
+  // The directory each row was printed in — see `trackDirectories`.
+  const commandMarks = () => instances.get(tabId)?.commandMarks?.marks ?? [];
+  const dirs = trackDirectories(term, { initial: startedIn, current: liveCwd, marks: commandMarks });
+  const stopTrail = useTerminalStore.subscribe((state, prev) => {
+    const cwd = tabOf(state)?.cwd;
+    if (cwd && cwd !== tabOf(prev)?.cwd) dirs.note(cwd);
+  });
+  const links = installRevealLinks(term, container, {
+    modifier: revealModifier,
+    kinds: revealKinds,
+    where: () => {
+      const tab = tabOf(useTerminalStore.getState());
+      const system = useSystemStore.getState();
+      const shell = shellPathOf(tab, {
+        defaultShell: useSettingsStore.getState().terminalDefaultShell,
+        systemShell: system.defaultShell,
+      });
+      const kind = shellKindFor(shell, system.os);
+      return { os: system.os, home: system.homeDir, msys: kind === 'msys' || kind === 'cygwin' };
+    },
+    cwdAt: (line) => dirs.at(line) || liveCwd(),
+    marks: commandMarks,
+    reveal: (path) => useEditorStore.getState().revealPath(path),
+    notice: (message) => writeNotice(tabId, message),
+  });
+  return {
+    dispose() {
+      stopTrail();
+      dirs.dispose();
+      links.dispose();
+    },
+  };
+}
+
+/**
  * What a click on a web address in the output does — the same whichever way
  * the output made it one: an address printed as text (`registerLinks`) or a
  * program's OSC 8 hyperlink (`hyperlinkHandler`). xterm calls both on the
@@ -827,6 +896,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     onNotify: (note) => useTerminalStore.getState().notifyFromProgram?.(tabId, note),
   });
   const linkProvider = registerLinks(term, tabId);
+  // After `registerLinks`, so its links come first where both would claim
+  // the same text (`findLinks` keeps them apart anyway).
+  const revealLinks = registerRevealLinks(term, tabId, container);
   const searchAddon = new SearchAddon();
   term.loadAddon(searchAddon);
   // The find bar reads its "n of m" from here. Reported per tab because the
@@ -887,6 +959,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     term,
     fitAddon,
     linkProvider,
+    revealLinks,
     searchAddon,
     // Asked for what a key sends by TerminalView's key handler; null when the
     // terminal has no parser (a test double).
@@ -1075,6 +1148,7 @@ export function disposeTerminal(tabId) {
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
   entry.linkProvider?.dispose();
+  entry.revealLinks?.dispose();
   entry.searchAddon?.dispose();
   entry.commandMarks.dispose();
   entry.term.dispose();

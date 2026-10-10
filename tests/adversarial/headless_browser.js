@@ -160,8 +160,19 @@ function makeSender(socket, defaultTimeoutMs = 15000) {
  * the page. Returns `{ evalJs, send, teardown }`: `evalJs(expression)` awaits
  * a promise and returns the value; `send(method, params)` is a raw CDP call on
  * the page's session.
+ *
+ * `session`, when given, is the agent-browser session to use instead of the
+ * one agent-browser names for this worktree — which two runs at once share,
+ * and the second then cannot start (found in review: both reported a
+ * browser that was there as missing).
+ *
+ * `pageErrors()` lists every exception the page threw and nobody caught —
+ * an event listener's included — since the harness attached
+ * (`Runtime.exceptionThrown`). A suite that asserts it is empty fails on an
+ * error the page swallowed into the console: one such error — a timer
+ * called the way a browser refuses — passed every case in Node.
  */
-export async function openHarness(fixture, { prefix, readyExpression }) {
+export async function openHarness(fixture, { prefix, readyExpression, session = null }) {
   let viteChild = null;
   let scratchDir = null;
   let sessionName = null;
@@ -214,7 +225,7 @@ export async function openHarness(fixture, { prefix, readyExpression }) {
     let sendRaw;
     let pageSessionId;
     try {
-      sessionName = sh('agent-browser', ['session', 'id', '--scope', 'worktree', '--prefix', prefix]);
+      sessionName = session || sh('agent-browser', ['session', 'id', '--scope', 'worktree', '--prefix', prefix]);
       sh('agent-browser', ['--session', sessionName, 'open', url]);
       sh('agent-browser', ['--session', sessionName, 'wait', '--load', 'networkidle']);
       ws = await connectWs(sh('agent-browser', ['--session', sessionName, 'get', 'cdp-url']));
@@ -228,6 +239,14 @@ export async function openHarness(fixture, { prefix, readyExpression }) {
     }
 
     const send = (method, params = {}) => sendRaw(method, params, pageSessionId);
+    const errors = [];
+    ws.addEventListener('message', (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.method !== 'Runtime.exceptionThrown' || msg.sessionId !== pageSessionId) return;
+      const details = msg.params?.exceptionDetails ?? {};
+      errors.push(details.exception?.description ?? details.text ?? 'an exception');
+    });
+    await send('Runtime.enable');
     const evalJs = async (expression) => {
       const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
       if (r.exceptionDetails) throw new Error(`page eval failed: ${JSON.stringify(r.exceptionDetails)}`);
@@ -240,7 +259,7 @@ export async function openHarness(fixture, { prefix, readyExpression }) {
       if (Date.now() > deadline) throw new Error('the harness module did not finish loading');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return { evalJs, send, teardown };
+    return { evalJs, send, teardown, pageErrors: () => errors.slice() };
   } catch (err) {
     teardown();
     throw err;

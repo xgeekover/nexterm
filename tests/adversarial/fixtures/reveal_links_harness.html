@@ -1,0 +1,174 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/reveal_links_headless.test.js.
+
+  Two REAL `@xterm/xterm` 6 terminals, each at a fixed on-screen rect so the
+  Node-side driver can aim CDP mouse and key events at them by plain
+  viewport coordinates (`rect`):
+
+    app    made by the app's own `getOrCreateTerminal`
+           (src/components/terminal/terminalRegistry.js) — the reveal links
+           (src/lib/revealLinks.js) and every other installer, in the order
+           the app runs them
+    stock  xterm and nothing else — the control: what a double-click
+           selects without any of it
+
+  Both show the same rows: two of `ls -l` and one of `ls -F`. The page is
+  not inside Tauri, so `fs_path_kinds` and `fs_reveal_path` are answered by
+  the browser mock (src/lib/ipc.js), whose tree holds `/workspace/My
+  Folder`, a file named `/workspace/My` (so `My Folder` must win over `My`),
+  `/workspace/build.sh`, `src` and `tests`; `revealed` is what a click asked
+  to show and `asked` how many `fs_path_kinds` calls were made. The tab has
+  no cwd of its own, so names are read against the open folder,
+  `/workspace` — as a terminal whose shell never reported one.
+
+  `underlined` is the text the DOM renderer draws underlined for a hovered
+  link (xterm 6 sets `text-decoration: underline` on those cells), and
+  `pointer` whether the screen element carries `xterm-cursor-pointer`.
+
+  Not part of the app's own routes; loaded only by that test, over the vite
+  dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; background: #111; }
+      .pane { position: fixed; width: 640px; height: 200px; overflow: hidden; }
+      #app { left: 0; top: 0; }
+      #stock { left: 0; top: 220px; }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="pane"></div>
+    <div id="stock" class="pane"></div>
+    <script type="module">
+      import { Terminal } from '@xterm/xterm';
+      import '@xterm/xterm/css/xterm.css';
+      import { useSettingsStore } from '../../../src/stores/settingsStore.js';
+      import { useEditorStore } from '../../../src/stores/editorStore.js';
+      import { useSystemStore } from '../../../src/stores/systemStore.js';
+      import { getOrCreateTerminal, disposeTerminal } from '../../../src/components/terminal/terminalRegistry.js';
+      import { mockBridge } from '../../../src/lib/ipc.js';
+
+      const COLS = 70;
+      const ROWS = 10;
+      const FONT = { fontFamily: 'monospace', fontSize: 14, lineHeight: 1 };
+      const LINES = [
+        "drwxr-xr-x 2 me me 4096 Oct  9 22:00 'My Folder'",
+        '-rwxr-xr-x 1 me me    0 Oct  9 22:00  build.sh',
+        'src/  tests/',
+      ];
+
+      useSettingsStore.setState({
+        terminalFontFamily: FONT.fontFamily,
+        terminalFontSize: FONT.fontSize,
+        terminalLineHeight: FONT.lineHeight,
+      });
+      useEditorStore.setState({ rootPath: '/workspace' });
+      mockBridge.directories.add('/workspace/My Folder');
+      mockBridge.files.set('/workspace/My', '');
+      mockBridge.files.set('/workspace/build.sh', '#!/bin/sh\n');
+
+      // How many lookups the page made: none at all may happen without the
+      // modifier. `kindsDelay` makes the backend as slow as a real one can be.
+      let asked = 0;
+      let kindsDelay = 0;
+      const invoke = mockBridge.invoke.bind(mockBridge);
+      mockBridge.invoke = async (command, args) => {
+        if (command === 'fs_path_kinds') {
+          asked += 1;
+          if (kindsDelay) await new Promise((resolve) => setTimeout(resolve, kindsDelay));
+        }
+        return invoke(command, args);
+      };
+
+      let appTabs = 0;
+      let appTabId = null;
+      const terms = {};
+
+      const makers = {
+        app() {
+          if (appTabId) disposeTerminal(appTabId);
+          appTabId = `reveal-links-harness-${(appTabs += 1)}`;
+          const entry = getOrCreateTerminal(appTabId, {});
+          document.getElementById('app').replaceChildren(entry.container);
+          entry.term.resize(COLS, ROWS);
+          return entry.term;
+        },
+        stock() {
+          terms.stock?.dispose();
+          const term = new Terminal({ cols: COLS, rows: ROWS, allowProposedApi: true, ...FONT });
+          term.open(document.getElementById('stock'));
+          return term;
+        },
+      };
+
+      const write = (which, text) => new Promise((resolve) => terms[which].write(text, resolve));
+
+      async function reset(which) {
+        terms[which] = makers[which]();
+        await write(which, `${LINES.join('\r\n')}\r\n`);
+        return true;
+      }
+
+      await Promise.all(Object.keys(makers).map(reset));
+
+      // The moves the page makes itself over the app's terminal — the
+      // look-again of src/lib/revealLinks.js — counted apart from the real ones.
+      let lookedAgain = 0;
+      document.addEventListener(
+        'mousemove',
+        (e) => {
+          if (!e.isTrusted && document.getElementById('app').contains(e.target)) lookedAgain += 1;
+        },
+        true
+      );
+
+      const screen = (which) => terms[which].element.querySelector('.xterm-screen');
+
+      window.__r = {
+        reset,
+        write,
+        asked: () => asked,
+        clearAsked: () => {
+          asked = 0;
+        },
+        lookedAgain: () => lookedAgain,
+        setKindsDelay: (ms) => {
+          kindsDelay = ms;
+        },
+        /** Another folder in the tree, never looked up before. */
+        addFolder: (name) => {
+          mockBridge.directories.add(`/workspace/${name}`);
+        },
+        /** The platform the app believes it is on: its modifier and its timers' path follow it. */
+        setOs: (os) => {
+          useSystemStore.setState({ os });
+        },
+        rect: (which) => {
+          const r = screen(which).getBoundingClientRect();
+          return { left: r.left, top: r.top, width: r.width, height: r.height };
+        },
+        cellSize: (which) => {
+          const r = screen(which).getBoundingClientRect();
+          return { width: r.width / terms[which].cols, height: r.height / terms[which].rows };
+        },
+        /** The text drawn underlined for a hovered link, row by row. */
+        underlined: (which) =>
+          [...terms[which].element.querySelectorAll('.xterm-rows > div')]
+            .map((row) => [...row.querySelectorAll('span')].filter((s) => s.style.textDecoration === 'underline').map((s) => s.textContent).join(''))
+            .filter(Boolean),
+        pointer: (which) => screen(which).classList.contains('xterm-cursor-pointer'),
+        revealed: () => mockBridge.revealed.slice(),
+        clearRevealed: () => {
+          mockBridge.revealed.length = 0;
+        },
+        selection: (which) => terms[which].getSelection(),
+        clearSelection: (which) => terms[which].clearSelection(),
+        os: () => useSystemStore.getState().os,
+        ready: true,
+      };
+    </script>
+  </body>
+</html>

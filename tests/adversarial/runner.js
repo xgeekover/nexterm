@@ -87,6 +87,10 @@ import './editor_read_failures.test.js';
 import './drop_paths.test.js';
 import './drop_paths_spec.test.js';
 import './terminal_file_drop.test.js';
+import './output_paths.test.js';
+import './output_context.test.js';
+import './reveal_links.test.js';
+import './reveal_links_headless.test.js';
 
 async function run() {
   console.log('====================================================');

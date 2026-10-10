@@ -747,6 +747,34 @@ Windows.
   then drag-select inside the name and release over the row → only the text
   is selected.
 
+### V34 — Ctrl+click a listed name shows it in Explorer
+
+Ctrl+click on a file or folder name in the output opens Explorer. The
+Windows code — `ShellExecuteExW` with the "explore" verb for a folder,
+`GetDriveTypeW` to leave mapped drives alone, `SEM_FAILCRITICALERRORS` — was
+type-checked on the Mac and never run; the Korean `dir` headings were tested
+in Node only. Never run on Windows.
+
+- In cmd, `dir` in a folder holding `새 폴더`, `새 폴더 - 복사본` and `a b.txt`:
+  hold Ctrl over each name → the whole name is underlined (not part of it);
+  release Ctrl → the underline goes. Ctrl+click a folder → Explorer opens
+  THAT folder; Ctrl+click a file → its folder opens with the file selected,
+  and nothing runs (try it on an `.exe` and a `.bat`).
+- `dir ..\other` and `dir /s`: names under each ` C:\… 디렉터리` heading open
+  the folder they were listed in. `cd` elsewhere and Ctrl+click an older
+  listing: still the folder it was listed in.
+- Ctrl+click `xcopy /?` output or `cmd /c` text: no `S:\` or `C:\` is opened.
+- A mapped network drive (`net use Z: …`), also disconnected: hovering with
+  Ctrl held never hangs the window and its names are not underlined.
+- Hovering without Ctrl, typing, double-click and right-click copy/paste on a
+  name behave exactly as before. AltGr (Ctrl+Alt) does not flash an underline.
+- In Git Bash: `ls /c/Users` names open `C:\Users\…`.
+- A folder named `x.{645FF040-5081-101B-9F08-00AA002F954E}` in a `dir`
+  listing is never underlined. `echo nul com1 con aux` hovered with Ctrl
+  underlines nothing and does not hang.
+- A path on an empty card reader or DVD drive, hovered with Ctrl: no
+  "insert a disk" box.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
