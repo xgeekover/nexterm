@@ -77,6 +77,7 @@ export function focusAfterClose(opener, doc) {
 const SECTIONS = [
   { id: 'keyboard', label: 'Keyboard Shortcuts' },
   { id: 'editor', label: 'Text Editor' },
+  { id: 'files', label: 'Files' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'workbench', label: 'Workbench' },
 ];
@@ -125,6 +126,18 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       settingKey: 'editor.minimap.enabled',
       title: 'Minimap',
       description: 'Controls whether the minimap is shown on the right edge of the editor.',
+      control: 'checkbox',
+    },
+    // ---- Files ----
+    {
+      id: 'filesEnableTrash',
+      section: 'files',
+      key: 'filesEnableTrash',
+      settingKey: 'files.enableTrash',
+      title: 'Enable Trash',
+      description: isWindows
+        ? 'Delete in the Explorer moves files and folders to the Recycle Bin, where they can be restored. On a drive that has none — a network drive, a USB stick — you are asked again before anything is deleted permanently. Disabled: Delete removes them permanently, after one question.'
+        : 'Delete in the Explorer moves files and folders to the Trash, where they can be restored. Where there is none — some network and USB drives — you are asked again before anything is deleted permanently. Disabled: Delete removes them permanently, after one question.',
       control: 'checkbox',
     },
     // ---- Terminal ----
@@ -353,6 +366,31 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       ],
     },
     {
+      id: 'terminalMultiLinePasteWarning',
+      section: 'terminal',
+      key: 'terminalMultiLinePasteWarning',
+      settingKey: 'terminal.integrated.enableMultiLinePasteWarning',
+      title: 'Multi-Line Paste Warning',
+      description:
+        'Ask before pasting two or more lines, offering Paste, Paste as One Line and Cancel. Auto: only when the program has not asked for bracketed paste, so each line would run as a command the moment it is pasted — cmd never asks for it; zsh, OpenCode and Claude Code do. A line with its own line break at the end is one line, and lines of only spaces are not counted. A paste with an escape sequence in it is asked about even where bracketed paste is on.',
+      control: 'select',
+      options: [
+        { value: 'auto', label: 'Auto' },
+        { value: 'always', label: 'Always' },
+        { value: 'never', label: 'Never' },
+      ],
+    },
+    {
+      id: 'terminalAutoReplyBatchJob',
+      section: 'terminal',
+      key: 'terminalAutoReplyBatchJob',
+      settingKey: 'terminal.integrated.autoReplies',
+      title: 'Answer cmd\'s "Terminate batch job (Y/N)?" with Y',
+      description:
+        'After you press Ctrl+C in a Command Prompt (cmd) terminal, cmd asks this when the program it stopped was started from a batch file — OpenCode, through npm\'s opencode.cmd, every time — and a second Ctrl+C while it asks can end cmd itself. Answered once, and only cmd\'s own question on a new line — the ^C cmd echoes beside it, or its words in English or Korean — within 3 seconds of the Ctrl+C (longer while the program is still closing) and before anything else is typed.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalMouseReporting',
       section: 'terminal',
       key: 'terminalMouseReporting',
@@ -520,6 +558,8 @@ export function SettingsWindow() {
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
+  const terminalMultiLinePasteWarning = useSettingsStore((s) => s.terminalMultiLinePasteWarning);
+  const terminalAutoReplyBatchJob = useSettingsStore((s) => s.terminalAutoReplyBatchJob);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
@@ -530,6 +570,7 @@ export function SettingsWindow() {
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
   const editorMinimap = useSettingsStore((s) => s.editorMinimap);
+  const filesEnableTrash = useSettingsStore((s) => s.filesEnableTrash);
   const reducedMotion = useSettingsStore((s) => s.reducedMotion);
 
   const values = {
@@ -545,6 +586,8 @@ export function SettingsWindow() {
     terminalCopyOnSelect,
     terminalMouseReporting,
     terminalRightClick,
+    terminalMultiLinePasteWarning,
+    terminalAutoReplyBatchJob,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
     terminalProgramNotifications,
@@ -555,6 +598,7 @@ export function SettingsWindow() {
     editorTabSize,
     editorWordWrap,
     editorMinimap,
+    filesEnableTrash,
     reducedMotion,
   };
 

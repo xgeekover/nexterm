@@ -43,6 +43,7 @@ import { useTerminalStore as T, isTabClosing } from '../../src/stores/terminalSt
 import { useSystemStore } from '../../src/stores/systemStore.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
+import { withoutPasteMarkers } from '../../src/lib/pasteWarning.js';
 
 // The glue imports the xterm registry, and TreeRow is JSX: the render suite's
 // loader stands in for `@xterm/*` and parses JSX, as tab_reorder_ui does.
@@ -1065,14 +1066,20 @@ describe('The Explorer row, as it is wired', () => {
 });
 
 describe("The registry's paste", () => {
-  /** `pasteIntoTerminal`, cut from terminalRegistry.js and run against `instances`. */
+  /** `pasteIntoTerminal`, cut from terminalRegistry.js and run against `instances`, with what it imports. */
   function pasteWith(instances) {
     const registry = source('src/components/terminal/terminalRegistry.js');
     const start = registry.indexOf('export function pasteIntoTerminal(');
     assert.ok(start > 0, 'the registry has pasteIntoTerminal');
-    const end = registry.indexOf('\n}\n', start) + 3;
-    const fn = new Function('instances', `${registry.slice(start + 'export '.length, end)}\nreturn pasteIntoTerminal;`);
-    return fn(instances);
+    // To the closing brace at the start of a line, whichever line ending.
+    const length = registry.slice(start).search(/\r?\n\}\r?\n/);
+    assert.ok(length > 0, 'and it ends');
+    const fn = new Function(
+      'instances',
+      'withoutPasteMarkers',
+      `${registry.slice(start + 'export '.length, start + length)}\n}\nreturn pasteIntoTerminal;`
+    );
+    return fn(instances, withoutPasteMarkers);
   }
 
   const terminal = () => {
@@ -1102,5 +1109,15 @@ describe("The registry's paste", () => {
     assert.equal(paste('t1', null), false);
     assert.deepEqual(live.seen, []);
     assert.deepEqual(gone.seen, []);
+  });
+
+  test('TF-62: a dropped name with bracketed paste\'s markers in it goes in without them — and one of only markers sends nothing', () => {
+    // A name can hold an escape character on Linux and macOS; one ending a
+    // bracketed paste early would run what follows it (src/lib/pasteWarning.js).
+    const live = terminal();
+    const paste = pasteWith(new Map([['t1', { term: live.term, disposed: false }]]));
+    assert.equal(paste('t1', "'/tmp/a\x1b[201~b'"), true);
+    assert.equal(paste('t1', '\x1b[200~\x1b[201~'), false, 'never the empty paste OpenCode reads as "attach the image"');
+    assert.deepEqual(live.seen, [['paste', "'/tmp/ab'"], ['focus']]);
   });
 });

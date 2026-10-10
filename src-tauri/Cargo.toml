@@ -40,6 +40,10 @@ tauri-plugin-notification = "2"
 # not by the webview; src/commands/clipboard.rs says why. Text only: with
 # `image-data` arboard can tell an image is there only by decoding all of it.
 arboard = { version = "3.6", default-features = false }
+# The Explorer's delete to the Trash / Recycle Bin (src/fs/trash.rs, which
+# says which system call it ends in on each platform, and what is checked
+# before it on Windows).
+trash = "5.2.9"
 
 # getuid(), so the shell-integration files go somewhere only this user can reach.
 [target.'cfg(unix)'.dependencies]

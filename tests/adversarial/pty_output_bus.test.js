@@ -148,7 +148,11 @@ describe('Output a tab printed before its terminal existed', () => {
 
   test('PB-07: wired — the registry attaches through the bus, and the store starts it first', () => {
     const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
-    assert.match(registry, /ptyUnlisten = attachOutput\(sessionId, \(data\) => entry\.term\.write\(data\)\);/);
+    assert.match(registry, /ptyUnlisten = attachOutput\(sessionId, \(data\) => writeOutput\(entry, data\)\);/);
+    // Which writes every chunk into the terminal, whatever else it looks for
+    // in it (cmd's batch-job question, src/lib/batchJobReply.js).
+    const writer = registry.slice(registry.indexOf('function writeOutput(entry, data) {'));
+    assert.match(writer, /^function writeOutput\(entry, data\) \{[\s\S]*?term\.write\(data\);[\s\S]*?term\.write\(data, \(\) => \{/);
     assert.doesNotMatch(registry, /listen\('pty-output'/, 'no listener of its own left to race the bus');
     assert.match(registry, /forgetOutput\(entry\.sessionId\)/, 'a rebound instance drops the old shell');
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8');

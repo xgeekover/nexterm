@@ -68,6 +68,25 @@ export const SETTINGS_DEFAULTS = {
    * src/lib/terminalRightClick.js.
    */
   terminalRightClick: defaultRightClick(),
+  /**
+   * Ask before pasting two or more lines (VS Code's
+   * `terminal.integrated.enableMultiLinePasteWarning`). 'auto' asks only
+   * while the program has not turned bracketed paste on, so each line would
+   * run as it arrives — cmd never turns it on; zsh, OpenCode and Claude Code
+   * do. 'always' asks for every such paste, 'never' for none. See
+   * src/lib/pasteWarning.js.
+   */
+  terminalMultiLinePasteWarning: 'auto',
+  /**
+   * After a Ctrl+C in a cmd terminal, answer cmd's "Terminate batch job
+   * (Y/N)?" with Y (VS Code's `terminal.integrated.autoReplies`, which ships
+   * this one reply). OpenCode runs in cmd through npm's `opencode.cmd`, so
+   * every Ctrl+C out of it ends in that question, and a second Ctrl+C reaching
+   * cmd while it asks has ended cmd itself. Only cmd's own question, new
+   * since the Ctrl+C, and nothing typed in between; once. See
+   * src/lib/batchJobReply.js.
+   */
+  terminalAutoReplyBatchJob: true,
   terminalDefaultShell: 'default',
   /**
    * Where a NEW terminal starts, when nothing has asked for a directory.
@@ -115,6 +134,14 @@ export const SETTINGS_DEFAULTS = {
   editorTabSize: 2,
   editorWordWrap: false,
   editorMinimap: true,
+  /**
+   * Delete in the Explorer moves to the Trash — the Recycle Bin on Windows
+   * (VS Code's `files.enableTrash`). Where there is none, or the move fails,
+   * nothing is deleted until a second question says it will be for good.
+   * Off: the permanent delete, after one question, as before. See
+   * src-tauri/src/fs/trash.rs.
+   */
+  filesEnableTrash: true,
   reducedMotion: false,
   /**
    * Shortcut overrides, `{ [commandId]: 'mod+shift+b' | ['a','b'] | null }`.

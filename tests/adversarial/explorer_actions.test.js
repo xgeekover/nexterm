@@ -588,7 +588,7 @@ describe('Explorer paste never writes over anything', () => {
     assert.equal(useEditorStore.getState().tabs.some((t) => t.filePath.startsWith(`${scratchDir}/src`)), false);
 
     const explorer = readFileSync(new URL('../../src/components/explorer/FileExplorer.jsx', import.meta.url), 'utf8');
-    assert.match(explorer, /message=\{deletePromptMessage\(deleteConfirm, deleteConfirm\.unsaved\)\}/);
+    assert.match(explorer, /message=\{deletePromptMessage\(deleteConfirm, deleteConfirm\.unsaved, \{ trash: deleteConfirm\.trash, os \}\)\}/);
     assert.doesNotMatch(explorer, /keepUnsaved/, 'no delete keeps a tab whose path is gone');
   });
 

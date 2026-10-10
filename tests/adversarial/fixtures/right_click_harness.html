@@ -27,6 +27,11 @@
   barrier, not a fire-and-forget write. `reset` replaces a pane's terminal
   with a fresh one, so no case inherits the last one's state.
 
+  A paste of several lines into a program without bracketed paste is asked
+  about first (src/lib/pasteWarning.js): `pastePrompt` is the question up,
+  `answerPaste` answers it as the dialog would, and `firePaste` fires the
+  browser's own paste event at a terminal's textarea, as Ctrl+V does.
+
   Not part of the app's own routes; loaded only by that test, over the vite
   dev server it starts on its own scratch config.
 -->
@@ -49,6 +54,8 @@
       import { useSettingsStore } from '../../../src/stores/settingsStore.js';
       import { getOrCreateTerminal, disposeTerminal } from '../../../src/components/terminal/terminalRegistry.js';
       import { terminalRightClickFor } from '../../../src/lib/terminalRightClick.js';
+      import { pasteWarningFor } from '../../../src/lib/pasteWarning.js';
+      import { usePastePromptStore } from '../../../src/stores/pastePromptStore.js';
       import { mockBridge } from '../../../src/lib/ipc.js';
 
       const COLS = 60;
@@ -169,6 +176,26 @@
         pasting: async () => {
           await terminalRightClickFor(terms.app.term)?.pasting;
           return true;
+        },
+        /** The multi-line paste question up, as `{ lines, bracketed }`, or null. */
+        pastePrompt: () => {
+          const prompt = usePastePromptStore.getState().prompt;
+          return prompt ? { lines: prompt.lines, bracketed: prompt.bracketed } : null;
+        },
+        /** Answer it as the dialog does, and wait for what the answer pastes. False when nothing was asked. */
+        answerPaste: async (choice) => {
+          if (!usePastePromptStore.getState().prompt) return false;
+          usePastePromptStore.getState().answer(choice);
+          await pasteWarningFor(terms.app.term)?.answering;
+          return true;
+        },
+        /** The browser's paste event carrying `text`, at `which`'s textarea, as Ctrl+V fires it. Whether it was cancelled. */
+        firePaste: (which, text) => {
+          const clipboardData = new DataTransfer();
+          clipboardData.setData('text/plain', text);
+          const event = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true });
+          terms[which].term.textarea.dispatchEvent(event);
+          return event.defaultPrevented;
         },
         platform: () => navigator.platform,
         ready: true,

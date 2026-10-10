@@ -1049,3 +1049,54 @@ describe('ConfirmDialog: the press that opened it', () => {
     assert.match(src, /openDialogs\.push\(self\);\s*openedAtRef\.current = Date\.now\(\);/);
   });
 });
+
+describe('ConfirmDialog: a question that opens with Cancel focused', () => {
+  beforeEach(loadUi);
+
+  // The Explorer's "Delete Permanently?" after a move to the Trash failed,
+  // and "Paste N lines?": each comes straight after a press that may be
+  // repeated out of habit — a second Enter, the second click of a double
+  // click. Review B8 and C5.
+  test('CD-29: Cancel has the keyboard; a click on the button within the grace is ignored, one from the keyboard or after it is not', async () => {
+    const { ConfirmDialog, BACKDROP_GRACE_MS, confirmClickCounts } = ui;
+    assert.equal(confirmClickCounts({ guarded: true, openedAt: 1000, now: 1000 + BACKDROP_GRACE_MS - 1, detail: 1 }), false);
+    assert.equal(confirmClickCounts({ guarded: true, openedAt: 1000, now: 1000 + BACKDROP_GRACE_MS, detail: 1 }), true);
+    assert.equal(confirmClickCounts({ guarded: true, openedAt: 1000, now: 1001, detail: 0 }), true, 'from the keyboard');
+    assert.equal(confirmClickCounts({ guarded: false, openedAt: 1000, now: 1001, detail: 2 }), true, 'other questions as before');
+    assert.equal(confirmClickCounts({ guarded: true, openedAt: null, now: 5000, detail: 1 }), false, 'not open yet');
+
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      await onPage(async (page) => {
+        const log = [];
+        page.terminal.focus();
+        page.render(h(ConfirmDialog, deleteFolder(log, 'permanent', { initialFocus: 'cancel', confirmLabel: 'Delete Permanently' })));
+        assert.equal(page.focus(), 'Cancel', 'Cancel has the keyboard');
+        page.press('Enter');
+        assert.deepEqual(log, ['permanent:cancel'], 'a second Enter out of habit cancels');
+
+        page.render(h(ConfirmDialog, deleteFolder(log, 'again', { initialFocus: 'cancel', confirmLabel: 'Delete Permanently' })));
+        const confirm = page.button('Delete Permanently');
+        dispatch(page.window, confirm, { type: 'click', detail: 1 });
+        assert.deepEqual(log, ['permanent:cancel'], 'a click at once is the end of a double-click: ignored');
+        dispatch(page.window, confirm, { type: 'click', detail: 0 });
+        assert.deepEqual(log, ['permanent:cancel', 'again:confirm'], 'a press from the keyboard counts');
+        now += BACKDROP_GRACE_MS;
+        dispatch(page.window, confirm, { type: 'click', detail: 1 });
+        assert.deepEqual(log, ['permanent:cancel', 'again:confirm', 'again:confirm'], 'and a click after the grace');
+      });
+      await onPage(async (page) => {
+        const log = [];
+        page.terminal.focus();
+        page.render(h(ConfirmDialog, deleteFolder(log)));
+        assert.equal(page.focus(), 'Delete', 'any other question: its button, as before');
+        dispatch(page.window, page.button('Delete'), { type: 'click', detail: 1 });
+        assert.deepEqual(log, ['delete:confirm'], 'and a click at once counts');
+      });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});

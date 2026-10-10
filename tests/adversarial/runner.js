@@ -91,6 +91,9 @@ import './output_paths.test.js';
 import './output_context.test.js';
 import './reveal_links.test.js';
 import './reveal_links_headless.test.js';
+import './paste_warning.test.js';
+import './batch_job_reply.test.js';
+import './explorer_trash.test.js';
 
 async function run() {
   console.log('====================================================');

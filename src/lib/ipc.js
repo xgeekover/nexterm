@@ -102,6 +102,13 @@ class BrowserMockBridge {
     // What `fs_reveal_path` was asked to show, oldest first, as `{ path,
     // kind }`. There is no file manager here; the suites read this.
     this.revealed = [];
+    // What `fs_delete_path` moved to the Trash, oldest first, as `{ path,
+    // recursive }` — there is no Trash here; the suites read this. And, while
+    // set, why the next moves fail: the reason the backend gives after "Not
+    // moved to the Trash: " (src-tauri/src/fs/trash.rs), as a string, or a
+    // function of the path answering one (or null to let that path move).
+    this.trashed = [];
+    this.trashRefusal = null;
   }
 
   /**
@@ -709,27 +716,41 @@ class BrowserMockBridge {
         return null;
       }
 
-      // 11. fs_delete_path
+      // 11. fs_delete_path — for good, or with `trash: true` to the Trash
+      // (the Recycle Bin on Windows). The backend moves to the bin only what
+      // it would delete, after the same checks, so a path that is not there
+      // is refused in the same words either way; a move that fails says so
+      // with its own fixed words, and nothing is deleted.
       case 'fs_delete_path': {
-        const { path, recursive = false } = args;
-        if (this.files.has(path)) {
-          this.files.delete(path);
-          await this.emit('fs-change', { path, kind: 'delete' });
-        } else if (this.directories.has(path)) {
-          if (recursive) {
-            for (const f of Array.from(this.files.keys())) {
-              if (f.startsWith(path)) this.files.delete(f);
-            }
-            for (const d of Array.from(this.directories.keys())) {
-              if (d.startsWith(path)) this.directories.delete(d);
-            }
-          } else {
-            this.directories.delete(path);
-          }
-          await this.emit('fs-change', { path, kind: 'delete' });
-        } else {
+        const { path, recursive = false, trash = false } = args;
+        const isFile = this.files.has(path);
+        if (!isFile && !this.directories.has(path)) {
           throw new Error(`Path does not exist: ${path}`);
         }
+        if (trash) {
+          const refusal = typeof this.trashRefusal === 'function' ? this.trashRefusal(path) : this.trashRefusal;
+          if (refusal) {
+            const bin = this.systemInfo.os === 'windows' ? 'Recycle Bin' : 'Trash';
+            throw new Error(`Not moved to the ${bin}: ${refusal}`);
+          }
+          this.trashed.push({ path, recursive: Boolean(recursive) });
+        }
+        if (isFile) {
+          this.files.delete(path);
+        } else if (recursive) {
+          // The folder and what is inside it — not a sibling whose name only
+          // begins the same (`src` and `src-old`).
+          const within = (key) => key === path || key.startsWith(`${path}/`);
+          for (const f of Array.from(this.files.keys())) {
+            if (within(f)) this.files.delete(f);
+          }
+          for (const d of Array.from(this.directories.keys())) {
+            if (within(d)) this.directories.delete(d);
+          }
+        } else {
+          this.directories.delete(path);
+        }
+        await this.emit('fs-change', { path, kind: 'delete' });
         return null;
       }
 

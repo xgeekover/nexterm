@@ -43,6 +43,8 @@ const SETTINGS_KEYS = [
   'terminalCopyOnSelect',
   'terminalMouseReporting',
   'terminalRightClick',
+  'terminalMultiLinePasteWarning',
+  'terminalAutoReplyBatchJob',
   'terminalDefaultShell',
   'terminalDefaultCwd',
   'terminalDefaultCwdPath',
@@ -53,6 +55,7 @@ const SETTINGS_KEYS = [
   'editorTabSize',
   'editorWordWrap',
   'editorMinimap',
+  'filesEnableTrash',
   'reducedMotion',
 ];
 
@@ -109,6 +112,9 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       // The one default that depends on the platform: the probe is whichever
       // value this platform does not start with.
       terminalRightClick: S.getState().settingsDefaults.terminalRightClick === 'copyPaste' ? 'default' : 'copyPaste',
+      terminalMultiLinePasteWarning: 'never',
+      terminalAutoReplyBatchJob: false,
+      filesEnableTrash: false,
       editorFontSize: 16,
       editorTabSize: 4,
       editorWordWrap: true,
