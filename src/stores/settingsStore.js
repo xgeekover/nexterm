@@ -84,6 +84,13 @@ export const SETTINGS_DEFAULTS = {
   /** The directory `terminalDefaultCwd: 'custom'` means. `~` is expanded. */
   terminalDefaultCwdPath: '',
   /**
+   * What a pane made by splitting starts as (VS Code's
+   * `terminal.integrated.splitCwd`): `inherited` continues the terminal being
+   * split — its directory and its shell — and `default` is a new terminal
+   * like any other. See `splitStartFor` in src/lib/terminalCwd.js.
+   */
+  terminalSplitCwd: 'inherited',
+  /**
    * Tell me when a command finishes in a terminal I am not looking at, once it
    * has run at least this long. 0 turns it off.
    *

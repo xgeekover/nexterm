@@ -256,6 +256,20 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       ],
     },
     {
+      id: 'terminalSplitCwd',
+      section: 'terminal',
+      key: 'terminalSplitCwd',
+      settingKey: 'terminal.integrated.splitCwd',
+      title: 'Split Directory',
+      description:
+        'Where a terminal made by splitting a pane starts. "The terminal being split" opens it in that terminal\'s current folder, with the same shell; "Same as a new terminal" follows Default Shell and Default Directory.',
+      control: 'select',
+      options: [
+        { value: 'inherited', label: 'The terminal being split' },
+        { value: 'default', label: 'Same as a new terminal' },
+      ],
+    },
+    {
       id: 'terminalDefaultCwdPath',
       section: 'terminal',
       key: 'terminalDefaultCwdPath',
@@ -511,6 +525,7 @@ export function SettingsWindow() {
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
   const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
+  const terminalSplitCwd = useSettingsStore((s) => s.terminalSplitCwd);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
@@ -535,6 +550,7 @@ export function SettingsWindow() {
     terminalProgramNotifications,
     terminalDefaultCwd,
     terminalDefaultCwdPath,
+    terminalSplitCwd,
     editorFontSize,
     editorTabSize,
     editorWordWrap,

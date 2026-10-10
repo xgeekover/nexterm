@@ -14,7 +14,7 @@ import { notificationFor, submitsLine } from '../lib/tabActivity.js';
 import { routeProgramNotification, windowAttention } from '../lib/programNotifications.js';
 import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
-import { resolveStartDir } from '../lib/terminalCwd.js';
+import { resolveStartDir, splitStartFor, startableCwd } from '../lib/terminalCwd.js';
 import {
   agentFromCommandLine,
   cleanAgentTitle,
@@ -2565,7 +2565,16 @@ export const useTerminalStore = create((set, get, api) => {
         ? paneId
         : group.activePaneId;
 
-      const newTab = await spawnTab();
+      // The split continues the terminal shown in the pane being split — its
+      // directory and its shell — unless the Split Directory setting says to
+      // start a new terminal like any other (`splitStartFor`).
+      const sourceLeaf = collectLeaves(group.tree).find((l) => l.id === targetPaneId);
+      const source = get().tabs.find((t) => t.id === sourceLeaf?.activeTabId) ?? null;
+      const start = splitStartFor(source, {
+        mode: useSettingsStore.getState().terminalSplitCwd,
+        os: useSystemStore.getState().os,
+      });
+      const newTab = await spawnTab(null, start.cwd, start.shell);
       if (!newTab) return null;
 
       const newPaneId = makePaneId();
@@ -3267,7 +3276,9 @@ export const useTerminalStore = create((set, get, api) => {
 
       // Duplicate keeps the source's shell as well as its directory — a copy
       // of a Git Bash terminal that opens PowerShell is not a copy.
-      const newTab = await spawnTab(null, source.cwd, source.shell);
+      // Its directory as a shell can be started there: a Git Bash `/c/x` is
+      // `C:\x` (`startableCwd`), or the copy fell back to the workspace root.
+      const newTab = await spawnTab(null, startableCwd(source, useSystemStore.getState().os), source.shell);
       if (!newTab) return null;
 
       set((state) => {
