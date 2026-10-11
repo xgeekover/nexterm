@@ -849,6 +849,39 @@ Shift+Insert never pressed.
   types its path. Right-click paste from the find field, then Cancel → focus
   back in the find field. Ctrl+W while asked → the question closes.
 
+### V39 — editor tabs come back per folder
+
+Only the browser mock was tested.
+
+- Open three files in two groups (one dragged to the right edge), quit with
+  the window's ✕, relaunch → same groups, tabs, shown tab and active group.
+- Open another folder through Open Recent, then go back → the first folder's
+  tabs. Do it again within a second of opening a file → that file is there too.
+- Delete or rename one of the files in Windows' File Explorer (outside the
+  app), relaunch → it is dropped (a file renamed outside counts as gone), no
+  notice, the others are there.
+- A folder on a mapped network drive with the drive disconnected → the app
+  starts, the Explorer works, Open Recent and the palette hand focus back at
+  once; a file opened and edited meanwhile is there after a restart; tabs
+  appear within 15 seconds; the drive's files come back within the next
+  three launches once it is back.
+- From `src` in a terminal, Ctrl+click a printed `..\README.md` → the
+  Explorer's README tab, not a second one. Open a file through a link typed in
+  another case (`C:\PROJ\SRC\a.js`), relaunch → it comes back. With `a.js`
+  already open from the Explorer, the link reveals that tab rather than
+  opening a second.
+- Hold a file with an exclusive lock (PowerShell:
+  `$f=[IO.File]::Open('x.txt','Open','Read','None')`), relaunch → its tab is
+  missing and nothing pops up; `$f.Close()`, relaunch → it is back. Keep it
+  locked for three launches → on the third it is forgotten. A file locked in
+  the right-hand group comes back in the right-hand group once unlocked.
+- On a slow restore, delete one restored file in the Explorer before the tabs
+  appear → it does not come back. Split the editor before they appear → the
+  split stays. Open a file and keep typing in it as the tabs appear → no
+  keystroke lost, the file stays in front; the restored tabs join its group.
+- Setting off → nothing reopens. Back on → what is open now comes back next
+  launch.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
