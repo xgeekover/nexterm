@@ -55,6 +55,7 @@ const SETTINGS_KEYS = [
   'editorTabSize',
   'editorWordWrap',
   'editorMinimap',
+  'editorRestoreTabs',
   'filesEnableTrash',
   'reducedMotion',
 ];
@@ -119,6 +120,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       editorTabSize: 4,
       editorWordWrap: true,
       editorMinimap: false,
+      editorRestoreTabs: false,
       reducedMotion: true,
     };
     const defaults = S.getState().settingsDefaults;

@@ -128,6 +128,16 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       description: 'Controls whether the minimap is shown on the right edge of the editor.',
       control: 'checkbox',
     },
+    {
+      id: 'editorRestoreTabs',
+      section: 'editor',
+      key: 'editorRestoreTabs',
+      settingKey: 'workbench.editor.restoreOpenEditors',
+      title: 'Restore Open Editors',
+      description:
+        'Reopens the files that were open in a folder, in the same editor groups, when the folder is opened again or NexTerm restarts. Unsaved changes are not kept: a reopened file shows what is on disk. Disabled: nothing is reopened, and the files remembered so far are forgotten.',
+      control: 'checkbox',
+    },
     // ---- Files ----
     {
       id: 'filesEnableTrash',
@@ -570,6 +580,7 @@ export function SettingsWindow() {
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
   const editorMinimap = useSettingsStore((s) => s.editorMinimap);
+  const editorRestoreTabs = useSettingsStore((s) => s.editorRestoreTabs);
   const filesEnableTrash = useSettingsStore((s) => s.filesEnableTrash);
   const reducedMotion = useSettingsStore((s) => s.reducedMotion);
 
@@ -598,6 +609,7 @@ export function SettingsWindow() {
     editorTabSize,
     editorWordWrap,
     editorMinimap,
+    editorRestoreTabs,
     filesEnableTrash,
     reducedMotion,
   };

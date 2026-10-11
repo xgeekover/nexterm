@@ -135,6 +135,15 @@ export const SETTINGS_DEFAULTS = {
   editorWordWrap: false,
   editorMinimap: true,
   /**
+   * Reopen the files a folder had open — its editor groups, which tab each
+   * showed, which was active — when that folder opens again, at launch or
+   * from Open Folder / Open Recent (VS Code keeps them per workspace). Only
+   * the files: a reopened tab reads what is on disk, never unsaved edits.
+   * Off: nothing is reopened, and what was remembered is forgotten. See
+   * src/lib/editorSession.js.
+   */
+  editorRestoreTabs: true,
+  /**
    * Delete in the Explorer moves to the Trash — the Recycle Bin on Windows
    * (VS Code's `files.enableTrash`). Where there is none, or the move fails,
    * nothing is deleted until a second question says it will be for good.

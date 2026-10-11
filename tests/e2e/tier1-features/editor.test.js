@@ -85,4 +85,18 @@ describe('Tier 1: Monaco Editor & File Tabs Feature Coverage', () => {
     assert.equal(app.editorTabs.length, 1, 'Only 1 tab should remain');
     assert.equal(app.activeEditorTabId, tab1.id, 'Active tab should switch to tab 1');
   });
+
+  test('TC-EDIT-08: A new case starts with none of the editor tabs the case before it left open', async () => {
+    // The open tabs are remembered per folder and come back when `init()`
+    // runs (src/lib/editorSession.js). Every case is a launch of its own,
+    // and the harness resets storage between them; if it did not, this
+    // folder's tabs would follow every case into the next.
+    await app.openFile('/workspace/package.json');
+    await app.openFile('/workspace/README.md');
+
+    app = new AppEnvironment();
+    await app.initialize();
+
+    assert.equal(app.editorTabs.length, 0, 'the previous case\'s tabs were restored into this one');
+  });
 });

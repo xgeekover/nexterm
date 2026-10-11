@@ -48,6 +48,17 @@ that layout the next time you open it.
   the agent — each typed as soon as its shell is ready, tmuxinator-style.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
+- **Editor tabs come back too.** Each folder remembers its open files — the
+  editor groups, which tab each shows, which is active — and reopens them at
+  launch or when you open that folder again (up to 50 tabs, 12 folders).
+  Files reopen as they are on disk; unsaved edits are not kept. A file that
+  has gone, grown past 50 MB or stopped being text is dropped; one that
+  cannot be read just then — locked, not allowed, a drive that does not
+  answer — is left out but remembered and tried again, for up to three
+  launches. Nothing waits for the tabs: they appear once their files are read
+  (15 seconds at most), and if you open or type in a file before then they
+  join its group instead of rearranging the editor. Settings ▸ Text Editor ▸
+  *Restore Open Editors* turns it off and forgets what was saved.
 - **Pick an agent conversation back up.** A terminal that was running OpenCode
   or Claude Code when NexTerm closed offers that conversation back — the one
   it had, by name — whether NexTerm started the agent or you typed it.

@@ -3,6 +3,7 @@ import { invoke, listen, revealInFileManager } from '../lib/ipc.js';
 import { getLanguageFromPath } from '../lib/utils.js';
 import {
   basename,
+  collapseDots,
   dirname,
   isInside,
   join,
@@ -13,7 +14,18 @@ import {
 } from '../lib/paths.js';
 import { findNode, frontierOf, placeUnder, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
+import {
+  normalizeSessions,
+  restoredLayout,
+  serializeSession,
+  sessionFiles,
+  sessionFor,
+  sessionsPayload,
+  withSession,
+} from '../lib/editorSession.js';
 import { useGitStore } from './gitStore.js';
+import { useSettingsStore } from './settingsStore.js';
+import { useSystemStore } from './systemStore.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
 const loadingDirs = new Set();
@@ -49,6 +61,23 @@ let initInFlight = null;
 
 let editorPaneCounter = 1;
 const makeEditorPaneId = () => `editor-pane-${editorPaneCounter++}`;
+
+/**
+ * Split ids for a restored layout. Splitting by hand names a split after the
+ * millisecond it happened, and a restore builds every split of a saved
+ * layout within one: siblings would share an id, which React keys them by.
+ */
+let restoredSplitCounter = 1;
+const makeRestoredSplitId = () => `editor-split-restored-${restoredSplitCounter++}`;
+
+/**
+ * A tab's id. The counter is there because a restore opens up to fifty tabs
+ * within one millisecond, and with four random characters alone two of fifty
+ * would share an id about once in fourteen hundred such restores.
+ */
+let editorTabCounter = 1;
+const makeEditorTabId = () =>
+  `tab-edit-${Date.now()}-${editorTabCounter++}-${Math.random().toString(36).slice(2, 6)}`;
 
 /** Walks a split-tree node and returns the id of its first leaf (DOM order). */
 function firstLeafId(node) {
@@ -471,18 +500,766 @@ async function writeTab(set, get, targetId, { force = false } = {}) {
   }
 }
 
+/** A tab on `filePath`, whose text on disk is `content`. */
+function newEditorTab(filePath, content) {
+  return {
+    id: makeEditorTabId(),
+    filePath,
+    fileName: basename(filePath),
+    content: content || '',
+    savedContent: content || '',
+    isDirty: false,
+    language: getLanguageFromPath(filePath),
+  };
+}
+
+// --- The tabs each folder had open ------------------------------------------
+//
+// Per folder, the editor's groups and the file each tab shows, written behind
+// every change and read back when that folder opens again — at launch, or by
+// Open Folder / Open Recent. The shape, and why everything read back is
+// treated as untrusted, is in src/lib/editorSession.js.
+
+/** Where the sessions are kept. */
+export const EDITOR_SESSIONS_KEY = 'nexterm.editor.sessions';
+
+const SESSION_DEBOUNCE_MS = 300;
+/** However busy the editor is, the saved tabs are never more than this stale. */
+const SESSION_MAX_WAIT_MS = 2000;
+/** How many files a restore reads at once: enough not to crawl, few enough not to crowd the backend. */
+const RESTORE_READS_AT_ONCE = 4;
+
+/**
+ * How long a restore waits for one file. A read that has not answered by then
+ * — a network drive gone away, a file another program holds — is left out for
+ * now, and the restore goes on without it: one read that never answered used
+ * to hold every other tab back for good.
+ */
+export const RESTORE_READ_TIMEOUT_MS = 5000;
+
+/**
+ * How long a restore waits for all of its files together. Reads go four at a
+ * time, so on a drive that answers nothing fifty files took over a minute of
+ * timeouts; past this, what has not been read is left for next time.
+ */
+export const RESTORE_DEADLINE_MS = 15000;
+
+/**
+ * How many launches in a row a saved file may fail to read — locked, not
+ * allowed, a link to nothing, no answer — before it is forgotten. Kept for
+ * good, such a file came back at every launch as a tab nobody could see or
+ * close.
+ */
+const RESTORE_TRIES = 3;
+
+/**
+ * The saved files already counted as a failed launch in this run of the app
+ * — from one init() to its dispose(). Opening another folder and coming back
+ * reads them again, and counted each time, a locked file was forgotten after
+ * three folder changes in as many seconds.
+ */
+const missedThisRun = new Set();
+
+/**
+ * Whether paths name the same file whatever their case, as the disks of
+ * Windows and macOS compare names by default — by the backend's own account
+ * of the machine (`systemStore`), the user agent's until it has given one.
+ */
+const caselessPaths = () => ['windows', 'macos'].includes(useSystemStore.getState().os);
+
+/**
+ * Whether two paths name one file: separator-blind as `samePath` is, and
+ * case-blind where the disk is (`caselessPaths`). A saved tab comes back
+ * spelled with the folder's own case, and compared by spelling alone it was
+ * a second tab beside one the user had opened — two buffers of one file.
+ * Nothing is respelled.
+ */
+function sameFile(a, b) {
+  if (!caselessPaths()) return samePath(a, b);
+  const fold = (path) => (typeof path === 'string' ? path.toLowerCase() : path);
+  return samePath(fold(a), fold(b));
+}
+
+/**
+ * The folder whose tabs are being saved: the open folder, from the moment it
+ * opens. Null while none is, and from a dispose() to the next init().
+ */
+let sessionRoot = null;
+
+/** Counts folder changes, so that a restore still reading for a folder the user has left is dropped. */
+let restoreGeneration = 0;
+
+/**
+ * The open folder's saved tabs that are not open.
+ *
+ * While the restore reads them, that is every one. Once it has put in what it
+ * could, it is the files it could not read for a reason that may pass — no
+ * answer in time, a lock, a file too large for now (`readFailureIsFinal` says
+ * which reasons do not).
+ *
+ * Saving starts the moment a folder opens, and every save carries these
+ * along, where the restore puts them (`sessionToSave`). Saving used to wait
+ * for the restore to land instead, and a restore that never landed — one read
+ * that never answered — left the folder unsaved for the rest of the run: a
+ * file opened and edited meanwhile was gone after a restart.
+ *
+ * `events` are the Explorer's moves and deletes since the folder opened, for
+ * the saved files to follow (`followMoves`); `suspects`, the paths the watcher
+ * saw deleted while the restore was reading; `misses`, how many launches in a
+ * row have failed to read each file (RESTORE_TRIES).
+ *
+ *   { root, generation, session, waiting: Set of saved paths, applied,
+ *     reading, events: [{ from, to } | { gone }], suspects: Set,
+ *     misses: Map of saved path -> count }
+ */
+let carry = null;
+
+/** The restore running, for `whenTabsRestored`. */
+let restoreRun = Promise.resolve();
+
+/**
+ * When each tab was last the active one, for keeping the most recently used
+ * past SESSION_TAB_LIMIT. Kept beside the store rather than in it: a tab
+ * that carried it would be a new object at every switch, and every editor
+ * group redraws when `tabs` changes.
+ *
+ * A restored tab gets a rank below zero, in the order it was last used in —
+ * below every tab the user has touched since, which all count from one up:
+ * restored as if just used, the tabs of the last session pushed out what the
+ * user had opened while they were read.
+ */
+const tabRecency = new Map(); // tab id -> tick
+let recencyTick = 0;
+const touchTab = (tabId) => {
+  if (tabId) tabRecency.set(tabId, ++recencyTick);
+};
+
+let sessionTimer = null;
+let sessionDeadline = null;
+let pendingSession = null; // { root, session } not written yet
+let lastSessionKey = null;
+
+/** Settings ▸ Text Editor ▸ Restore Open Editors. */
+const restoreEnabled = () => useSettingsStore.getState().editorRestoreTabs !== false;
+
+/** Every saved session, as safe to restore as `normalizeSessions` makes it. */
+function loadSessions() {
+  return normalizeSessions(loadState(EDITOR_SESSIONS_KEY, null), { caseless: caselessPaths() });
+}
+
+/** Write `root`'s session (null: none open), keeping the other folders'. */
+function writeSession(root, session) {
+  saveState(EDITOR_SESSIONS_KEY, sessionsPayload(withSession(loadSessions(), root, session)));
+}
+
+/** Write whatever is pending right now. Safe to call when nothing is. */
+function flushSessionWrite() {
+  clearTimeout(sessionTimer);
+  sessionTimer = null;
+  sessionDeadline = null;
+  const pending = pendingSession;
+  pendingSession = null;
+  if (pending && restoreEnabled()) writeSession(pending.root, pending.session);
+}
+
+/**
+ * Debounced write-behind with a ceiling, as the terminals' layout has (see
+ * `schedulePersist` in terminalStore.js): typing changes `tabs` with every
+ * key, but only a change to what is open reaches here.
+ *
+ * Another folder's session still waiting is written first rather than
+ * replaced — one pending write per folder would otherwise lose the last
+ * change made before the folder changed.
+ */
+function scheduleSessionWrite(root, session) {
+  if (pendingSession && !samePath(pendingSession.root, root)) flushSessionWrite();
+  pendingSession = { root, session };
+  clearTimeout(sessionTimer);
+  if (sessionDeadline === null) sessionDeadline = Date.now() + SESSION_MAX_WAIT_MS;
+  const wait = Math.max(0, Math.min(SESSION_DEBOUNCE_MS, sessionDeadline - Date.now()));
+  sessionTimer = setTimeout(flushSessionWrite, wait);
+}
+
+/** The files of a saved session in the order its groups show them. */
+function filesShown(session) {
+  const files = [];
+  const walk = (node) => (node.type === 'leaf' ? files.push(...node.files) : node.children.forEach(walk));
+  walk(session.tree);
+  return files;
+}
+
+/**
+ * Where a saved file of `carrying` is now, after the Explorer's moves and
+ * deletes since its folder opened — null when one of them deleted it.
+ */
+function followMoves(carrying, path) {
+  let current = path;
+  for (const event of carrying.events) {
+    if ('gone' in event) {
+      if (sameFile(current, event.gone) || isInside(event.gone, current)) return null;
+    } else {
+      current = reparent(current, event.from, event.to);
+    }
+  }
+  return current;
+}
+
+/**
+ * What the Explorer moved (a rename, a cut and paste) or deleted, kept for
+ * the saved files not open yet. The restore read them as they were, and put
+ * a file deleted meanwhile back as a clean tab with its old text — which a
+ * save then wrote back to disk, unasked, since saving a file that is not
+ * there makes it again.
+ */
+function noteExplorerMove(from, to) {
+  carry?.events.push({ from, to });
+}
+
+function noteExplorerDelete(path) {
+  carry?.events.push({ gone: path });
+}
+
+/**
+ * A deletion the watcher reported while the restore is reading. Not taken at
+ * its word: a program saving a file can delete it and write it anew, and git
+ * does so to every file it checks out. The file is looked at again before
+ * it is put in (`readSession`).
+ */
+function noteDeletedOnDisk(path) {
+  if (carry && !carry.applied && typeof path === 'string') carry.suspects.add(path);
+}
+
+/**
+ * Whether a failed read is the file's own answer, which waiting will not
+ * change: it is not there (or is a folder now), it is past what the editor
+ * opens, it is not text — what opening it by hand would say too — or the
+ * backend refuses the path itself: outside the folder, on another machine, a
+ * name Windows reads as another (src-tauri/src/fs/mod.rs). A restore drops
+ * such a file from the folder's saved tabs. Any other failure — no answer in
+ * time, a lock, a permission, a link to nothing — may pass: the file is left
+ * out of the editor but stays saved, for RESTORE_TRIES launches at most.
+ */
+const FINAL_READ_FAILURE =
+  /^(File not found: |File is not UTF-8 text: |File is too large to open \(|Failed to read file '.*': it is not a file$|Path is outside the workspace root |Path is on another machine or a device: |Path is not one Windows reads as it is written: |Path has a name that ends in a dot or a space)/s;
+
+export function readFailureIsFinal(err) {
+  return FINAL_READ_FAILURE.test(errorText(err));
+}
+
+/** Whether `fs_file_size` failed because nothing is at the path, in the words of each OS. */
+function sizeSaysGone(err) {
+  return /No such file or directory|cannot find the (?:file|path) specified|\(os error 2\)/i.test(errorText(err));
+}
+
+/** `promise`, or a rejection once `ms` have passed without an answer. */
+function withinTime(promise, ms) {
+  let timer = null;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`No answer within ${ms / 1000} s`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Start the session of `root`, the folder that has just become the open one:
+ * saved from now on, with what it had open last time carried along until the
+ * restore has read it (`carry`). The reading is `readSession`'s, started once
+ * the Explorer is up.
+ */
+function beginSession(root) {
+  restoreGeneration += 1;
+  sessionRoot = root || null;
+  lastSessionKey = null;
+  carry = null;
+  if (!root || !restoreEnabled()) return;
+  const session = sessionFor(loadSessions(), root);
+  if (!session) return;
+  carry = {
+    root,
+    generation: restoreGeneration,
+    session,
+    waiting: new Set(sessionFiles(session)),
+    applied: false,
+    reading: false,
+    events: [],
+    suspects: new Set(),
+    misses: new Map(Object.entries(session.misses ?? {})),
+  };
+}
+
+/** Read the open folder's saved tabs, if there are any and nothing reads them yet. */
+function startReading(set, get) {
+  if (!carry || carry.reading) return;
+  carry.reading = true;
+  restoreRun = readSession(set, get, carry);
+}
+
+/**
+ * Whether the user has done anything in the editor since the folder opened —
+ * opened a tab, split it, asked whether to close a group — so that a restore
+ * landing now puts its tabs into the editor as it is, rather than in place of
+ * it.
+ *
+ * Opening a tab counts. It used to take a split: a file the user had opened
+ * and was typing in was moved into the saved layout's own group when the
+ * restore landed, its editor drawn afresh, and the keyboard dropped to the
+ * page — the next keys went nowhere.
+ */
+function userTouchedEditor(state) {
+  const tree = state.editorSplitTree;
+  return tree?.type !== 'leaf' || tree.tabIds.length > 0 || state.pendingClose?.kind === 'pane';
+}
+
+/** Whether the keyboard is in an editor group — its text, or its row of tabs. */
+function editorHasKeyboard() {
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  return Boolean(active?.closest?.('[data-editor-pane-body], [data-editor-tab-strip]'));
+}
+
+/**
+ * The editor's groups with a saved session's files in them — `tabIdOf(path)`
+ * names each one's tab, or none to leave it out — and the active group and
+ * tab. Null when no file is left. Two ways:
+ *
+ *  - The saved layout. What a launch or a folder change gets when the user
+ *    has not touched the editor yet: one empty group, replaced.
+ *  - `intoLive`: the editor as it is, with the session's files added to its
+ *    active group, and nothing already there moved — no group replaced, no
+ *    tab taken out of its group, the active group and tab what they were.
+ *    When the user has done anything in the editor (`userTouchedEditor`).
+ *    The tabs never go into a group a "close this group?" question is about.
+ */
+function planLayout(state, session, tabIdOf, newId, intoLive) {
+  const layout = restoredLayout(session, tabIdOf, newId);
+  if (!layout) return null;
+  const leaves = collectLeaves(state.editorSplitTree);
+
+  if (intoLive) {
+    const shownNow = new Set(leaves.flatMap((leaf) => leaf.tabIds));
+    const incoming = collectLeaves(layout.tree)
+      .flatMap((leaf) => leaf.tabIds)
+      .filter((id) => !shownNow.has(id));
+    const asked = state.pendingClose?.kind === 'pane' ? state.pendingClose.id : null;
+    const target =
+      leaves.find((leaf) => leaf.id === state.activeEditorPaneId && leaf.id !== asked) ??
+      leaves.find((leaf) => leaf.id !== asked) ??
+      leaves[0];
+    const shown = target.tabIds.includes(target.activeTabId)
+      ? target.activeTabId
+      : (incoming.includes(layout.activeTabId) ? layout.activeTabId : incoming[0]) ?? null;
+    const tree = mapTree(state.editorSplitTree, (n) =>
+      n.type === 'leaf' && n.id === target.id ? { ...n, tabIds: [...n.tabIds, ...incoming], activeTabId: shown } : n
+    );
+    // The group the user was in stays the active one, and the active tab is
+    // the one it shows, as a click in it makes it (`setActiveEditorPane`).
+    const after = collectLeaves(tree);
+    const pane =
+      after.find((leaf) => leaf.id === state.activeEditorPaneId) ?? after.find((leaf) => leaf.id === target.id);
+    const activeTabId =
+      pane.activeTabId ?? (state.activeTabId && leafHoldingTab(tree, state.activeTabId) ? state.activeTabId : null);
+    return { tree, activeEditorPaneId: pane.id, activeTabId };
+  }
+
+  return { tree: layout.tree, activeEditorPaneId: layout.activePaneId, activeTabId: layout.activeTabId };
+}
+
+/**
+ * Once the restore has landed: the editor as it is, with each carried file
+ * (`carriedIds`) put back into the group it was saved in — beside the tab of
+ * that group it was saved next to, wherever that tab is now. A saved group
+ * none of whose files is open comes back as a group of its own, beside the
+ * rest; and when nothing at all is open, the saved layout is the answer.
+ * Only what is saved: nothing on screen moves.
+ *
+ * Into the active group, as they went, the files that could not be read
+ * this time came back next time in a group that was not theirs.
+ */
+function placeCarried(state, session, tabIdOf, carriedIds) {
+  const rows = new Map(collectLeaves(state.editorSplitTree).map((leaf) => [leaf.id, [...leaf.tabIds]]));
+  if ([...rows.values()].every((ids) => ids.length === 0)) {
+    let minted = 0;
+    return planLayout(state, session, (path) => tabIdOf.get(path) ?? null, (kind) => `kept-${kind}-${(minted += 1)}`, false);
+  }
+  const holderOf = (id) => [...rows].find(([, ids]) => ids.includes(id))?.[0] ?? null;
+  const groups = []; // { tabIds, activeTabId }: saved groups with nothing open
+
+  const walk = (node) => {
+    if (node.type !== 'leaf') {
+      node.children.forEach(walk);
+      return;
+    }
+    let anchor = null; // { leafId, id }: where this group's last file went
+    let before = []; // carried files waiting for an open one to go before
+    for (const saved of node.files) {
+      const id = tabIdOf.get(saved);
+      if (!id) continue;
+      if (carriedIds.has(id)) {
+        if (anchor) {
+          const row = rows.get(anchor.leafId);
+          row.splice(row.indexOf(anchor.id) + 1, 0, id);
+          anchor = { leafId: anchor.leafId, id };
+        } else {
+          before.push(id);
+        }
+        continue;
+      }
+      const leafId = holderOf(id);
+      if (!leafId) continue;
+      if (before.length > 0) {
+        const row = rows.get(leafId);
+        row.splice(row.indexOf(id), 0, ...before);
+        before = [];
+      }
+      anchor = { leafId, id };
+    }
+    if (before.length > 0) {
+      const active = tabIdOf.get(node.active);
+      groups.push({ tabIds: before, activeTabId: before.includes(active) ? active : before[0] });
+    }
+  };
+  walk(session.tree);
+
+  let tree = mapTree(state.editorSplitTree, (n) => (n.type === 'leaf' ? { ...n, tabIds: rows.get(n.id) } : n));
+  if (groups.length > 0) {
+    const extra = groups.map((group, i) => ({ type: 'leaf', id: `kept-group-${i + 1}`, ...group }));
+    tree =
+      tree.type === 'split' && tree.direction === 'horizontal'
+        ? { ...tree, children: [...tree.children, ...extra] }
+        : { type: 'split', id: 'kept-split', direction: 'horizontal', children: [tree, ...extra] };
+  }
+  return { tree, activeEditorPaneId: state.activeEditorPaneId, activeTabId: state.activeTabId };
+}
+
+/**
+ * What is saved for the editor's state: what is open, and the saved files
+ * still to come (`carry`) — where the restore will put them while it reads,
+ * in their own groups once it has landed (`placeCarried`) — ranked below
+ * every tab of this run, each with its count of failed launches.
+ */
+function sessionToSave(state) {
+  const recencyOf = (id) => tabRecency.get(id) ?? 0;
+  const caseless = caselessPaths();
+  if (!carry || carry.waiting.size === 0 || !samePath(carry.root, state.rootPath)) {
+    return serializeSession(state, recencyOf, { caseless });
+  }
+  const { session } = carry;
+  const rankOf = new Map(session.recent.map((saved, i) => [saved, -(i + 1)]));
+  const placeholders = [];
+  const ranks = new Map();
+  const misses = new Map();
+  const tabIdOf = new Map(); // saved path -> tab id, or a placeholder's
+  for (const saved of filesShown(session)) {
+    const path = followMoves(carry, saved);
+    if (path === null) continue;
+    const open = state.tabs.find((t) => sameFile(t.filePath, path));
+    if (open) {
+      tabIdOf.set(saved, open.id);
+    } else if (carry.waiting.has(saved)) {
+      const id = `carried-${placeholders.length}`;
+      placeholders.push({ id, filePath: path });
+      ranks.set(id, rankOf.get(saved) ?? 0);
+      misses.set(id, carry.misses.get(saved) ?? 0);
+      tabIdOf.set(saved, id);
+    }
+  }
+  if (placeholders.length === 0) return serializeSession(state, recencyOf, { caseless });
+  let minted = 0;
+  const plan = carry.applied
+    ? placeCarried(state, session, tabIdOf, new Set(placeholders.map((p) => p.id)))
+    : planLayout(
+        state,
+        session,
+        (path) => tabIdOf.get(path) ?? null,
+        (kind) => `planned-${kind}-${(minted += 1)}`,
+        userTouchedEditor(state)
+      );
+  if (!plan) return serializeSession(state, recencyOf, { caseless });
+  return serializeSession(
+    {
+      rootPath: state.rootPath,
+      tabs: [...state.tabs, ...placeholders],
+      editorSplitTree: plan.tree,
+      activeEditorPaneId: plan.activeEditorPaneId,
+      activeTabId: plan.activeTabId,
+    },
+    (id) => (ranks.has(id) ? ranks.get(id) : recencyOf(id)),
+    { missesOf: (id) => misses.get(id) ?? 0, caseless }
+  );
+}
+
+/**
+ * Save the open tabs if they differ from what was last saved — once the
+ * store holds a folder (`sessionRoot`) and the setting asks for it.
+ */
+function noteSessionChange(state) {
+  if (!restoreEnabled() || !sessionRoot || !samePath(sessionRoot, state.rootPath)) return;
+  const session = sessionToSave(state);
+  const key = JSON.stringify([sessionRoot, session]);
+  if (key === lastSessionKey) return;
+  lastSessionKey = key;
+  scheduleSessionWrite(sessionRoot, session);
+}
+
+/**
+ * Tabs closed in the folder that is open. A saved file the user closes while
+ * the restore is reading it stays closed, rather than coming back when the
+ * restore lands. And once it has landed, an editor the user empties is
+ * nothing open: the files it could not read go from the saved tabs as well.
+ */
+function noteClosedTabs(state, prev) {
+  if (!carry || state.rootPath !== prev.rootPath) return;
+  if (carry.applied && state.tabs.length === 0 && prev.tabs.length > 0) {
+    carry = null;
+    return;
+  }
+  const open = new Set(state.tabs.map((t) => t.id));
+  for (const tab of prev.tabs) {
+    if (open.has(tab.id)) continue;
+    for (const saved of carry.waiting) {
+      if (sameFile(followMoves(carry, saved), tab.filePath)) carry.waiting.delete(saved);
+    }
+  }
+}
+
+/**
+ * The setting turned off: nothing more is saved, and what was saved goes
+ * too. Kept, it would come back the day the setting is turned on again —
+ * files from a session long over — and until then it is a list of the files
+ * someone worked on, in storage, for nothing.
+ */
+function forgetSessions() {
+  clearTimeout(sessionTimer);
+  sessionTimer = null;
+  sessionDeadline = null;
+  pendingSession = null;
+  lastSessionKey = null;
+  carry = null;
+  saveState(EDITOR_SESSIONS_KEY, sessionsPayload([]));
+}
+
+/**
+ * The editor's state with what a restore read put in — `contents` holding the
+ * text of each saved file read, by saved path — or null when nothing can go
+ * in. A file already open keeps its tab, buffer and all, so nothing is open
+ * twice; a file the user closed, or the Explorer deleted, while it was read
+ * stays out; one the Explorer moved opens where it is now.
+ */
+function mergeRestored(state, carrying, contents) {
+  const { root, session } = carrying;
+  const tabIdOf = new Map(); // saved path -> tab id
+  const added = [];
+  for (const saved of filesShown(session)) {
+    const path = followMoves(carrying, saved);
+    if (path === null) continue;
+    const open = state.tabs.find((t) => sameFile(t.filePath, path));
+    if (open) {
+      tabIdOf.set(saved, open.id);
+      continue;
+    }
+    if (!contents.has(saved) || !carrying.waiting.has(saved)) continue;
+    const tab = newEditorTab(withSepOf(path, root), contents.get(saved));
+    added.push(tab);
+    tabIdOf.set(saved, tab.id);
+  }
+  const plan = planLayout(
+    state,
+    session,
+    (path) => tabIdOf.get(path) ?? null,
+    (kind) => (kind === 'pane' ? makeEditorPaneId() : makeRestoredSplitId()),
+    userTouchedEditor(state)
+  );
+  if (!plan) return null;
+
+  const fresh = new Set(added.map((tab) => tab.id));
+  session.recent.forEach((saved, i) => {
+    const id = tabIdOf.get(saved);
+    if (fresh.has(id)) tabRecency.set(id, -(i + 1));
+  });
+  return {
+    tabs: [...state.tabs, ...added],
+    editorSplitTree: plan.tree,
+    activeEditorPaneId: plan.activeEditorPaneId,
+    activeTabId: plan.activeTabId,
+  };
+}
+
+/**
+ * Read one saved file where it is now (`followMoves`). A file the Explorer
+ * moves while it is being read is read again where it went: the read asked
+ * for the old name, found nothing there, and the tab was dropped for good.
+ * Resolves to `{ text }`, or `{ deleted: true }` for a file the Explorer
+ * deleted; rejects with why it would not read.
+ */
+async function readSaved(carrying, saved) {
+  for (let attempt = 1; ; attempt += 1) {
+    const path = followMoves(carrying, saved);
+    if (path === null) return { deleted: true };
+    try {
+      const read = invoke('fs_read_file', { path: withSepOf(path, carrying.root) });
+      return { text: await withinTime(read, RESTORE_READ_TIMEOUT_MS) };
+    } catch (err) {
+      const moved = followMoves(carrying, saved) !== path;
+      if (moved && attempt < 3 && readFailureIsFinal(err)) continue;
+      throw err;
+    }
+  }
+}
+
+/**
+ * Read the saved tabs of `carrying.root`, the open folder, and put in what
+ * could be read.
+ *
+ * Every file is read again through `fs_read_file`, which the backend confines
+ * to the open folder: what is open is what is on disk now. Nothing waits on
+ * this — `init` and `enterRoot` settle once the Explorer is up — and the
+ * folder is saved meanwhile with these files carried along (`carry`).
+ *
+ * The tabs go in at once, when every read has answered or run out of time —
+ * RESTORE_READ_TIMEOUT_MS each, RESTORE_DEADLINE_MS for them all — so the
+ * layout never shows half built. A file not read is left out quietly — no
+ * `openFailure`: nobody asked for it just now, and a notice per file would
+ * greet a launch with a stack of them — and one line in the console names
+ * each, and why. Its group keeps the rest; a group left with nothing goes.
+ * One that may read next time is tried at most RESTORE_TRIES launches in a
+ * row.
+ */
+async function readSession(set, get, carrying) {
+  const { root, generation } = carrying;
+  const current = () => carry === carrying && generation === restoreGeneration && samePath(get().rootPath, root);
+  try {
+    const files = [...carrying.waiting];
+    const contents = new Map(); // saved path -> text
+    const settled = new Set(); // saved paths read, failed, or deleted
+    const gone = []; // { path, reason }: dropped from the saved tabs
+    const notNow = []; // { path, reason, asked }: kept, to be tried again
+    const asked = new Set(); // saved paths whose read was started
+    let next = 0;
+    let closed = false;
+    const reader = async () => {
+      while (!closed && next < files.length) {
+        const saved = files[next];
+        next += 1;
+        asked.add(saved);
+        try {
+          const result = await readSaved(carrying, saved);
+          if (closed) return;
+          if ('text' in result) contents.set(saved, result.text);
+        } catch (err) {
+          if (closed) return;
+          const failure = { path: saved, reason: readFailureReason(err, saved), asked: true };
+          (readFailureIsFinal(err) ? gone : notNow).push(failure);
+        }
+        settled.add(saved);
+      }
+    };
+    let deadline = null;
+    await Promise.race([
+      Promise.all(Array.from({ length: Math.min(RESTORE_READS_AT_ONCE, files.length) }, reader)),
+      new Promise((resolve) => {
+        deadline = setTimeout(resolve, RESTORE_DEADLINE_MS);
+      }),
+    ]);
+    clearTimeout(deadline);
+    closed = true;
+    // Past the deadline: a read under way had its chance; one never started
+    // did not, and is not held against its file (below).
+    const seconds = RESTORE_DEADLINE_MS / 1000;
+    for (const saved of files) {
+      if (settled.has(saved)) continue;
+      const started = asked.has(saved);
+      notNow.push({ path: saved, reason: started ? `no answer within ${seconds} s` : `not reached within ${seconds} s`, asked: started });
+    }
+    if (!current()) return;
+
+    // What the watcher saw deleted while the files were read, looked at again.
+    const suspected = [...contents.keys()].filter((saved) => {
+      const path = followMoves(carrying, saved);
+      return path !== null && [...carrying.suspects].some((s) => sameFile(s, path) || isInside(s, path));
+    });
+    await Promise.all(
+      suspected.map(async (saved) => {
+        try {
+          const path = withSepOf(followMoves(carrying, saved), root);
+          await withinTime(invoke('fs_file_size', { path }), RESTORE_READ_TIMEOUT_MS);
+        } catch (err) {
+          if (!sizeSaysGone(err)) return;
+          contents.delete(saved);
+          gone.push({ path: saved, reason: 'deleted while it was read' });
+        }
+      })
+    );
+    // Another folder opened, or the setting went off, while the files were read.
+    if (!current() || !restoreEnabled()) return;
+
+    // Tried once too often: forgotten like a file that is gone. A miss is
+    // counted only for a read that was asked for, and once a run at most:
+    // on a slow drive, files the deadline never reached were forgotten
+    // without ever being read.
+    const kept = [];
+    for (const miss of notNow) {
+      const counts = miss.asked && !missedThisRun.has(miss.path);
+      const tries = (carrying.misses.get(miss.path) ?? 0) + (counts ? 1 : 0);
+      if (tries >= RESTORE_TRIES) {
+        gone.push({ path: miss.path, reason: `${miss.reason}; not read in ${tries} launches, forgotten` });
+        continue;
+      }
+      if (counts) missedThisRun.add(miss.path);
+      if (tries > 0) carrying.misses.set(miss.path, tries);
+      kept.push(miss);
+    }
+    const missed = [...gone, ...kept];
+    if (missed.length > 0) {
+      const named = missed.map(({ path, reason }) => `${basename(path)} (${reason})`).join(', ');
+      console.warn(`[EditorStore] Not reopened from the last session: ${named}`);
+    }
+    // Read and written with nothing awaited between: a file the user opens
+    // now lands before or after this, never in the middle.
+    const hadKeyboard = editorHasKeyboard();
+    const merged = mergeRestored(get(), carrying, contents);
+    for (const saved of settled) if (!kept.some((miss) => miss.path === saved)) carrying.waiting.delete(saved);
+    for (const { path } of gone) carrying.waiting.delete(path);
+    carrying.applied = true;
+    if (carrying.waiting.size === 0) carry = null;
+    if (merged) set(merged);
+    // The keyboard stays in the editor if that is where it was: whatever the
+    // tabs coming in redrew, the active one is handed it back.
+    if (merged && hadKeyboard) get().focusEditor();
+    // Saved even when nothing went in: the files that are gone leave.
+    noteSessionChange(get());
+  } catch (err) {
+    console.error(`[EditorStore] Could not restore the editor tabs of ${root}:`, err);
+  }
+}
+
+/**
+ * The restore of the open folder's tabs: a promise that settles once it has
+ * put them in or given up — at once when none is running. Nothing in the app
+ * waits for it; the suites do.
+ */
+export function whenTabsRestored() {
+  return restoreRun;
+}
+
 /**
  * Point the workspace at `root`, which the backend has already opened.
  *
  * Another folder closes every editor tab — they belong to the folder being
- * left, and the callers have asked about unsaved ones first. The folder that
- * is already open keeps them: it is the first entry in Open Recent, and
- * choosing it again used to throw every tab away.
+ * left, and the callers have asked about unsaved ones first — and then opens
+ * the tabs that folder had last time (`readSession`), without waiting for
+ * them: Open Recent hands the keyboard back when this settles, and a read
+ * that never answered kept it for good. The folder that is already open
+ * keeps its tabs: it is the first entry in Open Recent, and choosing it
+ * again used to throw every tab away.
  */
 async function enterRoot(set, get, root) {
-  if (samePath(root, get().rootPath)) {
+  const another = !samePath(root, get().rootPath);
+  if (!another) {
     set({ rootPath: root });
   } else {
+    // The folder being left: its last change is written now, while it is
+    // still the one pending. The new one is saved from here on.
+    flushSessionWrite();
+    beginSession(root);
     set({
       rootPath: root,
       expandedFolders: new Set([root]),
@@ -495,6 +1272,7 @@ async function enterRoot(set, get, root) {
   get().rememberRoot(root);
   await get().refreshExplorer();
   useGitStore.getState().refreshNow();
+  if (another) startReading(set, get);
   return root;
 }
 
@@ -541,7 +1319,9 @@ export const useEditorStore = create((set, get) => ({
   attachListeners: async () => {
     if (listening) return;
     listening = true;
-    unlisteners.push(await listen('fs-change', () => {
+    unlisteners.push(await listen('fs-change', (payload) => {
+      // Something deleted while the tabs of last time are being read.
+      if (payload?.kind === 'delete') noteDeletedOnDisk(payload.path);
       // A build or install fires hundreds of events; refresh once they settle.
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => get().refreshExplorer(), 300);
@@ -561,6 +1341,15 @@ export const useEditorStore = create((set, get) => ({
     }
     unlisteners = [];
     listening = false;
+    // The tabs' last change is written out rather than dropped, as the
+    // terminals' layout is. And the next init() — a remount, a reload —
+    // reads the saved tabs again instead of taking this run's word that the
+    // store holds them; a restore still reading puts nothing in.
+    flushSessionWrite();
+    sessionRoot = null;
+    carry = null;
+    // And the run is over: the next counts its own failed reads.
+    missedThisRun.clear();
   },
   init: () => {
     // App's effect runs twice under React StrictMode in development, and the
@@ -586,10 +1375,21 @@ export const useEditorStore = create((set, get) => ({
       useGitStore.getState().refreshNow();
       const opened = get().rootPath;
       if (opened) get().rememberRoot(opened);
+      // This folder's tabs are saved from here on, with those it had open
+      // last time carried along until they are read. Not when the store
+      // already holds them: an init() after one that finished, with nothing
+      // disposed between, would lay them out again.
+      const fresh = !sessionRoot || !samePath(sessionRoot, opened);
+      if (fresh) beginSession(opened);
       await get().refreshExplorer();
 
       // Listen to filesystem changes
       await get().attachListeners();
+
+      // The tabs it had open last time, once the Explorer is up — and not
+      // waited for: a read that never answered held this, and every init()
+      // after it, for good (`readSession`).
+      if (fresh) startReading(set, get);
     })().finally(() => {
       initInFlight = null;
     });
@@ -806,16 +1606,21 @@ export const useEditorStore = create((set, get) => ({
   openFile: async (requestedPath) => {
     // Written the way the backend writes the open folder, so that a link
     // printed in a terminal and a click in the Explorer name the same file
-    // the same way (see `withSepOf`).
-    const filePath = withSepOf(requestedPath, get().rootPath);
+    // the same way (see `withSepOf`) — and with any `.` or `..` worked out,
+    // as the backend works them out (`collapseDots`): `src/../README.md`
+    // from a link was the Explorer's `README.md` in a second tab, and a
+    // saved tab spelled that way was never reopened.
+    const filePath = collapseDots(withSepOf(requestedPath, get().rootPath));
     // Check if already open — reveal it in whichever group already shows it
     // (VS Code's "revealIfOpen") rather than yanking it into the active
     // group, which would be surprising if the user deliberately split panes.
     // Compared separator-blind: on Windows `C:\p\a.js` and `C:\p/a.js` are
     // one file, and two tabs on it were two buffers of it, each taking the
-    // other's saves for changes made on disk.
-    const existing = get().tabs.find((t) => samePath(t.filePath, filePath));
-    if (existing) {
+    // other's saves for changes made on disk. And case-blind where the disk
+    // is (`sameFile`): a link printed as `C:\PROJ\a.js` opened a second tab
+    // on the Explorer's `C:\proj\a.js`.
+    const openTab = () => get().tabs.find((t) => sameFile(t.filePath, filePath));
+    const reveal = (existing) => {
       set((state) => {
         const holder = leafHoldingTab(state.editorSplitTree, existing.id);
         const paneId = holder ? holder.id : state.activeEditorPaneId;
@@ -827,23 +1632,20 @@ export const useEditorStore = create((set, get) => ({
         return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree, openFailure: null };
       });
       return existing;
-    }
+    };
+    const existing = openTab();
+    if (existing) return reveal(existing);
 
     try {
       const content = await invoke('fs_read_file', { path: filePath });
-      const fileName = basename(filePath);
-      const language = getLanguageFromPath(filePath);
+      // Opened by something else while this was reading — the restore of
+      // the folder's last session bringing the same file back, or a second
+      // click — and a second tab on one file is two buffers of it.
+      const raced = openTab();
+      if (raced) return reveal(raced);
 
-      const tabId = `tab-edit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const newTab = {
-        id: tabId,
-        filePath,
-        fileName,
-        content: content || '',
-        savedContent: content || '',
-        isDirty: false,
-        language,
-      };
+      const newTab = newEditorTab(filePath, content);
+      const tabId = newTab.id;
 
       set((state) => ({
         tabs: [...state.tabs, newTab],
@@ -1337,6 +2139,7 @@ export const useEditorStore = create((set, get) => ({
   deletePath: async (path, recursive = false, { trash = false } = {}) => {
     try {
       await invoke('fs_delete_path', { path, recursive, trash: Boolean(trash) });
+      noteExplorerDelete(path);
       await get().refreshExplorer();
       // Close every tab the delete removed. Matching only the exact path
       // left a deleted folder's files open, and saving one of those
@@ -1409,6 +2212,7 @@ export const useEditorStore = create((set, get) => ({
 
     try {
       await invoke('fs_rename_path', { from: oldPath, to: newPath });
+      noteExplorerMove(oldPath, newPath);
       set((state) => remapAfterMove(state, oldPath, newPath));
       await get().refreshExplorer();
     } catch (err) {
@@ -1452,6 +2256,7 @@ export const useEditorStore = create((set, get) => ({
         // A move is a rename: atomic, and it cannot drop part of a subtree
         // the way copy-then-delete does.
         await invoke('fs_rename_path', { from: srcPath, to: destPath });
+        noteExplorerMove(srcPath, destPath);
         set((state) => remapAfterMove(state, srcPath, destPath));
         set({ clipboard: null });
       } else {
@@ -1485,5 +2290,48 @@ export const useEditorStore = create((set, get) => ({
     return tabs.find((t) => t.id === activeTabId) || null;
   },
 }));
+
+// Every change to what is open, wherever it came from — a click, a drag, a
+// rename, a delete, a restore — passes here, so no action has to remember to
+// save. Typing changes `tabs` too; `noteSessionChange` finds the session the
+// same and writes nothing.
+useEditorStore.subscribe((state, prev) => {
+  if (state.activeTabId !== prev.activeTabId) touchTab(state.activeTabId);
+  if (
+    state.tabs === prev.tabs &&
+    state.editorSplitTree === prev.editorSplitTree &&
+    state.activeTabId === prev.activeTabId &&
+    state.activeEditorPaneId === prev.activeEditorPaneId &&
+    state.rootPath === prev.rootPath
+  ) {
+    return;
+  }
+  if (state.tabs !== prev.tabs) noteClosedTabs(state, prev);
+  // Closed tabs' ticks, now and then.
+  if (tabRecency.size > state.tabs.length + 100) {
+    const open = new Set(state.tabs.map((t) => t.id));
+    for (const id of tabRecency.keys()) if (!open.has(id)) tabRecency.delete(id);
+  }
+  noteSessionChange(state);
+});
+
+// Turned off: forget. Turned back on: start from what is open now, rather
+// than waiting for the next change to save it.
+useSettingsStore.subscribe((settings, prev) => {
+  if ((settings.editorRestoreTabs !== false) === (prev.editorRestoreTabs !== false)) return;
+  if (settings.editorRestoreTabs === false) {
+    forgetSessions();
+  } else {
+    lastSessionKey = null;
+    noteSessionChange(useEditorStore.getState());
+  }
+});
+
+// The webview can go away without warning (quit, reload, a Windows update
+// reboot). Write out whatever is pending rather than losing it.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', flushSessionWrite);
+  window.addEventListener('beforeunload', flushSessionWrite);
+}
 
 export default useEditorStore;

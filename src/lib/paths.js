@@ -125,6 +125,44 @@ export function withSepOf(path, like) {
   return path.replace(/\//g, '\\');
 }
 
+/**
+ * `path` with its `.` and `..` parts worked out by spelling, as the backend
+ * works them out before it opens anything (`lexical_normalize`,
+ * src-tauri/src/fs/mod.rs): `/w/src/../README.md` is `/w/README.md`. A `..`
+ * at the top stays at the top — `/..` is `/`, `C:\..` is `C:\` — as it does
+ * there.
+ *
+ * A terminal link resolves against the shell's directory without this
+ * (src/lib/terminalLinks.js), so a build run from `src` that prints
+ * `../README.md` named a file the Explorer calls something else: a second
+ * tab on it, a breadcrumb reading `src › .. › README.md`.
+ *
+ * A path with no `.` or `..` part comes back exactly as it was given. A
+ * relative one keeps a `..` it cannot work out.
+ */
+export function collapseDots(path) {
+  if (typeof path !== 'string') return path;
+  const parts = path.split(/[\\/]/);
+  if (!parts.some((part) => part === '.' || part === '..')) return path;
+  const sep = sepOf(path);
+  const head = /^(?:[\\/]{2}[^\\/]+[\\/][^\\/]+|[A-Za-z]:|)(?=[\\/]|$)/.exec(path)?.[0] ?? '';
+  const absolute = head !== '' || /^[\\/]/.test(path);
+  const rest = path.slice(head.length).split(/[\\/]/);
+  const kept = [];
+  for (const part of rest) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (kept.length > 0 && kept[kept.length - 1] !== '..') kept.pop();
+      else if (!absolute) kept.push('..');
+      continue;
+    }
+    kept.push(part);
+  }
+  const body = kept.join(sep);
+  if (absolute) return `${head}${sep}${body}`;
+  return body || '.';
+}
+
 /** Re-root `path` from `fromPath` onto `toPath` (used when a folder is renamed). */
 export function reparent(path, fromPath, toPath) {
   if (samePath(path, fromPath)) return toPath;
