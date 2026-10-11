@@ -330,22 +330,52 @@ fn rename_in(workspace: &fs::Workspace, from: &str, to: &str) -> Result<(), Stri
 /// Delete a file, a folder or a link. Confined as an entry, so deleting a
 /// link removes the link — including one that leads out of the open folder —
 /// and never what it leads to.
+///
+/// `trash: true` moves it to the Trash (the Recycle Bin on Windows) instead —
+/// the same entry, found the same way, so every guard of a permanent delete
+/// holds for it too. A move that cannot be made fails with "Not moved to the
+/// …" (`fs::trash`) and deletes nothing; whether to delete for good then is
+/// the user's to say, and the Explorer asks. Absent, as from callers before
+/// the setting existed, it is the permanent delete.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn fs_delete_path(
     state: State<AppState>,
     path: String,
     recursive: Option<bool>,
+    trash: Option<bool>,
 ) -> Result<(), String> {
-    delete_in(&state.workspace, &path, recursive.unwrap_or(false))
+    let recursive = recursive.unwrap_or(false);
+    if trash.unwrap_or(false) {
+        trash_in(&state.workspace, &path, recursive, fs::trash::move_to_bin)
+    } else {
+        delete_in(&state.workspace, &path, recursive)
+    }
 }
 
-fn delete_in(workspace: &fs::Workspace, path: &str, recursive: bool) -> Result<(), String> {
+/// The entry a delete acts on: confined as an entry, and never the open
+/// folder itself, which the IPC surface must not be able to delete.
+fn entry_to_delete(workspace: &fs::Workspace, path: &str) -> Result<std::path::PathBuf, String> {
     let target = workspace.confine_entry(path)?;
-    // Never allow the root itself to be deleted through the IPC surface.
     if is_root_of(workspace, &target) {
         return Err("Refusing to delete the workspace root".to_string());
     }
-    fs::delete_path(&target.to_string_lossy(), recursive)
+    Ok(target)
+}
+
+fn delete_in(workspace: &fs::Workspace, path: &str, recursive: bool) -> Result<(), String> {
+    fs::delete_path(&entry_to_delete(workspace, path)?.to_string_lossy(), recursive)
+}
+
+/// `delete_in`, to the bin: the entry is handed to `mover` — the system's
+/// bin in the app, a stand-in in the tests, which must never fill the real
+/// Trash of the machine they run on.
+fn trash_in(
+    workspace: &fs::Workspace,
+    path: &str,
+    recursive: bool,
+    mover: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    fs::trash::trash_path(&entry_to_delete(workspace, path)?, recursive, mover)
 }
 
 /// Copy a file or a folder to a new name — the Explorer's paste. `from` is
@@ -1198,6 +1228,263 @@ mod entry_tests {
 
         copied.unwrap();
         assert_eq!(names_in(&root.join("proj copy")), vec!["a.txt"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- Delete, to the Trash -------------------------------------------
+    //
+    // `trash_in` is `delete_in` with the entry handed to a mover. These run it
+    // with a stand-in bin — a folder of the test's own that the entry is
+    // renamed into, as a link is renamed: the link itself. The system's bin
+    // is never called from the suite: on macOS and Linux it is the Trash of
+    // whoever runs the tests, and every run would leave its leftovers there.
+    // What the crate does with links was checked by hand instead, on a
+    // scratch volume (src/fs/trash.rs).
+
+    /// The stand-in bin: what it was handed, in order, each moved inside it.
+    struct Bin {
+        dir: PathBuf,
+        took: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    impl Bin {
+        fn new(tag: &str) -> Bin {
+            let dir = std::env::temp_dir().join(format!("nexterm-bin-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Bin { dir, took: Default::default() }
+        }
+
+        fn mover(&self) -> impl FnOnce(&Path) -> Result<(), String> + '_ {
+            move |path: &Path| {
+                self.took.borrow_mut().push(path.to_path_buf());
+                let into = self.dir.join(self.took.borrow().len().to_string());
+                fs::rename(path, into).map_err(|e| e.to_string())
+            }
+        }
+
+        fn took(&self) -> Vec<PathBuf> {
+            self.took.borrow().clone()
+        }
+    }
+
+    impl Drop for Bin {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// `AGENTS.md -> CLAUDE.md`, and a link to a folder the Explorer shows as
+    /// a folder and so trashes "recursively": each goes to the bin as the
+    /// link it is, and what it points at stays.
+    #[cfg(unix)]
+    #[test]
+    fn trashing_a_link_takes_the_link_and_never_what_it_points_at() {
+        let (workspace, root) = open_folder("trash-links");
+        let bin = Bin::new("trash-links");
+        fs::write(root.join("CLAUDE.md"), "the real notes").unwrap();
+        link("CLAUDE.md", &root.join("AGENTS.md"));
+        let real = root.join("packages").join("shared");
+        write_at(&real.join("a.txt"), b"a");
+        link(Path::new("packages").join("shared"), &root.join("shared"));
+        let outside = outside_folder("trash-links");
+        link(&outside, &root.join("ext"));
+
+        let moved = [
+            super::trash_in(&workspace, "AGENTS.md", false, bin.mover()),
+            super::trash_in(&workspace, "shared", true, bin.mover()),
+            super::trash_in(&workspace, &s(&root.join("ext")), true, bin.mover()),
+        ];
+        for result in &moved {
+            if crate::fs::trash::LINKS_GO_TO_BIN {
+                assert_eq!(result, &Ok(()));
+            } else {
+                assert_eq!(result, &Err(crate::fs::trash::not_moved(crate::fs::trash::link_not_moved())));
+            }
+        }
+
+        if crate::fs::trash::LINKS_GO_TO_BIN {
+            // macOS: to the Trash, as links.
+            for name in ["AGENTS.md", "shared", "ext"] {
+                assert!(root.join(name).symlink_metadata().is_err(), "the link {name} is still there");
+            }
+            assert_eq!(bin.took(), vec![root.join("AGENTS.md"), root.join("shared"), root.join("ext")]);
+            for i in 1..=3 {
+                assert!(is_link(&bin.dir.join(i.to_string())), "the bin got what link {i} points at");
+            }
+        } else {
+            // Elsewhere: never handed to the system, nor removed unasked —
+            // the move fails, and the Explorer asks about a permanent delete.
+            assert_eq!(bin.took(), Vec::<PathBuf>::new());
+            for name in ["AGENTS.md", "shared", "ext"] {
+                assert!(is_link(&root.join(name)), "the link {name} was removed unasked");
+            }
+        }
+        assert_eq!(fs::read_to_string(root.join("CLAUDE.md")).unwrap(), "the real notes");
+        assert_eq!(fs::read_to_string(real.join("a.txt")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// Every way out of the open folder a permanent delete refuses, the bin
+    /// refuses too — and is never handed anything.
+    #[test]
+    fn trashing_is_no_way_out_of_the_folder() {
+        let (workspace, root) = open_folder("trash-out");
+        let bin = Bin::new("trash-out");
+        let outside = outside_folder("trash-out");
+        fs::create_dir_all(root.join("inner")).unwrap();
+        let escape = format!("../{}/secret.txt", outside.file_name().unwrap().to_string_lossy());
+
+        for path in [escape.clone(), format!("inner/../{escape}"), s(&outside.join("secret.txt"))] {
+            assert!(super::trash_in(&workspace, &path, false, bin.mover()).is_err(), "trashed {path}");
+        }
+        #[cfg(unix)]
+        {
+            link(&outside, &root.join("ext"));
+            assert!(super::trash_in(&workspace, "ext/secret.txt", false, bin.mover()).is_err(), "through a link out");
+        }
+        assert_eq!(bin.took(), Vec::<PathBuf>::new());
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn the_open_folder_itself_is_never_trashed() {
+        let (workspace, root) = open_folder("trash-root");
+        let bin = Bin::new("trash-root");
+        fs::create_dir_all(root.join("inner")).unwrap();
+
+        for spelling in [s(&root), String::new(), ".".to_string(), "inner/..".to_string()] {
+            let err = super::trash_in(&workspace, &spelling, true, bin.mover()).unwrap_err();
+            assert!(err.contains("workspace root"), "trash {spelling:?}: {err}");
+        }
+        assert_eq!(bin.took(), Vec::<PathBuf>::new());
+        assert!(root.join("inner").is_dir());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Finding out where a path on another machine leads signs in to that
+    /// machine; such a path is refused by its spelling, before any of that.
+    #[test]
+    fn a_path_on_another_machine_is_never_trashed() {
+        let (workspace, root) = open_folder("trash-remote");
+        let bin = Bin::new("trash-remote");
+        for path in [r"\\host\share\notes.txt", "//host/share/notes.txt", r"\\?\UNC\host\share\notes.txt"] {
+            let err = super::trash_in(&workspace, path, false, bin.mover()).unwrap_err();
+            assert!(err.contains("another machine"), "{path}: {err}");
+        }
+        assert_eq!(bin.took(), Vec::<PathBuf>::new());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Off Windows a backslash is a character of a name. A folder named `\..`
+    /// goes to the bin as itself; the folder above it, which `..` would
+    /// have meant, stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_starts_with_a_backslash_is_trashed_as_itself() {
+        let (workspace, root) = open_folder("trash-backslash");
+        let bin = Bin::new("trash-backslash");
+        let acme = root.join("com").join("acme");
+        write_at(&acme.join("keep.txt"), b"keep");
+        write_at(&acme.join("\\..").join("inside.txt"), b"inside");
+
+        super::trash_in(&workspace, &s(&acme.join("\\..")), true, bin.mover()).unwrap();
+
+        assert_eq!(bin.took(), vec![acme.join("\\..")]);
+        assert_eq!(fs::read_to_string(acme.join("keep.txt")).unwrap(), "keep");
+        assert_eq!(names_in(&acme), vec!["keep.txt"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Review B9: a space at either end of a name is part of it on macOS and
+    /// Linux. The path used to be trimmed on its way in, so `notes ` was
+    /// `notes`, the file beside it — and that was the one deleted. (Windows
+    /// itself drops a trailing space from a name, so no such file is made
+    /// there.)
+    #[cfg(unix)]
+    #[test]
+    fn a_name_with_a_space_at_either_end_is_that_name_and_no_other() {
+        let (workspace, root) = open_folder("spaces");
+        let bin = Bin::new("spaces");
+        for name in ["notes", "notes ", " notes"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+
+        delete_in(&workspace, &s(&root.join("notes ")), false).unwrap();
+        assert_eq!(names_in(&root), vec![" notes", "notes"], "deleting `notes ` deleted another file");
+        super::trash_in(&workspace, " notes", false, bin.mover()).unwrap();
+        assert_eq!(bin.took(), vec![root.join(" notes")]);
+        assert_eq!(names_in(&root), vec!["notes"]);
+
+        fs::write(root.join("notes "), "spaced").unwrap();
+        assert_eq!(size_in(&workspace, &s(&root.join("notes "))).unwrap(), 6, "read the wrong file");
+        write_in(&workspace, "notes ", "rewritten").unwrap();
+        assert_eq!(fs::read_to_string(root.join("notes")).unwrap(), "notes", "wrote over the wrong file");
+        assert_eq!(fs::read_to_string(root.join("notes ")).unwrap(), "rewritten");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Second review, N1, on Windows itself: `<folder>\. ` and the like are
+    /// the open folder to Windows, and neither delete may reach it.
+    #[cfg(windows)]
+    #[test]
+    fn the_open_folder_is_never_deleted_under_a_name_windows_drops() {
+        let (workspace, root) = open_folder("windows-drops");
+        let bin = Bin::new("windows-drops");
+        fs::write(root.join("keep.txt"), "keep").unwrap();
+        for name in [". ", " ", "...", ". ."] {
+            let spelling = format!(r"{}\{name}", s(&root));
+            assert!(delete_in(&workspace, &spelling, true).is_err(), "deleted {spelling:?}");
+            assert!(super::trash_in(&workspace, &spelling, true, bin.mover()).is_err(), "trashed {spelling:?}");
+        }
+        assert_eq!(bin.took(), Vec::<PathBuf>::new());
+        assert_eq!(fs::read_to_string(root.join("keep.txt")).unwrap(), "keep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A folder with something in it goes to the bin only when the delete
+    /// asked for its contents, as a permanent delete does.
+    #[test]
+    fn a_full_folder_is_trashed_only_when_its_contents_were_asked_for() {
+        let (workspace, root) = open_folder("trash-full");
+        let bin = Bin::new("trash-full");
+        write_at(&root.join("full").join("a.txt"), b"a");
+        fs::create_dir_all(root.join("empty")).unwrap();
+
+        let err = super::trash_in(&workspace, "full", false, bin.mover()).unwrap_err();
+        assert!(err.contains("not empty"), "{err}");
+        assert_eq!(bin.took(), Vec::<PathBuf>::new());
+        super::trash_in(&workspace, "empty", false, bin.mover()).unwrap();
+        super::trash_in(&workspace, "full", true, bin.mover()).unwrap();
+        assert_eq!(bin.took(), vec![root.join("empty"), root.join("full")]);
+        assert_eq!(fs::read(bin.dir.join("2").join("a.txt")).unwrap(), b"a");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The Explorer offers a permanent delete for a failure of the move, and
+    /// for nothing else: a bin that says it took the entry and left it is
+    /// such a failure, its own refusal is passed on as it is, and an entry
+    /// that is not there is not one at all.
+    #[test]
+    fn only_a_move_that_did_not_happen_is_a_failure_of_the_move() {
+        use crate::fs::trash::not_moved;
+        let (workspace, root) = open_folder("trash-failed");
+        fs::write(root.join("a.txt"), "a").unwrap();
+        let prefix = not_moved("");
+
+        let err = super::trash_in(&workspace, "a.txt", false, |_: &Path| Ok(())).unwrap_err();
+        assert!(err.starts_with(&prefix) && err.contains("still there"), "{err}");
+        let err = super::trash_in(&workspace, "a.txt", false, |_: &Path| Err(not_moved("no bin here"))).unwrap_err();
+        assert_eq!(err, not_moved("no bin here"));
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a", "a failed move deleted it anyway");
+
+        let err = super::trash_in(&workspace, "gone.txt", false, |_: &Path| panic!("handed an entry that is not there")).unwrap_err();
+        assert!(err.starts_with("Path does not exist"), "{err}");
+        assert!(!err.starts_with(&prefix));
         let _ = fs::remove_dir_all(&root);
     }
 }

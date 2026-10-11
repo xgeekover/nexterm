@@ -123,6 +123,19 @@ export function backdropCancels(openedAt, now) {
 }
 
 /**
+ * Whether a click on the confirm button counts. For a question opened with
+ * Cancel focused (`initialFocus: 'cancel'`) — one whose confirm cannot be
+ * undone and that follows straight on another — a pointer click within
+ * BACKDROP_GRACE_MS of opening does not: the second click of a double-click
+ * that answered the question before it lands there. A click from the
+ * keyboard (`detail` 0) always counts; reaching the button took a Tab.
+ */
+export function confirmClickCounts({ guarded = false, openedAt = null, now = 0, detail = 1 } = {}) {
+  if (!guarded || detail === 0) return true;
+  return backdropCancels(openedAt, now);
+}
+
+/**
  * VS Code-style modal confirmation. Replaces the native `confirm()` which
  * blocks the whole webview and cannot be styled.
  */
@@ -144,9 +157,18 @@ export function ConfirmDialog({
   // what had it has gone — the menu the dialog was chosen from, say. Puts it
   // there itself. See `focusOnClose`.
   fallbackFocus = null,
+  // Which button has the keyboard when it opens: 'confirm', or 'cancel' for a
+  // question whose confirm cannot be undone and that comes straight after
+  // another — the Explorer's "Delete Permanently?" after a move to the Trash
+  // failed. An Enter pressed twice out of habit then does nothing.
+  initialFocus = 'confirm',
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
+  const cancelRef = useRef(null);
+  // Read once per opening, by the effect below.
+  const focusCancelRef = useRef(false);
+  focusCancelRef.current = initialFocus === 'cancel';
   // Read by the key listener below, which is set up once per opening: the
   // callers pass a new arrow on every render.
   const onCancelRef = useRef(onCancel);
@@ -173,7 +195,7 @@ export function ConfirmDialog({
     const self = { returnTo: returnToRef.current, box, confirm: confirmRef.current };
     openDialogs.push(self);
     openedAtRef.current = Date.now();
-    confirmRef.current?.focus();
+    (focusCancelRef.current ? cancelRef.current : confirmRef.current)?.focus();
 
     // In the capture phase, ahead of the element the key was aimed at: a
     // terminal behind the dialog must not also get a key the dialog keeps.
@@ -249,6 +271,7 @@ export function ConfirmDialog({
             </button>
           )}
           <button
+            ref={cancelRef}
             type="button"
             onClick={onCancel}
             className="h-[26px] px-3 text-ui rounded-[3px] bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover"
@@ -258,7 +281,15 @@ export function ConfirmDialog({
           <button
             ref={confirmRef}
             type="button"
-            onClick={onConfirm}
+            onClick={(e) => {
+              const counts = confirmClickCounts({
+                guarded: initialFocus === 'cancel',
+                openedAt: openedAtRef.current,
+                now: Date.now(),
+                detail: e.detail,
+              });
+              if (counts) onConfirm?.(e);
+            }}
             className={cn(
               'h-[26px] px-3 text-ui rounded-[3px] text-vsc-accent-fg',
               danger ? 'bg-vsc-error hover:opacity-90' : 'bg-vsc-accent hover:bg-vsc-accent-hover'

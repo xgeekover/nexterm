@@ -53,6 +53,7 @@
 import { invoke } from './ipc.js';
 import { currentPlatform, copyTerminalSelection, hasVisibleSelection } from './terminalClipboard.js';
 import { hangulImeFor } from './hangulInlineIme.js';
+import { pasteWarningFor, withoutPasteMarkers } from './pasteWarning.js';
 
 /** The values the setting takes. Anything else acts as 'default'. */
 export const RIGHT_CLICK_BEHAVIORS = Object.freeze(['copyPaste', 'default']);
@@ -105,20 +106,32 @@ export async function readClipboard({ invoke: call = invoke } = {}) {
 
 /**
  * Paste what the clipboard holds into `term`, as Ctrl+V would. Returns what
- * went: 'text', 'image' or 'nothing'.
+ * went: 'text', 'held', 'image' or 'nothing'. `returnFocusTo` is what had the
+ * keyboard before the right-click took it: Cancel on the question gives it
+ * back there.
  *
  * Text goes through xterm's own `paste`, the function Ctrl+V's paste event
  * ends in: line breaks become `\r` and the text is bracketed when the program
  * asked for bracketed paste, so a multi-line paste is not run line by line.
+ * Several lines into a program that did NOT ask for that are 'held' instead,
+ * as Ctrl+V's are: asked about first, and pasted (or not) once answered —
+ * see src/lib/pasteWarning.js. A terminal without that check pastes at once.
  *
  * An image alone is handed over as an EMPTY bracketed paste — `paste('')` —
  * which is what Ctrl+V sends then, and what OpenCode takes as "read the image
  * from the clipboard". Only to a program that asked for bracketed paste: to
- * any other, an empty paste is no paste at all.
+ * any other, an empty paste is no paste at all. It has no lines, so it is
+ * never held.
+ *
+ * Bracketed paste's markers never go in with the text — one inside it would
+ * end the bracket early (src/lib/pasteWarning.js).
  */
-export function pasteClipboard(term, { text = '', image = false } = {}) {
+export function pasteClipboard(term, { text = '', image = false } = {}, { returnFocusTo = null } = {}) {
   if (typeof text === 'string' && text) {
-    term.paste(text);
+    if (pasteWarningFor(term)?.hold(text, { returnFocusTo })) return 'held';
+    const clean = withoutPasteMarkers(text);
+    if (!clean) return 'nothing';
+    term.paste(clean);
     return 'text';
   }
   if (image && term.modes?.bracketedPasteMode) {
@@ -212,6 +225,9 @@ class TerminalRightClickAddon {
     // neither reports it nor readies its context menu.
     this._gesture = { release: true, auxclick: true, menu: true };
     consume(e);
+    // What had the keyboard before this click took it: a paste the user
+    // then cancels gives it back (the find bar's field, say).
+    const before = this._container.ownerDocument?.activeElement ?? null;
     // xterm focuses itself on a press; this one never reaches it. Focused
     // before copying, which is done through xterm's own copy event.
     this._guard('focus', () => term.focus());
@@ -223,7 +239,7 @@ class TerminalRightClickAddon {
         term.clearSelection();
       });
     } else {
-      this._paste();
+      this._paste(before);
     }
   }
 
@@ -249,7 +265,7 @@ class TerminalRightClickAddon {
    * Each right-click reads for itself: two in a row paste twice, as two
    * Ctrl+Vs do.
    */
-  _paste() {
+  _paste(returnFocusTo = null) {
     const term = this._term;
     let reading;
     try {
@@ -264,7 +280,7 @@ class TerminalRightClickAddon {
         // does ahead of any key composing cannot absorb — the paste follows
         // what was typed.
         hangulImeFor(term)?.flush();
-        pasteClipboard(term, contents);
+        pasteClipboard(term, contents, { returnFocusTo });
       })
       .catch((err) => console.warn('[Terminal] a right-click could not paste the clipboard:', err));
   }

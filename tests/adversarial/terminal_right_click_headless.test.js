@@ -23,6 +23,11 @@
  *     the same bytes to the program, by xterm's own rule on this platform.
  *   - RH-07: with the setting at 'default' the app's terminal does exactly
  *     what the control does.
+ *   - RH-07b: the browser's own paste event — what Ctrl+V fires — is held by
+ *     the multi-line paste check before real xterm's listeners hear it, and
+ *     pasted once on Paste; to a program that asked for bracketed paste it
+ *     goes straight through. (The clipboard here holds two lines, so RH-02
+ *     and RH-05 answer that question too: src/lib/pasteWarning.js.)
  *
  * Needs agent-browser; skipped without it, like wheel_headless. RH-01 and
  * RH-08 are setup and teardown, as cases (no suite-level hooks in this
@@ -88,6 +93,8 @@ async function dragTopRow(which, cols) {
 
 /** Both terminals fresh, the setting on, the clipboard holding `clipboard`, and `prelude` written to both. */
 async function fresh({ prelude = '', clipboard = CLIPBOARD, setting = 'copyPaste' } = {}) {
+  // A multi-line paste question an earlier case left up goes, unanswered.
+  await call('answerPaste', 'cancel');
   await call('setRightClick', setting);
   await call('setClipboard', clipboard);
   for (const which of ['app', 'stock']) {
@@ -130,6 +137,11 @@ describe('The right-click: real xterm 6 under headless Chromium (CDP)', () => {
     if (!HEADLESS_AVAILABLE || !harness) skip(NO_BROWSER);
     const reads = await fresh();
     await rightClick('app');
+    // Two lines into a program that did not ask for bracketed paste: asked
+    // about first, nothing sent until answered (src/lib/pasteWarning.js).
+    assert.deepEqual(await call('pastePrompt'), { lines: 2, bracketed: false }, 'the multi-line paste question');
+    assert.equal(await call('data', 'app'), '', 'nothing pasted before the answer');
+    assert.equal(await call('answerPaste', 'paste'), true);
     const app = await outcome('app');
     assert.equal(app.data, PASTED, 'the clipboard, as xterm pastes it — a line break as Enter, no bracketing nobody asked for');
     assert.deepEqual(app.seen, [], 'not one of the four events reached xterm\'s element');
@@ -207,6 +219,7 @@ describe('The right-click: real xterm 6 under headless Chromium (CDP)', () => {
     assert.equal((await call('reads')) - reads, 0, 'the clipboard not even read');
 
     await rightClick('app');
+    assert.equal(await call('answerPaste', 'paste'), true, 'two lines: asked about first');
     assert.equal(await call('data', 'app'), PASTED, 'nothing selected now: the next right-click pastes');
 
     // The same inside a full-screen program, where Shift-drag is how one
@@ -256,6 +269,40 @@ describe('The right-click: real xterm 6 under headless Chromium (CDP)', () => {
       assert.equal(app.data, stock.data, prelude ? 'reported, as before' : 'nothing typed, as before');
       assert.equal((await call('reads')) - reads, 0);
     }
+  });
+
+  test('RH-07b: the browser\'s paste — Ctrl+V — is held before real xterm hears it, pasted once on Paste; bracketed goes straight through', async () => {
+    if (!HEADLESS_AVAILABLE || !harness) skip(NO_BROWSER);
+    await fresh();
+    assert.equal(await call('firePaste', 'app', CLIPBOARD.text), true, 'cancelled: the webview pastes nothing into the textarea');
+    assert.equal(await call('data', 'app'), '', 'xterm\'s own paste listener never ran');
+    assert.deepEqual(await call('pastePrompt'), { lines: 2, bracketed: false });
+    assert.equal(await call('answerPaste', 'paste'), true);
+    assert.equal(await call('data', 'app'), PASTED, 'pasted once, through xterm\'s paste');
+    await sleep(30);
+    assert.equal(await call('data', 'app'), PASTED, 'and only once');
+
+    await fresh();
+    await call('firePaste', 'app', CLIPBOARD.text);
+    assert.equal(await call('answerPaste', 'cancel'), true);
+    assert.equal(await call('data', 'app'), '', 'Cancel: nothing');
+    assert.equal(await call('focused', 'app'), true, 'and the terminal has the keyboard');
+
+    // The control: xterm alone pastes at once.
+    await call('firePaste', 'stock', CLIPBOARD.text);
+    assert.equal(await call('data', 'stock'), PASTED);
+
+    // A program that asked for bracketed paste gets it at once.
+    await fresh({ prelude: FULL_SCREEN });
+    await call('firePaste', 'app', CLIPBOARD.text);
+    assert.equal(await call('pastePrompt'), null, 'not asked');
+    assert.equal(await call('data', 'app'), BRACKETED);
+
+    // One line with its own line break: pasted at once.
+    await fresh();
+    await call('firePaste', 'app', 'echo one\n');
+    assert.equal(await call('pastePrompt'), null);
+    assert.equal(await call('data', 'app'), 'echo one\r');
   });
 
   test('RH-08: teardown — close the browser session and stop the scratch server', async () => {

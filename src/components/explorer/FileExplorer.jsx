@@ -10,8 +10,21 @@ import { Filter,
   ChevronRight,
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
+import { useSettingsStore } from '../../stores/settingsStore.js';
+import { useSystemStore } from '../../stores/systemStore.js';
 import { TreeRow, NameInput, indentFor, ROW_HEIGHT } from './TreeRow.jsx';
-import { deletePromptMessage, filterTree, flattenVisible, navigate } from './treeRows.js';
+import {
+  deleteConfirmLabel,
+  deletePromptMessage,
+  deletesToTrash,
+  failureText,
+  filterTree,
+  flattenVisible,
+  navigate,
+  permanentDeletePromptMessage,
+  queuePermanent,
+  trashFailureReason,
+} from './treeRows.js';
 import { fileIconFor, folderIconFor } from './fileIcons.jsx';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
@@ -84,7 +97,15 @@ export function FileExplorer() {
   const [explorerError, setExplorerError] = useState('');
   const [rootExpanded, setRootExpanded] = useState(true);
   const [contextMenu, setContextMenu] = useState(null); // { x, y, target }
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, isLink, name }
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { path, isDir, isLink, name, unsaved, trash }
+  // After a move to the Trash failed: the same target, and why — asked
+  // again, as a permanent delete, before anything is deleted for good. A
+  // queue, one question at a time (`queuePermanent` says why).
+  const [permanentQueue, setPermanentQueue] = useState([]); // deleteConfirm's shape + { reason, id }
+  const permanentConfirm = permanentQueue[0] ?? null;
+  const closePermanent = (id) => setPermanentQueue((queue) => queue.filter((t) => t.id !== id));
+  // Which bin the questions name: the Recycle Bin on Windows, the Trash elsewhere.
+  const os = useSystemStore((s) => s.os);
 
   // A remount (the side bar reopened) re-reads the tree. The FIRST mount runs
   // before App has asked the backend for the workspace root — a child's
@@ -226,6 +247,15 @@ export function FileExplorer() {
             .tabsUnder(target.path)
             .filter((t) => t.isDirty)
             .map((t) => t.fileName),
+          // To the Trash or for good, decided as the question opens: what it
+          // says and what its button does must be the same thing, whatever
+          // happens to the setting while it is open. A link goes to the Trash
+          // on macOS only; elsewhere it is removed as a link.
+          trash: deletesToTrash({
+            enabled: useSettingsStore.getState().filesEnableTrash !== false,
+            isLink: Boolean(target.isLink),
+            os: useSystemStore.getState().os,
+          }),
         }),
     });
 
@@ -637,20 +667,74 @@ export function FileExplorer() {
               // A link is removed as a link (src-tauri/src/fs/mod.rs
               // delete_path): what it points to is left alone, so "its
               // contents will be deleted too" would be false — and frightening.
-              message={deletePromptMessage(deleteConfirm, deleteConfirm.unsaved)}
-              confirmLabel="Delete"
-              danger
+              // To the Trash, it says so, and that it can be got back.
+              message={deletePromptMessage(deleteConfirm, deleteConfirm.unsaved, { trash: deleteConfirm.trash, os })}
+              confirmLabel={deleteConfirmLabel({ trash: deleteConfirm.trash, os })}
+              danger={!deleteConfirm.trash}
               onConfirm={() => {
                 const target = deleteConfirm;
                 setDeleteConfirm(null);
                 if (!target) return;
-                deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(err.message));
+                const recursive = target.isDir && !target.isLink;
+                if (!target.trash) {
+                  deletePath(target.path, recursive).catch((err) => setExplorerError(failureText(err)));
+                  return;
+                }
+                // A move that could not be made deleted nothing. It is never
+                // turned into a permanent delete here: that is asked first,
+                // in words that say it cannot be undone. Any other refusal
+                // (outside the folder, already gone) is only reported — a
+                // permanent delete would be refused just the same.
+                deletePath(target.path, recursive, { trash: true }).catch((err) => {
+                  const text = failureText(err);
+                  const reason = trashFailureReason(text);
+                  if (reason === null) setExplorerError(text);
+                  else setPermanentQueue((queue) => queuePermanent(queue, { ...target, reason }));
+                });
               }}
               onCancel={() => setDeleteConfirm(null)}
               // Chosen from the context menu, which has gone by the time
               // this opens, so nothing had the keyboard to give it back to:
               // the tree it was chosen in takes it, as it had it before the
               // menu opened.
+              fallbackFocus={() => {
+                if (treeRef.current) treeRef.current.focus({ preventScroll: true });
+                else focusWorkspace('terminal');
+              }}
+            />,
+            document.body
+          )
+        : null}
+
+      {/* The move to the Trash failed — on Windows most often a drive with no
+          Recycle Bin, where the shell would have deleted for good without a
+          word. Nothing has been deleted; this asks whether to, and only
+          "Delete Permanently" does. Portaled and drawn only while open, as
+          the first question is. */}
+      {permanentConfirm
+        ? createPortal(
+            <ConfirmDialog
+              // A dialog of its own per question: a new one opens fresh,
+              // Cancel focused, never as the last one rewritten.
+              key={permanentConfirm.id}
+              open
+              title="Delete Permanently?"
+              message={permanentDeletePromptMessage(permanentConfirm, permanentConfirm.reason, permanentConfirm.unsaved, {
+                os,
+              })}
+              confirmLabel="Delete Permanently"
+              danger
+              // Asked a moment after the Enter that chose "Move to Trash": a
+              // second Enter out of habit must not be the answer.
+              initialFocus="cancel"
+              onConfirm={() => {
+                const target = permanentConfirm;
+                closePermanent(target.id);
+                deletePath(target.path, target.isDir && !target.isLink).catch((err) => setExplorerError(failureText(err)));
+              }}
+              onCancel={() => closePermanent(permanentConfirm.id)}
+              // Asked after the first question had gone, so nothing had the
+              // keyboard: the tree takes it, as after the first.
               fallbackFocus={() => {
                 if (treeRef.current) treeRef.current.focus({ preventScroll: true });
                 else focusWorkspace('terminal');

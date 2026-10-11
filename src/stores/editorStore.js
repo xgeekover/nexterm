@@ -1327,10 +1327,16 @@ export const useEditorStore = create((set, get) => ({
   /** The open tabs at `path` or under it — what deleting `path` would close. */
   tabsUnder: (path) => get().tabs.filter((t) => samePath(t.filePath, path) || isInside(path, t.filePath)),
 
-  /** Delete `path`, and close the tabs of what went with it. */
-  deletePath: async (path, recursive = false) => {
+  /**
+   * Delete `path`, and close the tabs of what went with it. `trash: true`
+   * moves it to the Trash (the Recycle Bin on Windows) instead; a move that
+   * cannot be made rejects with "Not moved to the …" and deletes nothing —
+   * the Explorer then asks whether to delete it for good
+   * (`trashFailureReason`, src/components/explorer/treeRows.js).
+   */
+  deletePath: async (path, recursive = false, { trash = false } = {}) => {
     try {
-      await invoke('fs_delete_path', { path, recursive });
+      await invoke('fs_delete_path', { path, recursive, trash: Boolean(trash) });
       await get().refreshExplorer();
       // Close every tab the delete removed. Matching only the exact path
       // left a deleted folder's files open, and saving one of those

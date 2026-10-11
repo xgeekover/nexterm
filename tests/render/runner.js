@@ -740,6 +740,34 @@ for (const [id, value] of [
   );
 }
 
+// ---- The three safety settings ---------------------------------------------
+
+scenario(
+  'RN-67',
+  'the settings window offers the trash, the multi-line paste warning and the batch-job reply, at their defaults',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    expectText(html, 'Files');
+    expectText(html, 'Enable Trash');
+    expectText(html, 'files.enableTrash');
+    expectText(html, 'Multi-Line Paste Warning');
+    expectText(html, 'terminal.integrated.enableMultiLinePasteWarning');
+    expectText(html, 'terminal.integrated.autoReplies');
+    expectText(html, 'Terminate batch job (Y/N)?');
+    const at = html.indexOf('terminal.integrated.enableMultiLinePasteWarning');
+    const select = /<select\b[^>]*>([\s\S]*?)<\/select>/.exec(html.slice(at))?.[1] ?? '';
+    const options = [...select.matchAll(/<option\b([^>]*)>/g)].map(([, attrs]) => ({
+      value: /\svalue="([^"]*)"/.exec(attrs)?.[1] ?? null,
+      selected: /\sselected=""/.test(attrs),
+    }));
+    expectThat(options.map((o) => o.value).join() === 'auto,always,never', `it offers ${JSON.stringify(options)}`);
+    expectThat(options.filter((o) => o.selected).map((o) => o.value).join() === 'auto', 'auto is drawn as chosen');
+  }
+);
+
 // ---- Keyboard Shortcuts -----------------------------------------------------
 
 scenario(

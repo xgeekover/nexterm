@@ -6,6 +6,7 @@ import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
+import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
@@ -76,6 +77,9 @@ export default function App() {
 
       {/* VS Code-style Settings window — opened from the activity bar / menu */}
       <SettingsWindow />
+
+      {/* "Paste N lines?" before a multi-line paste a program would run line by line */}
+      <PasteWarningDialog />
     </div>
   );
 }

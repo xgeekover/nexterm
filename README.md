@@ -128,6 +128,15 @@ to it, opened. It counts the matches, `Esc` clears it, and clearing puts your
 own expanded folders back exactly as they were. This is a different question
 from ⌘P — "what is in here that looks like X, and where does it sit".
 
+**Delete to the Trash.** Delete in the Explorer moves files and folders to the
+Trash — the Recycle Bin on Windows — where they can be restored. Where that is
+not possible or cannot be checked — a network drive, a USB stick, an item too
+big for the Recycle Bin, a drive whose Recycle Bin is turned off — nothing is
+deleted until a second question, *Delete Permanently?*, opens with Cancel
+focused. On Windows and Linux a link is removed as a link and what it points to
+stays; on macOS it goes to the Trash. Settings ▸ Files ▸ *Enable Trash* turns
+it off.
+
 **Go back to a folder you had open.** `⌥⌘O`, File → *Open Recent…*, or the
 list the Explorer shows when nothing is open. A folder that has since been
 moved or deleted is refused by the backend and drops out of the list rather
@@ -229,6 +238,15 @@ every program. Paste with `⌘V` on macOS, `Ctrl+V` on Windows — see the table
 below. A program that asked for bracketed paste gets the text bracketed, so a
 multi-line paste into a shell or an agent is not run line by line.
 
+**Pasting several lines asks first.** A paste of two or more lines into a
+program that has not asked for bracketed paste — cmd never does, so each line
+would run as it arrives — asks *Paste*, *Paste as One Line* or *Cancel*, with
+Cancel focused so a habitual Enter does not run it. Lines of only spaces do
+not count, and a paste that carries an escape sequence is always asked about;
+bracketed-paste markers are stripped from everything pasted, so a pasted
+`ESC[201~` cannot end the bracket early and run what follows. Settings ▸
+Terminal ▸ *Multi-Line Paste Warning*: Auto, Always or Never.
+
 **Drop a file to type its path.** Drag files or folders from Windows Explorer
 or Finder — or a row from NexTerm's own Explorer — onto a terminal, and their
 full paths are typed into that pane's active terminal: quoted only when
@@ -312,6 +330,13 @@ on (mouse reporting, the full-screen view) is switched off, so a drag selects
 text again. On Windows this is how a terminal comes back when quitting
 OpenCode with Ctrl+C took cmd down with it, as has been seen; the code it
 prints says how cmd ended.
+
+**cmd's "Terminate batch job (Y/N)?" is answered for you.** OpenCode runs in
+cmd through `opencode.cmd`, so Ctrl+C out of it makes cmd ask that question,
+and a second Ctrl+C at it can end cmd itself. In a cmd terminal, after your
+Ctrl+C, NexTerm types `Y` for you — only for cmd's own question (its `^C` beside
+it, or its English or Korean wording), only one that appeared after the Ctrl+C,
+and only until you type something else. Settings ▸ Terminal turns it off.
 
 **Save the whole session.** The 💾 on the WORKSPACES section (or *Save All
 Groups…* from the empty-area menu) snapshots every group — layouts and

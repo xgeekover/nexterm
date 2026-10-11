@@ -59,11 +59,14 @@ import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installTerminalRightClick } from '../../lib/terminalRightClick.js';
+import { installPasteWarning, withoutPasteMarkers } from '../../lib/pasteWarning.js';
+import { usePastePromptStore } from '../../stores/pastePromptStore.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { attachOutput, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
 import { exitNotice, freshScreen } from '../../lib/shellExit.js';
+import { screenRow, setBatchJobScreenReader } from '../../lib/batchJobReply.js';
 
 const instances = new Map();
 
@@ -806,7 +809,7 @@ function bindSession(entry, sessionId) {
     // printed before this terminal existed — a tab never shown kept it there —
     // then everything live, with nothing lost or doubled in between.
     startPtyOutputBus();
-    ptyUnlisten = attachOutput(sessionId, (data) => entry.term.write(data));
+    ptyUnlisten = attachOutput(sessionId, (data) => writeOutput(entry, data));
 
     // When the shell exits, say so — with the code as Windows documents it —
     // and that Enter starts a new one (the store's `restartShell`). The pane
@@ -829,6 +832,28 @@ function bindSession(entry, sessionId) {
     ptyUnlisten?.();
     exitUnlisten?.();
   };
+}
+
+/**
+ * One chunk of a shell's output into its terminal.
+ *
+ * While a Ctrl+C sent to a cmd tab waits for cmd's "Terminate batch job
+ * (Y/N)?" (src/lib/batchJobReply.js), the store hears that the chunk has
+ * arrived — whether the wait is still open is judged then, not when xterm
+ * gets round to parsing it — and is asked to look at the screen once xterm
+ * has written the chunk, its write callback: the question is matched on the
+ * row the cursor is on, not in the raw output, which ConPTY reorders. Any
+ * other time the chunk is only written.
+ */
+function writeOutput(entry, data) {
+  const { tabId, term } = entry;
+  if (!useTerminalStore.getState().batchJobOutputArrived?.(tabId)) {
+    term.write(data);
+    return;
+  }
+  term.write(data, () => {
+    if (!entry.disposed) useTerminalStore.getState().answerBatchJobPrompt?.(tabId, term);
+  });
 }
 
 export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
@@ -946,6 +971,21 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   });
   // ---- end right-click ---------------------------------------------------------
 
+  // ---- Several lines pasted — src/lib/pasteWarning.js -------------------------
+  // A program that never asked for bracketed paste (cmd) runs a pasted block
+  // line by line as it arrives, so such a paste is asked about first: the
+  // browser's paste (Ctrl+V, Shift+Insert, ⌘V, the Edit menu) is held by a
+  // capture listener on the container, ahead of xterm's own, and the
+  // right-click paste above asks the same check. The question is drawn by
+  // PasteWarningDialog.jsx; the setting is read at every paste. Disposed with
+  // the terminal.
+  installPasteWarning(term, container, {
+    settings: useSettingsStore,
+    ask: (question) => usePastePromptStore.getState().ask(tabId, question),
+    withdraw: () => usePastePromptStore.getState().withdraw(tabId),
+  });
+  // ---- end multi-line paste ----------------------------------------------------
+
   const dataDisposable = onData ? term.onData(onData) : null;
 
   // Feed this tab's PTY output straight into its xterm for the whole life of
@@ -956,6 +996,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   ensureSettingsSubscriptionStarted();
 
   entry = {
+    // Whose output `writeOutput` is writing, for what the store looks for in it.
+    tabId,
     term,
     fitAddon,
     linkProvider,
@@ -1080,6 +1122,14 @@ export function writeNotice(tabId, message) {
 // Node under the test suites, and xterm brings a stylesheet with it).
 setTerminalNoticeSink(writeNotice);
 
+// The row on a tab's screen as a Ctrl+C arms the wait for cmd's batch-job
+// question, so a question already on screen then is never the one answered
+// (src/lib/batchJobReply.js). Null for a tab with no terminal.
+setBatchJobScreenReader((tabId) => {
+  const entry = instances.get(tabId);
+  return entry && !entry.disposed ? screenRow(entry.term) : null;
+});
+
 /**
  * Tell the program in `tabId`'s terminal that the terminal lost focus, when it
  * asked for focus reports and xterm last told it the opposite — for a terminal
@@ -1126,11 +1176,19 @@ export function clearTerminal(tabId) {
  * pasted for empty text either — an EMPTY bracketed paste is what Ctrl+V
  * sends for an image-only clipboard, and OpenCode attaches the clipboard's
  * image when it reads one.
+ *
+ * Straight to xterm's `paste`, never past the multi-line paste question
+ * (src/lib/pasteWarning.js): the user chose these paths by dropping them, and
+ * they are one line however many there are. Without bracketed paste's
+ * markers, as every paste is: a file's name can hold an escape character
+ * on Linux and macOS.
  */
 export function pasteIntoTerminal(tabId, text) {
   const entry = instances.get(tabId);
   if (!entry || entry.disposed || typeof text !== 'string' || text === '') return false;
-  entry.term.paste(text);
+  const clean = withoutPasteMarkers(text);
+  if (!clean) return false;
+  entry.term.paste(clean);
   entry.term.focus();
   return true;
 }

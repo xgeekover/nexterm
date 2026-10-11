@@ -251,16 +251,113 @@ export function navigate(rows, index, key) {
  * open, its Save made a new folder or file where the link had been, and the
  * file the user meant to edit never got the edits. So those tabs close too,
  * and the prompt says to save first to keep the edits where the link leads.
+ *
+ * With `trash` (the `files.enableTrash` setting) it asks about moving to the
+ * Trash — the Recycle Bin on Windows (`os`) — instead, in words that say it
+ * can be got back; the unsaved changes are lost all the same, since the tabs
+ * close, and it says so in the same words.
  */
-export function deletePromptMessage(target, unsavedNames = []) {
+export function deletePromptMessage(target, unsavedNames = [], { trash = false, os = null } = {}) {
   const unsaved = unsavedChangesIn(unsavedNames);
+  const lostThroughLink = unsaved
+    ? ` Unsaved changes in ${unsaved} will be lost; save them first to keep them in what it points to.`
+    : '';
+  const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost.` : '';
+  if (trash) {
+    const bin = trashName(os);
+    if (target.isLink) {
+      return `Move the link '${target.name}' to the ${bin}? What it points to is not touched.${lostThroughLink}`;
+    }
+    const contents = target.isDir ? ' Its contents go with it.' : '';
+    return `Move '${target.name}' to the ${bin}?${contents} You can restore it from the ${bin}.${lost}`;
+  }
   if (target.isLink) {
+    return `Are you sure you want to delete the link '${target.name}'? What it points to is not touched.${lostThroughLink}`;
+  }
+  const contents = target.isDir ? ' Its contents will be deleted too.' : '';
+  return `Are you sure you want to delete '${target.name}'?${contents}${lost}`;
+}
+
+/**
+ * Whether a delete of `target` goes to the Trash: with the setting on, and —
+ * for a link — only on macOS. Windows and Linux remove a link as a link
+ * instead (src-tauri/src/fs/trash.rs, `LINKS_GO_TO_BIN`, says why), and
+ * then the question is the plain one about deleting a link: what it points
+ * to is not touched, which is all there is to say.
+ */
+export function deletesToTrash({ enabled = true, isLink = false, os = null } = {}) {
+  return Boolean(enabled) && (!isLink || os === 'macos');
+}
+
+let permanentIds = 0;
+
+/**
+ * The "Delete Permanently?" questions waiting, oldest first, with `target`
+ * added — unless one for the same path is already waiting. Each gets an id
+ * of its own, which keys its dialog.
+ *
+ * A queue, not one slot: two moves to the Trash can fail one after the
+ * other, and the second used to rewrite the question already open — same
+ * dialog, focus where the user had put it, its button now deleting the
+ * other file. Each question opens only once the one before has closed, as
+ * a new dialog with Cancel focused.
+ */
+export function queuePermanent(queue, target) {
+  const waiting = Array.isArray(queue) ? queue : [];
+  if (!target || waiting.some((t) => t.path === target.path)) return waiting;
+  permanentIds += 1;
+  return [...waiting, { ...target, id: `permanent-${permanentIds}` }];
+}
+
+/** What the bin a delete moves to is called on `os`: the Recycle Bin on Windows, the Trash elsewhere. */
+export function trashName(os) {
+  return os === 'windows' ? 'Recycle Bin' : 'Trash';
+}
+
+/** The delete prompt's button: what it will do, in its own words. */
+export function deleteConfirmLabel({ trash = false, os = null } = {}) {
+  return trash ? `Move to ${trashName(os)}` : 'Delete';
+}
+
+/**
+ * Why a move to the bin failed — the backend's words after "Not moved to the
+ * Trash: " (or "…Recycle Bin: ", src-tauri/src/fs/trash.rs) — or null for
+ * any other failure. Only a failure of the move leads to the question about
+ * a permanent delete: a path refused for being outside the folder, on
+ * another machine or already gone would be refused by a permanent delete
+ * just the same, and asking would only offer to try.
+ */
+export function trashFailureReason(message) {
+  const match = /^Not moved to the (?:Trash|Recycle Bin): ([\s\S]*)$/.exec(typeof message === 'string' ? message : '');
+  return match ? match[1].trim() : null;
+}
+
+/**
+ * The second question, after a move to the bin failed: whether to delete
+ * `target` for good instead, saying why it could not be moved — on Windows
+ * most often a drive with no Recycle Bin (a network drive, a USB stick),
+ * where the shell would otherwise have deleted it permanently without a
+ * word. Unsaved changes are named as in the first question.
+ */
+export function permanentDeletePromptMessage(target, reason, unsavedNames = [], { os = null } = {}) {
+  const unsaved = unsavedChangesIn(unsavedNames);
+  const bin = trashName(os);
+  const why = reason ? `: ${String(reason).replace(/[.\s]+$/, '')}.` : '.';
+  // Listed as a folder, a link now (made a junction since): the backend
+  // refused to move it (`link_not_moved` in src-tauri/src/fs/trash.rs), and
+  // a permanent delete removes the link alone — so it is asked about as one.
+  if (target.isLink || /^It is a link\b/.test(String(reason ?? ''))) {
     const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost; save them first to keep them in what it points to.` : '';
-    return `Are you sure you want to delete the link '${target.name}'? What it points to is not touched.${lost}`;
+    return `The link '${target.name}' could not be moved to the ${bin}${why} Delete the link permanently instead? What it points to is not touched.${lost}`;
   }
   const contents = target.isDir ? ' Its contents will be deleted too.' : '';
   const lost = unsaved ? ` Unsaved changes in ${unsaved} will be lost.` : '';
-  return `Are you sure you want to delete '${target.name}'?${contents}${lost}`;
+  return `'${target.name}' could not be moved to the ${bin}${why} Delete it permanently instead? This cannot be undone.${contents}${lost}`;
+}
+
+/** A failure's words: Tauri rejects with the command's own string, the browser mock with an Error. */
+export function failureText(err) {
+  return typeof err === 'string' ? err : String(err?.message ?? err ?? '');
 }
 
 /** "a.js", "a.js and b.js", "a.js, b.js and 3 other files". */

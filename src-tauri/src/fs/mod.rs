@@ -2,6 +2,7 @@ pub mod git;
 pub mod watcher;
 pub mod search;
 pub mod reveal;
+pub mod trash;
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;
@@ -44,17 +45,23 @@ pub fn canonical_or(path: &Path) -> PathBuf {
     path.canonical().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// A path as given, `~/` expanded; empty or `.` is the current directory.
+///
+/// Never trimmed: a space at either end is part of a name on macOS and
+/// Linux, and the paths reaching here name entries that exist — trimming
+/// `…/notes ` made it `…/notes`, its sibling, and a delete then removed the
+/// wrong file. What a person types is trimmed where it is typed
+/// (`NameInput` in TreeRow.jsx, the store's `renamePath`).
 pub fn resolve_path(path_str: &str) -> PathBuf {
-    let trimmed = path_str.trim();
-    if trimmed.is_empty() || trimmed == "." {
+    if path_str.is_empty() || path_str == "." {
         return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     }
-    if let Some(stripped) = trimmed.strip_prefix("~/") {
+    if let Some(stripped) = path_str.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
             return PathBuf::from(home).join(stripped);
         }
     }
-    PathBuf::from(trimmed)
+    PathBuf::from(path_str)
 }
 
 pub fn read_dir_hierarchy(root_str: &str, max_depth: Option<usize>) -> Result<Vec<FileNode>, String> {
@@ -1032,22 +1039,49 @@ pub fn confine_entry_to(root: &Path, path_str: &str) -> Result<PathBuf, String> 
 }
 
 /// The path the webview named, made absolute against `root`, with `.` and
-/// `..` worked out by spelling alone. `None` for a blank path or `.`, which
+/// `..` worked out by spelling alone. `None` for an empty path or `.`, which
 /// both mean the open folder.
+///
+/// Taken exactly as spelled, never trimmed: on macOS and Linux `notes ` is a
+/// name of its own, and trimming it made a delete of `notes ` delete
+/// `notes`, the entry beside it (see `resolve_path`).
 ///
 /// Refused here, before anything touches the filesystem, when finding out
 /// where it leads would mean asking another machine (`on_another_machine`).
 /// The check after `canonicalize` came too late for that: canonicalizing
 /// `\\host\share\x` is what makes Windows connect to the host.
 fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
-    let trimmed = path_str.trim();
-    if trimmed.is_empty() || trimmed == "." {
+    spelled_in_as(root, path_str, cfg!(windows))
+}
+
+/// `spelled_in`, with Windows' rules (`windows`) on or off — so the suites
+/// hold them on every platform.
+///
+/// Windows does not act on a path as it is spelled: it drops every dot and
+/// space from the end of its last part, and a single dot from the end of any
+/// other ("File path formats on Windows systems", Microsoft; std hands a
+/// short `C:\…` path to Windows as it is). So `<folder>\. `, `<folder>\ `,
+/// `<folder>\...` and `<folder>\. .` are names inside the folder by their
+/// spelling — not the folder, which no delete may touch (`is_root_of`) — and
+/// the folder itself to Windows: a delete of one removed the whole open
+/// folder, and a move to the Recycle Bin recycled it. Such a path is refused
+/// on Windows, as is any other Windows would read differently from how it
+/// is written (`std::path::absolute`, its own normalisation, against the
+/// spelling). `\\?\` spelling would not help: the trash crate and the shell
+/// normalise again. Elsewhere `notes ` is a name like any other.
+fn spelled_in_as(root: &Path, path_str: &str, windows: bool) -> Result<Option<PathBuf>, String> {
+    if path_str.is_empty() || path_str == "." {
         return Ok(None);
     }
+    if windows && windows_drops_part_of(path_str) {
+        return Err(format!(
+            "Path has a name that ends in a dot or a space, which Windows would read as another: {path_str}"
+        ));
+    }
 
-    let expanded = match trimmed.strip_prefix("~/") {
+    let expanded = match path_str.strip_prefix("~/") {
         Some(rest) => home_dir().join(rest),
-        None => PathBuf::from(trimmed),
+        None => PathBuf::from(path_str),
     };
     let joined = if expanded.is_absolute() {
         expanded
@@ -1055,10 +1089,30 @@ fn spelled_in(root: &Path, path_str: &str) -> Result<Option<PathBuf>, String> {
         root.join(expanded)
     };
     let spelled = lexical_normalize(&joined);
-    if on_another_machine(root, trimmed, &spelled) {
+    if on_another_machine(root, path_str, &spelled) {
         return Err(format!("Path is on another machine or a device: {path_str}"));
     }
+    #[cfg(windows)]
+    if windows && !windows_reads_as_written(&spelled) {
+        return Err(format!("Path is not one Windows reads as it is written: {path_str}"));
+    }
     Ok(Some(spelled))
+}
+
+/// Whether any part of `path` ends in a dot or a space — other than `.` and
+/// `..` themselves, which are worked out by spelling — so that Windows would
+/// drop it and act on another path (`spelled_in_as`). Either separator.
+pub fn windows_drops_part_of(path: &str) -> bool {
+    path.split(['\\', '/'])
+        .any(|part| part != "." && part != ".." && (part.ends_with('.') || part.ends_with(' ')))
+}
+
+/// Whether Windows' own normalisation of `spelled` (GetFullPathNameW, through
+/// `std::path::absolute`) is `spelled` itself. It is purely lexical: nothing
+/// is looked up, and no other machine is asked.
+#[cfg(windows)]
+fn windows_reads_as_written(spelled: &Path) -> bool {
+    std::path::absolute(spelled).is_ok_and(|full| full == spelled)
 }
 
 /// `path` with every link in it resolved, refused unless that lands inside
@@ -1154,6 +1208,46 @@ mod confine_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Second review, N1: Windows drops the dots and spaces from the end of
+    /// a name, so `<folder>\. ` is the open folder itself to it — and a
+    /// delete of that removed the whole folder. Refused there; elsewhere it
+    /// is a name inside the folder, never the folder.
+    #[test]
+    fn a_name_windows_would_drop_part_of_is_refused_under_windows_rules() {
+        for path in [". ", " ", "...", ". .", "x.", "x ", r"src\. ", "src/. ", r"src.\a.txt", "a. /b", r"C:\proj\..."] {
+            assert!(windows_drops_part_of(path), "{path:?}");
+        }
+        for path in [".", "..", r"C:\proj\a.txt", r"a\..\b", ".hidden", "foo .txt", r"\\?\C:\a", "", r"C:\proj\src\"] {
+            assert!(!windows_drops_part_of(path), "{path:?}");
+        }
+        let root = temp_root("windows-drops");
+        let at = root.to_string_lossy().to_string();
+        for spelling in [
+            format!("{at}/. "),
+            format!("{at}/ "),
+            format!("{at}/..."),
+            format!("{at}/. ."),
+            ". ".to_string(),
+            "sub/ ".to_string(),
+        ] {
+            let err = spelled_in_as(&root, &spelling, true).unwrap_err();
+            assert!(err.contains("ends in a dot or a space"), "{spelling:?}: {err}");
+            let named = spelled_in_as(&root, &spelling, false).unwrap().unwrap();
+            assert_ne!(named, root, "{spelling:?} is a name in the folder, not the folder");
+        }
+        assert!(spelled_in_as(&root, "src/a.txt", true).unwrap().is_some());
+        assert!(spelled_in_as(&root, "src/../a.txt", true).unwrap().is_some(), "`..` is worked out by spelling");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_own_reading_of_a_path_is_compared_with_its_spelling() {
+        assert!(windows_reads_as_written(Path::new(r"C:\proj\a.txt")));
+        assert!(!windows_reads_as_written(Path::new(r"C:\proj\x. ")));
+        assert!(!windows_reads_as_written(Path::new(r"C:\proj\...")));
+    }
+
     /// Windows opens `\\host\share\x` by connecting to the host and signing
     /// in with the user's credentials (NTLM), and canonicalizing a path
     /// opens it — so confinement reached the host before it ever compared
@@ -1172,11 +1266,27 @@ mod confine_tests {
             r"\??\UNC\host\share\x.txt",
             "/??/UNC/host/share/x.txt",
             r"\\?\GLOBALROOT\Device\Mup\host\share\x.txt",
-            r"  \\host\share\x.txt",
         ] {
             for (what, result) in [("confine_to", confine_to(&root, path)), ("confine_entry_to", confine_entry_to(&root, path))] {
                 let err = result.expect_err(&format!("{what} let {path:?} through"));
                 assert!(err.contains("another machine"), "{what} {path:?}: {err}");
+            }
+        }
+        // A path is no longer trimmed (`spelled_in`), so one that only
+        // starts with spaces before `\\host` is a name in the open folder —
+        // a folder named by the spaces — and never reaches a host. On Windows
+        // that name is refused outright: Windows drops trailing spaces, so a
+        // name made of them is no name it would keep (`windows_drops_part_of`).
+        for (what, result) in [
+            ("confine_to", confine_to(&root, r"  \\host\share\x.txt")),
+            ("confine_entry_to", confine_entry_to(&root, r"  \\host\share\x.txt")),
+        ] {
+            if cfg!(windows) {
+                let err = result.expect_err(&format!("{what}: a name of spaces is no name on Windows"));
+                assert!(err.contains("ends in a dot or a space"), "{what}: {err}");
+            } else {
+                let inside = result.unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert!(inside.starts_with(&root) && !is_network_path(&inside.to_string_lossy()), "{what}: {inside:?}");
             }
         }
         // Local paths, in the spellings Windows allows, are still judged by

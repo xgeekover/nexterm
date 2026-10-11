@@ -15,6 +15,9 @@ import { routeProgramNotification, windowAttention } from '../lib/programNotific
 import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir, splitStartFor, startableCwd } from '../lib/terminalCwd.js';
+import { createBatchJobReplies } from '../lib/batchJobReply.js';
+import { shellKindFor } from '../lib/dropPaths.js';
+import { shellPathOf } from '../lib/terminalFileDrop.js';
 import {
   agentFromCommandLine,
   cleanAgentTitle,
@@ -1244,6 +1247,34 @@ async function clearTerminalView(tabId) {
   }
 }
 
+/**
+ * Whether a tab's shell is cmd: the shell it reported, else the one it would
+ * have been given (`shellPathOf`), named as the platform names it.
+ */
+function runsCmd(tab) {
+  if (!tab) return false;
+  const system = useSystemStore.getState();
+  const shell = shellPathOf(tab, {
+    defaultShell: useSettingsStore.getState().terminalDefaultShell,
+    systemShell: system.defaultShell,
+  });
+  return shellKindFor(shell, system.os) === 'cmd';
+}
+
+/**
+ * cmd's "Terminate batch job (Y/N)?" after a Ctrl+C, answered Y — the rules
+ * and the reasons are src/lib/batchJobReply.js. Armed by `writeRaw`, which
+ * every input to a shell goes through; the registry asks after each chunk of
+ * output it writes (`awaitsBatchJobPrompt`, `answerBatchJobPrompt`). The
+ * answer is typed like any key, through `writeRaw`. Everything is read as
+ * each event comes: the setting, the tab's shell, the tab itself.
+ */
+const batchJobReplies = createBatchJobReplies({
+  enabled: () => useSettingsStore.getState().terminalAutoReplyBatchJob !== false,
+  isCmd: (tabId) => runsCmd(useTerminalStore.getState().tabs.find((t) => t.id === tabId)),
+  reply: (tabId, text) => useTerminalStore.getState().writeRaw(tabId, text),
+});
+
 /** A machine left running overnight must not grow this without bound. */
 const NOTIFICATION_LIMIT = 50;
 
@@ -1640,6 +1671,7 @@ export const useTerminalStore = create((set, get, api) => {
       await disposeTerminalView(tabId);
       typedLines.delete(tabId);
       forgetAgentTitle(tabId);
+      batchJobReplies.forget(tabId);
       // Whatever its shell printed that no terminal ever showed goes with it, as
       // in `closeTab`. Closing a pane, a group or the whole workspace comes this
       // way, and a tab of theirs never brought forward kept up to BACKLOG_LIMIT
@@ -1938,6 +1970,21 @@ export const useTerminalStore = create((set, get, api) => {
         if (state.find.resultIndex === resultIndex && state.find.resultCount === resultCount) return {};
         return { find: { ...state.find, resultIndex, resultCount } };
       }),
+
+    // ---- cmd's "Terminate batch job (Y/N)?" ----------------------------
+    // Asked by the registry for every chunk of output it writes, so these
+    // are a Map lookup until a Ctrl+C has armed the tab. See
+    // src/lib/batchJobReply.js.
+
+    /**
+     * A chunk of `tabId`'s output has arrived: whether the tab still waits
+     * for cmd's question after a Ctrl+C — judged now, as it arrives — so its
+     * screen is read once xterm has written it.
+     */
+    batchJobOutputArrived: (tabId) => batchJobReplies.outputArrived(tabId),
+
+    /** A chunk of `tabId`'s output is on `term`'s screen: answer cmd's question if that is what it shows. Returns whether it did. */
+    answerBatchJobPrompt: (tabId, term) => batchJobReplies.afterOutput(tabId, term),
 
     // ---- Reading the layout -------------------------------------------
     getActiveGroup: () => {
@@ -3346,6 +3393,7 @@ export const useTerminalStore = create((set, get, api) => {
         await disposeTerminalView(tabId);
         typedLines.delete(tabId);
         forgetAgentTitle(tabId);
+        batchJobReplies.forget(tabId);
         // Whatever its shell printed that no terminal ever showed goes with it.
         forgetOutput(tab.sessionId);
 
@@ -3579,8 +3627,11 @@ export const useTerminalStore = create((set, get, api) => {
         return;
       }
       // Every key and every line the app types goes through here, so this is
-      // where the line being typed can be followed to the command it runs.
+      // where the line being typed can be followed to the command it runs —
+      // and where a Ctrl+C into cmd starts the wait for "Terminate batch job
+      // (Y/N)?", and anything typed after it ends that wait.
       followTyping(tab, data);
+      batchJobReplies.noteInput(targetId, data);
       // Both taken before the write: the shell's answer can arrive before
       // `invoke` resolves, and it must still count as an answer to this line.
       const submitted = { at: Date.now(), endsBefore: endsOf(tab.sessionId) };
