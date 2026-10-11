@@ -94,6 +94,7 @@ import './reveal_links_headless.test.js';
 import './paste_warning.test.js';
 import './batch_job_reply.test.js';
 import './explorer_trash.test.js';
+import './editor_session_restore.test.js';
 
 async function run() {
   console.log('====================================================');

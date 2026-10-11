@@ -768,6 +768,26 @@ scenario(
   }
 );
 
+scenario(
+  'RN-68',
+  'the settings window offers Restore Open Editors among the editor settings, on by default',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    expectText(html, 'Restore Open Editors');
+    const at = html.indexOf('workbench.editor.restoreOpenEditors');
+    expectThat(at !== -1, 'rendered without its setting key');
+    expectThat(
+      html.indexOf('editor.minimap.enabled') < at && at < html.indexOf('files.enableTrash'),
+      'it is not drawn with the editor settings'
+    );
+    const box = /<input\b[^>]*type="checkbox"[^>]*>/.exec(html.slice(at))?.[0] ?? '';
+    expectThat(/\schecked=""/.test(box), `drawn unchecked: ${box}`);
+  }
+);
+
 // ---- Keyboard Shortcuts -----------------------------------------------------
 
 scenario(
