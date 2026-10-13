@@ -324,12 +324,20 @@ well as one started from a pane's menu (right-click the empty part of its tab
 strip → *New opencode Terminal* / *New Claude Code Terminal*); a line that
 does more than start the agent (`cd x && opencode`, a pipe) is not followed.
 Claude Code's conversation is always the exact one. OpenCode chooses its own
-ids, but names the conversation it shows in the terminal's title, and NexTerm
-looks that title up with `opencode session list` — so once the conversation
-has a title, *Resume* is `opencode -s <id>`, that conversation, and the offer
-says which by name. Before then, or if OpenCode cannot be found from NexTerm,
-it is `opencode --continue`: the folder's most recent. *Choose…* lists the
-folder's OpenCode conversations to resume another.
+ids, but names the conversation it shows in the terminal's title; NexTerm looks
+that title up with `opencode session list`, run in the terminal's own folder
+(so conversations in a git repository are found), while it runs — again if
+that fails — and when *Resume* is pressed. *Resume* then types
+`opencode -s <id>`, never a conversation another terminal has. When NexTerm
+cannot tell which conversation a terminal had — two terminals showing the same
+title before either knew its id, for instance — it types nothing, says why,
+and opens *Choose…* in the active pane, where conversations other terminals
+hold are greyed out; the list opens without taking the keyboard from the
+terminal. `opencode --continue` (the most recent conversation in the folder or
+below — a whole repository from its root) is typed only when the list cannot
+say which and no other OpenCode terminal is open, offered or resumed (and
+still open) in the same folder, a folder above it or one below it; if the list
+cannot be read at all, the offer shows OpenCode's own reason.
 
 **When a shell exits.** A terminal whose shell has ended says so once —
 `[process exited with code …]`, with Windows' crash and Ctrl+C codes also in

@@ -582,9 +582,27 @@ cmd; and whether the app, started from the Start menu, finds npm's
   ticked; picking another types `opencode -s` with that one's id.
 - `opencode` started and quit again (`/exit`) before the restart: no offer.
   `opencode run "hi"`, `opencode --version`, `cd .. && opencode`: no offer.
-- When it fails, say which half: an offer that only ever says *the most
-  recent opencode conversation in this folder* — even after the reply — is
-  the title or the lookup. With Developer Tools open, the console says
+- Four OpenCode terminals in one **git repository** folder in cmd, each in
+  its own conversation, each with at least one reply before quitting: quit,
+  start again, *Resume* each → four different `opencode -s ses_…`, never
+  `--continue`. Two of them renamed to the same title after their first reply
+  still each resume their own; two that never had a reply ask.
+- With opencode removed from PATH: the offer says "opencode was not found on
+  PATH" (readable, not garbled), and nothing is typed while another OpenCode
+  terminal is open or was resumed in the same folder, above it or below it;
+  unrelated folders and closed terminals don't count. An opencode too old for
+  `--pure` reads its list from outside the repository and says so on the offer.
+- After an "opencode session list: gave up after 20 s", Task Manager shows no
+  leftover `node.exe` or `opencode.exe` from it.
+- A folder on a share (`\\server\share`) is compared by spelling only; a
+  repository on a share does not list its conversations (mapped drive letters
+  do).
+- When it fails, copy the offer's reason line word for word, and the output of
+  `where.exe opencode`. A terminal line "opencode lists no conversation for
+  this folder (…)" means opencode keeps the folder spelled differently: run
+  `opencode session list --format json` in that folder and note its
+  `directory`. Otherwise say which half: an offer that never names the
+  conversation, even after the reply, is the title or the lookup. With Developer Tools open, the console says
   "could not look up the opencode conversation" when the lookup failed (note
   where `opencode` is installed: `where.exe opencode`); with no such line,
   conhost dropped the title. No offer at all is the typed line not being
