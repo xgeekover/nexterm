@@ -628,6 +628,9 @@ function TerminalPane({
   // Only the tabs that belong to this pane, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const boundTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
+  // What its resume offer does when opencode's conversation is not found by
+  // name: continue the most recent, or ask (see `resumeFallbackFor`).
+  const resumeFallback = useTerminalStore((s) => (boundTab ? s.resumeFallbackFor(boundTab.id) : null));
 
   // Where in THIS strip the dragged tab would go in, as a slot — the chip it
   // would land before, or `paneTabs.length` for after the last — or null.
@@ -956,6 +959,10 @@ function TerminalPane({
           <div className="flex flex-col h-full">
             <AgentResumeBanner
               tab={boundTab}
+              fallback={resumeFallback}
+              // One list opens by itself at a time, the active pane's: two
+              // open lists both took the same Enter.
+              autoOpen={isActivePane}
               onResume={() => resumeAgent(boundTab.id)}
               onDismiss={() => dismissAgentResume(boundTab.id)}
               onListSessions={() => listAgentSessions(boundTab.id)}

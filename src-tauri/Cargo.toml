@@ -61,7 +61,10 @@ junction = "2"
 # Showing a path from a terminal's output in Explorer (src/fs/reveal.rs): a
 # folder opened by the verb only folders have, a mapped network drive left
 # alone, no "insert a disk" box. Already in the tree through tauri and wry.
+# `Win32_Globalization`: cmd.exe's own messages read in the console's code
+# page when it fails to run npm's `opencode.cmd` (src/commands/agent.rs).
 windows-sys = { version = "0.59", features = [
+    "Win32_Globalization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Check, ListOrdered, Play, X } from 'lucide-react';
 import { agentLabel, resumeCertainty } from '../../lib/agents.js';
 import { cn } from '../../lib/utils.js';
@@ -29,6 +29,69 @@ const BUSY_REASON =
 const CHOICES_SHOWN = 20;
 
 /**
+ * Closes the list that last opened by itself, in whichever banner that was:
+ * at most one is open at a time.
+ */
+let closeAutoOpened = null;
+
+/** Why Resume and Choose… wait while the terminal's conversation is being looked up. */
+const LOOKING_REASON = 'Looking for this terminal\u{2019}s conversation\u{2026}';
+
+/**
+ * What the offer says about what Resume will do, from how sure it can be
+ * (`resumeCertainty`) and, for opencode with no id, what happens when its
+ * conversation is not found by name (`fallback`, the store's
+ * `resumeFallbackFor`): 'continue' — the most recent conversation in the
+ * folder or below, which `--continue` opens — or 'ask'. Said as it will
+ * happen: the offer once promised to ask where it then typed `--continue`.
+ */
+function detailFor(certainty, { label, named, ago, fallback }) {
+  if (certainty === 'exact') {
+    return `Picks up ${named ? `${named}, ` : ''}the conversation this terminal had${ago ? `, started ${ago}` : ''}.`;
+  }
+  const started = ago ? `; ${label} was started in this terminal ${ago}` : '';
+  const recent = `the most recent ${label} conversation in this folder or below`;
+  if (certainty === 'lookup') {
+    if (fallback === 'continue') {
+      return named
+        ? `Looks up ${named}, the conversation this terminal had, by its name \u{2014} or, not found, ${recent}${started}.`
+        : `Picks up ${recent}${started}.`;
+    }
+    return named
+      ? `Looks up ${named}, the conversation this terminal had, by its name, and asks if it cannot tell${started}.`
+      : `Asks which of this folder\u{2019}s ${label} conversations this terminal had \u{2014} it never learned its name${started}.`;
+  }
+  return `Picks up the most recent ${label} conversation in this folder${started}${named ? ` \u{2014} it was in ${named}` : ''}.`;
+}
+
+/**
+ * Why Resume did not type anything (`tab.agentResumeNotice`, set by the
+ * store's `resumeAgent`), or a list the user opened that could not be read
+ * (`failure`): one line, with the backend's own reason word for word — that
+ * reason is what tells a failing machine's cause apart from the others.
+ */
+function noticeText(notice, failure, label) {
+  // Ended here with a full stop of its own, whatever the backend ended it with.
+  const reason = String(notice?.reason ?? failure ?? '').replace(/[.,;:\s]+$/, '');
+  const parts = [];
+  if (notice?.kind === 'unsure') parts.push('Could not tell which conversation this terminal had \u{2014} choose one below.');
+  if (notice?.kind === 'taken') {
+    parts.push(
+      notice.latest
+        ? `${notice.heldBy} already continued the most recent conversation \u{2014} choose another.`
+        : `That conversation is open in ${notice.heldBy} already \u{2014} choose another.`
+    );
+  }
+  if (reason) parts.push(`Could not list ${label}\u{2019}s conversations: ${reason}.`);
+  if (notice?.kind === 'unreadable' && notice.shared) {
+    parts.push(
+      `Another ${label} terminal is in this folder, above it or below it, so the most recent conversation may be that terminal\u{2019}s \u{2014} choose below.`
+    );
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
+/**
  * The offer to pick an agent conversation back up in a restored terminal.
  *
  * Offered, not taken. Starting an agent runs a real CLI that spends tokens
@@ -43,11 +106,12 @@ const CHOICES_SHOWN = 20;
  * - **how sure the resume is.** With `claude` NexTerm chose the id, so it is
  *   that conversation. With `opencode` it is that conversation once the
  *   terminal has learned which one it showed — from the title opencode gives
- *   the terminal (src/lib/agents.js) — and the offer names it. Until then the
- *   best the CLI can do is the most recent in this folder — and if two such
- *   terminals were open on one folder, they would both land on it. That is
- *   what the second line says instead of pretending otherwise, and why
- *   "Choose…" lists the folder's conversations to pick from.
+ *   the terminal (src/lib/agents.js) — and the offer names it. Until then
+ *   Resume looks it up by the title the terminal kept, among the folder's
+ *   conversations no other terminal has; when that cannot tell, it types
+ *   nothing, says why, and opens "Choose…" rather than guess — a guess is how
+ *   two terminals on one folder both landed in the same conversation. The
+ *   backend's reason is shown word for word when the list cannot be read.
  * - **what the time is.** `agent.startedAt` is when the agent was STARTED in
  *   this terminal, and resuming does not move it — so it is "started", never
  *   "last used", which nothing records. With `opencode` the conversation
@@ -62,62 +126,116 @@ const CHOICES_SHOWN = 20;
  * over it: drawn over the terminal it hid the first rows, which is exactly
  * where a freshly restored shell prints its prompt.
  */
-export function AgentResumeBanner({ tab, onResume, onDismiss, onListSessions, onResumeWith }) {
+export function AgentResumeBanner({
+  tab,
+  fallback = null,
+  autoOpen = true,
+  onResume,
+  onDismiss,
+  onListSessions,
+  onResumeWith,
+}) {
   // The "Choose…" list: where it opens, and what it holds so far.
   const [choices, setChoices] = useState(null);
+  // Why the list the user opened could not be read, said on the banner too.
+  const [failure, setFailure] = useState(null);
+  const chooseRef = useRef(null);
+  // The offer's own box: with focus anywhere in it, the open list takes keys.
+  const bannerRef = useRef(null);
+  // The notice the list last opened by itself for, so it opens once for each.
+  const openedFor = useRef(null);
   const agent = tab?.agent;
-  if (!tab?.agentResumeOffered || !agent) return null;
+  const offered = Boolean(tab?.agentResumeOffered && agent);
+  const label = agentLabel(agent?.kind);
+  const notice = offered ? tab.agentResumeNotice ?? null : null;
 
-  const certainty = resumeCertainty(agent);
-  if (!certainty) return null;
-
-  const label = agentLabel(agent.kind);
-  const ago = when(agent.startedAt);
-  const busy = Boolean(tab.running);
-  // The conversation's own name, when the terminal learned it (opencode shows
-  // it as the terminal's title). Quoted as it came, never typed anywhere.
-  const named = agent.title ? `“${agent.title}”` : null;
-  const detail =
-    certainty === 'exact'
-      ? `Picks up ${named ? `${named}, ` : ''}the conversation this terminal had${ago ? `, started ${ago}` : ''}.`
-      : `Picks up the most recent ${label} conversation in this folder${ago ? `; ${label} was started in this terminal ${ago}` : ''}${named ? ` — it was in ${named}` : ''}.`;
-  // A list to choose from, for an agent whose conversations NexTerm can list.
-  const canChoose = agent.kind === 'opencode' && typeof onListSessions === 'function' && typeof onResumeWith === 'function';
-
-  const openChoices = async (event) => {
-    const box = event.currentTarget.getBoundingClientRect();
-    const at = { x: box.left, y: box.bottom + 2 };
+  // `auto`: opened by itself, for a notice — it then takes no focus.
+  const openChoices = async (anchor, { auto = false } = {}) => {
+    const box = anchor.getBoundingClientRect();
+    const at = { x: box.left, y: box.bottom + 2, auto };
     setChoices({ ...at, items: [{ key: 'loading', label: `Looking for ${label} conversations…`, disabled: true }] });
+    // Not a conversation of the list: what to do when none of them is it.
+    const fresh = { key: 'fresh', label: `Start a new ${label} conversation`, onSelect: () => onResumeWith({ fresh: true }) };
+    const latest = {
+      key: 'latest',
+      // `--continue`: the folder's most recent, or one in a folder below it.
+      label: `Continue the most recent ${label} conversation in this folder or below`,
+      onSelect: () => onResumeWith({ latest: true }),
+    };
     let items;
     try {
       const sessions = await onListSessions();
-      items =
+      setFailure(null);
+      const listed =
         sessions.length > 0
           ? sessions.slice(0, CHOICES_SHOWN).map((s) => ({
               key: s.id,
-              label: s.title || s.id,
+              // Open in another terminal already: shown, and not to be picked —
+              // the store refuses it too (`takenByOther`).
+              label: s.heldBy ? `${s.title || s.id} \u{2014} open in ${s.heldBy}` : s.title || s.id,
+              disabled: Boolean(s.heldBy),
+              disabledReason: s.heldBy ? `Open in ${s.heldBy} already` : undefined,
               // The one this terminal is known to have had.
               icon: s.id === agent.sessionId ? Check : undefined,
               shortcut: when(s.updated) ?? undefined,
               onSelect: () => onResumeWith({ sessionId: s.id, title: s.title }),
             }))
           : [{ key: 'none', label: `No ${label} conversations in this folder`, disabled: true }];
+      // With nothing listed, the list may only spell this folder differently
+      // from opencode; `--continue` finds the folder by itself.
+      items = [...listed, { type: 'separator', key: 'others' }, ...(sessions.length === 0 ? [latest] : []), fresh];
     } catch (err) {
+      const reason = String(err?.message ?? err);
+      setFailure(reason);
       items = [
-        {
-          key: 'error',
-          label: `Could not list ${label}’s conversations`,
-          disabled: true,
-          disabledReason: String(err?.message ?? err),
-        },
+        { key: 'error', label: `Could not list ${label}\u{2019}s conversations`, disabled: true, disabledReason: reason },
+        { type: 'separator', key: 'others' },
+        latest,
+        fresh,
       ];
     }
     // Only into a list that is still open.
     setChoices((open) => (open ? { ...open, items } : open));
   };
 
+  // Resume could not tell which conversation this terminal had, and typed
+  // nothing: the list opens by itself, under Choose…, once per notice — in
+  // the active pane only (`autoOpen`), and never beside another that did
+  // (`closeAutoOpened`). Two lists open at once both took the same Enter.
+  const noticeSeq = notice?.seq ?? null;
+  useEffect(() => {
+    if (noticeSeq === null || !autoOpen || openedFor.current === noticeSeq || !chooseRef.current) return undefined;
+    openedFor.current = noticeSeq;
+    closeAutoOpened?.();
+    const close = () => setChoices(null);
+    closeAutoOpened = close;
+    openChoices(chooseRef.current, { auto: true });
+    return () => {
+      if (closeAutoOpened === close) closeAutoOpened = null;
+    };
+    // Opened once for each notice, not again for every render while it shows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noticeSeq, autoOpen]);
+
+  if (!offered) return null;
+  const certainty = resumeCertainty(agent);
+  if (!certainty) return null;
+
+  const ago = when(agent.startedAt);
+  const busy = Boolean(tab.running);
+  const looking = Boolean(tab.agentResumeLooking);
+  const waitReason = busy ? BUSY_REASON : looking ? LOOKING_REASON : null;
+  // The conversation's own name, when the terminal learned it (opencode shows
+  // it as the terminal's title). Quoted as it came, never typed anywhere.
+  const named = agent.title ? `\u{201C}${agent.title}\u{201D}` : null;
+  const detail = detailFor(certainty, { label, named, ago, fallback });
+  const said = looking ? LOOKING_REASON : noticeText(notice, failure, label);
+  // A list to choose from, for an agent whose conversations NexTerm can list.
+  const canChoose = agent.kind === 'opencode' && typeof onListSessions === 'function' && typeof onResumeWith === 'function';
+
   return (
     <div
+      ref={bannerRef}
       role="status"
       data-agent-resume=""
       className={cn(
@@ -130,14 +248,19 @@ export function AgentResumeBanner({ tab, onResume, onDismiss, onListSessions, on
         <div className="text-vsc-muted">
           {detail} The terminal&rsquo;s own scrollback is not restored.
         </div>
+        {said ? (
+          <div data-agent-resume-notice="" className={looking ? 'text-vsc-muted' : 'text-vsc-warn'}>
+            {said}
+          </div>
+        ) : null}
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
         <button
           type="button"
           onClick={onResume}
-          disabled={busy}
-          title={busy ? BUSY_REASON : undefined}
+          disabled={Boolean(waitReason)}
+          title={waitReason ?? undefined}
           // Same button the empty pane uses for New Terminal; `vsc-button`
           // is not a token this theme defines and would have styled nothing.
           // Disabled, the hover must not light it up as if it were clickable.
@@ -148,10 +271,11 @@ export function AgentResumeBanner({ tab, onResume, onDismiss, onListSessions, on
         </button>
         {canChoose ? (
           <button
+            ref={chooseRef}
             type="button"
-            onClick={openChoices}
-            disabled={busy}
-            title={busy ? BUSY_REASON : `Pick one of this folder’s ${label} conversations to resume instead`}
+            onClick={(event) => openChoices(event.currentTarget)}
+            disabled={Boolean(waitReason)}
+            title={waitReason ?? `Pick one of this folder\u{2019}s ${label} conversations to resume instead`}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-vsc-fg hover:bg-vsc-item-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
           >
             <ListOrdered size={12} />
@@ -174,6 +298,14 @@ export function AgentResumeBanner({ tab, onResume, onDismiss, onListSessions, on
         y={choices?.y ?? 0}
         items={choices?.items ?? []}
         onClose={() => setChoices(null)}
+        // Several banners can each have a list: keys go to the one focused,
+        // or to this offer's while focus is on it. One that opened by itself
+        // leaves focus where it was — in the terminal, often, still being
+        // typed into — and waits for a click, a press of its Choose button, or
+        // an arrow key on this offer.
+        focusedKeys
+        keysWithin={bannerRef}
+        takeFocus={!choices?.auto}
       />
     </div>
   );

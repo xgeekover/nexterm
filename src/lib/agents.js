@@ -39,10 +39,23 @@
  * quits. `opencode session list --format json` lists every conversation with
  * its id, title, directory and times, so a title seen in a terminal maps back
  * to an id (`pickOpencodeSession`). An opencode terminal therefore learns its
- * conversation's id after the fact and resumes it exactly from then on; until
- * it has, "the most recent one in this directory" is all `--continue` offers.
+ * conversation's id after the fact and resumes it exactly from then on.
  * `-s <id>` with an older conversation shows its title at once and does not
  * touch its `updated` time.
+ *
+ * One that never learned it — the lookup failed, or never ran — is looked up
+ * again when Resume is pressed (`planOpencodeResume`), and two terminals are
+ * never handed the same conversation. `--continue` — the most recent
+ * conversation in the directory OR BELOW it, a whole repository from its
+ * root — is typed only when the list cannot say and no other opencode
+ * terminal is within that reach: typed blind into four terminals on one
+ * folder, it put three of them in the same conversation (reported on
+ * Windows, 2026-10-13).
+ *
+ * `opencode session list` lists only the conversations of the project its
+ * working directory belongs to — a git repository, or the one "global"
+ * project of every folder outside one — so the backend runs it in the
+ * terminal's folder (src-tauri/src/commands/agent.rs).
  *
  * Both CLIs key their sessions to the working directory, which is why a
  * restored terminal must come back in its own cwd first — see
@@ -184,6 +197,11 @@ export function startCommand(kind) {
  * The id is checked here as well as in `serializeAgent`. This is exported,
  * and a record handed to it without passing through there must not reach a
  * shell either.
+ *
+ * For an opencode record with no id this is only the record's own fallback,
+ * `--continue`. The store does not type it as it stands: it looks the
+ * conversation up first (`planOpencodeResume`), and types `-s <id>` whenever
+ * the list can be read.
  */
 export function resumeCommand(agent) {
   if (!agent || !isKnownAgent(agent.kind)) return null;
@@ -199,16 +217,24 @@ export function resumeCommand(agent) {
  * `exact` — the record holds the conversation's own id: claude's because
  *   NexTerm chose it, opencode's once its title has been matched to one
  *   (or the user typed `-s <id>`). That conversation and no other.
- * `latest` — no id, so the CLI can only offer the most recent one in this
- *   directory. With two such terminals open on the same folder they would
- *   both land on the same conversation, so the wording must not claim
+ * `lookup` — opencode with no id: its conversation is looked up when Resume
+ *   is pressed, by the title the record kept, among the folder's
+ *   conversations no other terminal holds (`planOpencodeResume`). Found, it
+ *   is that one. Not found, a terminal with no other opencode terminal in
+ *   its folder, above it or below it continues the most recent (in the
+ *   folder or below), and any other asks — which the offer says
+ *   (AgentResumeBanner.jsx).
+ * `latest` — claude with no id, so the CLI can only offer the most recent one
+ *   in this directory. With two such terminals open on the same folder they
+ *   would both land on the same conversation, so the wording must not claim
  *   otherwise.
  */
 export function resumeCertainty(agent) {
   if (!agent || !isKnownAgent(agent.kind)) return null;
   // The same test `resumeCommand` applies: an id it will not type is not a
   // conversation this can promise to find.
-  return isSessionIdFor(agent.kind, agent.sessionId) ? 'exact' : 'latest';
+  if (isSessionIdFor(agent.kind, agent.sessionId)) return 'exact';
+  return agent.kind === 'opencode' ? 'lookup' : 'latest';
 }
 
 /** What to call the agent in the interface. */
@@ -407,22 +433,105 @@ export function opencodeTitleMatches(shown, full) {
 }
 
 /**
+ * Whether two terminals that show `a` and `b` could be showing the same
+ * conversation title: the same text, or one of them opencode's cut of the
+ * other. What makes them rivals for the conversations that title fits.
+ */
+export function opencodeTitlesAlike(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
+  return a === b || opencodeTitleMatches(a, b) || opencodeTitleMatches(b, a);
+}
+
+/** `taken` as a Set, whatever it was handed as. */
+const asSet = (taken) => (taken instanceof Set ? taken : new Set(Array.isArray(taken) ? taken : []));
+
+/**
  * The conversation a terminal showing `title` is in, from `sessions` —
  * `opencode session list`'s, already narrowed to the terminal's directory
- * (the backend does that) — or null when none fits.
+ * (the backend does that) — or null when none fits, or when which one it is
+ * cannot be told.
  *
  * Titles repeat: a model names two conversations about the same thing the
- * same way. So among those whose title fits, the one the terminal is already
- * known to be in (`currentId`) stays — opening an older conversation with
- * `-s` does not make it the most recently updated — and otherwise the most
- * recently updated wins, which is the one just started or just written to.
+ * same way. So among those whose title fits:
+ *
+ * - the one the terminal is known, or was last known, to be in (`currentId`)
+ *   stays — opening an older conversation with `-s` does not make it the
+ *   most recently updated, and a conversation renamed keeps its id. It stays
+ *   even if another terminal holds it too: it was typed or resumed there,
+ *   which no guess here can overrule.
+ * - one another terminal holds (`taken`) — in its record, or as the id it
+ *   let go of on a new title — is never picked: two terminals handed the
+ *   same conversation is the bug this exists to prevent.
+ * - when other terminals that do not know their conversation show a title
+ *   like it too (`contenders` counts them and this one), none is picked.
+ *   Nothing says which is whose: a conversation is created at its first
+ *   message, not when its agent starts, and an older one can be reopened, so
+ *   dealing them out by age swapped them (review, 2026-10-13) — and a swap
+ *   would then be typed as an exact id. They ask instead.
+ * - otherwise the most recently updated wins, which is the one just started
+ *   or just written to.
  */
-export function pickOpencodeSession(sessions, { title, currentId = null } = {}) {
+export function pickOpencodeSession(sessions, { title, currentId = null, taken = null, contenders = 1 } = {}) {
   if (!Array.isArray(sessions) || typeof title !== 'string' || !title) return null;
   const fits = sessions.filter(
     (s) => s && isSessionIdFor('opencode', s.id) && opencodeTitleMatches(title, s.title)
   );
   if (fits.length === 0) return null;
   if (currentId && fits.some((s) => s.id === currentId)) return fits.find((s) => s.id === currentId);
-  return fits.reduce((best, s) => ((Number(s.updated) || 0) > (Number(best.updated) || 0) ? s : best));
+  if (contenders > 1) return null;
+  const held = asSet(taken);
+  const free = fits.filter((s) => !held.has(s.id));
+  return free.reduce(
+    (best, s) => (best === null || (Number(s.updated) || 0) > (Number(best.updated) || 0) ? s : best),
+    null
+  );
+}
+
+/**
+ * What Resume does in an opencode terminal whose record has no id — or one
+ * another terminal took first — decided from the folder's conversations.
+ *
+ * `sessions` is the folder's list (`opencode session list`, narrowed by the
+ * backend), or null when it could not be read. `taken` and `contenders` are
+ * `pickOpencodeSession`'s. `alone` is whether no other opencode terminal is
+ * within `--continue`'s reach — in this folder, one above it or one below
+ * it — offering a conversation back, running one, or resumed there since
+ * the workspace came back.
+ *
+ * Returns one of:
+ *
+ *   { session }            resume that one, by id
+ *   { latest: true }       `--continue`, only when `alone`: the list cannot
+ *                          be read, or holds nothing the terminal's title
+ *                          fits. It opens the most recent conversation in
+ *                          this folder OR BELOW it — a whole repository from
+ *                          its root — so another opencode terminal there
+ *                          could be the one whose conversation that is.
+ *   { choose: 'unsure' }   do not guess; the user picks from the list
+ *   { choose: 'unreadable' }  the list cannot be read and another opencode
+ *                          terminal is within reach: the user decides
+ *
+ * The rules, in order: by the title the record kept, when it fits a
+ * conversation nobody else has and no other terminal could be showing it.
+ * A title that fits only conversations others hold, or that others show
+ * too, asks. With no title to go on — none kept, or one that fits nothing
+ * listed (a folder made a repository since, a conversation deleted) — the
+ * newest is a guess: `--continue` alone, which is what it always was, and
+ * otherwise ask.
+ */
+export function planOpencodeResume({
+  title = null,
+  hintId = null,
+  sessions = null,
+  taken = null,
+  contenders = 1,
+  alone = false,
+} = {}) {
+  if (!Array.isArray(sessions)) return alone ? { latest: true } : { choose: 'unreadable' };
+  const fits = typeof title === 'string' && title ? sessions.filter((s) => s && opencodeTitleMatches(title, s.title)) : [];
+  if (fits.length > 0) {
+    const session = pickOpencodeSession(sessions, { title, currentId: hintId, taken, contenders });
+    return session ? { session } : { choose: 'unsure' };
+  }
+  return alone ? { latest: true } : { choose: 'unsure' };
 }

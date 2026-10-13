@@ -20,15 +20,21 @@ import { shellKindFor } from '../lib/dropPaths.js';
 import { shellPathOf } from '../lib/terminalFileDrop.js';
 import {
   agentFromCommandLine,
+  agentLabel,
   cleanAgentTitle,
+  isKnownAgent,
   isSessionIdFor,
   opencodeTitleMatches,
   opencodeTitleOf,
+  opencodeTitlesAlike,
   pickOpencodeSession,
+  planOpencodeResume,
   resumeCommand,
   serializeAgent,
   startCommand,
 } from '../lib/agents.js';
+import { stripTrailingSep, toPosix } from '../lib/paths.js';
+import { isNetworkPath } from '../lib/terminalLinks.js';
 import {
   followCommandLine,
   normalizeSlotCommand,
@@ -1038,6 +1044,55 @@ const shownTitles = new Map();
 /** tab id -> the pending lookup of its opencode conversation. */
 const resolveTimers = new Map();
 
+/**
+ * tab id -> `{ shown, count }`: how many lookups in a row for the title it
+ * shows (`shown`) failed or found nothing. A lookup is tried again after
+ * each, AGENT_RESOLVE_RETRY_MS apart, while that title still shows: one
+ * failure used to be final for the title, and a terminal whose only lookup
+ * failed resumed "the most recent" conversation after a restart.
+ */
+const resolveMisses = new Map();
+
+/**
+ * tab id -> the conversation id its record held before opencode showed a new
+ * title (`noteAgentTitle`). The record lets go of an id the moment the title
+ * changes — the title may be another conversation's — but a conversation
+ * renamed is still the same conversation: two terminals that knew their ids
+ * and were then retitled alike had them dealt out again, swapped. So the
+ * lookup keeps the old id when it fits the new title (`pickOpencodeSession`'s
+ * `currentId`), and until it has decided, no other terminal may take it —
+ * not by a lookup, nor by a Resume (`holdersElsewhere`, `needsLookup`). It
+ * goes when the lookup decides, the agent exits, the terminal closes, or a
+ * new record starts.
+ */
+const idHints = new Map();
+
+/**
+ * tab id -> the folder (`folderKey`) of a terminal that typed opencode by
+ * Resume since the workspace was restored, and of those that typed
+ * `--continue`. `--continue` opens the most recent conversation in its
+ * folder or below it (opencode keeps each conversation's place in its
+ * project), so it is only for a terminal with no other opencode terminal
+ * within that reach (`aloneInReach`); and a second one there, chosen from a
+ * list, would be the same conversation as the first. Kept while the
+ * terminal is open, its agent exited or not — the conversation it had is
+ * still its own — and dropped when it closes (`forgetTerminal`).
+ */
+const opencodeResumers = new Map();
+const continuedLatest = new Map();
+
+/**
+ * Whether `--continue` in one of two folders (`folderKey` spellings) could
+ * open the other's conversation: the same folder, or one inside the other.
+ * Siblings do not reach each other. A folder not known is taken to reach
+ * everything — the side that asks rather than guesses.
+ */
+function foldersOverlap(a, b) {
+  if (!a || !b || a === b) return true;
+  const within = (inner, outer) => inner.startsWith(outer.endsWith('/') ? outer : `${outer}/`);
+  return within(a, b) || within(b, a);
+}
+
 /** Tab ids whose new shell is being started (`restartShell`): one at a time. */
 const restarting = new Set();
 
@@ -1074,8 +1129,49 @@ export function __setAgentResolveDelayMs(ms) {
   return previous;
 }
 
-/** Whether a failed lookup has been reported; once a run is enough. */
-let resolveFailureReported = false;
+/**
+ * How long after a lookup that failed or found nothing it is tried again,
+ * attempt by attempt, while the same title shows; then it is left until the
+ * title changes or Resume asks. A cold start of a large CLI on a slow disk,
+ * a database another opencode holds for a moment, a conversation not yet
+ * written when its title first showed — each of these clears up by itself.
+ */
+export const AGENT_RESOLVE_RETRY_MS = Object.freeze([15_000, 60_000, 300_000]);
+let agentResolveRetryMs = AGENT_RESOLVE_RETRY_MS;
+
+/** Test hook: the retry schedule. Returns what it replaced. */
+export function __setAgentResolveRetryMs(delays) {
+  const previous = agentResolveRetryMs;
+  agentResolveRetryMs = Array.isArray(delays) ? delays : AGENT_RESOLVE_RETRY_MS;
+  return previous;
+}
+
+/** Numbers each resume notice, so one that repeats the last is still new to the banner. */
+let noticeSeq = 0;
+
+/** Why lookups failed, as reported to the console this run: each reason once. */
+const reportedLookupFailures = new Set();
+
+/** The reason a failed `agent_sessions` gave, as one line of text. */
+function lookupFailureOf(err) {
+  const text = String(err?.message ?? err ?? '').replace(/\s+/g, ' ').trim();
+  return text || 'no reason given';
+}
+
+/** Say on the console why a lookup failed — once for each reason, however often it is retried. */
+function reportLookupFailure(reason) {
+  if (reportedLookupFailures.has(reason)) return;
+  reportedLookupFailures.add(reason);
+  console.warn('[TerminalStore] could not look up the opencode conversation:', reason);
+}
+
+/**
+ * A directory as two terminals' spellings of it compare: one kind of
+ * separator, no trailing one, one case. Folding case on a filesystem that
+ * keeps it apart can only make two folders look shared, which makes the
+ * resume ask rather than guess — the safe side.
+ */
+const folderKey = (path) => toPosix(stripTrailingSep(typeof path === 'string' ? path.trim() : '')).toLowerCase();
 
 /**
  * How long a submitted line may go unanswered before it counts as a running
@@ -1448,10 +1544,18 @@ export const useTerminalStore = create((set, get, api) => {
   const recordAgent = (tabId, agent, atPrompt) => {
     // A new record has seen no title yet (`noteAgentTitle`).
     shownTitles.delete(tabId);
+    resolveMisses.delete(tabId);
+    idHints.delete(tabId);
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === tabId
-          ? { ...t, agent, agentResumeOffered: false, agentTyped: atPrompt ? { sessionId: t.sessionId } : null }
+          ? {
+              ...t,
+              agent,
+              agentResumeOffered: false,
+              agentResumeNotice: null,
+              agentTyped: atPrompt ? { sessionId: t.sessionId } : null,
+            }
           : t
       ),
     }));
@@ -1498,47 +1602,337 @@ export const useTerminalStore = create((set, get, api) => {
   };
 
   /**
+   * The directory `tab`'s conversations are listed for: its own, spelled so
+   * Windows can open it (`startableCwd` — Git Bash's `/c/x` is `C:\x`, which
+   * is what opencode keeps), or '' for none. One on another machine is
+   * handed over as it is: the backend compares it by its spelling and never
+   * runs anything there (`run_dir` in src-tauri/src/commands/agent.rs).
+   */
+  const lookupFolder = (tab) => {
+    const cwd = typeof tab?.cwd === 'string' ? tab.cwd.trim() : '';
+    return isNetworkPath(cwd) ? cwd : startableCwd(tab, useSystemStore.getState().os) || '';
+  };
+
+  /** The same folder, by `folderKey`, for telling which terminals share one. */
+  const sameFolder = (a, b) => {
+    const key = folderKey(lookupFolder(a) || a?.cwd);
+    return key !== '' && key === folderKey(lookupFolder(b) || b?.cwd);
+  };
+
+  /** Whether `tab` runs, or offers back, an opencode that does not know its conversation's id. */
+  const unsureOpencode = (tab) => tab?.agent?.kind === 'opencode' && !isSessionIdFor('opencode', tab.agent.sessionId);
+
+  /** `opencode session list` for `cwd`, the conversations with ids that may be typed. Rejects with the reason. */
+  const listOpencodeSessions = async (cwd) => {
+    const sessions = await invoke('agent_sessions', { kind: 'opencode', cwd });
+    return Array.isArray(sessions) ? sessions.filter((x) => isSessionIdFor('opencode', x?.id)) : [];
+  };
+
+  /**
+   * The conversation ids other terminals hold, each with the terminal that
+   * holds it: in its record — running there, or offered back there — or as
+   * the id its record let go of on a new title (`idHints`). By id alone,
+   * whatever the folder: ids are opencode's own and unique.
+   */
+  const holdersElsewhere = (state, tabId) => {
+    const holders = new Map();
+    const hold = (id, ownerId) => {
+      if (ownerId === tabId || holders.has(id)) return;
+      holders.set(id, state.tabs.find((t) => t.id === ownerId) ?? null);
+    };
+    for (const t of state.tabs) {
+      if (t.agent?.kind === 'opencode' && isSessionIdFor('opencode', t.agent.sessionId)) hold(t.agent.sessionId, t.id);
+    }
+    for (const [ownerId, id] of idHints) hold(id, ownerId);
+    return holders;
+  };
+
+  /** The ids no pick for `tabId` may take (`holdersElsewhere`). */
+  const sessionsHeldElsewhere = (state, tabId) => new Set(holdersElsewhere(state, tabId).keys());
+
+  /** What to call a terminal that holds something, in a message. */
+  const nameOf = (tab) => tab?.title || tab?.defaultTitle || 'another terminal';
+
+  /**
+   * How many terminals in `tab`'s folder show `title` (or offer it back)
+   * without knowing which conversation it is — `tab` included. More than
+   * one, and `pickOpencodeSession` picks none.
+   */
+  const contendersFor = (state, tab, title) =>
+    state.tabs.filter(
+      (t) => t.id === tab.id || (unsureOpencode(t) && sameFolder(t, tab) && opencodeTitlesAlike(t.agent.title, title))
+    ).length;
+
+  /** `tab`'s folder as `foldersOverlap` compares them. */
+  const folderKeyOf = (tab) => folderKey(lookupFolder(tab) || tab?.cwd);
+
+  /**
+   * Whether `tabId` is the one opencode terminal within `--continue`'s
+   * reach: no other one in its folder, a folder above it or one below it
+   * (`foldersOverlap`) offers a conversation back, runs one, or was resumed
+   * there since the workspace came back. Only then may `--continue` be typed
+   * for it: that is the most recent conversation in the folder or below — a
+   * whole repository from its root — so such a terminal could be the one
+   * whose conversation it is. Terminals in unrelated folders do not count.
+   */
+  const aloneInReach = (state, tabId) => {
+    const here = folderKeyOf(state.tabs.find((t) => t.id === tabId));
+    return (
+      !state.tabs.some((t) => t.id !== tabId && t.agent?.kind === 'opencode' && foldersOverlap(here, folderKeyOf(t))) &&
+      ![...opencodeResumers].some(([id, folder]) => id !== tabId && foldersOverlap(here, folder))
+    );
+  };
+
+  /**
+   * Look again, later, for the conversation of a title whose lookup failed
+   * or found nothing — on AGENT_RESOLVE_RETRY_MS, while that record still
+   * shows that title. A new title starts its own count (`noteAgentTitle`);
+   * the agent exiting, the terminal closing or a new record ends it.
+   */
+  const retryResolve = (tabId, agent, shown) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab || tab.agent !== agent || tab.agentResumeOffered || shownTitles.get(tabId) !== shown) return;
+    const misses = resolveMisses.get(tabId);
+    const count = misses?.shown === shown ? misses.count : 0;
+    if (count >= agentResolveRetryMs.length) return;
+    resolveMisses.set(tabId, { shown, count: count + 1 });
+    clearTimeout(resolveTimers.get(tabId));
+    resolveTimers.set(
+      tabId,
+      setTimeout(() => {
+        resolveTimers.delete(tabId);
+        resolveAgentSession(tabId);
+      }, agentResolveRetryMs[count])
+    );
+  };
+
+  /**
    * Find the opencode conversation `tabId` shows, from the title it shows
    * (`shownTitles`): `opencode session list`, narrowed to the terminal's
-   * directory by the backend, then `pickOpencodeSession`. Written onto the
-   * record only if it is still the one the lookup was made for and that
-   * title still shows — a quicker switch, or the agent exiting, wins.
+   * directory by the backend, then `pickOpencodeSession` — never one another
+   * terminal holds, and none at all while another terminal that does not
+   * know its conversation shows a title like it. Written onto the record
+   * only if it is still the one the lookup was made for and that title still
+   * shows — a quicker switch, or the agent exiting, wins. Failed or
+   * empty-handed, it is tried again (`retryResolve`).
+   *
+   * Everything after the answer — what is held, the rivals, the write — is
+   * one synchronous step, so two lookups answered together cannot both take
+   * the same conversation.
    */
   const resolveAgentSession = async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     const agent = tab?.agent;
     const shown = shownTitles.get(tabId);
-    if (!agent || agent.kind !== 'opencode' || tab.agentResumeOffered || !shown || !tab.cwd) return;
+    const cwd = tab ? lookupFolder(tab) : '';
+    if (!agent || agent.kind !== 'opencode' || tab.agentResumeOffered || !shown || !cwd) return;
     let sessions;
     try {
-      sessions = await invoke('agent_sessions', { kind: 'opencode', cwd: tab.cwd });
+      sessions = await listOpencodeSessions(cwd);
     } catch (err) {
-      // opencode not found from here, a CLI that changed its output: the
-      // terminal resumes the folder's latest conversation, as it always did.
-      if (!resolveFailureReported) {
-        resolveFailureReported = true;
-        console.warn('[TerminalStore] could not look up the opencode conversation:', err);
-      }
+      // opencode not found from here, a CLI that changed its output, a
+      // database busy for a moment. Said once per reason, and tried again;
+      // a restart that still has no id looks again when Resume is pressed.
+      reportLookupFailure(lookupFailureOf(err));
+      retryResolve(tabId, agent, shown);
       return;
     }
-    const picked = pickOpencodeSession(sessions, { title: shown, currentId: agent.sessionId });
-    if (!picked) return;
-    set((state) => {
-      let changed = false;
-      const tabs = state.tabs.map((t) => {
-        if (t.id !== tabId || t.agent !== agent || shownTitles.get(tabId) !== shown) return t;
-        const title = cleanAgentTitle(picked.title) ?? agent.title;
-        if (agent.sessionId === picked.id && agent.title === title) return t;
-        changed = true;
-        return { ...t, agent: { ...agent, sessionId: picked.id, title } };
-      });
-      return changed ? { tabs } : state;
+    const state = get();
+    const now = state.tabs.find((t) => t.id === tabId);
+    if (!now || now.agent !== agent || shownTitles.get(tabId) !== shown) return;
+    const picked = pickOpencodeSession(sessions, {
+      title: shown,
+      // Its own id, or the one it let go of on this new title (`idHints`):
+      // still its conversation if that is renamed to it.
+      currentId: agent.sessionId ?? idHints.get(tabId) ?? null,
+      taken: sessionsHeldElsewhere(state, tabId),
+      contenders: contendersFor(state, now, shown),
     });
+    if (!picked) {
+      retryResolve(tabId, agent, shown);
+      return;
+    }
+    resolveMisses.delete(tabId);
+    idHints.delete(tabId);
+    const title = cleanAgentTitle(picked.title) ?? agent.title;
+    if (agent.sessionId === picked.id && agent.title === title) return;
+    set((s) => ({
+      tabs: s.tabs.map((t) => (t.id === tabId && t.agent === agent ? { ...t, agent: { ...agent, sessionId: picked.id, title } } : t)),
+    }));
   };
 
-  /** Forget a closed terminal's conversation bookkeeping. */
+  /**
+   * The resume a pick from the banner's list asks for, or null for none:
+   * `{ sessionId, title }` that conversation — its id held to the same
+   * standard as a remembered one before it reaches the shell — `{ latest:
+   * true }` the folder's most recent (`--continue`), `{ fresh: true }` a new
+   * one. With `continued` for `--continue`.
+   */
+  const chosenResume = (agent, choice) => {
+    if (!choice || !agent || !isKnownAgent(agent.kind)) return null;
+    if (choice.fresh === true) return startCommand(agent.kind);
+    if (choice.latest === true) {
+      const next = { ...agent, sessionId: null };
+      return { agent: next, command: resumeCommand(next), continued: true };
+    }
+    if (!isSessionIdFor(agent.kind, choice.sessionId)) return null;
+    const next = { ...agent, sessionId: choice.sessionId, title: cleanAgentTitle(choice.title) };
+    return { agent: next, command: resumeCommand(next) };
+  };
+
+  /**
+   * Who already has what a pick from the list asks for — the terminal, for
+   * the banner to name — or undefined when nobody does. A conversation open
+   * in another terminal (`holdersElsewhere`), or, for `{ latest: true }`,
+   * the most recent one another terminal within reach continued this run
+   * (`foldersOverlap`): either typed
+   * here would put two terminals in one conversation. A list picks on Enter,
+   * and one pressed in the wrong list did exactly that (review, 2026-10-13).
+   */
+  const takenByOther = (state, tabId, choice) => {
+    if (choice?.latest === true) {
+      const here = folderKeyOf(state.tabs.find((t) => t.id === tabId));
+      const other = [...continuedLatest].find(([id, folder]) => id !== tabId && foldersOverlap(here, folder));
+      return other === undefined ? undefined : nameOf(state.tabs.find((t) => t.id === other[0]));
+    }
+    if (!isSessionIdFor('opencode', choice?.sessionId)) return undefined;
+    const holders = holdersElsewhere(state, tabId);
+    return holders.has(choice.sessionId) ? nameOf(holders.get(choice.sessionId)) : undefined;
+  };
+
+  /**
+   * Whether Resume in `tab` has to look its opencode conversation up first:
+   * the record has no id, or another terminal has its id — running it now,
+   * resumed into it already, or holding it while a new title is looked up
+   * (`holdersElsewhere`); not one merely offering it back too. Two records
+   * with one id are what the same-title pick of earlier builds left on disk:
+   * the first to resume keeps it, and the other finds its own by title.
+   * claude never does.
+   */
+  const needsLookup = (state, tab) => {
+    const agent = tab?.agent;
+    if (agent?.kind !== 'opencode') return false;
+    if (!isSessionIdFor('opencode', agent.sessionId)) return true;
+    const holder = holdersElsewhere(state, tab.id).get(agent.sessionId);
+    return Boolean(holder) && !holder.agentResumeOffered;
+  };
+
+  /**
+   * Take the offer in `tabId` for `agent`, the record about to be typed: the
+   * offer goes, and the record becomes that conversation — which other
+   * terminals' picks then leave alone (`holdersElsewhere`) — or, for
+   * `continued`, the folder's most recent (`continuedLatest`). One step,
+   * made in the same turn as the decision it carries out: a Resume decided
+   * in another terminal next, even one whose answer arrived together with
+   * this one's, sees the conversation as taken.
+   */
+  const takeOffer = (tabId, agent, { continued = false } = {}) => {
+    if (agent?.kind === 'opencode') {
+      const folder = folderKeyOf(get().tabs.find((t) => t.id === tabId));
+      opencodeResumers.set(tabId, folder);
+      if (continued) continuedLatest.set(tabId, folder);
+    }
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId ? { ...t, agent, agentResumeOffered: false, agentResumeNotice: null } : t
+      ),
+    }));
+  };
+
+  /**
+   * Decide Resume for an opencode terminal that has to look its conversation
+   * up (`needsLookup`): read the folder's list, then `planOpencodeResume`.
+   * Resolves with `{ agent, command, note? }` to type — `note` a line for
+   * the terminal saying why it is the folder's most recent — or null with
+   * nothing to type: the user is asked (the offer stays, with
+   * `agentResumeNotice` saying why), or the terminal changed meanwhile —
+   * dismissed, closed, something started in it, an agent typed by hand.
+   *
+   * While the list is read the banner says so and takes no second press
+   * (`agentResumeLooking`). The decision after it is one synchronous step
+   * with the read of what other terminals hold, as in `resolveAgentSession`:
+   * Resume pressed in four terminals at once hands out four conversations.
+   */
+  const lookUpResume = async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    const agent = tab?.agent;
+    if (!agent) return null;
+    const cwd = lookupFolder(tab);
+    const mark = (fields) =>
+      set((state) => ({ tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, ...fields } : t)) }));
+    mark({ agentResumeLooking: true, agentResumeNotice: null });
+    let sessions = null;
+    let failure = null;
+    try {
+      if (!cwd) failure = 'this terminal is in no folder on this machine to look in';
+      else sessions = await listOpencodeSessions(cwd);
+    } catch (err) {
+      failure = lookupFailureOf(err);
+      reportLookupFailure(failure);
+    } finally {
+      mark({ agentResumeLooking: false });
+    }
+
+    const state = get();
+    const now = state.tabs.find((t) => t.id === tabId);
+    if (!now || now.agent !== agent || !now.agentResumeOffered || now.running) return null;
+    const alone = aloneInReach(state, tabId);
+    const plan = planOpencodeResume({
+      title: agent.title,
+      sessions,
+      taken: sessionsHeldElsewhere(state, tabId),
+      contenders: contendersFor(state, now, agent.title),
+      alone,
+    });
+    if (plan.session) {
+      const next = { ...agent, sessionId: plan.session.id, title: cleanAgentTitle(plan.session.title) ?? agent.title };
+      takeOffer(tabId, next);
+      return { agent: next, command: resumeCommand(next) };
+    }
+    const label = agentLabel(agent.kind);
+    if (plan.latest) {
+      const next = { ...agent, sessionId: null };
+      // Said in the terminal: why it is the most recent rather than its own.
+      const named = agent.title ? `\u{201C}${agent.title}\u{201D}` : null;
+      let note = null;
+      if (failure) {
+        note = `${label}\u{2019}s conversations could not be listed (${failure}), so this continues the most recent one in this folder or below.`;
+      } else if (sessions.length === 0) {
+        note = `${label} lists no conversation for this folder (${cwd}), so this continues the most recent one in this folder or below.`;
+      } else if (named) {
+        note = `None of this folder\u{2019}s ${label} conversations is called ${named} any more, so this continues the most recent one in this folder or below.`;
+      }
+      takeOffer(tabId, next, { continued: true });
+      return { agent: next, command: resumeCommand(next), note, continued: true };
+    }
+    mark({
+      agentResumeNotice: {
+        kind: plan.choose,
+        reason: failure,
+        shared: !alone,
+        // A new notice each time, so the banner opens its list again for it.
+        seq: (noticeSeq += 1),
+      },
+    });
+    return null;
+  };
+
+  /**
+   * Forget a closed terminal: its conversation bookkeeping, and that it was
+   * resumed this run — closed, it reaches no conversation `--continue` could
+   * take from it.
+   */
+  const forgetTerminal = (tabId) => {
+    forgetAgentTitle(tabId);
+    opencodeResumers.delete(tabId);
+    continuedLatest.delete(tabId);
+  };
+
+  /** Forget a terminal's conversation bookkeeping: it closed, or its agent ended. */
   const forgetAgentTitle = (tabId) => {
     shownTitles.delete(tabId);
+    resolveMisses.delete(tabId);
+    idHints.delete(tabId);
     clearTimeout(resolveTimers.get(tabId));
     resolveTimers.delete(tabId);
   };
@@ -1670,7 +2064,7 @@ export const useTerminalStore = create((set, get, api) => {
       }
       await disposeTerminalView(tabId);
       typedLines.delete(tabId);
-      forgetAgentTitle(tabId);
+      forgetTerminal(tabId);
       batchJobReplies.forget(tabId);
       // Whatever its shell printed that no terminal ever showed goes with it, as
       // in `closeTab`. Closing a pane, a group or the whole workspace comes this
@@ -2994,6 +3388,12 @@ export const useTerminalStore = create((set, get, api) => {
                 notifications: [...raised, ...state.notifications].slice(0, NOTIFICATION_LIMIT),
               };
         });
+        // An agent that ended has no conversation left to look up — a retry
+        // waiting minutes for its title (`retryResolve`) goes with it — nor
+        // one to keep from other terminals (`idHints`).
+        for (const t of get().tabs) {
+          if (t.sessionId === session_id && !t.agent) forgetAgentTitle(t.id);
+        }
       }));
       unlisteners.push(await listen('pty-exit', (payload) => {
         const { session_id, exit_code } = payload || {};
@@ -3109,6 +3509,10 @@ export const useTerminalStore = create((set, get, api) => {
         await get().attachListeners();
         return;
       }
+      // A workspace restored from disk starts a run: what was resumed in the
+      // last one says nothing about the terminals coming back now.
+      opencodeResumers.clear();
+      continuedLatest.clear();
 
       try {
         // Listening before anything is spawned. A shell draws its first
@@ -3392,7 +3796,7 @@ export const useTerminalStore = create((set, get, api) => {
         }
         await disposeTerminalView(tabId);
         typedLines.delete(tabId);
-        forgetAgentTitle(tabId);
+        forgetTerminal(tabId);
         batchJobReplies.forget(tabId);
         // Whatever its shell printed that no terminal ever showed goes with it.
         forgetOutput(tab.sessionId);
@@ -3477,30 +3881,64 @@ export const useTerminalStore = create((set, get, api) => {
      * it types ends its record the same way, when it exits — including a
      * resume that fails at once, like `claude --resume` for a conversation
      * that was never sent a message and so was never saved (#37).
+     *
+     * An opencode record with no id — its lookup failed while it ran, or
+     * never ran — is looked up now, before anything is typed, and so is one
+     * whose id another terminal has (`needsLookup`, `lookUpResume`). Typed by
+     * id whenever the list says which conversation; never one another
+     * terminal holds. When it cannot tell, nothing is typed: the offer stays
+     * and says why, and the banner opens its list. `--continue` only for the
+     * one opencode terminal within its reach (`aloneInReach`) when the list
+     * cannot say, and the terminal says why first. Typed blind, it put three of four
+     * terminals on one folder into the same conversation.
+     *
+     * `choice` is a pick from the banner's list (`chosenResume`): refused,
+     * with a notice naming the terminal, when another terminal already has
+     * it (`takenByOther`). Resolves with whether a command was typed.
      */
     resumeAgent: async (tabId, choice = null) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
-      if (!tab || tab.running) return false;
+      if (!tab || tab.running || tab.agentResumeLooking) return false;
 
-      // A conversation picked from the banner's list (`choice`, from
-      // `listAgentSessions`) instead of the one remembered. Its id is held to
-      // the same standard as a remembered one before it reaches the shell.
-      const agent =
-        choice && tab.agent && isSessionIdFor(tab.agent.kind, choice.sessionId)
-          ? { ...tab.agent, sessionId: choice.sessionId, title: cleanAgentTitle(choice.title) }
-          : tab.agent;
-      const command = resumeCommand(agent);
+      let plan = chosenResume(tab.agent, choice);
+      const heldBy = plan && tab.agent?.kind === 'opencode' ? takenByOther(get(), targetId, choice) : undefined;
+      if (heldBy !== undefined) {
+        // Refused, and said: the list may have been read before that
+        // terminal took it.
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === targetId
+              ? { ...t, agentResumeNotice: { kind: 'taken', heldBy, latest: choice.latest === true, seq: (noticeSeq += 1) } }
+              : t
+          ),
+        }));
+        return false;
+      }
+      if (!plan && needsLookup(get(), tab)) {
+        plan = await lookUpResume(targetId);
+        if (!plan) return false;
+      }
+      const { agent, command, note = null, continued = false } = plan ?? {
+        agent: tab.agent,
+        command: resumeCommand(tab.agent),
+      };
       // The offer goes away either way: an agent we no longer recognise is
       // not something to keep asking about. And it goes before any wait for
-      // a prompt, so it cannot be taken twice while that wait lasts.
-      set((state) => ({
-        tabs: state.tabs.map((t) => (t.id === targetId ? { ...t, agentResumeOffered: false } : t)),
-      }));
-      if (!command) return false;
+      // a prompt, so it cannot be taken twice while that wait lasts — with
+      // the record set to what is about to be typed (`takeOffer`; a
+      // looked-up one was taken as it was decided).
+      if (!command) {
+        set((state) => ({
+          tabs: state.tabs.map((t) => (t.id === targetId ? { ...t, agentResumeOffered: false, agentResumeNotice: null } : t)),
+        }));
+        return false;
+      }
+      takeOffer(targetId, agent, { continued });
 
       const readiness = await untilPromptReady(targetId);
       if (readiness === 'gone') return false;
+      if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
       recordAgent(targetId, agent, readiness === 'ready');
       await get().writeRaw(targetId, `${command}\r`);
       return true;
@@ -3511,13 +3949,32 @@ export const useTerminalStore = create((set, get, api) => {
      * terminal's directory, newest first — for the resume banner's list.
      * Only opencode keeps a list NexTerm can read (src-tauri/src/commands/
      * agent.rs); claude's resume is exact already. Rejects with the reason
-     * when the list cannot be had.
+     * when the list cannot be had. Each comes with `heldBy`: the name of the
+     * other terminal that has it (`holdersElsewhere`), or null.
      */
     listAgentSessions: async (tabId) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       if (tab?.agent?.kind !== 'opencode') return [];
-      const sessions = await invoke('agent_sessions', { kind: 'opencode', cwd: tab.cwd || '' });
-      return Array.isArray(sessions) ? sessions.filter((x) => isSessionIdFor('opencode', x?.id)) : [];
+      const cwd = lookupFolder(tab);
+      if (!cwd) throw new Error('this terminal is in no folder on this machine to look in');
+      const sessions = await listOpencodeSessions(cwd);
+      // Which other terminal each is open in, offered back in, or was
+      // resumed into this run, by its name (`holdersElsewhere`): the list
+      // shows it, and a pick of it is refused (`takenByOther`).
+      const holders = holdersElsewhere(get(), tabId);
+      return sessions.map((s) => ({ ...s, heldBy: holders.has(s.id) ? nameOf(holders.get(s.id)) : null }));
+    },
+
+    /**
+     * What Resume in `tabId` does when its opencode conversation is not found
+     * by name, for the offer to say: 'continue' — the most recent in the
+     * folder or below, for the one opencode terminal within its reach
+     * (`aloneInReach`) — or 'ask'. Null for anything but opencode.
+     */
+    resumeFallbackFor: (tabId) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (tab?.agent?.kind !== 'opencode') return null;
+      return aloneInReach(get(), tabId) ? 'continue' : 'ask';
     },
 
     /**
@@ -3543,6 +4000,9 @@ export const useTerminalStore = create((set, get, api) => {
       // Another conversation, or the first title of this one. An id stays
       // only while no title was ever known for it: one typed with `-s`, or a
       // record from before titles were kept — the lookup keeps it if it fits.
+      // One let go of is kept aside (`idHints`): the same conversation,
+      // renamed, is found again by it rather than dealt out anew.
+      if (agent.sessionId && agent.title) idHints.set(tabId, agent.sessionId);
       const next = {
         ...agent,
         sessionId: agent.sessionId && !agent.title ? agent.sessionId : null,
@@ -3608,7 +4068,7 @@ export const useTerminalStore = create((set, get, api) => {
       const targetId = tabId || get().activeTabId;
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.id === targetId ? { ...t, agentResumeOffered: false, agent: null } : t
+          t.id === targetId ? { ...t, agentResumeOffered: false, agentResumeNotice: null, agent: null } : t
         ),
       }));
     },
