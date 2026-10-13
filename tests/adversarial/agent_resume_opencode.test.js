@@ -27,6 +27,7 @@ import { suggestStartupCommand } from '../../src/lib/startupCommands.js';
 import * as terminalStore from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { SCHEMA_VERSION } from '../../src/lib/persistence.js';
+import { useSystemStore } from '../../src/stores/systemStore.js';
 
 const T = terminalStore.useTerminalStore;
 const { PERSIST_KEY } = terminalStore;
@@ -574,6 +575,877 @@ describe('After a restart, that conversation is offered back', () => {
       await relaunch({ seed: workspaceRunning(startCommand('claude').agent) });
       assert.deepEqual(await T.getState().listAgentSessions(T.getState().tabs[0].id), []);
       mockBridge.agentSessions = [];
+    });
+  });
+});
+
+// ---- Several terminals on one folder ----------------------------------------
+//
+// Reported from Windows (2026-10-13): four OpenCode terminals, each in its own
+// conversation; NexTerm quit and started again, Resume pressed in each — and
+// three of them came back in the SAME conversation. A record with no id typed
+// `opencode --continue`, the folder's most recent, into every one of them.
+
+const SES_C = 'ses_ccccccccccccCCCCCCCCCCCCCC';
+const SES_D = 'ses_ddddddddddddDDDDDDDDDDDDDD';
+const SES_E = 'ses_eeeeeeeeeeeeEEEEEEEEEEEEEE';
+
+/** A saved workspace of terminals in `cwd`, one per agent record, in one pane. */
+const workspaceOf = (agents, cwd = '/workspace') => ({
+  workspaceName: 'Default',
+  activeGroupId: 'group-agents',
+  groups: [
+    {
+      id: 'group-agents', name: 'Agents', createdAt: 1, activePaneId: 'pane-agents',
+      tree: { type: 'leaf', id: 'pane-agents', tabIds: agents.map((_, i) => `tab-${i + 1}`), activeTabId: 'tab-1' },
+    },
+  ],
+  tabs: agents.map((agent, i) => ({ id: `tab-${i + 1}`, title: `Terminal ${i + 1}`, cwd, agent })),
+});
+
+/** An opencode record as a quit leaves it on disk. */
+const ocRecord = (startedAt, title = null, sessionId = null) => ({ kind: 'opencode', sessionId, startedAt, title });
+
+/** Relaunched into `seed`, every restored shell at its first prompt. Resolves with the tab ids, in order. */
+async function restoredTerminals(seed) {
+  await relaunch({ seed });
+  for (const t of T.getState().tabs) await prompt(t);
+  return T.getState().tabs.map((t) => t.id);
+}
+
+/**
+ * What `fn` typed into each terminal, by tab id, and every `agent_sessions`
+ * call. `answer(nth, args, asTheMockWould)` may stand in for the backend:
+ * throw for a lookup that fails, wait for a slow one.
+ */
+async function typedInto(fn, { answer = null } = {}) {
+  const original = mockBridge.invoke;
+  const typed = {};
+  const lookups = [];
+  mockBridge.invoke = async function (command, args, ...rest) {
+    if (command === 'pty_write') {
+      const key = T.getState().tabs.find((t) => t.sessionId === args?.session_id)?.id ?? args?.session_id;
+      (typed[key] ??= []).push(args?.data);
+      return null;
+    }
+    if (command === 'agent_sessions') {
+      lookups.push({ ...args });
+      if (answer) return answer(lookups.length - 1, args, () => original.call(this, command, args, ...rest));
+    }
+    return original.call(this, command, args, ...rest);
+  };
+  try {
+    await fn();
+  } finally {
+    mockBridge.invoke = original;
+  }
+  return { typed, lookups };
+}
+
+/**
+ * `withOwnDisk`, every terminal closed after: one case's records and claims
+ * must not decide the next one's picks.
+ */
+const isolated = (fn) =>
+  withOwnDisk(async () => {
+    try {
+      await fn();
+    } finally {
+      await closeAll();
+    }
+  });
+
+/** Every `--continue` typed, anywhere. */
+const blindContinues = (typed) => Object.values(typed).flat().filter((line) => /--continue/.test(line));
+
+describe('Every terminal resumes its own conversation', () => {
+  test('OR-19: four terminals on one folder that never learned their ids each resume their own, by id', async () => {
+    await isolated(async () => {
+      const titles = ['Alpha', 'Beta', 'Gamma', 'Delta'];
+      const ids = [SES_A, SES_B, SES_C, SES_D];
+      const tabs = await restoredTerminals(workspaceOf(titles.map((title, i) => ocRecord(i + 1, title))));
+      assert.equal(tabs.length, 4, 'setup: four terminals came back');
+      conversations([
+        ...titles.map((title, i) => ({ id: ids[i], title, updated: 10 + i, created: i + 1, directory: '/workspace' })),
+        // The folder's most recent: what `--continue` opened in each of them.
+        { id: SES_E, title: 'Something newer', updated: 99, created: 50, directory: '/workspace' },
+      ]);
+      const { typed, lookups } = await typedInto(async () => {
+        for (const id of tabs) assert.equal(await T.getState().resumeAgent(id), true, `${id} typed nothing`);
+      });
+      assert.deepEqual(
+        typed,
+        Object.fromEntries(tabs.map((id, i) => [id, [`opencode -s ${ids[i]}\r`]])),
+        'each its own, by id'
+      );
+      assert.equal(lookups.length, 4, 'looked up when Resume was pressed, once each');
+      tabs.forEach((id, i) => {
+        assert.equal(tabById(id).agent.sessionId, ids[i]);
+        assert.equal(tabById(id).agentResumeOffered, false);
+      });
+      await sleep(400); // the write-behind
+      assert.deepEqual(onDisk().tabs.map((t) => t.agent.sessionId), ids, 'and the next restart knows them');
+    });
+  });
+
+  test('OR-20: pressed in four terminals at once and answered out of order, each named one gets its own and same-titled ones type nothing', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(
+        workspaceOf([ocRecord(1, 'Alpha'), ocRecord(2, 'Beta'), ocRecord(3, 'Hello'), ocRecord(4, 'Hello')])
+      );
+      conversations([
+        { id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' },
+        { id: SES_B, title: 'Beta', updated: 20, created: 2, directory: '/workspace' },
+        { id: SES_C, title: 'Hello', updated: 30, created: 3, directory: '/workspace' },
+        { id: SES_D, title: 'Hello', updated: 40, created: 4, directory: '/workspace' },
+      ]);
+      const { typed } = await typedInto(
+        async () => {
+          const resumed = await Promise.all(tabs.map((id) => T.getState().resumeAgent(id)));
+          assert.deepEqual(resumed, [true, true, false, false]);
+        },
+        {
+          // The first asked answers last; two answer in the same turn.
+          answer: async (nth, _args, asTheMockWould) => {
+            await sleep([60, 20, 20, 0][nth] ?? 0);
+            return asTheMockWould();
+          },
+        }
+      );
+      assert.deepEqual(typed, { [tabs[0]]: [`opencode -s ${SES_A}\r`], [tabs[1]]: [`opencode -s ${SES_B}\r`] });
+      assert.deepEqual(blindContinues(typed), []);
+      for (const id of tabs.slice(2)) assert.equal(tabById(id).agentResumeNotice?.kind, 'unsure');
+    });
+  });
+
+  test('OR-21: two terminals offering one title back ask \u{2014} however their conversations\u{2019} times line up with their agents\u{2019}', async () => {
+    // From the review (2026-10-13): a conversation is created at its first
+    // message, not when its agent starts; an old one can be reopened; a
+    // closed terminal leaves one behind. Dealing them out by age swapped
+    // them, and the swap was typed as an exact id.
+    const layouts = {
+      'messaged in the other order': [
+        { id: SES_A, title: 'Hello', created: 300, updated: 900, directory: '/workspace' },
+        { id: SES_B, title: 'Hello', created: 210, updated: 950, directory: '/workspace' },
+      ],
+      'an old one reopened': [
+        { id: SES_A, title: 'Hello', created: 101, updated: 900, directory: '/workspace' },
+        { id: SES_D, title: 'Hello', created: 50, updated: 950, directory: '/workspace' },
+      ],
+      'one left by a closed terminal': [
+        { id: SES_A, title: 'Hello', created: 101, updated: 900, directory: '/workspace' },
+        { id: SES_C, title: 'Hello', created: 150, updated: 160, directory: '/workspace' },
+        { id: SES_B, title: 'Hello', created: 201, updated: 950, directory: '/workspace' },
+      ],
+    };
+    await isolated(async () => {
+      for (const [how, list] of Object.entries(layouts)) {
+        for (const order of [[0, 1], [1, 0]]) {
+          const tabs = await restoredTerminals(workspaceOf([ocRecord(100, 'Hello'), ocRecord(200, 'Hello')]));
+          conversations(list);
+          const { typed } = await typedInto(async () => {
+            for (const at of order) assert.equal(await T.getState().resumeAgent(tabs[at]), false, `${how}, ${order}`);
+          });
+          assert.deepEqual(typed, {}, `${how}, pressed in the order ${order}: a guess typed as an exact id`);
+          for (const id of tabs) assert.equal(tabById(id).agentResumeNotice?.kind, 'unsure', how);
+        }
+      }
+    });
+  });
+
+  test('OR-22: running, two terminals that show one title learn neither conversation \u{2014} rather than a guess', async () => {
+    const first = await readyTerminal();
+    const second = await readyTerminal();
+    try {
+      conversations([
+        { id: SES_OLD, title: 'Hello', updated: 900, created: 100, directory: first.cwd },
+        { id: SES_NEW, title: 'Hello', updated: 300, created: 200, directory: first.cwd },
+      ]);
+      assert.equal(second.cwd, first.cwd, 'setup: one folder');
+      await quickly(() =>
+        withHook('__setAgentResolveRetryMs', [], async () => {
+          await withBackend({}, async () => {
+            await typeLine(first.id, 'opencode');
+            await started(first);
+            await sleep(5);
+            await typeLine(second.id, 'opencode');
+            await started(second);
+            await titled(second, 'OC | Hello');
+            await titled(first, 'OC | Hello');
+            await settle();
+          });
+        })
+      );
+      assert.equal(tabById(first.id).agent.sessionId, null);
+      assert.equal(tabById(second.id).agent.sessionId, null);
+    } finally {
+      await closeAll();
+    }
+  });
+
+  test('OR-34: running, a terminal never learns a conversation another terminal already has \u{2014} though it was written to last', async () => {
+    const first = await readyTerminal();
+    const second = await readyTerminal();
+    try {
+      // The first terminal's conversation is the one being written to, so it
+      // is the most recently updated of the two called "Hello".
+      conversations([
+        { id: SES_OLD, title: 'Hello', updated: 900, created: 100, directory: first.cwd },
+        { id: SES_NEW, title: 'Hello', updated: 300, created: 200, directory: first.cwd },
+      ]);
+      await quickly(async () => {
+        await withBackend({}, async () => {
+          await typeLine(first.id, 'opencode');
+          await started(first);
+          await titled(first, 'OC | Hello');
+          await settle();
+          assert.equal(tabById(first.id).agent.sessionId, SES_OLD, 'setup: the first knows its own');
+          await typeLine(second.id, 'opencode');
+          await started(second);
+          await titled(second, 'OC | Hello');
+          await settle();
+        });
+      });
+      assert.equal(tabById(second.id).agent.sessionId, SES_NEW, 'took the conversation the first terminal is in');
+    } finally {
+      await closeAll();
+    }
+  });
+
+  test('OR-23: with no titles to go on, terminals in one run all ask \u{2014} none guesses the newest', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1), ocRecord(2), ocRecord(3)]));
+      conversations([
+        { id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' },
+        { id: SES_B, title: 'Beta', updated: 20, created: 2, directory: '/workspace' },
+        { id: SES_C, title: 'Gamma', updated: 30, created: 3, directory: '/workspace' },
+      ]);
+      const asked = await typedInto(async () => {
+        for (const id of tabs) assert.equal(await T.getState().resumeAgent(id), false);
+      });
+      assert.deepEqual(asked.typed, {}, 'any of them could have been the newest\u{2019}s');
+      for (const id of tabs) {
+        const t = tabById(id);
+        assert.equal(t.agentResumeOffered, true, 'the offer stays');
+        assert.equal(t.agentResumeNotice?.kind, 'unsure', 'and says it could not tell');
+        assert.equal(t.agentResumeLooking, false);
+      }
+      assert.notEqual(tabById(tabs[0]).agentResumeNotice.seq, tabById(tabs[1]).agentResumeNotice.seq);
+
+      const chosen = await typedInto(async () => {
+        // The user picks for two from the list...
+        assert.equal(await T.getState().resumeAgent(tabs[0], { sessionId: SES_C, title: 'Gamma' }), true);
+        assert.equal(await T.getState().resumeAgent(tabs[1], { sessionId: SES_A, title: 'Alpha' }), true);
+        // ...and the third, though the last left, still does not guess.
+        assert.equal(await T.getState().resumeAgent(tabs[2]), false);
+      });
+      assert.deepEqual(chosen.typed, {
+        [tabs[0]]: [`opencode -s ${SES_C}\r`],
+        [tabs[1]]: [`opencode -s ${SES_A}\r`],
+      });
+      assert.equal(tabById(tabs[0]).agentResumeNotice, null, 'the notice goes with the offer');
+    });
+  });
+
+  test('OR-24: a terminal with no title among others that have theirs asks, while they resume by name', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1), ocRecord(2, 'Gamma'), ocRecord(3, 'Beta')]));
+      conversations([
+        { id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' },
+        { id: SES_B, title: 'Beta', updated: 20, created: 2, directory: '/workspace' },
+        { id: SES_C, title: 'Gamma', updated: 30, created: 3, directory: '/workspace' },
+      ]);
+      const { typed } = await typedInto(async () => {
+        for (const id of tabs) await T.getState().resumeAgent(id);
+      });
+      assert.deepEqual(typed, { [tabs[1]]: [`opencode -s ${SES_C}\r`], [tabs[2]]: [`opencode -s ${SES_B}\r`] });
+      assert.equal(tabById(tabs[0]).agentResumeNotice?.kind, 'unsure');
+    });
+  });
+
+  test('OR-25: the list cannot be read and the folder is shared \u{2014} nothing blind is typed, and the backend\'s reason is shown', async () => {
+    await isolated(async () => {
+      const warn = console.warn;
+      const warned = [];
+      console.warn = (...args) => warned.push(args.join(' '));
+      try {
+        const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha'), ocRecord(2, 'Beta')]));
+        const reason = 'opencode session list failed: Error: database is locked';
+        const refused = await typedInto(
+          async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[0]), false);
+          },
+          { answer: () => Promise.reject(new Error(reason)) }
+        );
+        assert.deepEqual(refused.typed, {}, 'no `--continue` into a folder another opencode terminal shares');
+        const t = tabById(tabs[0]);
+        assert.equal(t.agentResumeOffered, true);
+        assert.deepEqual(
+          { kind: t.agentResumeNotice?.kind, reason: t.agentResumeNotice?.reason, shared: t.agentResumeNotice?.shared },
+          { kind: 'unreadable', reason, shared: true },
+          'the reason, word for word, for the banner'
+        );
+        assert.ok(warned.some((line) => line.includes(reason)), 'and on the console');
+
+        // Chosen knowingly from the list: the folder's most recent, or a new one.
+        const chosen = await typedInto(async () => {
+          assert.equal(await T.getState().resumeAgent(tabs[0], { latest: true }), true);
+          assert.equal(await T.getState().resumeAgent(tabs[1], { fresh: true }), true);
+        });
+        assert.deepEqual(chosen.typed, { [tabs[0]]: ['opencode --continue\r'], [tabs[1]]: ['opencode\r'] });
+        assert.equal(tabById(tabs[1]).agent.title, null, 'a new conversation is a new record');
+      } finally {
+        console.warn = warn;
+      }
+    });
+  });
+
+  test('OR-26: one terminal alone with an unreadable list still continues the most recent, as before \u{2014} and says why', async () => {
+    await isolated(async () => {
+      const warn = console.warn;
+      const warned = [];
+      console.warn = (...args) => warned.push(args.join(' '));
+      try {
+        const [only] = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha')]));
+        const { typed } = await typedInto(
+          async () => {
+            assert.equal(await T.getState().resumeAgent(only), true);
+          },
+          { answer: () => Promise.reject(new Error('opencode was not found on PATH')) }
+        );
+        assert.deepEqual(typed, { [only]: ['opencode --continue\r'] });
+        assert.ok(
+          warned.some((line) => line.includes('opencode was not found on PATH') && line.includes('most recent')),
+          `the terminal (here the console) is told why: ${JSON.stringify(warned)}`
+        );
+      } finally {
+        console.warn = warn;
+      }
+    });
+  });
+
+  test('OR-27: two records left with one id by an earlier build \u{2014} the first keeps it, the other finds its own by title', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(
+        workspaceOf([ocRecord(1, 'Hello', SES_NEW), ocRecord(2, 'Hello', SES_NEW)])
+      );
+      conversations([
+        { id: SES_OLD, title: 'Hello', updated: 100, created: 1, directory: '/workspace' },
+        { id: SES_NEW, title: 'Hello', updated: 200, created: 2, directory: '/workspace' },
+      ]);
+      const { typed, lookups } = await typedInto(async () => {
+        for (const id of tabs) assert.equal(await T.getState().resumeAgent(id), true);
+      });
+      assert.deepEqual(typed, { [tabs[0]]: [`opencode -s ${SES_NEW}\r`], [tabs[1]]: [`opencode -s ${SES_OLD}\r`] });
+      assert.equal(lookups.length, 1, 'only the second had to look');
+    });
+  });
+
+  test('OR-41: two records left with one id \u{2014} the first resumes it, opencode renames it there, and the second still does not type it', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Hello', SES_NEW), ocRecord(2, 'Hello', SES_NEW)]));
+      conversations([{ id: SES_NEW, title: 'Hello', updated: 200, created: 2, directory: '/workspace' }]);
+      await quickly(() =>
+        withHook('__setAgentResolveRetryMs', [], async () => {
+          const first = await typedInto(async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[0]), true);
+            await started(tabById(tabs[0]));
+            // Renamed where the list does not show it yet: the record lets
+            // go of the id while it looks for the new title.
+            await titled(tabById(tabs[0]), 'OC | Hello, renamed');
+            await settle();
+          });
+          assert.deepEqual(first.typed, { [tabs[0]]: [`opencode -s ${SES_NEW}\r`] });
+          assert.equal(tabById(tabs[0]).agent.sessionId, null, 'setup: the record let go of the id');
+          const second = await typedInto(async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[1]), false);
+          });
+          assert.deepEqual(second.typed, {}, 'the conversation open in the first terminal, typed into the second');
+          assert.equal(tabById(tabs[1]).agentResumeNotice?.kind, 'unsure');
+        })
+      );
+    });
+  });
+
+  test('OR-28: Resume looks once \u{2014} a second press while it looks, or a dismiss, types nothing', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha'), ocRecord(2, 'Beta')]));
+      conversations([
+        { id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' },
+        { id: SES_B, title: 'Beta', updated: 20, created: 2, directory: '/workspace' },
+      ]);
+      const slow = async (_nth, _args, asTheMockWould) => {
+        await sleep(60);
+        return asTheMockWould();
+      };
+      const { typed, lookups } = await typedInto(
+        async () => {
+          const first = T.getState().resumeAgent(tabs[0]);
+          await sleep(10);
+          assert.equal(tabById(tabs[0]).agentResumeLooking, true, 'the banner says it is looking');
+          assert.equal(await T.getState().resumeAgent(tabs[0]), false, 'a second press');
+          const other = T.getState().resumeAgent(tabs[1]);
+          await sleep(10);
+          T.getState().dismissAgentResume(tabs[1]);
+          assert.equal(await first, true);
+          assert.equal(await other, false, 'dismissed while it looked');
+        },
+        { answer: slow }
+      );
+      assert.equal(lookups.length, 2);
+      assert.deepEqual(typed, { [tabs[0]]: [`opencode -s ${SES_A}\r`] });
+      assert.equal(tabById(tabs[1]).agent, null);
+      assert.equal(tabById(tabs[0]).agentResumeLooking, false);
+    });
+  });
+
+  test('OR-33: a conversation resumed here stays this terminal\'s while its record has lost the id \u{2014} and is free once the terminal closes', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha', SES_A), ocRecord(2, 'Alpha')]));
+      conversations([{ id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' }]);
+      await quickly(() =>
+        withHook('__setAgentResolveRetryMs', [], async () => {
+          const first = await typedInto(async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[0]), true);
+            await started(tabById(tabs[0]));
+            // opencode shows a title the list does not have: the record lets
+            // go of the id until a lookup finds it again — which this one
+            // cannot.
+            await titled(tabById(tabs[0]), 'OC | Alpha, renamed');
+            await settle();
+          });
+          assert.deepEqual(first.typed, { [tabs[0]]: [`opencode -s ${SES_A}\r`] });
+          assert.equal(tabById(tabs[0]).agent.sessionId, null, 'setup: the record lost its id');
+
+          const second = await typedInto(async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[1]), false);
+          });
+          assert.deepEqual(second.typed, {}, 'the conversation open in the first terminal, typed into the second');
+          assert.equal(tabById(tabs[1]).agentResumeNotice?.kind, 'unsure');
+
+          await T.getState().closeTab(tabs[0]);
+          const third = await typedInto(async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[1]), true);
+          });
+          assert.deepEqual(third.typed, { [tabs[1]]: [`opencode -s ${SES_A}\r`] }, 'closed, it is no one\u{2019}s');
+        })
+      );
+    });
+  });
+
+  test('OR-35: on Windows the folder is looked up as Windows spells it \u{2014} Git Bash\'s /c/x as C:\\x \u{2014} and one on another machine by its spelling', async () => {
+    const os = useSystemStore.getState().os;
+    try {
+      await isolated(async () => {
+        useSystemStore.setState({ os: 'windows' });
+        const [only] = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha')]));
+        T.setState((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.id === only ? { ...t, cwd: '/c/Users/me/proj', shell: 'C:\\Program Files\\Git\\bin\\bash.exe' } : t
+          ),
+        }));
+        conversations([{ id: SES_A, title: 'Alpha', updated: 1, created: 1, directory: 'C:\\Users\\me\\proj' }]);
+        const msys = await typedInto(async () => {
+          assert.equal(await T.getState().resumeAgent(only), true);
+        });
+        assert.deepEqual(msys.lookups, [{ kind: 'opencode', cwd: 'C:\\Users\\me\\proj' }]);
+        assert.deepEqual(msys.typed, { [only]: [`opencode -s ${SES_A}\r`] });
+
+        // The backend compares it by spelling and runs nothing there
+        // (`run_dir`); its Choose\u{2026} list works too.
+        const share = '\\\\fileserver\\share\\proj';
+        const [remote] = await restoredTerminals(workspaceOf([ocRecord(1, 'Beta'), ocRecord(2, 'Gamma')], share));
+        conversations([
+          { id: SES_B, title: 'Beta', updated: 2, created: 2, directory: share },
+          { id: SES_C, title: 'Gamma', updated: 3, created: 3, directory: share },
+        ]);
+        const network = await typedInto(async () => {
+          assert.equal(await T.getState().resumeAgent(remote), true);
+        });
+        assert.deepEqual(network.lookups, [{ kind: 'opencode', cwd: share }]);
+        assert.deepEqual(network.typed, { [remote]: [`opencode -s ${SES_B}\r`] });
+        const listed = await T.getState().listAgentSessions(T.getState().tabs[1].id);
+        assert.deepEqual(listed.map((s) => s.id), [SES_C, SES_B]);
+      });
+    } finally {
+      useSystemStore.setState({ os });
+    }
+  });
+
+  test('OR-29: the list marks a conversation another terminal has \u{2014} in its record, or resumed into and since renamed \u{2014} and a pick of it is refused', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha', SES_A), ocRecord(2, 'Beta', SES_B), ocRecord(3)]));
+      conversations([
+        { id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' },
+        { id: SES_B, title: 'Beta', updated: 20, created: 2, directory: '/workspace' },
+        { id: SES_C, title: 'Gamma', updated: 30, created: 3, directory: '/workspace' },
+      ]);
+      await quickly(() =>
+        withHook('__setAgentResolveRetryMs', [], async () => {
+          await typedInto(async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[0]), true);
+            await started(tabById(tabs[0]));
+            // Renamed where the list does not show it yet: the record lets
+            // go of the id until a lookup finds it again.
+            await titled(tabById(tabs[0]), 'OC | Alpha, renamed');
+            await settle();
+          });
+        })
+      );
+      assert.equal(tabById(tabs[0]).agent.sessionId, null, 'setup: the record lost its id');
+      const listed = await T.getState().listAgentSessions(tabs[2]);
+      assert.deepEqual(
+        listed.map((s) => [s.id, s.heldBy]),
+        [[SES_C, null], [SES_B, 'Terminal 2'], [SES_A, 'Terminal 1']]
+      );
+      const refused = await typedInto(async () => {
+        assert.equal(await T.getState().resumeAgent(tabs[2], { sessionId: SES_A, title: 'Alpha' }), false);
+        assert.equal(await T.getState().resumeAgent(tabs[2], { sessionId: SES_B, title: 'Beta' }), false);
+      });
+      assert.deepEqual(refused.typed, {}, 'two terminals in one conversation');
+      assert.deepEqual(
+        { kind: tabById(tabs[2]).agentResumeNotice?.kind, heldBy: tabById(tabs[2]).agentResumeNotice?.heldBy },
+        { kind: 'taken', heldBy: 'Terminal 2' }
+      );
+      assert.equal(tabById(tabs[2]).agentResumeOffered, true, 'the offer stays');
+      const free = await typedInto(async () => {
+        assert.equal(await T.getState().resumeAgent(tabs[2], { sessionId: SES_C, title: 'Gamma' }), true);
+      });
+      assert.deepEqual(free.typed, { [tabs[2]]: [`opencode -s ${SES_C}\r`] });
+    });
+  });
+
+  test('OR-36: running, two terminals that knew their conversations keep them when opencode renames both alike', async () => {
+    const a = await readyTerminal();
+    const b = await readyTerminal();
+    try {
+      const firstA = 'New session - 2026-10-13T05:00:09.000Z';
+      const firstB = 'New session - 2026-10-13T05:00:00.000Z';
+      // b was messaged first, so its conversation is the older though its
+      // agent started later.
+      conversations([
+        { id: SES_B, title: firstB, created: 10, updated: 10, directory: a.cwd },
+        { id: SES_A, title: firstA, created: 20, updated: 20, directory: a.cwd },
+      ]);
+      await quickly(() =>
+        withHook('__setAgentResolveRetryMs', [], async () => {
+          await withBackend({}, async () => {
+            await typeLine(a.id, 'opencode');
+            await started(a);
+            await sleep(5);
+            await typeLine(b.id, 'opencode');
+            await started(b);
+            await titled(b, `OC | ${firstB}`);
+            await titled(a, `OC | ${firstA}`);
+            await settle();
+            assert.deepEqual([tabById(a.id).agent.sessionId, tabById(b.id).agent.sessionId], [SES_A, SES_B], 'setup');
+            // The same prompt in both: the model names both conversations alike.
+            conversations(mockBridge.agentSessions.map((s) => ({ ...s, title: 'Fix the login bug', updated: s.updated + 100 })));
+            await titled(a, 'OC | Fix the login bug');
+            await titled(b, 'OC | Fix the login bug');
+            assert.equal(tabById(a.id).agent.sessionId, null, 'until it is looked up, the old id stands for no title');
+            await settle();
+          });
+        })
+      );
+      assert.deepEqual([tabById(a.id).agent.sessionId, tabById(b.id).agent.sessionId], [SES_A, SES_B], 'dealt out again, swapped');
+    } finally {
+      await closeAll();
+    }
+  });
+
+  test('OR-37: running, an id a terminal let go of on a new title is not taken by another meanwhile', async () => {
+    const a = await readyTerminal();
+    const b = await readyTerminal();
+    try {
+      conversations([
+        { id: SES_A, title: 'Hello', created: 100, updated: 900, directory: a.cwd },
+        { id: SES_B, title: 'Hello', created: 200, updated: 300, directory: a.cwd },
+      ]);
+      await quickly(() =>
+        withHook('__setAgentResolveRetryMs', [], async () => {
+          await withBackend({}, async () => {
+            await typeLine(a.id, 'opencode');
+            await started(a);
+            await titled(a, 'OC | Hello');
+            await settle();
+            assert.equal(tabById(a.id).agent.sessionId, SES_A, 'setup');
+            // Renamed; the list has not caught up, so a cannot find it yet.
+            await titled(a, 'OC | Hello world');
+            await settle();
+            assert.equal(tabById(a.id).agent.sessionId, null, 'setup: a let go of its id');
+            await typeLine(b.id, 'opencode');
+            await started(b);
+            await titled(b, 'OC | Hello');
+            await settle();
+          });
+        })
+      );
+      assert.equal(tabById(b.id).agent.sessionId, SES_B, 'took the conversation the first terminal is in');
+    } finally {
+      await closeAll();
+    }
+  });
+
+  test('OR-38: no `--continue` while another opencode terminal is in the run \u{2014} a parent and its subfolder included \u{2014} and only one chosen knowingly', async () => {
+    // `--continue` is the most recent in the folder OR BELOW: from a
+    // repository's root it is the subfolder terminal's conversation too.
+    await isolated(async () => {
+      const seed = workspaceOf([ocRecord(1, 'Root work'), ocRecord(2, 'Sub work')]);
+      seed.tabs[1].cwd = '/workspace/sub';
+      for (const failing of [false, true]) {
+        const tabs = await restoredTerminals(seed);
+        conversations([]);
+        const { typed } = await typedInto(
+          async () => {
+            for (const id of tabs) assert.equal(await T.getState().resumeAgent(id), false);
+          },
+          failing ? { answer: () => Promise.reject(new Error('opencode session list: gave up after 20 s')) } : {}
+        );
+        assert.deepEqual(typed, {}, failing ? 'unreadable list' : 'empty list');
+        assert.deepEqual(
+          tabs.map((id) => tabById(id).agentResumeNotice?.kind),
+          failing ? ['unreadable', 'unreadable'] : ['unsure', 'unsure']
+        );
+        const chosen = await typedInto(async () => {
+          assert.equal(await T.getState().resumeAgent(tabs[0], { latest: true }), true);
+          assert.equal(await T.getState().resumeAgent(tabs[1], { latest: true }), false, 'the same most recent, twice');
+        });
+        assert.deepEqual(chosen.typed, { [tabs[0]]: ['opencode --continue\r'] });
+        assert.deepEqual(
+          { kind: tabById(tabs[1]).agentResumeNotice?.kind, latest: tabById(tabs[1]).agentResumeNotice?.latest },
+          { kind: 'taken', latest: true }
+        );
+      }
+    });
+  });
+
+  test('OR-39: one terminal alone whose title fits nothing listed continues the most recent \u{2014} not a guessed old id \u{2014} and says why', async () => {
+    await isolated(async () => {
+      const warn = console.warn;
+      const warned = [];
+      console.warn = (...args) => warned.push(args.join(' '));
+      try {
+        const [only] = await restoredTerminals(workspaceOf([ocRecord(1, 'Made a repository since')]));
+        conversations([{ id: SES_OLD, title: 'Something from before', updated: 1, created: 1, directory: '/workspace' }]);
+        const { typed } = await typedInto(async () => {
+          assert.equal(await T.getState().resumeAgent(only), true);
+        });
+        assert.deepEqual(typed, { [only]: ['opencode --continue\r'] });
+        assert.ok(
+          warned.some((line) => line.includes('\u{201C}Made a repository since\u{201D}') && line.includes('or below')),
+          `not said why: ${JSON.stringify(warned)}`
+        );
+      } finally {
+        console.warn = warn;
+      }
+    });
+  });
+
+  test('OR-40: a terminal resumed this run still counts once its opencode has exited \u{2014} the last one left does not `--continue` into its conversation', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha', SES_A), ocRecord(2)]));
+      conversations([{ id: SES_A, title: 'Alpha', updated: 10, created: 1, directory: '/workspace' }]);
+      const first = await typedInto(async () => {
+        assert.equal(await T.getState().resumeAgent(tabs[0]), true);
+        await started(tabById(tabs[0]));
+        await prompt(tabById(tabs[0])); // opencode exits: its record ends
+      });
+      assert.deepEqual(first.typed, { [tabs[0]]: [`opencode -s ${SES_A}\r`] });
+      assert.equal(tabById(tabs[0]).agent, null, 'setup: the first terminal runs no opencode now');
+      const second = await typedInto(async () => {
+        assert.equal(await T.getState().resumeAgent(tabs[1]), false);
+      });
+      assert.deepEqual(second.typed, {}, 'the most recent is the conversation the first terminal had');
+      assert.equal(tabById(tabs[1]).agentResumeNotice?.kind, 'unsure');
+    });
+  });
+
+  test('OR-42: terminals whose folders `--continue` cannot reach from one another \u{2014} unrelated projects, sibling folders \u{2014} each continue their own most recent', async () => {
+    await isolated(async () => {
+      const seed = workspaceOf([ocRecord(1, 'Alpha'), ocRecord(2, 'Beta'), ocRecord(3, 'Gamma'), ocRecord(4, 'Delta')]);
+      ['/projA', '/projB', '/repo/web', '/repo/api'].forEach((cwd, i) => {
+        seed.tabs[i].cwd = cwd;
+      });
+      const tabs = await restoredTerminals(seed);
+      const unreadable = { answer: () => Promise.reject(new Error('opencode was not found on PATH (OR-42)')) };
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        const { typed } = await typedInto(async () => {
+          for (const id of tabs) assert.equal(await T.getState().resumeAgent(id), true, id);
+        }, unreadable);
+        assert.deepEqual(typed, Object.fromEntries(tabs.map((id) => [id, ['opencode --continue\r']])));
+      } finally {
+        console.warn = warn;
+      }
+
+      // A parent and its child do reach each other, in whatever case and
+      // with whatever separators two shells spell them.
+      const nested = workspaceOf([ocRecord(1, 'Root'), ocRecord(2, 'Sub')]);
+      nested.tabs[0].cwd = '/Repo/';
+      nested.tabs[1].cwd = '\\repo\\web';
+      const pair = await restoredTerminals(nested);
+      assert.deepEqual(pair.map((id) => T.getState().resumeFallbackFor(id)), ['ask', 'ask']);
+      const sibling = workspaceOf([ocRecord(1, 'A'), ocRecord(2, 'B')]);
+      sibling.tabs[0].cwd = '/repo/web';
+      sibling.tabs[1].cwd = '/repo/website';
+      const siblings = await restoredTerminals(sibling);
+      assert.deepEqual(siblings.map((id) => T.getState().resumeFallbackFor(id)), ['continue', 'continue'], '/repo/web is not inside /repo/website');
+    });
+  });
+
+  test('OR-43: once the other opencode terminal is closed, the one left continues the most recent again', async () => {
+    await isolated(async () => {
+      const tabs = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha', SES_A), ocRecord(2, 'Beta')]));
+      conversations([{ id: SES_A, title: 'Alpha', updated: 1, created: 1, directory: '/workspace' }]);
+      await typedInto(async () => {
+        assert.equal(await T.getState().resumeAgent(tabs[0]), true);
+      });
+      assert.equal(T.getState().resumeFallbackFor(tabs[1]), 'ask', 'setup: the first terminal is within reach');
+      await T.getState().closeTab(tabs[0]);
+      assert.equal(T.getState().resumeFallbackFor(tabs[1]), 'continue');
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        const { typed } = await typedInto(
+          async () => {
+            assert.equal(await T.getState().resumeAgent(tabs[1]), true);
+          },
+          { answer: () => Promise.reject(new Error('database is locked')) }
+        );
+        assert.deepEqual(typed, { [tabs[1]]: ['opencode --continue\r'] });
+      } finally {
+        console.warn = warn;
+      }
+    });
+  });
+
+  test('OR-44: the most recent continued in one project does not stop another project\u{2019}s terminal choosing its own', async () => {
+    await isolated(async () => {
+      const seed = workspaceOf([ocRecord(1, 'Alpha'), ocRecord(2, 'Beta'), ocRecord(3, 'Gamma')]);
+      ['/projA', '/projB', '/projB/sub'].forEach((cwd, i) => {
+        seed.tabs[i].cwd = cwd;
+      });
+      const tabs = await restoredTerminals(seed);
+      const unreadable = { answer: () => Promise.reject(new Error('opencode was not found on PATH (OR-44)')) };
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        const auto = await typedInto(async () => {
+          for (const id of tabs) await T.getState().resumeAgent(id);
+        }, unreadable);
+        assert.deepEqual(auto.typed, { [tabs[0]]: ['opencode --continue\r'] }, 'projB and its subfolder reach each other: they ask');
+        const chosen = await typedInto(async () => {
+          assert.equal(await T.getState().resumeAgent(tabs[1], { latest: true }), true, 'refused for what projA continued');
+          assert.equal(await T.getState().resumeAgent(tabs[2], { latest: true }), false, 'its parent continued the same most recent');
+        });
+        assert.deepEqual(chosen.typed, { [tabs[1]]: ['opencode --continue\r'] });
+        assert.equal(tabById(tabs[2]).agentResumeNotice?.heldBy, 'Terminal 2');
+      } finally {
+        console.warn = warn;
+      }
+    });
+  });
+});
+
+describe('A lookup that fails while opencode runs is tried again', () => {
+  /** Retries after 20, 40 and 60 ms rather than 15 s, a minute and five. */
+  const soon = (fn) => withHook('__setAgentResolveRetryMs', [20, 40, 60], fn);
+
+  test('OR-30: a lookup that failed is tried again, and the id is learned when it answers', async () => {
+    const tab = await readyTerminal();
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      conversations([{ id: SES_A, title: 'Alpha', updated: 1, created: 1, directory: tab.cwd }]);
+      await quickly(() =>
+        soon(async () => {
+          const { lookups } = await typedInto(
+            async () => {
+              await typeLine(tab.id, 'opencode');
+              await started(tab);
+              await titled(tab, 'OC | Alpha');
+              await sleep(12); // looked up at 5 ms; the retry is due at 25
+              assert.equal(tabById(tab.id).agent.sessionId, null, 'setup: the first lookup failed');
+              await sleep(80);
+            },
+            {
+              answer: (nth, _args, asTheMockWould) =>
+                nth === 0 ? Promise.reject(new Error('opencode session list: gave up after 20 s')) : asTheMockWould(),
+            }
+          );
+          assert.equal(lookups.length, 2, 'once more, and no more once it answered');
+        })
+      );
+      assert.equal(tabById(tab.id).agent.sessionId, SES_A);
+    } finally {
+      console.warn = warn;
+      await closeAll();
+    }
+  });
+
+  test('OR-31: retries are bounded, found-nothing counts too, and they stop when the title changes or opencode exits', async () => {
+    const tab = await readyTerminal();
+    const warn = console.warn;
+    const warned = [];
+    console.warn = (...args) => warned.push(args.join(' '));
+    try {
+      await quickly(() =>
+        soon(async () => {
+          // A reason of its own: each is said once a run, and OR-11 said the plain one.
+          const failing = { answer: () => Promise.reject(new Error('opencode was not found on PATH (OR-31)')) };
+          const bounded = await typedInto(async () => {
+            await typeLine(tab.id, 'opencode');
+            await started(tab);
+            await titled(tab, 'OC | Alpha');
+            await sleep(250);
+          }, failing);
+          assert.equal(bounded.lookups.length, 4, 'the first and three more, then left until the title changes');
+          assert.equal(warned.length, 1, 'said once, not at every retry');
+
+          // Nothing listed for it: tried again as well.
+          conversations([]);
+          const empty = await typedInto(async () => {
+            await titled(tab, 'OC | Beta');
+            await sleep(250);
+          });
+          assert.equal(empty.lookups.length, 4);
+
+          // A new title starts its own count; opencode exiting stops it.
+          const stopped = await typedInto(async () => {
+            await titled(tab, 'OC | Gamma');
+            await sleep(12); // looked up at 5 ms and failed; the retry is due at 25
+            await prompt(tab); // opencode exits
+            await sleep(200);
+          }, failing);
+          assert.equal(stopped.lookups.length, 1, 'no retry after the agent exited');
+          assert.equal(tabById(tab.id).agent, null);
+        })
+      );
+    } finally {
+      console.warn = warn;
+      await closeAll();
+    }
+  });
+});
+
+describe('Claude Code resumes as it always did', () => {
+  test('OR-32: an exact record and one with no id each type what they did, with no lookup, two in one folder or not', async () => {
+    await isolated(async () => {
+      const claude = startCommand('claude').agent;
+      const tabs = await restoredTerminals(
+        workspaceOf([claude, { kind: 'claude', sessionId: null, startedAt: 2, title: null }, { kind: 'claude', sessionId: null, startedAt: 3, title: null }])
+      );
+      const { typed, lookups } = await typedInto(async () => {
+        for (const id of tabs) assert.equal(await T.getState().resumeAgent(id), true);
+      });
+      assert.deepEqual(typed, {
+        [tabs[0]]: [`claude --resume ${claude.sessionId}\r`],
+        [tabs[1]]: ['claude --continue\r'],
+        [tabs[2]]: ['claude --continue\r'],
+      });
+      assert.deepEqual(lookups, []);
     });
   });
 });

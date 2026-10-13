@@ -16,11 +16,37 @@ import { cn } from '../../lib/utils.js';
  *     onSelect?: () => void }
  * Separator shape:
  *   { type: 'separator', key }
+ *
+ * `focusedKeys`: take keys only while focus is inside the menu — or inside
+ * `keysWithin`, the element it belongs to. A menu opened by a click is the
+ * only one open, and takes the window's keys; one that opens by itself may
+ * not be (the resume offer's list, one per pane), and two of them listening
+ * to the window both took the same Enter.
+ *
+ * `takeFocus`: focus the menu as it opens (the default). One that opens by
+ * itself does not: whoever was typing somewhere else keeps typing there,
+ * and the menu waits for a click, or for focus to come to it or to
+ * `keysWithin`.
  */
-export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
+export function ContextMenu({
+  open,
+  x = 0,
+  y = 0,
+  items = [],
+  onClose,
+  focusedKeys = false,
+  keysWithin = null,
+  takeFocus = true,
+}) {
   const menuRef = useRef(null);
   const [placement, setPlacement] = useState({ left: x, top: y, ready: false });
   const [activeIndex, setActiveIndex] = useState(-1);
+  // The row Enter picks, as last drawn. Enter used to read it inside a state
+  // updater and pick from there: an item's `onSelect` then ran during a
+  // render — React warns of it, and StrictMode runs an updater twice, which
+  // picked twice.
+  const activeRef = useRef(-1);
+  activeRef.current = activeIndex;
 
   const selectableIndexes = items.reduce((acc, item, idx) => {
     if (item.type !== 'separator' && !item.disabled) acc.push(idx);
@@ -55,7 +81,7 @@ export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
 
   useEffect(() => {
     if (!open) return undefined;
-    menuRef.current?.focus();
+    if (takeFocus) menuRef.current?.focus();
 
     const moveActive = (dir) => {
       if (selectableIndexes.length === 0) return;
@@ -77,6 +103,10 @@ export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
     };
 
     const handleKeyDown = (e) => {
+      if (focusedKeys) {
+        const at = document.activeElement;
+        if (!menuRef.current?.contains(at) && !keysWithin?.current?.contains(at)) return;
+      }
       if (e.key === 'Escape') {
         e.preventDefault();
         onClose?.();
@@ -87,11 +117,11 @@ export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
         e.preventDefault();
         moveActive(-1);
       } else if (e.key === 'Enter' || e.key === ' ') {
+        // Taken from the owner (`keysWithin`) with no row picked yet, the key
+        // is the owner's own: Enter on its focused button presses it.
+        if (focusedKeys && activeRef.current < 0 && !menuRef.current?.contains(document.activeElement)) return;
         e.preventDefault();
-        setActiveIndex((current) => {
-          activateIndex(current);
-          return current;
-        });
+        activateIndex(activeRef.current);
       }
     };
 
@@ -113,7 +143,7 @@ export function ContextMenu({ open, x = 0, y = 0, items = [], onClose }) {
       window.removeEventListener('scroll', handleDismiss, true);
       window.removeEventListener('resize', handleDismiss);
     };
-  }, [open, items, onClose, selectableIndexes]);
+  }, [open, items, onClose, selectableIndexes, focusedKeys, keysWithin, takeFocus]);
 
   if (!open) return null;
 

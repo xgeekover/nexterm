@@ -379,23 +379,45 @@ scenario(
 
 scenario(
   'RN-18',
-  'opencode is offered as the most recent conversation here, not as this one',
+  'opencode that never learned its conversation, the run\u{2019}s only one: the most recent in this folder or below, said as such',
   () => {
     reset();
     useTerminalStore.setState({ tabs: [offering({ kind: 'opencode', sessionId: null })] });
   },
   (html) => {
     expectText(html, 'Resume opencode?');
-    // The time belongs to this terminal: the most recent conversation in the
-    // folder may be another terminal's.
+    // What Resume then types is `opencode --continue`, which opens the most
+    // recent conversation in the folder or BELOW it — the offer says so,
+    // and says the time is this terminal's, not that conversation's.
     expectText(
       html,
-      'Picks up the most recent opencode conversation in this folder; opencode was started in this terminal 3h ago.'
+      'Picks up the most recent opencode conversation in this folder or below; opencode was started in this terminal 3h ago.'
     );
     expectThat(
       !visibleText(html).includes('the conversation this terminal had'),
-      'promises opencode the exact conversation, which it cannot choose'
+      'promises opencode the exact conversation, which it does not know'
     );
+  }
+);
+
+scenario(
+  'RN-74',
+  'opencode that never learned its conversation, beside another opencode terminal: it asks \u{2014} no "most recent"',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering({ kind: 'opencode', sessionId: null }),
+        tab('t2', { agent: { kind: 'opencode', sessionId: null, startedAt: 1, title: 'Other' }, agentResumeOffered: true }),
+      ],
+    });
+  },
+  (html) => {
+    expectText(
+      html,
+      'Asks which of this folder\u{2019}s opencode conversations this terminal had \u{2014} it never learned its name; opencode was started in this terminal 3h ago.'
+    );
+    expectThat(!visibleText(html).includes('most recent'), 'offers "the most recent", which Resume will not type here');
   }
 );
 
@@ -445,7 +467,7 @@ scenario(
 
 scenario(
   'RN-41',
-  'an opencode terminal that saw a title but no id still promises only the latest — and says what it was in',
+  'an opencode terminal that saw a title but no id looks it up by name \u{2014} alone in the run, the most recent if not found',
   () => {
     reset();
     useTerminalStore.setState({ tabs: [offering({ ...OPENCODE_KNOWN, sessionId: null })] });
@@ -453,13 +475,178 @@ scenario(
   (html) => {
     expectText(
       html,
-      'Picks up the most recent opencode conversation in this folder; opencode was started in this terminal 3h ago \u2014 it was in \u201cFix the login bug\u201d.'
+      'Looks up \u{201C}Fix the login bug\u{201D}, the conversation this terminal had, by its name \u{2014} or, not found, the most recent opencode conversation in this folder or below; opencode was started in this terminal 3h ago.'
     );
-    expectThat(
-      !visibleText(html).includes('the conversation this terminal had'),
-      'promises the exact conversation without its id'
+    expectThat(!visibleText(html).includes('Picks up \u{201C}'), 'promises the exact conversation without its id');
+    expectThat(buttonsIn(html).find((b) => b.text === 'Choose\u{2026}'), 'no Choose\u{2026} when the resume cannot be exact');
+    expectThat(!/data-agent-resume-notice/.test(html), 'a notice with nothing to say');
+  }
+);
+
+scenario(
+  'RN-75',
+  'the same beside another opencode terminal: by name, and it asks if it cannot tell \u{2014} no "most recent"',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering({ ...OPENCODE_KNOWN, sessionId: null }),
+        tab('t2', { agent: { kind: 'opencode', sessionId: 'ses_bbbbbbbbbbbbBBBBBBBBBBBBBB', startedAt: 1, title: 'B' } }),
+      ],
+    });
+  },
+  (html) => {
+    expectText(
+      html,
+      'Looks up \u{201C}Fix the login bug\u{201D}, the conversation this terminal had, by its name, and asks if it cannot tell; opencode was started in this terminal 3h ago.'
     );
-    expectThat(buttonsIn(html).find((b) => b.text === 'Choose…'), 'no Choose… when the resume cannot be exact');
+    expectThat(!visibleText(html).includes('most recent'), 'offers "the most recent", which Resume will not type here');
+  }
+);
+
+scenario(
+  'RN-76',
+  'a conversation picked from the list that another terminal already has \u{2014} refused, and the banner says where it is',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering(
+          { kind: 'opencode', sessionId: null },
+          { agentResumeNotice: { kind: 'taken', heldBy: 'Terminal 2', latest: false, seq: 4 } }
+        ),
+      ],
+    });
+  },
+  (html) => {
+    expectText(html, 'That conversation is open in Terminal 2 already \u{2014} choose another.');
+  }
+);
+
+scenario(
+  'RN-77',
+  'the most recent picked from the list after another terminal continued it \u{2014} refused, and said',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering(
+          { kind: 'opencode', sessionId: null },
+          { agentResumeNotice: { kind: 'taken', heldBy: 'Terminal 3', latest: true, seq: 5 } }
+        ),
+      ],
+    });
+  },
+  (html) => {
+    expectText(html, 'Terminal 3 already continued the most recent conversation \u{2014} choose another.');
+  }
+);
+
+scenario(
+  'RN-69',
+  'Resume looking up the conversation says so, and neither button can be pressed again meanwhile',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [offering({ ...OPENCODE_KNOWN, sessionId: null }, { agentResumeLooking: true })],
+    });
+  },
+  (html) => {
+    expectText(html, 'Looking for this terminal\u{2019}s conversation\u{2026}');
+    const buttons = buttonsIn(html);
+    for (const name of ['Resume', 'Choose\u{2026}']) {
+      const button = buttons.find((b) => b.text === name);
+      expectThat(button, `no ${name} button`);
+      expectThat(button.disabled, `${name} can be pressed again while the conversation is looked up`);
+      expectThat(button.title.includes('Looking for this terminal'), `${name} does not say why it waits`);
+    }
+    expectThat(!buttons.find((b) => b.label === 'Dismiss').disabled, 'Dismiss is disabled while it looks');
+  }
+);
+
+scenario(
+  'RN-70',
+  'Resume could not tell which conversation this terminal had \u{2014} it says so, and both ways on stay open',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering({ kind: 'opencode', sessionId: null }, { agentResumeNotice: { kind: 'unsure', reason: null, shared: true, seq: 1 } }),
+      ],
+    });
+  },
+  (html) => {
+    expectText(html, 'Could not tell which conversation this terminal had \u{2014} choose one below.');
+    expectThat(/data-agent-resume-notice=""[^>]*class="[^"]*text-vsc-warn/.test(html), 'the notice is not drawn as a warning');
+    const buttons = buttonsIn(html);
+    expectThat(buttons.find((b) => b.text === 'Choose\u{2026}') && !buttons.find((b) => b.text === 'Choose\u{2026}').disabled, 'Choose\u{2026} is not there to choose with');
+    expectThat(!buttons.find((b) => b.text === 'Resume').disabled, 'Resume cannot be tried again');
+  }
+);
+
+scenario(
+  'RN-71',
+  'the list could not be read in a folder another opencode shares \u{2014} the backend\u{2019}s reason word for word, and why nothing was typed',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering(
+          { ...OPENCODE_KNOWN, sessionId: null },
+          {
+            agentResumeNotice: {
+              kind: 'unreadable',
+              reason: "opencode session list failed: 'node' is not recognized as an internal or external command,",
+              shared: true,
+              seq: 2,
+            },
+          }
+        ),
+      ],
+    });
+  },
+  (html) => {
+    expectText(
+      html,
+      "Could not list opencode\u{2019}s conversations: opencode session list failed: 'node' is not recognized as an internal or external command. Another opencode terminal is in this folder, above it or below it, so the most recent conversation may be that terminal\u{2019}s \u{2014} choose below."
+    );
+  }
+);
+
+scenario(
+  'RN-72',
+  'opencode not found: the reason ends the sentence once, however the backend punctuated it',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        offering(
+          { kind: 'opencode', sessionId: null },
+          { agentResumeNotice: { kind: 'unreadable', reason: 'opencode was not found on PATH.', shared: true, seq: 3 } }
+        ),
+      ],
+    });
+  },
+  (html) => {
+    expectText(html, 'Could not list opencode\u{2019}s conversations: opencode was not found on PATH. Another opencode terminal');
+    expectThat(!visibleText(html).includes('PATH..'), 'the reason ends in two full stops');
+    expectThat(/data-agent-resume-notice=""[^>]*class="[^"]*text-vsc-warn/.test(html), 'the notice is not drawn as a warning');
+  }
+);
+
+scenario(
+  'RN-73',
+  'Claude Code with no id is still offered as the folder\u{2019}s most recent \u{2014} nothing about it changed',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [offering({ kind: 'claude', sessionId: null })] });
+  },
+  (html) => {
+    expectText(
+      html,
+      'Picks up the most recent Claude Code conversation in this folder; Claude Code was started in this terminal 3h ago.'
+    );
+    expectThat(!buttonsIn(html).some((b) => b.text === 'Choose\u{2026}'), 'a Choose\u{2026} with nothing behind it');
   }
 );
 

