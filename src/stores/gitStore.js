@@ -26,13 +26,13 @@ export const useGitStore = create((set, get) => {
   const read = async () => {
     try {
       const status = await invoke('git_status');
-      set({ status: status ?? null, isLoaded: true });
+      set((s) => ({ status: status ?? null, isLoaded: true, refreshes: s.refreshes + 1 }));
       return status ?? null;
     } catch (err) {
       // Not an error worth showing: a backend that cannot answer is the same
       // as a folder that is not a repository.
       console.warn('[git] could not read status:', err);
-      set({ status: null, isLoaded: true });
+      set((s) => ({ status: null, isLoaded: true, refreshes: s.refreshes + 1 }));
       return null;
     }
   };
@@ -40,6 +40,15 @@ export const useGitStore = create((set, get) => {
   return {
     status: null,
     isLoaded: false,
+    /**
+     * How many times the status has been read, whatever it said. Something
+     * in the repository may have changed each time — the watcher saw files
+     * change, or a folder was opened — so the TERMINALS side bar reads its
+     * terminals' branches again when this moves (src/hooks/
+     * useBranchLookups.js). `status` cannot say so: a status read twice the
+     * same is a new object, and null twice is null.
+     */
+    refreshes: 0,
 
     /** Read now, coalescing with anything already running. */
     refreshNow: async () => {

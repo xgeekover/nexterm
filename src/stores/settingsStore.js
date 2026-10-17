@@ -153,6 +153,36 @@ export const SETTINGS_DEFAULTS = {
    * See src/lib/terminalProgress.js.
    */
   terminalProgress: true,
+  /**
+   * What each row of the TERMINALS side bar shows besides its title. With
+   * any of the second-line items on, every row is two lines of the same
+   * height, so nothing moves under the pointer when one of them changes; with
+   * all of them off, rows are one line, as before. See src/lib/
+   * terminalStatus.js.
+   *
+   * - Folder: where the terminal is, on the right of its first line — what
+   *   the side bar has always shown.
+   * - Git Branch: the branch that folder is on, read from the repository's
+   *   `HEAD` by the backend (`git_branch`) when the folder changes, a command
+   *   ends in the terminal, or the workspace's git status refreshes — never
+   *   on a timer. Off: nothing is looked up at all (src/stores/
+   *   branchStore.js).
+   * - Agent and Status: which agent runs in it, and what it is doing as one
+   *   state — waiting for you, failed, running, a program's progress.
+   * - Last Notification: the last thing it told you, read or not.
+   */
+  terminalsPanelFolder: true,
+  terminalsPanelBranch: true,
+  terminalsPanelAgent: true,
+  terminalsPanelLastNote: true,
+  /**
+   * Show the side bar's groups, and the terminals in each pane, most urgent
+   * first: waiting for you, then failed, then still working, then idle, then
+   * exited — the user's own order among equals. Only the side bar's: the
+   * order the groups and tabs are kept in never changes, and turning this off
+   * shows it again.
+   */
+  terminalsPanelSortAttention: false,
   editorFontSize: 12,
   editorTabSize: 2,
   editorWordWrap: false,

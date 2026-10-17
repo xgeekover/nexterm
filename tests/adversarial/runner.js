@@ -98,6 +98,8 @@ import './explorer_trash.test.js';
 import './editor_session_restore.test.js';
 import './terminal_progress.test.js';
 import './attention.test.js';
+import './terminal_status.test.js';
+import './branch_store.test.js';
 
 async function run() {
   console.log('====================================================');

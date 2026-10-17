@@ -372,6 +372,59 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         'Shows the progress a program reports with OSC 9;4, the sequence Windows Terminal understands, as a thin bar under its tab and its group, and on Windows on the taskbar button too. Off, every bar is taken down at once.',
       control: 'checkbox',
     },
+    // ---- The TERMINALS side bar's rows (stage 2) ----
+    // With any of Branch, Agent and Status, or Last Notification on, every
+    // terminal row is two lines of one height; with all three off, one line.
+    {
+      id: 'terminalsPanelFolder',
+      section: 'terminal',
+      key: 'terminalsPanelFolder',
+      settingKey: 'terminal.sidebar.showFolder',
+      title: 'Show Folder',
+      description:
+        'In the TERMINALS side bar, shows the folder each terminal is in at the right of its row, cut from the front when it does not fit.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalsPanelBranch',
+      section: 'terminal',
+      key: 'terminalsPanelBranch',
+      settingKey: 'terminal.sidebar.showGitBranch',
+      title: 'Show Git Branch',
+      description:
+        "In the TERMINALS side bar, shows the Git branch of each terminal's folder under its title. It is read from the folder's .git when the terminal changes folder, when a command ends in it, and when the workspace's Git status refreshes — never on a timer, and nothing the repository configures is ever run to find it. A terminal in WSL or in a network folder shows no branch. Off, nothing is looked up.",
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalsPanelAgent',
+      section: 'terminal',
+      key: 'terminalsPanelAgent',
+      settingKey: 'terminal.sidebar.showAgentStatus',
+      title: 'Show Agent and Status',
+      description:
+        "In the TERMINALS side bar, shows under each terminal's title the agent running in it — Claude Code or OpenCode — and what it is doing: waiting for you, failed, running, a program's progress, or exited.",
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalsPanelLastNote',
+      section: 'terminal',
+      key: 'terminalsPanelLastNote',
+      settingKey: 'terminal.sidebar.showLastNotification',
+      title: 'Show Last Notification',
+      description:
+        "In the TERMINALS side bar, shows under each terminal's title the last thing it told you — a program's message, a bell, a finished command — dimmed once you have read it. Point at it for the whole text and how long ago it came.",
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalsPanelSortAttention',
+      section: 'terminal',
+      key: 'terminalsPanelSortAttention',
+      settingKey: 'terminal.sidebar.sortByAttention',
+      title: 'Sort by Attention',
+      description:
+        'Lists the groups in the TERMINALS side bar, and the terminals in each pane, most urgent first: waiting for you, then failed, then running, then idle, then exited, keeping your order among equals. Only the side bar changes — tabs and group chips keep your order, and turning this off shows it again; menu items that act on your order, such as Close Terminals to the Right, are unavailable while it is on. While you aim, the list holds still: while the pointer is over a terminal or group row, from a press until its click and a double-click after, while a menu from the list is open, and while a row is being renamed. Moving off the rows, or leaving the window, lets it catch up; until it has, a dot on the sort button says a newer order is waiting.',
+      control: 'checkbox',
+    },
     {
       id: 'terminalSuggestions',
       section: 'terminal',
@@ -606,6 +659,11 @@ export function SettingsWindow() {
   const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
   const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
   const terminalProgress = useSettingsStore((s) => s.terminalProgress);
+  const terminalsPanelFolder = useSettingsStore((s) => s.terminalsPanelFolder);
+  const terminalsPanelBranch = useSettingsStore((s) => s.terminalsPanelBranch);
+  const terminalsPanelAgent = useSettingsStore((s) => s.terminalsPanelAgent);
+  const terminalsPanelLastNote = useSettingsStore((s) => s.terminalsPanelLastNote);
+  const terminalsPanelSortAttention = useSettingsStore((s) => s.terminalsPanelSortAttention);
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
   const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
   const terminalSplitCwd = useSettingsStore((s) => s.terminalSplitCwd);
@@ -638,6 +696,11 @@ export function SettingsWindow() {
     terminalBellAttention,
     terminalAttentionFlashFocused,
     terminalProgress,
+    terminalsPanelFolder,
+    terminalsPanelBranch,
+    terminalsPanelAgent,
+    terminalsPanelLastNote,
+    terminalsPanelSortAttention,
     terminalDefaultCwd,
     terminalDefaultCwdPath,
     terminalSplitCwd,

@@ -1,8 +1,11 @@
+pub mod drive;
 pub mod git;
 pub mod watcher;
 pub mod search;
 pub mod reveal;
 pub mod trash;
+
+pub use drive::{on_a_network_drive, QuietDriveErrors};
 pub use watcher::FsWatcherManager;
 
 use parking_lot::Mutex;
@@ -903,16 +906,58 @@ pub fn is_network_path(path: &str) -> bool {
 /// went through: a git checkout or an unpacked archive makes a chain as
 /// easily as a direct link. A chain too long to be anything but a loop
 /// counts as leading off the machine — it is never followed either way.
+///
+/// By spelling alone: a folder on a mapped network drive is a folder like any
+/// other here, as the open folder may well be on one. What must not reach a
+/// drive like that asks `link_leads_off_machine_by`.
 pub fn link_leads_off_machine(path: &Path) -> bool {
+    link_leads_off_machine_by(path, &|_| false)
+}
+
+/// `link_leads_off_machine`, and every link's target — and `path` itself —
+/// judged by the drive it lands on as well: `network_drive` says whether a
+/// path is on a mapped network drive (`on_a_network_drive` in the app).
+/// `Z:\…` is spelled like any local path, and a local link onto it reached
+/// the drive. The target is judged as soon as it is read — absolute, or
+/// joined to the link's folder, without a verbatim prefix — and only then is
+/// anything below it looked at.
+///
+/// For the lookups that must never reach another machine whatever the open
+/// folder is: the branch of a terminal's folder (`fs::git::branch_of`) and
+/// the paths in a terminal's output (`fs::reveal`).
+pub fn link_leads_off_machine_by(path: &Path, network_drive: &dyn Fn(&str) -> bool) -> bool {
     let mut hops = MAX_LINK_HOPS;
-    reaches_off_machine(path, &mut hops)
+    reaches_off_machine(path, &mut hops, network_drive)
 }
 
 /// Links followed in one `link_leads_off_machine` before it gives up.
 const MAX_LINK_HOPS: u32 = 40;
 
-fn reaches_off_machine(path: &Path, hops: &mut u32) -> bool {
-    if is_network_path(&path.to_string_lossy()) {
+/// Whether a link's `target` is rooted but names no drive: one separator,
+/// then something that is not one — `\Device\HarddiskVolume2\…` from a
+/// reparse point's raw data, `\x`. Windows reads such a path against
+/// whatever drive is current where it is opened, not necessarily the link's,
+/// so where it leads cannot be told from where the link is: it counts as
+/// leading off the machine. Two separators first are another machine or a
+/// verbatim spelling, which `is_network_path` judges.
+///
+/// `windows` is whether `/` separates as well (`cfg!(windows)`). Elsewhere
+/// `/x` is the absolute path it looks like, and only a leading backslash —
+/// which no Unix name has by accident — counts.
+fn rooted_without_drive(target: &str, windows: bool) -> bool {
+    let separator = |c: Option<char>| c == Some('\\') || (windows && c == Some('/'));
+    let mut chars = target.chars();
+    separator(chars.next()) && !separator(chars.next())
+}
+
+/// Whether `path`, as spelled, is somewhere this machine must not reach.
+fn off_machine(path: &Path, network_drive: &dyn Fn(&str) -> bool) -> bool {
+    let spelled = path.to_string_lossy();
+    is_network_path(&spelled) || network_drive(&without_verbatim_prefix(&spelled))
+}
+
+fn reaches_off_machine(path: &Path, hops: &mut u32, network_drive: &dyn Fn(&str) -> bool) -> bool {
+    if off_machine(path, network_drive) {
         return true;
     }
     let mut walked = PathBuf::new();
@@ -939,14 +984,17 @@ fn reaches_off_machine(path: &Path, hops: &mut u32) -> bool {
         let Ok(target) = fs::read_link(&walked) else {
             return true;
         };
-        if is_network_path(&target.to_string_lossy()) {
+        let spelled_target = target.to_string_lossy();
+        if is_network_path(&spelled_target) || rooted_without_drive(&spelled_target, cfg!(windows)) {
             return true;
         }
         let next = match walked.parent() {
             Some(parent) if target.is_relative() => parent.join(&target),
             _ => target,
         };
-        if reaches_off_machine(&next, hops) {
+        // Judged where it lands before anything there is looked at: the walk
+        // below starts by asking about `next` itself.
+        if reaches_off_machine(&next, hops, network_drive) {
             return true;
         }
     }
@@ -2332,6 +2380,45 @@ mod off_machine_chain_tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&share);
     }
+
+    /// A link onto a mapped network drive is spelled like any local path
+    /// (`Z:\…`): asked about the drive as well (`link_leads_off_machine_by`,
+    /// which `branch_of` and the output's paths use), every link's target is
+    /// judged by the drive it lands on before anything below it. By spelling
+    /// alone — what the rest of the backend asks, where a whole folder can be
+    /// on such a drive — it stays here.
+    #[test]
+    fn a_link_onto_a_network_drive_leads_off_the_machine_when_the_drive_is_asked() {
+        let root = scratch("drive-root");
+        let share = scratch("drive-share");
+        fs::create_dir_all(share.join("inner")).unwrap();
+        std::os::unix::fs::symlink(&share, root.join("onto")).unwrap();
+        std::os::unix::fs::symlink("onto", root.join("hop")).unwrap();
+        std::os::unix::fs::symlink(format!("../{}/inner", share.file_name().unwrap().to_string_lossy()), root.join("relative")).unwrap();
+        fs::create_dir_all(root.join("here")).unwrap();
+        let mapped = share.to_string_lossy().to_string();
+        let on_drive = move |path: &str| path.starts_with(&mapped);
+
+        for name in ["onto", "hop", "onto/inner", "hop/inner"] {
+            assert!(link_leads_off_machine_by(&root.join(name), &on_drive), "{name}");
+            assert!(!link_leads_off_machine(&root.join(name)), "{name}: by spelling alone it stays");
+        }
+        assert!(link_leads_off_machine_by(&share.join("inner"), &on_drive), "the path itself on the drive");
+        assert!(!link_leads_off_machine_by(&root.join("here"), &on_drive), "a folder that is here");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let records = |path: &str| {
+            asked.borrow_mut().push(path.to_string());
+            false
+        };
+        assert!(!link_leads_off_machine_by(&root.join("relative"), &records));
+        let asked = asked.into_inner();
+        assert!(
+            asked.iter().any(|p| Path::new(p).ends_with(Path::new("inner")) && p.contains("..")),
+            "a relative target is judged joined to the link's folder: {asked:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&share);
+    }
 }
 
 #[cfg(test)]
@@ -2352,5 +2439,44 @@ mod junction_target_tests {
         assert_eq!(junction_target(Path::new("../../../elsewhere"), published), PathBuf::from("/w/elsewhere"));
         assert_eq!(junction_target(Path::new("/abs/target"), published), PathBuf::from("/abs/target"));
         assert!(!junction_target(Path::new("x"), published).to_string_lossy().contains(".copying"));
+    }
+}
+
+/// A link's target that is rooted but names no drive — `\Device\…` from a
+/// reparse point's raw data, `\x` — is read by Windows against whatever drive
+/// is current, not the link's: it cannot be judged by where the link is, and
+/// is not followed.
+#[cfg(test)]
+mod rooted_target_tests {
+    use super::*;
+
+    #[test]
+    fn a_rooted_target_with_no_drive_is_not_judged_as_local() {
+        for target in [r"\Device\HarddiskVolume2\x", r"\x", r"\", r"\GLOBAL??\Z:\x", r"\Users\me"] {
+            assert!(rooted_without_drive(target, true), "{target:?} on Windows");
+            assert!(rooted_without_drive(target, false), "{target:?} elsewhere too: no Unix name starts like that by accident");
+        }
+        assert!(rooted_without_drive("/x", true), "a forward slash roots a path on Windows too");
+        assert!(!rooted_without_drive("/x", false), "on Unix `/x` is the absolute path it looks like");
+        for target in [r"C:\x", "C:/x", r"\\?\C:\x", r"\\host\share", "//host/share", "x", r"..\x", "../x", "x/y", "", "C:"] {
+            assert!(!rooted_without_drive(target, true), "{target:?}: a drive, a prefix, two separators or relative");
+        }
+    }
+
+    /// End to end on Unix, where such a target is a strange relative name:
+    /// joined to the link's folder, it was taken for a path here.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_rooted_target_with_no_drive_leads_off_the_machine() {
+        let dir = std::env::temp_dir().join(format!("nexterm-rooted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = dunce::canonicalize(&dir).unwrap();
+        std::os::unix::fs::symlink(r"\Device\HarddiskVolume2\share", dir.join("raw")).unwrap();
+        std::os::unix::fs::symlink("plain", dir.join("ordinary")).unwrap();
+        assert!(link_leads_off_machine(&dir.join("raw")));
+        assert!(link_leads_off_machine(&dir.join("raw").join("inner")));
+        assert!(!link_leads_off_machine(&dir.join("ordinary")), "an ordinary relative target stays here");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

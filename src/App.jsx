@@ -12,6 +12,7 @@ import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
 import { useTerminalFileDrop } from './hooks/useTerminalFileDrop.js';
 import { useAttention } from './hooks/useAttention.js';
+import { useBranchLookups } from './hooks/useBranchLookups.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
@@ -36,6 +37,10 @@ export default function App() {
   // and every terminal's progress goes to the taskbar. Once, here: mounted
   // twice, the taskbar would be told everything twice.
   useAttention();
+  // The branch of each terminal's folder, for the TERMINALS side bar: looked
+  // up when a folder changes, a command ends, or the workspace's git status
+  // refreshes. Once, here: mounted twice, every folder would be asked twice.
+  useBranchLookups();
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
