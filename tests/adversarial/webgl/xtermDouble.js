@@ -90,6 +90,8 @@ export class Terminal {
     this.onData = this._noop;
     this.onCursorMove = this._noop;
     this.onScroll = this._noop;
+    // The registry hands the bell to the store; nothing here ever rings.
+    this.onBell = this._noop;
     this._dirty = false;
     this._wasOnScreen = false;
     this._lastBlink = -Infinity;

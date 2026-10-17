@@ -130,6 +130,29 @@ export const SETTINGS_DEFAULTS = {
    * kind it understands. See src/lib/programNotifications.js.
    */
   terminalProgramNotifications: true,
+  /**
+   * Flash a pane's attention ring, once, when a notification or the bell is
+   * aimed at the terminal you are typing into. Off by default: what you are
+   * looking at needs no telling, and nothing is recorded for it either way —
+   * this only adds a glance for those who want one. See `attentionFlash` in
+   * terminalStore.js.
+   */
+  terminalAttentionFlashFocused: false,
+  /**
+   * A terminal's bell — a BEL a program prints when it wants you — rings that
+   * terminal's pane and counts in the status bar's bell, as a notification
+   * would; never on the desktop. Off: the bell is ignored, as it always was.
+   * See `bellFromTerminal` in terminalStore.js.
+   */
+  terminalBellAttention: true,
+  /**
+   * Show the progress a program reports (ConEmu's OSC 9;4, which winget and
+   * Claude Code send) as a bar on its tab, and on Windows on the taskbar
+   * button — not on the macOS Dock (see src-tauri/src/commands/taskbar.rs).
+   * Read as each report arrives; turning it off takes every bar down at once.
+   * See src/lib/terminalProgress.js.
+   */
+  terminalProgress: true,
   editorFontSize: 12,
   editorTabSize: 2,
   editorWordWrap: false,

@@ -4,6 +4,7 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { isMac } from '../../lib/platform.js';
 import { displayChord } from '../../lib/chords.js';
 import {
+  DEFAULT_RESOLVED,
   configurableCommands,
   commandsOverTerminal,
   describeConflict,
@@ -33,9 +34,14 @@ const NO_NOTES = new Map();
  * true when it was written, it stayed while the count grew to ten — the wrong
  * thing to tell someone looking for the command that took a key from their
  * shell.
+ *
+ * Only the commands that have a key in `bindings` — the user's, as resolved:
+ * one claimed over a terminal with no key bound (Mark All Notifications Read,
+ * out of the box) takes nothing from the shell, and naming it among the keys
+ * "taken" sent people looking for a key that is not there.
  */
-export function overTerminalNote(commands = commandsOverTerminal()) {
-  const titles = commands.map((c) => c.title);
+export function overTerminalNote(commands = commandsOverTerminal(), bindings = DEFAULT_RESOLVED) {
+  const titles = commands.filter((c) => keysFor(c.id, bindings).length > 0).map((c) => c.title);
   if (titles.length === 0) {
     return 'Over a focused terminal, a shortcut works only when the terminal has no use for its keys.';
   }
@@ -270,7 +276,7 @@ export function KeybindingSettings({ query = '' }) {
         </div>
       )}
 
-      <p className="text-ui-sm text-vsc-muted pt-2 pb-1">{overTerminalNote()}</p>
+      <p className="text-ui-sm text-vsc-muted pt-2 pb-1">{overTerminalNote(undefined, bindings)}</p>
 
       {commands.map((command) => (
         <KeybindingRow

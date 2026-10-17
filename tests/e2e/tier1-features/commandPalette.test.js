@@ -39,8 +39,15 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
     const titles = app.searchPalette('').commands.map((c) => c.title);
     assert.deepEqual(
       titles,
-      ['New Terminal Tab', 'Clear Terminal', 'Toggle Pane Zoom', 'Save All Files'],
-      'The palette offers exactly the four commands the app implements'
+      [
+        'New Terminal Tab',
+        'Clear Terminal',
+        'Toggle Pane Zoom',
+        'Go to Latest Unread Notification',
+        'Mark All Notifications Read',
+        'Save All Files',
+      ],
+      'The palette offers exactly the six commands the app implements'
     );
   });
 
@@ -118,5 +125,33 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
     await app.executePaletteItem(zoom);
     assert.equal(group().zoomedPaneId, undefined, 'and running it again shows every pane');
     assert.equal(group().tree.type, 'split', 'the split itself was never touched');
+  });
+
+  test('TC-PAL-09: Go to Latest Unread Notification shows the terminal that is waiting, and reads it; Mark All Read reads the rest', async () => {
+    const first = app.terminal.activeTabId;
+    const second = (await app.terminal.createTab()).id;
+    const third = (await app.terminal.createTab()).id;
+    app.terminal.switchTab(first);
+    const background = { focused: false, visible: true };
+    const note = { title: 'opencode', body: 'Session done', occasion: 'always', urgency: 1 };
+    app.terminal.notifyFromProgram(second, note, background);
+    app.terminal.notifyFromProgram(third, note, background);
+    const unread = () => app.terminal.notifications.filter((n) => n.read === false).map((n) => n.tabId);
+    assert.deepEqual(unread().sort(), [second, third].sort(), 'setup: two terminals are waiting');
+
+    app.openCommandPalette();
+    const go = app.searchPalette('unread').commands.find((c) => c.command === 'go_to_unread_notification');
+    assert.ok(go, 'the palette offers it');
+    const target = await app.executePaletteItem(go);
+    assert.equal(target, third, 'the newest first');
+    assert.equal(app.terminal.activeTabId, third);
+    assert.deepEqual(unread(), [second]);
+
+    app.openCommandPalette();
+    const mark = app.searchPalette('mark all').commands.find((c) => c.command === 'mark_notifications_read');
+    await app.executePaletteItem(mark);
+    assert.deepEqual(unread(), []);
+    assert.equal(app.terminal.activeTabId, third, 'marking read goes nowhere');
+    assert.equal(await app.executePaletteItem(go), null, 'and with nothing unread, the jump does nothing');
   });
 });

@@ -46,7 +46,7 @@ import {
   webglInternals,
 } from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
-import { useTerminalStore } from '../../stores/terminalStore.js';
+import { setTerminalOutputBarrier, useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { createKindLookup } from '../../lib/outputPaths.js';
@@ -63,8 +63,9 @@ import { installPasteWarning, withoutPasteMarkers } from '../../lib/pasteWarning
 import { usePastePromptStore } from '../../stores/pastePromptStore.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
-import { attachOutput, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
+import { attachOutput, createHistoryMark, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
+import { installTerminalProgress } from '../../lib/terminalProgress.js';
 import { exitNotice, freshScreen } from '../../lib/shellExit.js';
 import { screenRow, setBatchJobScreenReader } from '../../lib/batchJobReply.js';
 
@@ -809,7 +810,18 @@ function bindSession(entry, sessionId) {
     // printed before this terminal existed — a tab never shown kept it there —
     // then everything live, with nothing lost or doubled in between.
     startPtyOutputBus();
-    ptyUnlisten = attachOutput(sessionId, (data) => writeOutput(entry, data));
+    // What was kept is written as history (`entry.history`): the progress it
+    // reports and the bells it rings are over by now, and a message in it is
+    // filed under when it arrived. Ended whatever the write does — left up,
+    // every bell and bar of the terminal's life would be taken for history.
+    ptyUnlisten = attachOutput(sessionId, (data, kept, at) => {
+      if (kept) entry.history.before(at);
+      try {
+        writeOutput(entry, data);
+      } finally {
+        if (kept) entry.history.after(entry.term);
+      }
+    });
 
     // When the shell exits, say so — with the code as Windows documents it —
     // and that Enter starts a new one (the store's `restartShell`). The pane
@@ -910,6 +922,11 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // terminal taken off screen without a blur can still be reported as gone —
   // WebKit sends none. TerminalView asks; see focusReport.js.
   const focusReports = installFocusReports(term);
+  // Whether what this terminal is reading is output kept for it before it was
+  // first shown (`bindSession`): history, whose progress and bells are over,
+  // and whose messages are filed under when they were printed. See
+  // `createHistoryMark` in ptyOutputBus.js.
+  const history = createHistoryMark();
   // What a program asks to tell the user — OpenCode, Claude Code — through
   // OSC 9, 99 or 777: to the bell, and to the desktop while the window is in
   // the background. Read from the first byte, so OpenCode's start-up question
@@ -918,7 +935,42 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // programNotifications.js.
   installProgramNotifications(term, {
     enabled: () => useSettingsStore.getState().terminalProgramNotifications !== false,
-    onNotify: (note) => useTerminalStore.getState().notifyFromProgram?.(tabId, note),
+    // When the output being read was printed, if it is output kept from
+    // before the terminal was shown (`history`): the addon rate-limits such
+    // messages by that time, apart from live ones, and hands it on.
+    keptAt: () => (history.reading ? history.at ?? Date.now() : null),
+    // One from kept output goes with the time it was printed: the store files
+    // it there, and never shows it on the desktop or as a flash.
+    onNotify: (note, keptAt) => {
+      if (keptAt === null || keptAt === undefined) {
+        useTerminalStore.getState().notifyFromProgram?.(tabId, note);
+        return;
+      }
+      const kept = { keptAt };
+      useTerminalStore.getState().notifyFromProgram?.(tabId, note, undefined, kept);
+    },
+  });
+  // How far along a program says it is — ConEmu's OSC 9;4, which winget and
+  // Claude Code send — on the tab chip and the taskbar. Its own OSC 9 handler
+  // beside the one above, taking `4;…` and nothing else; the setting is read
+  // as each report arrives, and the store paces the updates. Not taken from
+  // history. Disposed with the terminal. See terminalProgress.js.
+  installTerminalProgress(term, {
+    enabled: () => !history.reading && useSettingsStore.getState().terminalProgress !== false,
+    onProgress: (report) => useTerminalStore.getState().setTabProgress?.(tabId, report),
+  });
+  // The terminal's bell — a BEL in the output — to the store, which decides
+  // whether it is worth an entry (`bellFromTerminal`); a BEL in history rang
+  // long ago, and is not news. xterm fires this from inside its parser, so a
+  // listener that threw would wedge the write queue the way a throwing OSC
+  // handler does: it never throws. Disposed with the terminal.
+  const bellDisposable = term.onBell(() => {
+    try {
+      if (history.reading) return;
+      useTerminalStore.getState().bellFromTerminal?.(tabId);
+    } catch (err) {
+      console.warn('[Terminal] could not take the bell:', err);
+    }
   });
   const linkProvider = registerLinks(term, tabId);
   // After `registerLinks`, so its links come first where both would claim
@@ -1008,6 +1060,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     modifyOtherKeys,
     // Sends the focus-out a hidden terminal never got (`reportFocusOut`).
     focusReports,
+    bellDisposable,
+    // Kept output being read — see `createHistoryMark`.
+    history,
     sessionId: null,
     container,
     dataDisposable,
@@ -1122,6 +1177,24 @@ export function writeNotice(tabId, message) {
 // Node under the test suites, and xterm brings a stylesheet with it).
 setTerminalNoticeSink(writeNotice);
 
+// What the store waits for before taking a progress bar down at a command's
+// end: everything the shell printed before it, read. xterm runs a write's
+// callback once it has parsed everything written before it, and an empty
+// write is how to ask for exactly that. With no terminal there is nothing to
+// wait for.
+setTerminalOutputBarrier((tabId, fn) => {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed) {
+    fn();
+    return;
+  }
+  try {
+    entry.term.write('', fn);
+  } catch {
+    fn();
+  }
+});
+
 // The row on a tab's screen as a Ctrl+C arms the wait for cmd's batch-job
 // question, so a question already on screen then is never the one answered
 // (src/lib/batchJobReply.js). Null for a tab with no terminal.
@@ -1193,6 +1266,18 @@ export function pasteIntoTerminal(tabId, text) {
   return true;
 }
 
+/**
+ * Give `tabId`'s terminal the keyboard — what going to a notification ends
+ * in (`goToNotification` in terminalStore.js). False when it has no terminal
+ * on the page to take it: never shown, or not in a pane right now.
+ */
+export function focusTerminalView(tabId) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed || !entry.container?.isConnected) return false;
+  entry.term.focus();
+  return true;
+}
+
 export function disposeTerminal(tabId) {
   const entry = instances.get(tabId);
   if (!entry) return;
@@ -1205,6 +1290,7 @@ export function disposeTerminal(tabId) {
   entry.renderDisposable?.dispose();
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
+  entry.bellDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.revealLinks?.dispose();
   entry.searchAddon?.dispose();

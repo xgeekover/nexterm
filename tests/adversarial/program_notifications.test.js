@@ -762,7 +762,8 @@ describe('Program notifications: the store puts them in the bell and on the desk
     let installed = null;
     const settings = { terminalProgramNotifications: true };
     const calls = [];
-    const run = new Function('installProgramNotifications', 'term', 'tabId', 'useSettingsStore', 'useTerminalStore', src.slice(start, end));
+    const history = { reading: false, at: null };
+    const run = new Function('installProgramNotifications', 'term', 'tabId', 'useSettingsStore', 'useTerminalStore', 'history', src.slice(start, end));
     const term = { id: 'the-term' };
     run(
       (t, options) => {
@@ -771,7 +772,8 @@ describe('Program notifications: the store puts them in the bell and on the desk
       term,
       'tab-term-7',
       { getState: () => settings },
-      { getState: () => ({ notifyFromProgram: (...args) => calls.push(args) }) }
+      { getState: () => ({ notifyFromProgram: (...args) => calls.push(args) }) },
+      history
     );
     assert.equal(installed.t, term);
     assert.equal(installed.options.enabled(), true);
@@ -780,8 +782,17 @@ describe('Program notifications: the store puts them in the bell and on the desk
     delete settings.terminalProgramNotifications;
     assert.equal(installed.options.enabled(), true, 'a setting not there yet is the default, on');
     const n = done();
-    installed.options.onNotify(n);
+    assert.equal(installed.options.keptAt(), null, 'live output: no time of its own');
+    installed.options.onNotify(n, null);
     assert.deepEqual(calls, [['tab-term-7', n]], 'to the store, for its own tab');
+    // From output kept before the terminal was shown: the addon is told when
+    // it was printed — its own allowance runs on that (TP-19b) — and the
+    // store files it there (AT-17).
+    history.reading = true;
+    history.at = 1_234;
+    assert.equal(installed.options.keptAt(), 1_234);
+    installed.options.onNotify(n, 1_234);
+    assert.deepEqual(calls[1], ['tab-term-7', n, undefined, { keptAt: 1_234 }]);
   });
 
   test('PN-50: the backend answers `show_desktop_notification` — the command is registered, and the mock stands in', async () => {

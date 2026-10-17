@@ -121,7 +121,9 @@ const STAND_INS = {
     export const History = icon('History');
     export const Terminal = icon('Terminal');
     export const Save = icon('Save');
-    export const Maximize2 = icon('Maximize2');`,
+    export const Maximize2 = icon('Maximize2');
+    export const BellRing = icon('BellRing');
+    export const CheckCheck = icon('CheckCheck');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */

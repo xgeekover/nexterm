@@ -62,6 +62,16 @@
 
   --vsc-error:              #f85149;
   --vsc-warn:               #cca700;
+  /* "A terminal wants you": the pane's attention ring and the unread pills.
+     Orange, and well away from --vsc-warn's yellow: a tab chip can carry a
+     paused progress bar (drawn in --vsc-warn) and an unread count at once,
+     and an amber close to #cca700 made the two one colour. Not the red of
+     --vsc-error, which the bell keeps for a failure, nor the blue of
+     --vsc-focus, which says "this pane is active" — both lines can be on one
+     pane and must read as two things. The fg is for text on it (a pill's
+     count): 7:1. */
+  --vsc-attention:          #ff8a3d;
+  --vsc-attention-fg:       #1f1f1f;
   --vsc-ok:                 #2ea043;
   --vsc-info:               #3794ff;
   --vsc-git-modified:       #e2c08d;
@@ -237,6 +247,123 @@ code, kbd, pre, .font-mono {
    — which never gets this class — always tracks the pointer 1:1. */
 .panel-maximize-transition > [data-panel] {
   transition: flex-grow 180ms ease-out;
+}
+
+/* ---------------------------------------------------------------------------
+   Attention — which terminal is waiting for you, and how far along its
+   program says it is (src/components/terminal/AttentionIndicators.jsx).
+
+   Unlike the shell motion above, these three cannot simply be sped up to
+   0.01ms by the rules below. The ring's pulse and the progress slide repeat
+   forever, and an infinite animation at 0.01ms is not stopped: it sits at
+   whatever point of its cycle the clock happens to land on (Chromium parks
+   the activity dot's pulse at about two-thirds opacity) — a dim ring, a
+   segment parked anywhere. The flash ends at opacity 0 and holds it, so sped
+   up it would be gone before it was ever drawn. So under reduced motion each
+   is switched off outright (`animation: none`) and the element shows its
+   resting style instead: a steady ring, a steady ring for as long as the
+   flash lasts (the store takes it away after ATTENTION_FLASH_MS), and a
+   still 30% segment in the middle of the bar — off the left edge, where
+   every bar with an amount starts, so it cannot be read as "30% done".
+   --------------------------------------------------------------------------- */
+@keyframes attention-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+@keyframes attention-flash {
+  0%   { opacity: 0; }
+  12%  { opacity: 1; }
+  55%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes progress-slide {
+  /* The segment is 30% of the track, and a translate is a share of the
+     segment's own width: -100% starts it just off the left edge, 333% ends it
+     just off the right (100 / 30 = 3.33). */
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(333%); }
+}
+.animate-attention-pulse {
+  animation: attention-pulse 2s ease-in-out infinite;
+}
+.animate-attention-flash {
+  animation: attention-flash 1200ms ease-out both;
+}
+.animate-progress-indeterminate {
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-attention-pulse,
+  .animate-attention-flash {
+    animation: none !important;
+  }
+  .animate-progress-indeterminate {
+    animation: none !important;
+    /* 35% in from the left: 35 / 30 of its own width. */
+    transform: translateX(116.667%);
+  }
+}
+:root.reduce-motion .animate-attention-pulse,
+:root.reduce-motion .animate-attention-flash {
+  animation: none !important;
+}
+:root.reduce-motion .animate-progress-indeterminate {
+  animation: none !important;
+  transform: translateX(116.667%);
+}
+
+/* Forced colours (Windows High Contrast). Box shadows are dropped and every
+   background is repainted in the theme's own colours, so the frame lines —
+   Tailwind rings, which are box shadows — vanished and the pill was left a
+   bare digit. Here they are real borders in system colours, which the mode
+   keeps (`forced-color-adjust: none` so they are kept as given): the
+   attention ring and a bar in Highlight, the active pane's line in
+   CanvasText, so the two still read as two things; the pill and the list's
+   unread dot get an edge of their own. */
+@media (forced-colors: active) {
+  [data-attention-ring],
+  [data-active-pane] {
+    forced-color-adjust: none;
+    box-shadow: none !important;
+  }
+  [data-attention-ring] {
+    border: 2px solid Highlight;
+  }
+  [data-active-pane] {
+    border: 1px solid CanvasText;
+  }
+  [data-unread-count] {
+    border: 1px solid CanvasText;
+  }
+  [data-unread-dot] {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  [data-progress-fill] {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  /* The bar's state is its colour, which this mode takes away: a paused bar
+     is dotted, a failed one dashed in the text colour, so the three still
+     differ (the chip's own words say which, see `progressWords`). */
+  [data-progress-state="warning"] [data-progress-fill] {
+    background: repeating-linear-gradient(90deg, Highlight 0 2px, Canvas 2px 4px);
+  }
+  [data-progress-state="error"] [data-progress-fill] {
+    background: repeating-linear-gradient(90deg, CanvasText 0 6px, Canvas 6px 8px);
+  }
+  /* The zoom chip's edge is a ring too: an outline here — 2px in Highlight
+     while a hidden pane waits, as the panes' own attention ring is. */
+  [data-zoomed-chip] {
+    box-shadow: none !important;
+    outline: 1px solid ButtonText;
+    outline-offset: -1px;
+  }
+  [data-zoomed-chip][data-hidden-unread] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

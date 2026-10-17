@@ -9,6 +9,7 @@ import React, {
   useState,
 } from 'react';
 import { createPortal, flushSync } from 'react-dom';
+import { useShallow } from 'zustand/react/shallow';
 import { Panel, Group, Separator, useGroupRef } from 'react-resizable-panels';
 import {
   sizesOf,
@@ -32,13 +33,24 @@ import {
   Minimize2,
 } from 'lucide-react';
 import { useTerminalStore, treeOnScreen, zoomedPaneOf } from '../../stores/terminalStore.js';
+import { useSettingsStore } from '../../stores/settingsStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { AgentResumeBanner } from './AgentResumeBanner.jsx';
 import { AGENT_IDS, agentLabel } from '../../lib/agents.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
 import { ActivityDot } from './ActivityDot.jsx';
+import {
+  GroupProgress,
+  PANE_FRAME_PX,
+  PaneFrame,
+  TabProgress,
+  UnreadPill,
+  paneBodyBackground,
+  pressOnPaneFrame,
+} from './AttentionIndicators.jsx';
 import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
+import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { copyText } from '../../lib/copyText.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
@@ -65,6 +77,9 @@ import { pathDropLabel } from '../../lib/terminalFileDrop.js';
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
+
+/** No tabs, as one array for every caller, so a default prop is not a new array each render. */
+const NO_TAB_IDS = Object.freeze([]);
 
 /**
  * When a drag ends the browser may still deliver a `click` to the chip the
@@ -531,32 +546,51 @@ function DragPreview({ drag }) {
  * without something on screen saying "Zoomed", a dev server or an agent in one
  * of them is easy to forget. Nothing at all for a group of one pane, which has
  * nothing to hide.
+ *
+ * A terminal waiting for you in a hidden pane has no ring on screen to say
+ * so, and the zoomed pane's own strip shows none of its tabs. So the chip
+ * says it: the attention colour, a count, and the words in its tooltip.
+ * Counted here, from `hiddenTabIds`, so only the chip draws again when that
+ * count changes.
  */
-function PaneZoomControl({ zoomed, canZoom, hiddenPanes, onToggle, shortcut }) {
+function PaneZoomControl({ zoomed, canZoom, hiddenPanes, hiddenTabIds = NO_TAB_IDS, onToggle, shortcut }) {
   const keys = shortcut('toggle-pane-zoom');
+  const hiddenUnread = useTerminalStore((s) => unreadIn(unreadCountByTab(s.notifications), hiddenTabIds));
   const swallowMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
   };
   if (zoomed) {
     const others = `${hiddenPanes} other pane${hiddenPanes === 1 ? '' : 's'}`;
+    const waiting = hiddenUnread > 0 ? `${unreadLabel(hiddenUnread)} in hidden panes` : '';
     return (
       <button
         type="button"
         data-zoomed-chip=""
+        data-hidden-unread={hiddenUnread || undefined}
         aria-pressed="true"
         onClick={onToggle}
         onContextMenu={swallowMenu}
-        title={`Zoomed — ${others} hidden, still running. Click to show every pane${keys ? ` (${keys})` : ''}`}
+        title={`Zoomed — ${others} hidden, still running${waiting ? `; ${waiting}` : ''}. Click to show every pane${keys ? ` (${keys})` : ''}`}
         className={cn(
-          'shrink-0 flex items-center gap-1 h-[18px] px-1.5 rounded-sm text-ui-sm text-vsc-fg-bright',
-          'ring-1 ring-inset ring-vsc-accent transition-colors',
-          'bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]',
-          'hover:bg-[color-mix(in_srgb,var(--vsc-accent)_40%,transparent)]'
+          'relative shrink-0 flex items-center gap-1 h-[18px] px-1.5 rounded-sm text-ui-sm text-vsc-fg-bright',
+          'ring-1 ring-inset transition-colors',
+          hiddenUnread > 0
+            ? cn(
+                'ring-vsc-attention',
+                'bg-[color-mix(in_srgb,var(--vsc-attention)_22%,transparent)]',
+                'hover:bg-[color-mix(in_srgb,var(--vsc-attention)_36%,transparent)]'
+              )
+            : cn(
+                'ring-vsc-accent',
+                'bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]',
+                'hover:bg-[color-mix(in_srgb,var(--vsc-accent)_40%,transparent)]'
+              )
         )}
       >
         <Minimize2 size={12} />
         <span>Zoomed</span>
+        <UnreadPill count={hiddenUnread} label={waiting} />
       </button>
     );
   }
@@ -594,6 +628,7 @@ function TerminalPane({
   zoomed = false,
   canZoom = false,
   hiddenPanes = 0,
+  hiddenTabIds = NO_TAB_IDS,
   onToggleZoom,
 }) {
   const { shortcut } = useShortcuts();
@@ -632,6 +667,28 @@ function TerminalPane({
   // name: continue the most recent, or ask (see `resumeFallbackFor`).
   const resumeFallback = useTerminalStore((s) => (boundTab ? s.resumeFallbackFor(boundTab.id) : null));
 
+  // Unread entries per tab of THIS pane, in `node.tabIds` order: numbers,
+  // compared one by one, so an entry for a terminal in another pane or group
+  // does not draw this one again (`unreadCountByTab` hands back the same
+  // object for the same list, so reading it here costs nothing).
+  const unreadByTab = useTerminalStore(
+    useShallow((s) => {
+      const counts = unreadCountByTab(s.notifications);
+      return node.tabIds.map((id) => counts[id] ?? 0);
+    })
+  );
+  const unreadOf = (tabId) => unreadByTab[node.tabIds.indexOf(tabId)] ?? 0;
+  // The flash is for the terminal on screen in this pane — the one being
+  // typed into, which is why it gets a flash and not an entry.
+  const flash = useTerminalStore((s) => (boundTab ? s.attentionFlash[boundTab.id] : undefined));
+  // Files dragged over this pane. While anything is about to be dropped here
+  // the drop's own highlight is what the pane should say, and the ring steps
+  // aside rather than being drawn over or under it.
+  const pathDropHere = usePathDropStore((s) => s.target?.paneId === paneId);
+  const ringAside = Boolean(dropZone) || pathDropHere;
+  // The terminal's own background, for the margin the frame is drawn in.
+  const frameBackground = useSettingsStore((s) => paneBodyBackground(s.terminalTheme));
+
   // Where in THIS strip the dragged tab would go in, as a slot — the chip it
   // would land before, or `paneTabs.length` for after the last — or null.
   const insertAt =
@@ -662,10 +719,9 @@ function TerminalPane({
     <div
       onMouseDown={() => setActivePane(paneId, groupId)}
       onFocusCapture={() => setActivePane(paneId, groupId)}
-      className={cn(
-        'flex flex-col h-full w-full bg-vsc-terminal overflow-hidden',
-        isActivePane && 'ring-1 ring-inset ring-vsc-focus'
-      )}
+      // Which pane is active is drawn in the body's frame (`PaneFrame`): a
+      // ring on this box was painted over by the strip and the terminal.
+      className="flex flex-col h-full w-full bg-vsc-terminal overflow-hidden"
     >
       {/* Tab strip — each chip is a drag handle. Right-clicking empty space
           in the strip (not a chip or a button) opens the pane menu. */}
@@ -688,6 +744,11 @@ function TerminalPane({
           {paneTabs.map((tab, i) => {
             const isActive = tab.id === boundTab?.id;
             const isBeingDragged = drag?.active && drag.tabId === tab.id;
+            const unread = unreadOf(tab.id);
+            // What the dot says, then what the pill says — one sentence for
+            // both, so hovering answers "why is that one red" and "what does
+            // it want" alike. With neither, how to use the chip.
+            const status = [activityLabel(tab), unread > 0 ? unreadLabel(unread) : ''].filter(Boolean).join(', ');
 
             if (renamingTabId === tab.id) {
               return (
@@ -724,8 +785,8 @@ function TerminalPane({
                 // a colour is not something a screen reader can read out, and
                 // "why is that one red" should be answerable by hovering.
                 title={
-                  activityLabel(tab)
-                    ? `${tab.title} — ${activityLabel(tab)}`
+                  status
+                    ? `${tab.title} — ${status}`
                     : `${tab.title} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
                 }
                 onPointerDown={(e) => {
@@ -790,6 +851,13 @@ function TerminalPane({
                 >
                   {tab.title}
                 </span>
+                {/* In line, after the title and before the ✕: over the corner
+                    it covered the ✕ and sat beside the next tab's title,
+                    reading as that one's. It never comes or goes between a
+                    press and its release — the store holds a pane's
+                    mark-read until the pointer is up — so the ✕ cannot move
+                    out from under a click. */}
+                <UnreadPill count={unread} className="ml-1.5" />
 
                 {/* Same slot, size and reveal as an editor tab's: a fixed box
                     so the chip does not change width on hover, hidden until
@@ -821,6 +889,7 @@ function TerminalPane({
                     <X size={14} />
                   </button>
                 </span>
+                <TabProgress tabId={tab.id} />
               </div>
             );
           })}
@@ -841,6 +910,7 @@ function TerminalPane({
             zoomed={zoomed}
             canZoom={canZoom}
             hiddenPanes={hiddenPanes}
+            hiddenTabIds={hiddenTabIds}
             onToggle={() => onToggleZoom?.(paneId)}
             shortcut={shortcut}
           />
@@ -947,8 +1017,16 @@ function TerminalPane({
         ]}
       />
 
-      {/* Live terminal surface — also the drop target */}
-      <div data-pane-body={paneId} className="relative flex-1 overflow-hidden">
+      {/* Live terminal surface — also the drop target. The padding is the
+          frame `PaneFrame` draws in, there whether anything is drawn or not
+          (see PANE_FRAME_PX); the drop overlays still cover the whole body.
+          A press on it is a press on the terminal (`pressOnPaneFrame`). */}
+      <div
+        data-pane-body={paneId}
+        onMouseDown={pressOnPaneFrame}
+        className="relative flex-1 overflow-hidden"
+        style={{ padding: PANE_FRAME_PX, backgroundColor: frameBackground }}
+      >
         {boundTab ? (
           // The resume offer is a row of its own ABOVE the terminal. Laid over
           // it, it hid the first three rows — exactly where a freshly restored
@@ -987,6 +1065,16 @@ function TerminalPane({
         )}
         {/* While dragging, swallow pointer events so the xterm cannot eat them. */}
         {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
+        {/* Always this element in this place, so that what it draws coming
+            and going never moves the terminal to another slot. Under the
+            drop overlays by z-index (15 against their 20), not by order. The
+            active line only where there is another pane on screen to be told
+            apart from. */}
+        <PaneFrame
+          active={isActivePane && canZoom && !zoomed}
+          unread={!ringAside && unreadByTab.some((n) => n > 0)}
+          flash={ringAside ? undefined : flash}
+        />
         <DropIndicator zone={dropZone} />
         <PathDropHighlight paneId={paneId} />
       </div>
@@ -1081,8 +1169,9 @@ function ResizableSplit({ node, groupId, renderChild }) {
  * its own tab strip), a "split" is a resizable row/column of children.
  *
  * `zoom` is the group's zoom, the same for every pane: `{ paneId, canZoom,
- * hiddenPanes, onToggle }` — the zoomed pane's id (null when none), whether
- * the group has panes enough to zoom one, how many a zoom is hiding.
+ * hiddenPanes, hiddenTabIds, onToggle }` — the zoomed pane's id (null when
+ * none), whether the group has panes enough to zoom one, how many a zoom is
+ * hiding and the terminals in them.
  */
 function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, onRenameGroup, zoom }) {
   if (node.type === 'leaf') {
@@ -1099,6 +1188,7 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
         zoomed={Boolean(zoom?.paneId) && zoom.paneId === node.id}
         canZoom={Boolean(zoom?.canZoom)}
         hiddenPanes={zoom?.hiddenPanes ?? 0}
+        hiddenTabIds={zoom?.hiddenTabIds}
         onToggleZoom={zoom?.onToggle}
       />
     );
@@ -1146,6 +1236,9 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
   // fine and white-screened the app at run time — the exact failure mode React
   // has no way to warn about.)
   const tabs = useTerminalStore((s) => s.tabs);
+  // Its own again, for the same reason: unread entries per terminal, the
+  // same frozen object for as long as the list is the same.
+  const unreadCounts = useTerminalStore((s) => unreadCountByTab(s.notifications));
   const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const createGroup = useTerminalStore((s) => s.createGroup);
   const closeGroup = useTerminalStore((s) => s.closeGroup);
@@ -1228,9 +1321,13 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
           const isDropTarget = Boolean(drag?.active) && drag.targetGroupId === group.id;
           const isBeingDragged = Boolean(drag?.active) && drag.kind === 'group' && drag.groupId === group.id;
           const terminals = countTerminals(group.tree);
+          const groupTabs = tabsOfGroup(group.tree, tabs);
+          const groupTabIds = groupTabs.map((t) => t.id);
           // Switching groups replaces the whole arrangement, so a command
           // failing in one you are not looking at is invisible without this.
-          const activity = groupActivity(tabsOfGroup(group.tree, tabs));
+          const activity = groupActivity(groupTabs);
+          // And a terminal waiting for you over there is the reason to switch.
+          const unread = unreadIn(unreadCounts, groupTabIds);
           // Every group keeps its own zoom across switches, so the chip says
           // which ones will come back with panes hidden.
           const zoomed = Boolean(zoomedPaneOf(group));
@@ -1272,7 +1369,9 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                   : activity === 'failed'
                     ? ', one of them ended on a failure'
                     : ''
-              }${zoomed ? ', one pane zoomed' : ''}. Click to switch, drag to reorder, drop a terminal here to move it, double-click to rename.`}
+              }${zoomed ? ', one pane zoomed' : ''}${
+                unread > 0 ? `, ${unreadLabel(unread)}` : ''
+              }. Click to switch, drag to reorder, drop a terminal here to move it, double-click to rename.`}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
                 beginGroupDrag(group, e);
@@ -1318,6 +1417,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               {insertAt === groups.length && i === groups.length - 1 && <InsertionMarker side="after" />}
               <ActivityDot state={activity} />
               <span className="truncate max-w-[140px]">{group.name}</span>
+              <UnreadPill count={unread} />
               {zoomed && <Maximize2 size={10} aria-label="one pane zoomed" className="shrink-0 opacity-70" />}
               <span className="text-[10px] tabular-nums opacity-60">{terminals}</span>
               {canClose && (
@@ -1335,6 +1435,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                   <X size={11} />
                 </button>
               )}
+              <GroupProgress tabIds={groupTabIds} />
             </div>
           );
         })}
@@ -1684,6 +1785,11 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     paneId: zoomedPane?.id ?? null,
     canZoom: paneCount > 1,
     hiddenPanes: zoomedPane ? paneCount - 1 : 0,
+    hiddenTabIds: zoomedPane
+      ? collectPanes(activeGroup.tree)
+          .filter((pane) => pane.id !== zoomedPane.id)
+          .flatMap((pane) => pane.tabIds)
+      : NO_TAB_IDS,
     onToggle: handleToggleZoom,
   };
 

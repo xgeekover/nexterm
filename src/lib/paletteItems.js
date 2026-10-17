@@ -76,6 +76,23 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       subtitle: 'Fill the group with the active pane, or show every pane again',
       hint: hint('toggle-pane-zoom'),
     },
+    {
+      type: 'command',
+      id: 'cmd-go-to-unread-notification',
+      command: 'go_to_unread_notification',
+      title: 'Go to Latest Unread Notification',
+      subtitle: 'Show the terminal that is waiting for you, and mark it read',
+      hint: hint('go-to-unread-notification'),
+    },
+    // No hint unless the user bound one: it has no chord of its own.
+    {
+      type: 'command',
+      id: 'cmd-mark-notifications-read',
+      command: 'mark_notifications_read',
+      title: 'Mark All Notifications Read',
+      subtitle: 'Every terminal stops asking for attention; the bell keeps the list',
+      hint: hint('mark-notifications-read'),
+    },
     // No hint: nothing is bound to Save All. It used to show Save's chord,
     // which writes the active tab and leaves every other one unsaved.
     {
