@@ -51,6 +51,9 @@ const SETTINGS_KEYS = [
   'terminalSplitCwd',
   'terminalNotifyAfterSeconds',
   'terminalProgramNotifications',
+  'terminalAttentionFlashFocused',
+  'terminalBellAttention',
+  'terminalProgress',
   'editorFontSize',
   'editorTabSize',
   'editorWordWrap',
@@ -110,6 +113,9 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalCopyOnSelect: false,
       terminalMouseReporting: false,
       terminalProgramNotifications: false,
+      terminalAttentionFlashFocused: true,
+      terminalBellAttention: false,
+      terminalProgress: false,
       // The one default that depends on the platform: the probe is whichever
       // value this platform does not start with.
       terminalRightClick: S.getState().settingsDefaults.terminalRightClick === 'copyPaste' ? 'default' : 'copyPaste',

@@ -307,11 +307,14 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     assert.deepEqual(notInMenu.sort(), [
       // Deliberately keyboard-only. `all-commands` is ⌘⇧P, the other half of
       // quick open; the pane-focus pair and the two guards have never been
-      // menu items.
+      // menu items. The two notification commands are the bell's: its list
+      // has Mark All Read, and the palette has both.
       'all-commands',
       'escape',
       'focus-next-pane',
       'focus-previous-pane',
+      'go-to-unread-notification',
+      'mark-notifications-read',
       'reload-guard',
     ]);
   });
@@ -330,6 +333,20 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // would never work at all, VS Code makes the same trade, and Settings
       // can move it. The arrow keys do the same job in the shell.
       'find-in-terminal',
+      // ⇧⌘U, and Ctrl+Shift+U off macOS. Getting from the terminal you are in
+      // to the one that is waiting is what the command is for. Shifted it is
+      // not a bare Ctrl+letter — xterm sends nothing for Ctrl+Shift+U — so
+      // the shell gives up nothing; Ctrl+U stays its own (KB-12). On Linux an
+      // input method (IBus, GTK's own) may take Ctrl+Shift+U for "type a code
+      // point" before the page ever sees it; Settings can move the chord.
+      'go-to-unread-notification',
+      // No chord of its own, so it takes nothing from the shell as shipped. A
+      // chord the user gives it is meant to work where the jump's does, from
+      // a focused terminal. As for everything on this list, a bare Ctrl+letter
+      // chosen for it would then be the app's, not the shell's: the user's
+      // choice, in a Settings window that names every command claimed over a
+      // terminal (SW-10).
+      'mark-notifications-read',
       'reload-guard',
       // ⇧⌘F. The terminal has no use for it, and shifted it is not a bare
       // Ctrl+letter, so nothing is taken from the shell.

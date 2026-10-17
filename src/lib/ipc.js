@@ -84,6 +84,10 @@ class BrowserMockBridge {
     // What `show_desktop_notification` was asked to show, oldest first. There
     // is no desktop here; the suites read this instead.
     this.desktopNotifications = [];
+    // What `set_taskbar_progress` put on the taskbar, oldest first, as
+    // `{ status, progress }` the way the backend takes it. There is no
+    // taskbar here; the suites read this.
+    this.taskbarProgress = [];
     // What `clipboard_read` answers — the backend's own shape. There is no
     // system clipboard here: the suites put on it what a right-click should
     // find, and a copy made in the page never reaches it.
@@ -778,6 +782,47 @@ class BrowserMockBridge {
         this.desktopNotifications.push({ title: String(title), body: String(body) });
         if (this.desktopNotifications.length > 50) this.desktopNotifications.shift();
         return false;
+      }
+
+      // 19b. set_taskbar_progress — the backend shows the window's progress on
+      // the Windows taskbar (src-tauri/src/commands/taskbar.rs; elsewhere it
+      // takes and refuses the same and shows nothing). Refused as the backend
+      // refuses, and nothing else: what Tauri cannot read into
+      // `status: String` and `progress: Option<u64>` — in its own words — and
+      // then a status that is not one of the five. What it is handed is JSON:
+      // a key left undefined is missing, NaN and Infinity are null, and
+      // missing or null is `None`. A percentage is held at 100, and none is
+      // passed on for 'none' or 'indeterminate'. Kept — the last 50 — for the
+      // suites to read.
+      case 'set_taskbar_progress': {
+        const wire = JSON.parse(JSON.stringify(args ?? {}));
+        const invalid = (key, why) => new Error(`invalid args \`${key}\` for command \`set_taskbar_progress\`: ${why}`);
+        // serde's word for what it found instead.
+        const found = (v) => {
+          if (v === null) return 'invalid type: null';
+          if (typeof v === 'boolean') return `invalid type: boolean \`${v}\``;
+          if (typeof v === 'string') return `invalid type: string ${JSON.stringify(v)}`;
+          if (Array.isArray(v)) return 'invalid type: sequence';
+          if (typeof v === 'object') return 'invalid type: map';
+          if (!Number.isInteger(v) || Math.abs(v) >= 2 ** 64) return `invalid type: floating point \`${v}\``;
+          return v < 0 ? `invalid value: integer \`${v}\`` : `invalid type: integer \`${v}\``;
+        };
+        if (!Object.prototype.hasOwnProperty.call(wire, 'status')) {
+          throw invalid('status', 'command set_taskbar_progress missing required key status');
+        }
+        const { status } = wire;
+        if (typeof status !== 'string') throw invalid('status', `${found(status)}, expected a string`);
+        const progress = wire.progress ?? null;
+        if (progress !== null && !(typeof progress === 'number' && Number.isInteger(progress) && progress >= 0 && progress < 2 ** 64)) {
+          throw invalid('progress', `${found(progress)}, expected u64`);
+        }
+        if (!['none', 'normal', 'indeterminate', 'paused', 'error'].includes(status)) {
+          throw new Error('unknown taskbar progress status');
+        }
+        const amount = status === 'none' || status === 'indeterminate' || progress === null ? null : Math.min(progress, 100);
+        this.taskbarProgress.push({ status, progress: amount });
+        if (this.taskbarProgress.length > 50) this.taskbarProgress.shift();
+        return null;
       }
 
       // 20. clipboard_read — the backend reads the system clipboard for a

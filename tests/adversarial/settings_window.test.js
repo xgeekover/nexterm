@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { COMMANDS, configurableCommands } from '../../src/lib/keybindings.js';
+import { COMMANDS, configurableCommands, keysFor, resolveKeybindings } from '../../src/lib/keybindings.js';
 
 const h = React.createElement;
 
@@ -276,17 +276,25 @@ describe('Settings: what a focused terminal never sees', () => {
     );
   });
 
-  test('SW-10: the note above the shortcuts names every command claimed over a terminal, and no other', async () => {
+  test('SW-10: the note above the shortcuts names every command claimed over a terminal that has a key, and no other', async () => {
     // It said "only the two side-bar toggles are claimed" while ten were —
     // the wrong answer for someone looking for what took a key from their
-    // shell.
+    // shell. And a command with no key takes nothing from anyone: Mark All
+    // Notifications Read is claimed over a terminal, and has no default.
     const overTerminalNote = await exported('overTerminalNote');
     const note = overTerminalNote();
     for (const { id, title } of configurableCommands()) {
-      if (COMMANDS[id].overTerminal) assert.ok(note.includes(title), `${title} is claimed over a terminal and not named`);
-      else assert.ok(!note.includes(title), `${title} is not claimed over a terminal, yet named`);
+      const takes = COMMANDS[id].overTerminal && keysFor(id).length > 0;
+      if (takes) assert.ok(note.includes(title), `${title} takes a key over a terminal and is not named`);
+      else assert.ok(!note.includes(title), `${title} takes no key over a terminal, yet is named`);
     }
+    assert.ok(!note.includes('Mark All Notifications Read'), 'no key, not named');
     assert.ok(!/only the two side-bar toggles/.test(note));
+    // What the user has bound is what counts.
+    const { bindings } = resolveKeybindings({ 'mark-notifications-read': 'mod+alt+u', 'find-in-terminal': null });
+    const rebound = overTerminalNote(undefined, bindings);
+    assert.ok(rebound.includes('Mark All Notifications Read'), 'given a key, it is named');
+    assert.ok(!rebound.includes('Find in Terminal'), 'unbound, it is not');
   });
 
   test('SW-11: the Keyboard Shortcuts section draws that note', async () => {

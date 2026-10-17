@@ -8,10 +8,20 @@ import { parseSize, restartsShell, sessionIsGone } from '../lib/shellExit.js';
 // over the user's workspace. Reads go through `loadVersionedState` + an explicit
 // version branch; writes still use `saveState` (always the current version).
 import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistence.js';
-import { useSettingsStore } from './settingsStore.js';
+import { isViewShown, useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
 import { notificationFor, submitsLine } from '../lib/tabActivity.js';
-import { routeProgramNotification, windowAttention } from '../lib/programNotifications.js';
+import { createRateLimiter, routeProgramNotification, windowAttention } from '../lib/programNotifications.js';
+import { PROGRESS_INTERVAL_MS, createLatestThrottle, nextProgress, sameProgress } from '../lib/terminalProgress.js';
+import {
+  addBell,
+  capNotifications,
+  foldRings,
+  insertNewestFirst,
+  isUnread,
+  latestUnread,
+  markRead,
+} from '../lib/attention.js';
 import { isWindows } from '../lib/platform.js';
 import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir, splitStartFor, startableCwd } from '../lib/terminalCwd.js';
@@ -1377,6 +1387,280 @@ const NOTIFICATION_LIMIT = 50;
 /** Tells apart two program notifications for one tab in the same millisecond. */
 let programNoteCounter = 0;
 
+// ---------------------------------------------------------------------------
+// Attention: which terminal is waiting for you (src/lib/attention.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the window has the keyboard and can be seen, asked whenever a rule
+ * needs to know whether the user is looking — `windowAttention`, unless a
+ * suite has said otherwise (`__setAttentionSource`).
+ */
+let attentionSource = () => windowAttention();
+
+/** The window's focus and visibility now, never throwing. */
+function currentAttention() {
+  try {
+    return attentionSource() || { focused: false, visible: false };
+  } catch {
+    return { focused: false, visible: false };
+  }
+}
+
+/** For the suites: what the store takes the window's focus to be. Returns the previous source. */
+export function __setAttentionSource(source) {
+  const previous = attentionSource;
+  attentionSource = typeof source === 'function' ? source : () => windowAttention();
+  return previous;
+}
+
+const monotonicNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/**
+ * How long a pane's ring flashes when a notification or a bell is aimed at
+ * the terminal being typed into and `terminalAttentionFlashFocused` is on:
+ * once, about this long, and nothing recorded.
+ */
+export const ATTENTION_FLASH_MS = 1200;
+let attentionFlashMs = ATTENTION_FLASH_MS;
+
+/** For the suites: a shorter flash. Returns the previous length. */
+export function __setAttentionFlashMs(ms) {
+  const previous = attentionFlashMs;
+  attentionFlashMs = ms;
+  return previous;
+}
+
+/** tab id -> the timer that ends its flash. */
+const flashTimers = new Map();
+/** Each flash is numbered, so a second one restarts the first rather than being taken for it. */
+let flashCounter = 0;
+
+/**
+ * tab id -> its bell's rate limit (`createRateLimiter`, the program
+ * notifications' own numbers): a program ringing in a loop — or a file of
+ * BELs `cat`-ed — costs one entry at most every two seconds, ten a minute.
+ */
+const bellLimiters = new Map();
+/**
+ * tab id -> the rate limit of its bell's flashes (`terminalAttentionFlashFocused`),
+ * an allowance of its own: what a shell rings at the terminal being typed
+ * into must not use up what the bell needs once you are elsewhere.
+ */
+const flashLimiters = new Map();
+/** Tells apart two bell entries for one tab in the same millisecond. */
+let bellCounter = 0;
+
+/**
+ * How long rings the rate limit refused wait before they are added to their
+ * bell entry's count, in one update (`foldRings`): the rate limit's own two
+ * seconds, so a terminal ringing nonstop costs one write for the rings it
+ * was let through and one for the rest, every two seconds at most.
+ */
+export const BELL_FOLD_MS = 2000;
+let bellFoldMs = BELL_FOLD_MS;
+
+/** For the suites: a shorter wait. Returns the previous one. */
+export function __setBellFoldMs(ms) {
+  const previous = bellFoldMs;
+  bellFoldMs = ms;
+  return previous;
+}
+
+/**
+ * tab id -> rings refused by its bell's rate limit, held rather than lost:
+ * `{ id, rings, at, timer }`. With `id`, they rang while that entry was
+ * unread and are added to its count; with `id` null, nothing was waiting to
+ * be seen when they rang, and they are listed as an entry of their own at
+ * the next moment the limit allows. "Bell ×2" for six rings was a count of
+ * what got through the limit, not of what rang; and a ring just after the
+ * entry was read went nowhere at all.
+ */
+const bellFolds = new Map();
+
+/** The bell's rate-limit clock: monotonic. The suites put their own in (`__setBellClock`). */
+let bellClock = () => monotonicNow();
+
+/** For the suites: the bell's clock. Returns the previous one. */
+export function __setBellClock(clock) {
+  const previous = bellClock;
+  bellClock = typeof clock === 'function' ? clock : () => monotonicNow();
+  return previous;
+}
+
+/**
+ * Whether a pointer button is down anywhere in the window (`notePointer`,
+ * from src/hooks/useAttention.js). While it is, the seen rule holds what it
+ * would mark read until the button is let go: a press on a chip or a pane
+ * makes its tab active on the way DOWN, and reading it then took its pill
+ * away and moved every chip after it before the button came UP — the click
+ * landed on the neighbour. Explicit actions — the jump, an entry clicked,
+ * Mark All Read — are not held.
+ */
+let pointerPressed = false;
+/** Whether the seen rule wanted to read the active tab during the press. */
+let seenOnRelease = false;
+let pointerSafetyTimer = null;
+
+/**
+ * How long a press may last before its release is assumed: an up the window
+ * never heard (it went to another application, the webview lost it) must
+ * not hold the seen rule for good.
+ */
+export const POINTER_SAFETY_MS = 1500;
+let pointerSafetyMs = POINTER_SAFETY_MS;
+
+/** For the suites: a shorter wait for a lost release. Returns the previous one. */
+export function __setPointerSafetyMs(ms) {
+  const previous = pointerSafetyMs;
+  pointerSafetyMs = ms;
+  return previous;
+}
+
+/** The unread bell entry of `tabId`, or undefined. */
+const unreadBellOf = (notifications, tabId) =>
+  notifications.find((n) => n?.kind === 'bell' && n.tabId === tabId && isUnread(n));
+
+/** `tabId`'s bell rate limit, made on first use. */
+function bellLimiterOf(tabId) {
+  let limiter = bellLimiters.get(tabId);
+  if (!limiter) {
+    limiter = createRateLimiter();
+    bellLimiters.set(tabId, limiter);
+  }
+  return limiter;
+}
+
+/**
+ * tab id -> the pacing of its progress bar (`createLatestThrottle`): at most
+ * ten updates a second, the last report winning.
+ */
+const progressThrottles = new Map();
+let progressIntervalMs = PROGRESS_INTERVAL_MS;
+
+/** For the suites: another pace for progress bars made from now on. Returns the previous one. */
+export function __setProgressIntervalMs(ms) {
+  const previous = progressIntervalMs;
+  progressIntervalMs = ms;
+  return previous;
+}
+
+/**
+ * For the suites: how many tabs the attention state keeps something for
+ * outside the store — flash timers, bell rate limits, progress pacing —
+ * which the store's own state cannot show.
+ */
+export function __attentionKept() {
+  return {
+    flashTimers: flashTimers.size,
+    bellLimiters: bellLimiters.size,
+    flashLimiters: flashLimiters.size,
+    bellFolds: bellFolds.size,
+    progressThrottles: progressThrottles.size,
+  };
+}
+
+/** Stop whatever bar update `tabId` is holding back. */
+function cancelProgress(tabId) {
+  progressThrottles.get(tabId)?.cancel();
+}
+
+/**
+ * Run `fn` once `tabId`'s terminal has read all the output it has been
+ * handed so far — set by the registry (`setTerminalOutputBarrier`); at once
+ * where there is no terminal, as in the Node-run suites.
+ *
+ * The end of a command is the backend's to report (OSC 133 never reaches
+ * xterm), and it reports it right after the output that came before it. But
+ * xterm reads what it is given a task later, so a progress report in that
+ * last output — `printf '\e]9;4;1;50\a'`, a program killed mid-bar — was
+ * read only after the bar had been taken down, and put it back up over the
+ * prompt for good. Taken down behind the output instead, it goes after
+ * everything the command printed and before anything the next one does.
+ */
+let afterTerminalOutput = (_tabId, fn) => fn();
+
+/**
+ * For the registry: how to wait for a terminal to have read its output (see
+ * `afterTerminalOutput`). Returns the previous one, for the suites.
+ */
+export function setTerminalOutputBarrier(barrier) {
+  const previous = afterTerminalOutput;
+  afterTerminalOutput = typeof barrier === 'function' ? barrier : (_tabId, fn) => fn();
+  return previous;
+}
+
+/** Take `tabId`'s bar down, and drop any update it is holding back. */
+function dropProgress(tabId) {
+  cancelProgress(tabId);
+  useTerminalStore.setState((s) => {
+    const progress = withoutProgress(s.progress, [tabId]);
+    return progress === s.progress ? s : { progress };
+  });
+}
+
+/** Take the bars of `tabIds` down once each terminal has read what it was given. */
+function dropProgressAfterOutput(tabIds) {
+  for (const tabId of tabIds) {
+    try {
+      afterTerminalOutput(tabId, () => dropProgress(tabId));
+    } catch {
+      dropProgress(tabId);
+    }
+  }
+}
+
+/** `progress` without the bars of `tabIds` — the same object when none of them had one. */
+function withoutProgress(progress, tabIds) {
+  const ids = [...tabIds].filter((id) => progress && Object.prototype.hasOwnProperty.call(progress, id));
+  if (ids.length === 0) return progress;
+  const next = { ...progress };
+  for (const id of ids) delete next[id];
+  return next;
+}
+
+/**
+ * Give `tabId`'s terminal the keyboard: the registry's `focusTerminalView`,
+ * through a dynamic import as `disposeTerminalView` is, so this store never
+ * loads xterm in Node. The suites put their own in (`__setTerminalFocus`).
+ */
+let focusTerminalOf = (tabId) => {
+  if (typeof document === 'undefined') return;
+  import('../components/terminal/terminalRegistry.js')
+    .then(({ focusTerminalView }) => focusTerminalView?.(tabId))
+    .catch(() => {
+      // No terminal view to focus — nothing else to do.
+    });
+};
+
+/** For the suites: what gives a terminal the keyboard. Returns the previous one. */
+export function __setTerminalFocus(focus) {
+  const previous = focusTerminalOf;
+  focusTerminalOf = focus;
+  return previous;
+}
+
+/**
+ * Give `tabId`'s terminal the keyboard once the switch to it has been drawn
+ * — a frame later, when its pane is on the page; TerminalView focuses a pane
+ * that BECOMES active by itself, but not one that already was, in a window
+ * that was elsewhere. Left alone when the find bar is open on that terminal
+ * (it owns the caret, as TerminalView leaves it), and when something else
+ * became the active tab meanwhile.
+ */
+function focusTerminalSoon(tabId) {
+  const later = typeof requestAnimationFrame === 'function' ? (fn) => requestAnimationFrame(fn) : (fn) => setTimeout(fn, 0);
+  later(() => {
+    const { activeTabId, find } = useTerminalStore.getState();
+    if (activeTabId !== tabId || (find?.open && find.tabId === tabId)) return;
+    try {
+      focusTerminalOf(tabId);
+    } catch (err) {
+      console.warn('[TerminalStore] could not focus the terminal:', err);
+    }
+  });
+}
+
 export const useTerminalStore = create((set, get, api) => {
   /**
    * Where a new terminal starts, for EVERY way of making one: the directory
@@ -2216,6 +2500,111 @@ export const useTerminalStore = create((set, get, api) => {
     };
   };
 
+  /**
+   * Draw `tabId`'s pane's ring once (`attentionFlash`): on now, off again
+   * after ATTENTION_FLASH_MS. A flash while one is showing starts over, and
+   * the timer of the one it replaced ends nothing.
+   */
+  const flashTerminal = (tabId) => {
+    flashCounter += 1;
+    const number = flashCounter;
+    clearTimeout(flashTimers.get(tabId));
+    set((s) => ({ attentionFlash: { ...s.attentionFlash, [tabId]: number } }));
+    flashTimers.set(
+      tabId,
+      setTimeout(() => {
+        flashTimers.delete(tabId);
+        set((s) => {
+          if (s.attentionFlash[tabId] !== number) return s;
+          const { [tabId]: _ended, ...rest } = s.attentionFlash;
+          return { attentionFlash: rest };
+        });
+      }, attentionFlashMs)
+    );
+  };
+
+  /** Add `fold`'s rings to entry `id`'s count (`foldRings`). */
+  const addRingsTo = (id, fold) =>
+    set((s) => {
+      const notifications = foldRings(s.notifications, id, fold.rings, fold.at);
+      return notifications === s.notifications ? s : { notifications };
+    });
+
+  /**
+   * Let the rings held for `tabId` out (`bellFolds`):
+   *
+   *   - rung while an entry was unread: into that entry's count, read since
+   *     or not; gone with it if it was dismissed;
+   *   - rung with nothing waiting: into the tab's unread bell entry if one
+   *     has appeared since; otherwise listed as a new entry — once the rate
+   *     limit allows, the hold renewed until it does — unless the tab is
+   *     being typed into by now, or the bell was turned off.
+   */
+  const releaseBellRings = (tabId) => {
+    const fold = bellFolds.get(tabId);
+    if (!fold) return;
+    clearTimeout(fold.timer);
+    fold.timer = null;
+    if (fold.id !== null) {
+      bellFolds.delete(tabId);
+      addRingsTo(fold.id, fold);
+      return;
+    }
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === tabId);
+    if (!tab || useSettingsStore.getState().terminalBellAttention === false) {
+      bellFolds.delete(tabId);
+      return;
+    }
+    const waiting = unreadBellOf(state.notifications, tabId);
+    if (waiting) {
+      bellFolds.delete(tabId);
+      addRingsTo(waiting.id, fold);
+      return;
+    }
+    if (state.activeTabId === tabId && currentAttention().focused) {
+      bellFolds.delete(tabId);
+      return;
+    }
+    if (!bellLimiterOf(tabId).allow(bellClock())) {
+      fold.timer = setTimeout(() => releaseBellRings(tabId), bellFoldMs);
+      return;
+    }
+    bellFolds.delete(tabId);
+    bellCounter += 1;
+    const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
+    const bell = { id: `bell-${tabId}-${fold.at}-${bellCounter}`, tabId, tabTitle, at: fold.at, count: fold.rings };
+    set((s) => ({ notifications: addBell(s.notifications, bell, NOTIFICATION_LIMIT) }));
+  };
+
+  /**
+   * One ring of `tabId`'s bell the rate limit refused: held — with the
+   * unread entry it rang for (`entryId`), or with none — and let out by one
+   * update once BELL_FOLD_MS has passed (`releaseBellRings`). No store write
+   * per ring: a flood of BELs is a few writes in all.
+   */
+  const holdBellRing = (tabId, entryId) => {
+    let fold = bellFolds.get(tabId);
+    // Rings held for another entry, or for none, are let out first: those
+    // rung for an entry since read and replaced stay that entry's.
+    if (fold && fold.id !== entryId) {
+      releaseBellRings(tabId);
+      fold = bellFolds.get(tabId) ?? null;
+      if (fold && fold.id !== entryId) {
+        clearTimeout(fold.timer);
+        bellFolds.delete(tabId);
+        fold = null;
+      }
+    }
+    if (!fold) {
+      fold = { id: entryId, rings: 0, at: 0, timer: null };
+      bellFolds.set(tabId, fold);
+    }
+    fold.rings += 1;
+    fold.at = Date.now();
+    if (fold.timer === null) fold.timer = setTimeout(() => releaseBellRings(tabId), bellFoldMs);
+  };
+
   const initialGroup = makeGroup({ name: 'Group 1' });
 
   return {
@@ -2254,18 +2643,256 @@ export const useTerminalStore = create((set, get, api) => {
     // a build in another group finished four minutes ago — which is the whole
     // point of running things in a terminal you are not watching.
     //
-    // Two kinds: a command that finished (`notificationFor` in tabActivity.js),
-    // and what a program in a terminal asked to tell you (`kind: 'program'`,
-    // see `notifyFromProgram`).
+    // Three kinds: a command that finished (`notificationFor` in
+    // tabActivity.js), what a program in a terminal asked to tell you
+    // (`kind: 'program'`, see `notifyFromProgram`), and a terminal's bell
+    // (`kind: 'bell'`, see `bellFromTerminal`).
+    //
+    // Every entry is made with `read: false`, and is marked read once its
+    // terminal has been seen (see the attention subscription at the bottom of
+    // this file and src/lib/attention.js): that is what rings a pane and
+    // counts on a tab chip. An entry stays in the list, read, until it is
+    // dismissed or cleared.
     //
     // Newest first. Capped, because a machine left running overnight would
-    // otherwise grow this without bound.
+    // otherwise grow this without bound — and past the cap the oldest READ
+    // entries go first, so something seen never pushes out something still
+    // waiting (`capNotifications`).
     notifications: [],
 
     dismissNotification: (id) =>
       set((state) => ({ notifications: state.notifications.filter((n) => n.id !== id) })),
 
     clearNotifications: () => set({ notifications: [] }),
+
+    /**
+     * Mark every entry of terminal `tabId` read. Nothing changes — not even
+     * the list's identity — when none was unread.
+     */
+    markTabRead: (tabId) =>
+      set((state) => {
+        const notifications = markRead(state.notifications, (n) => n.tabId === tabId);
+        return notifications === state.notifications ? state : { notifications };
+      }),
+
+    /** Mark All Read: every entry, every terminal. */
+    markAllNotificationsRead: () =>
+      set((state) => {
+        const notifications = markRead(state.notifications);
+        return notifications === state.notifications ? state : { notifications };
+      }),
+
+    /**
+     * The window has just come to the front, or become visible again: the
+     * terminal on screen as the active tab has now been seen. Called by
+     * `useAttention` (src/hooks/useAttention.js) on the window's `focus` and
+     * on `visibilitychange` to visible.
+     */
+    noteWindowFocused: () => {
+      // A click into the window: held until the button is let go (`notePointer`).
+      if (pointerPressed) {
+        seenOnRelease = true;
+        return;
+      }
+      const { activeTabId } = get();
+      if (activeTabId) get().markTabRead(activeTabId);
+    },
+
+    /**
+     * A pointer button went down (`pressed`) or up anywhere in the window —
+     * `useAttention`'s capture listeners. While one is down, the seen rule
+     * holds what it would read; let go, the terminal active then is read, if
+     * the window still has the focus. A release the window never hears is
+     * assumed after POINTER_SAFETY_MS.
+     */
+    notePointer: (pressed) => {
+      clearTimeout(pointerSafetyTimer);
+      pointerSafetyTimer = null;
+      if (pressed) {
+        pointerPressed = true;
+        pointerSafetyTimer = setTimeout(() => get().notePointer(false), pointerSafetyMs);
+        return;
+      }
+      if (!pointerPressed) return;
+      pointerPressed = false;
+      if (!seenOnRelease) return;
+      seenOnRelease = false;
+      const { activeTabId } = get();
+      if (activeTabId && currentAttention().focused) get().markTabRead(activeTabId);
+    },
+
+    /**
+     * Go to the terminal an entry is about — the bell list's click: show it
+     * (`switchTab` brings its group on screen, its pane active, and ends a
+     * zoom that hides it), give it the keyboard, and mark that terminal read.
+     * The entry stays, read.
+     *
+     * The Terminal view is brought on screen first, wherever it was dragged:
+     * its region shown, and the view chosen in it over the other views there
+     * (`showView`). Showing the bottom panel alone left a Terminal view moved
+     * into a side bar behind the Explorer — nothing on screen, the keyboard
+     * nowhere, and the entry read all the same. So nothing happens, and
+     * nothing is read, unless the view really is on screen by then; and it is
+     * shown before the tab switches, as a switch in a focused window is itself
+     * a reading (the attention subscription below).
+     *
+     * Only a terminal in a pane can be gone to — not one spawned and not yet
+     * placed, nor one taken out of its pane on its way to being killed
+     * (`killTabIfOrphaned`): switching to either shows nothing. And the
+     * terminal is read only once it really is on screen after the switch, as
+     * the active tab — not merely beside it, the keyboard kept elsewhere.
+     *
+     * False when the entry, or its terminal, is gone or in no pane, or there
+     * is nowhere to show it.
+     */
+    goToNotification: (id) => {
+      const entry = get().notifications.find((n) => n.id === id);
+      if (!entry || !groupOfTab(get(), entry.tabId)) return false;
+      useSettingsStore.getState().showView?.('terminal');
+      if (!isViewShown(useSettingsStore.getState(), 'terminal')) return false;
+      get().switchTab(entry.tabId);
+      if (get().activeTabId !== entry.tabId || !tabOnScreen(get(), entry.tabId)) return false;
+      focusTerminalSoon(entry.tabId);
+      get().markTabRead(entry.tabId);
+      return true;
+    },
+
+    /**
+     * Go to Latest Unread Notification: the newest unread entry — by when it
+     * happened — whose terminal is in a pane, as `goToNotification` goes to
+     * one. Returns the tab gone to, or null — with nothing unread it does
+     * nothing at all.
+     */
+    goToLatestUnread: () => {
+      const state = get();
+      const placed = new Set(state.groups.flatMap((g) => collectLeaves(g.tree).flatMap((leaf) => leaf.tabIds)));
+      const entry = latestUnread(state.notifications, placed);
+      if (!entry) return null;
+      return get().goToNotification(entry.id) ? entry.tabId : null;
+    },
+
+    // ---- A terminal flashing, and a terminal's bell ----------------------
+    //
+    // tab id -> the number of its current flash: a pane whose terminal is
+    // here draws its ring once, for ATTENTION_FLASH_MS (D4). Only for a
+    // notification or a bell aimed at the terminal being typed into, with
+    // `terminalAttentionFlashFocused` on — what is being looked at needs no
+    // entry, and with the setting on it gets a glance instead. A second flash
+    // restarts the first, under a new number, so the drawing can restart too.
+    attentionFlash: {},
+
+    /**
+     * The terminal `tabId` rang its bell (xterm's `onBell`, wired in
+     * terminalRegistry.js) — a BEL in its output: what a program does when it
+     * wants you and knows nothing better, and what an agent's `\a` on
+     * finishing is.
+     *
+     * Routed as a program notification with kitty's `always` occasion, but
+     * only ever to the bell's list, never to the desktop: a BEL says nothing
+     * worth an OS notification and arrives far too freely. So: an entry,
+     * unless this is the terminal being typed into — the active tab in a
+     * focused window — which flashes instead when the setting says to. A ring
+     * while the tab's bell entry is still unread is added to that entry
+     * (`addBell`). Rings past the tab's rate limit are not written as they
+     * come, and not lost either: held, and added to that entry, or listed as
+     * a new one once the limit allows, in one update a moment later
+     * (`holdBellRing`).
+     *
+     * Off entirely with `terminalBellAttention` off. `attention` and `now`
+     * (a monotonic clock, for the rate limit) are there for the suites.
+     * Returns `{ inApp, flash }`, or null for a tab that is gone.
+     */
+    bellFromTerminal: (tabId, attention = currentAttention(), now = bellClock()) => {
+      const state = get();
+      const tab = state.tabs.find((t) => t.id === tabId);
+      if (!tab) return null;
+      const settings = useSettingsStore.getState();
+      if (settings.terminalBellAttention === false) return { inApp: false, flash: false };
+      const route = routeProgramNotification({
+        occasion: 'always',
+        activeTab: state.activeTabId === tabId,
+        onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
+        focused: Boolean(attention?.focused),
+      });
+      const flash = !route.inApp && settings.terminalAttentionFlashFocused === true;
+      if (!route.inApp && !flash) return { inApp: false, flash: false };
+      // Counted only for a ring that would show, and a flash against an
+      // allowance of its own: the bells a shell rings at the terminal you are
+      // typing into (a failed completion) must not use up the allowance of
+      // the next one, rung while you are elsewhere. A storm of them is one
+      // flash, not a store update per BEL.
+      let limiter = flash ? flashLimiters.get(tabId) : bellLimiterOf(tabId);
+      if (!limiter) {
+        limiter = createRateLimiter();
+        flashLimiters.set(tabId, limiter);
+      }
+      if (!limiter.allow(now)) {
+        // Refused, but not lost: held, and counted or listed in one update a
+        // moment later (`holdBellRing`). A refused flash is just refused.
+        if (!flash) holdBellRing(tabId, unreadBellOf(state.notifications, tabId)?.id ?? null);
+        return { inApp: false, flash: false };
+      }
+      if (flash) {
+        flashTerminal(tabId);
+        return { inApp: false, flash: true };
+      }
+      const at = Date.now();
+      bellCounter += 1;
+      const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
+      set((s) => ({
+        notifications: addBell(s.notifications, { id: `bell-${tabId}-${at}-${bellCounter}`, tabId, tabTitle, at }, NOTIFICATION_LIMIT),
+      }));
+      return { inApp: true, flash: false };
+    },
+
+    // ---- How far along each terminal's program says it is ----------------
+    //
+    // tab id -> `{ state, value }`: 'normal', 'error', 'indeterminate' or
+    // 'warning', and a percentage or null (src/lib/terminalProgress.js). Its
+    // own map and not a field of `tabs`, which every pane, the side bar and
+    // the status bar subscribe to: a program reporting progress would
+    // otherwise re-render all of them ten times a second.
+    progress: {},
+
+    /**
+     * A progress report from `tabId`'s terminal (`parseProgress`'s shape).
+     *
+     * The bar it leaves is worked out from the bar before it — the one still
+     * waiting to be shown, if one is — and an update that leaves the bar as it
+     * was is dropped. A tab's bar changes at most ten times a second: past
+     * that the latest bar waits, replacing any bar already waiting, and is
+     * shown when the tenth of a second is up. Nothing with the `terminalProgress`
+     * setting off, or for a tab that is gone. Returns whether the bar is
+     * changing.
+     */
+    setTabProgress: (tabId, update) => {
+      if (useSettingsStore.getState().terminalProgress === false) return false;
+      if (!get().tabs.some((t) => t.id === tabId)) return false;
+      let throttle = progressThrottles.get(tabId);
+      const shown = get().progress[tabId] ?? null;
+      const current = throttle?.holding ? throttle.held : shown;
+      const next = nextProgress(current, update);
+      if (sameProgress(next, current)) return false;
+      if (!throttle) {
+        // Nothing held is delivered for a tab that has gone or with the
+        // setting off: both cancel what is held as they happen
+        // (`pruneAttention`, and the settings subscription below).
+        throttle = createLatestThrottle({
+          intervalMs: progressIntervalMs,
+          deliver: (bar) => {
+            set((s) => {
+              if (sameProgress(s.progress[tabId], bar)) return s;
+              if (bar === null) return { progress: withoutProgress(s.progress, [tabId]) };
+              return { progress: { ...s.progress, [tabId]: bar } };
+            });
+          },
+        });
+        progressThrottles.set(tabId, throttle);
+      }
+      throttle.push(next);
+      return true;
+    },
+
 
     /**
      * A program in terminal `tabId` asked to tell the user something —
@@ -2283,28 +2910,56 @@ export const useTerminalStore = create((set, get, api) => {
      * carries a message and nothing else. An entry is never a failure — the
      * badge turns red for an exit code, and this has none.
      *
+     * Aimed at the terminal being typed into, with kitty's `always` occasion,
+     * it flashes that pane instead when `terminalAttentionFlashFocused` is on
+     * (`attentionFlash`). Not for `unfocused` or `invisible`: a program that
+     * asked to be heard only while nobody is looking has not asked for a
+     * glance from someone who is.
+     *
+     * `keptAt` says the note was read from output kept before the terminal was
+     * first shown (`createHistoryMark` in ptyOutputBus.js), printed at that
+     * time. Still listed — a permission request in a tab nobody had looked at
+     * is usually still waiting — but as what it is: filed under when it was
+     * printed, so it neither tops the list nor outranks newer news for the
+     * jump; never on the desktop, as the moment for that has passed; never a
+     * flash. Kitty's occasions describe the moment it was sent, when nobody
+     * could see the terminal, so they let it through; only the terminal being
+     * typed into now gets nothing, its screen showing what the note says.
+     *
      * `attention` is the window's focus and visibility, read as the note
      * arrives; the suites hand theirs in. Returns where it went, or null for
      * a tab that is gone.
      */
-    notifyFromProgram: (tabId, note, attention = windowAttention()) => {
+    notifyFromProgram: (tabId, note, attention = currentAttention(), { keptAt } = {}) => {
       const state = get();
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab || !note) return null;
-      const route = routeProgramNotification({
-        occasion: note.occasion,
-        activeTab: state.activeTabId === tabId,
-        onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
-        focused: Boolean(attention?.focused),
-      });
+      const fromHistory = typeof keptAt === 'number' && Number.isFinite(keptAt);
+      const typingInto = state.activeTabId === tabId && Boolean(attention?.focused);
+      const route = fromHistory
+        ? { inApp: !typingInto, desktop: false }
+        : routeProgramNotification({
+            occasion: note.occasion,
+            activeTab: state.activeTabId === tabId,
+            onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
+            focused: Boolean(attention?.focused),
+          });
       const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
       const title = note.title || tabTitle;
       const body = note.body || '';
       if (route.inApp) {
-        const at = Date.now();
+        const at = fromHistory ? keptAt : Date.now();
         programNoteCounter += 1;
-        const entry = { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at };
-        set((s) => ({ notifications: [entry, ...s.notifications].slice(0, NOTIFICATION_LIMIT) }));
+        const entry = { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at, read: false };
+        set((s) => ({ notifications: capNotifications(insertNewestFirst(s.notifications, entry), NOTIFICATION_LIMIT) }));
+      } else if (
+        !fromHistory &&
+        (note.occasion ?? 'always') === 'always' &&
+        state.activeTabId === tabId &&
+        Boolean(attention?.focused) &&
+        useSettingsStore.getState().terminalAttentionFlashFocused === true
+      ) {
+        flashTerminal(tabId);
       }
       if (route.desktop) {
         // Denied by the OS is an answer, not an error: the backend says false.
@@ -3334,6 +3989,10 @@ export const useTerminalStore = create((set, get, api) => {
         // A new prompt: whatever was being typed is gone with the old one,
         // and the next line is followed from its first key.
         for (const t of get().tabs) if (t.sessionId === session_id) typedLines.delete(t.id);
+        // The command's progress bar goes with the command (below): a program
+        // that ended — or was killed — without taking its bar down must not
+        // leave it standing over the prompt.
+        const ended = get().tabs.filter((t) => t.sessionId === session_id).map((t) => t.id);
         set((state) => {
           // Built inside the same update as the tabs it describes: a second
           // `set` from within an updater is how two writes to one store end up
@@ -3353,7 +4012,7 @@ export const useTerminalStore = create((set, get, api) => {
               state.activeTabId,
               (useSettingsStore.getState().terminalNotifyAfterSeconds ?? 0) * 1000
             );
-            if (note) raised.push(note);
+            if (note) raised.push({ ...note, read: false });
             // The agent typed into this shell (see `recordAgent`) has exited
             // at the first end after it was typed that arrives while
             // something is RUNNING: a C came first, or on Windows its line
@@ -3385,9 +4044,13 @@ export const useTerminalStore = create((set, get, api) => {
             ? { tabs: nextTabs }
             : {
                 tabs: nextTabs,
-                notifications: [...raised, ...state.notifications].slice(0, NOTIFICATION_LIMIT),
+                notifications: capNotifications([...raised, ...state.notifications], NOTIFICATION_LIMIT),
               };
         });
+        // Behind the output the command printed, which may still be on its
+        // way through xterm (`afterTerminalOutput`). An update still waiting
+        // is dropped with it.
+        dropProgressAfterOutput(ended);
         // An agent that ended has no conversation left to look up — a retry
         // waiting minutes for its title (`retryResolve`) goes with it — nor
         // one to keep from other terminals (`idHints`).
@@ -3422,6 +4085,10 @@ export const useTerminalStore = create((set, get, api) => {
           });
         }
 
+        // Nothing is left running to finish what a bar was counting — taken
+        // down behind the shell's last output, as at a command's end.
+        const gone = get().tabs.filter((t) => t.sessionId === session_id).map((t) => t.id);
+        dropProgressAfterOutput(gone);
         set((state) => ({
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
@@ -4173,7 +4840,10 @@ export const useTerminalStore = create((set, get, api) => {
         }
         typedLines.delete(tabId);
         forgetAgentTitle(tabId);
+        // A bar from the shell that exited describes nothing in the new one.
+        cancelProgress(tabId);
         set((state) => ({
+          progress: withoutProgress(state.progress, [tabId]),
           tabs: state.tabs.map((t) =>
             t.id === tabId
               ? {
@@ -4369,6 +5039,96 @@ useTerminalStore.subscribe((state, prevState) => {
   if (key === lastPersistKey) return;
   lastPersistKey = key;
   schedulePersist(state);
+});
+
+/** `map` keeping only the keys in `live` — the same object when it had no others. */
+function keepLive(map, live) {
+  if (!map) return map;
+  const dead = Object.keys(map).filter((id) => !live.has(id));
+  if (dead.length === 0) return map;
+  const next = { ...map };
+  for (const id of dead) delete next[id];
+  return next;
+}
+
+/**
+ * What the attention state keeps about terminals, for terminals that exist.
+ *
+ * ONE place for it, rather than a line in every action that removes a tab:
+ * a tab goes when it is closed, when its pane or its group is, when a
+ * workspace is loaded over it, when a saved group replaces it — and every one
+ * of those ends in `tabs` losing it. So whenever `tabs` changes, the bell's
+ * entries, the progress bars and the flashes of tabs that are not in it any
+ * more are dropped, and with them the timers, rate limits and held-back
+ * updates kept outside the store. Nothing is written when nothing is stale,
+ * which is the usual case: `tabs` changes with every command a shell runs.
+ */
+function pruneAttention(state) {
+  const live = new Set(state.tabs.map((t) => t.id));
+  for (const [id, timer] of flashTimers) {
+    if (live.has(id)) continue;
+    clearTimeout(timer);
+    flashTimers.delete(id);
+  }
+  for (const limiters of [bellLimiters, flashLimiters]) {
+    for (const id of limiters.keys()) if (!live.has(id)) limiters.delete(id);
+  }
+  for (const [id, fold] of bellFolds) {
+    if (live.has(id)) continue;
+    clearTimeout(fold.timer);
+    bellFolds.delete(id);
+  }
+  for (const [id, throttle] of progressThrottles) {
+    if (live.has(id)) continue;
+    throttle.cancel();
+    progressThrottles.delete(id);
+  }
+  const notifications = state.notifications.some((n) => !live.has(n?.tabId))
+    ? state.notifications.filter((n) => live.has(n?.tabId))
+    : state.notifications;
+  const progress = keepLive(state.progress, live);
+  const attentionFlash = keepLive(state.attentionFlash, live);
+  if (notifications === state.notifications && progress === state.progress && attentionFlash === state.attentionFlash) return;
+  useTerminalStore.setState({ notifications, progress, attentionFlash });
+}
+
+// Attention upkeep, on every change to the store:
+//
+//   - a tab that went takes what was kept about it along (`pruneAttention`);
+//   - a terminal that becomes the active tab while the window has focus has
+//     been seen, and its entries are read. That covers every way the active
+//     tab moves — a click on a chip, a pane, the side bar, a shortcut, a
+//     group switch, a closed tab handing over to its neighbour — without each
+//     of them having to remember. A switch while the window is in the
+//     background marks nothing: nobody saw it. Typing needs no rule of its
+//     own, as typing into a terminal means it is the active tab of a focused
+//     window, which it was made when it got there.
+//
+// Read through `setState` rather than the state's own actions, which a suite
+// may have swapped for recorders (menu_contract.test.js).
+useTerminalStore.subscribe((state, prevState) => {
+  if (state.tabs !== prevState.tabs) pruneAttention(state);
+  const { activeTabId } = useTerminalStore.getState();
+  if (activeTabId && activeTabId !== prevState.activeTabId && currentAttention().focused) {
+    // Made active by a press: read when it is let go (`notePointer`).
+    if (pointerPressed) {
+      seenOnRelease = true;
+      return;
+    }
+    useTerminalStore.setState((s) => {
+      const notifications = markRead(s.notifications, (n) => n.tabId === s.activeTabId);
+      return notifications === s.notifications ? s : { notifications };
+    });
+  }
+});
+
+// Progress bars off: every bar goes at once, not only the next report. The
+// taskbar follows from the map emptying (src/hooks/useAttention.js).
+useSettingsStore.subscribe((settings, prevSettings) => {
+  if (settings.terminalProgress === false && prevSettings.terminalProgress !== false) {
+    for (const throttle of progressThrottles.values()) throttle.cancel();
+    useTerminalStore.setState((s) => (Object.keys(s.progress || {}).length === 0 ? s : { progress: {} }));
+  }
 });
 
 // The webview can go away without warning (quit, reload, a Windows update

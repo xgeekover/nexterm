@@ -7,6 +7,8 @@ import {
   Terminal,
   Save,
   Maximize2,
+  BellRing,
+  CheckCheck,
 } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
@@ -32,6 +34,8 @@ function iconFor(item) {
   if (item.type === 'file') return <FileCode size={16} />;
   if (item.command === 'save_all') return <Save size={16} />;
   if (item.command === 'toggle_pane_zoom') return <Maximize2 size={16} />;
+  if (item.command === 'go_to_unread_notification') return <BellRing size={16} />;
+  if (item.command === 'mark_notifications_read') return <CheckCheck size={16} />;
   return <Terminal size={16} />;
 }
 
@@ -162,6 +166,8 @@ export function CommandPalette() {
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
+  const goToLatestUnread = useTerminalStore((s) => s.goToLatestUnread);
+  const markAllNotificationsRead = useTerminalStore((s) => s.markAllNotificationsRead);
   const writeRaw = useTerminalStore((s) => s.writeRaw);
 
   const [query, setQuery] = useState('');
@@ -280,6 +286,14 @@ export function CommandPalette() {
         // The active pane of the group on screen, as the shortcut does.
         togglePaneZoom?.();
         setActiveView('terminal');
+        return;
+      case 'go_to_unread_notification':
+        // As the shortcut does — the Terminal view brought on screen wherever
+        // it is; with nothing unread, nothing happens.
+        goToLatestUnread?.();
+        return;
+      case 'mark_notifications_read':
+        markAllNotificationsRead?.();
         return;
       case 'save_all':
         await saveAll();

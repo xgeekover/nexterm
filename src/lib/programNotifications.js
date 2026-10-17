@@ -456,11 +456,20 @@ const monotonicClock = () => (typeof performance !== 'undefined' ? performance.n
  * dropped.
  */
 class ProgramNotificationsAddon {
-  constructor({ onNotify, enabled, clock = monotonicClock, rateLimit = RATE_LIMIT } = {}) {
+  constructor({ onNotify, enabled, clock = monotonicClock, rateLimit = RATE_LIMIT, keptAt } = {}) {
     this._onNotify = onNotify;
     this._enabled = enabled;
     this._clock = clock;
     this._limiter = createRateLimiter(rateLimit);
+    // Output kept for the terminal before it was shown, replayed into it as it
+    // is made, holds messages printed then — minutes or an hour apart, read
+    // here within a millisecond. Counted on the live clock, a burst of them
+    // passed one and spent the next two seconds of live allowance on old
+    // news. So they have an allowance of their own, clocked by when each was
+    // printed (`keptAt`, read as each one is handed on), and the live one is
+    // never touched by them.
+    this._keptAt = keptAt;
+    this._keptLimiter = createRateLimiter(rateLimit);
     this._kitty = new KittyNotifications();
     this._disposables = [];
   }
@@ -505,12 +514,28 @@ class ProgramNotificationsAddon {
     }
   }
 
-  /** Hand a notification on, if the rate limit lets it through. False when there was none. */
+  /** When the output being read was printed, for kept output; null for live output. */
+  _readKeptAt() {
+    try {
+      const at = typeof this._keptAt === 'function' ? this._keptAt() : null;
+      return typeof at === 'number' && Number.isFinite(at) ? at : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Hand a notification on, if its rate limit lets it through — the live
+   * one, or kept output's own (see the constructor). False when there was
+   * none.
+   */
   _deliver(note) {
     if (!note) return false;
-    if (this._limiter.allow(this._clock())) {
+    const keptAt = this._readKeptAt();
+    const allowed = keptAt === null ? this._limiter.allow(this._clock()) : this._keptLimiter.allow(keptAt);
+    if (allowed) {
       try {
-        this._onNotify?.(note);
+        this._onNotify?.(note, keptAt);
       } catch (err) {
         console.warn('[Terminal] could not pass on a notification:', err);
       }
@@ -532,10 +557,13 @@ class ProgramNotificationsAddon {
 
 /**
  * Read program notifications on `term` from now on (see
- * `ProgramNotificationsAddon`): each one goes to `onNotify(note)` —
+ * `ProgramNotificationsAddon`): each one goes to `onNotify(note, keptAt)` —
  * `{ title, body, occasion, urgency }`, cleaned — while `enabled()` is true.
- * `clock` and `rateLimit` are there for the tests. Returns the addon, or null
- * when `term` has no parser to listen to (a test double).
+ * `keptAt()`, when given, says when the output being read was printed if it
+ * is output kept from before the terminal was shown, and null otherwise; it
+ * is handed on as `keptAt`. `clock` and `rateLimit` are there for the tests.
+ * Returns the addon, or null when `term` has no parser to listen to (a test
+ * double).
  */
 export function installProgramNotifications(term, options = {}) {
   if (typeof term?.parser?.registerOscHandler !== 'function' || typeof term.loadAddon !== 'function') return null;

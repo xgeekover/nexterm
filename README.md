@@ -39,6 +39,11 @@ that layout the next time you open it.
   pane fill its group and hides the rest — tmux's `Prefix z`, iTerm2's
   *Maximize Active Pane*. The hidden ones keep running; press it again and the
   split comes back exactly as it was.
+- **See which terminal wants you.** When a program in a terminal you are not
+  looking at says something, rings the bell or finishes a long command, that
+  pane gets an orange ring and its tab, its group and its row in the side bar
+  get a count. `⌘⇧U` (`Ctrl+Shift+U` elsewhere) goes straight to the latest
+  one. A program that reports progress draws a thin bar under its tab.
 - **Save a group, or the whole desk.** *Save Group…* keeps one group's layout
   and each terminal's current directory. *Save All Groups…* snapshots every
   group at once under a name, and restoring it brings the entire session back —
@@ -414,6 +419,9 @@ Neither program does this until you tell it to:
   `preferredNotifChannel` setting (`kitty`). *iTerm2 (OSC 9)* and *Ghostty (OSC
   777)* work too. The default, *Auto*, picks by the terminal's name and has
   nothing for NexTerm, so it stays silent.
+  *Terminal Bell* works as well, but only inside the app: a bell rings the
+  terminal for your attention (see below) and never makes a desktop
+  notification.
 
 A desktop notification needs the operating system to allow it — on macOS
 System Settings ▸ Notifications, on Windows Settings ▸ System ▸ Notifications,
@@ -422,6 +430,59 @@ installed app (the `setup.exe` or `.msi`): Tauri's notification plugin, which
 shows them, documents its Windows support as working only for installed apps.
 The portable `NexTerm.exe` is not installed, so do not count on a toast from it.
 The bell works everywhere either way.
+
+### Which terminal wants you
+
+Every entry in the status bar's bell belongs to a terminal, and stays unread
+until you look at that terminal: it is the active one while the NexTerm window
+has focus. While it is unread you can see it from anywhere:
+
+- **An orange ring** around the pane that holds the terminal. It pulses unless
+  motion is reduced (Settings ▸ Workbench, or the operating system's own
+  setting).
+- **A count** on the terminal's tab, on its group's chip and on its rows in the
+  TERMINALS side bar.
+- **The bell's number** is how many entries are unread. Unread ones are bold,
+  read ones are dimmed, and the bell turns red when an unread one is a failed
+  command. *Mark all read* and *Clear all* are at the top of the list.
+
+`⌘⇧U` (`Ctrl+Shift+U` on Windows and Linux) goes to the newest unread entry's
+terminal, in whatever group or pane it is, and puts the cursor there.
+*Go to Latest Unread Notification* and *Mark All Notifications Read* are in the
+command palette too, and both can be given other keys in Settings ▸ Keyboard Shortcuts.
+On Linux the input method (IBus) may take `Ctrl+Shift+U` for itself; bind
+another key if it does nothing.
+
+Three things make an entry: a long command finishing (see *Be told when
+something finishes*), a program's notification (above), and the terminal bell
+— the `BEL` character a program prints, which Claude Code's *Terminal Bell*
+channel sends. Repeated bells from one terminal add up in one entry, and a bell
+is never a desktop notification. Settings ▸ Terminal ▸ *Terminal Bell* turns
+bells off. Nothing is recorded for the terminal you are typing into; with
+*Flash the Terminal You Are In* on, its ring flashes once instead.
+
+**Progress.** A program can report how far along it is with OSC 9;4, the
+sequence Windows Terminal and ConEmu understand. NexTerm draws it as a thin bar
+under the terminal's tab — blue while it runs, red for an error, yellow when
+paused, a sliding segment when the program cannot say how far. The group's
+chip, and on Windows the taskbar button, show one bar for several terminals: an
+error wins over a pause, a pause over normal progress, and among equals the one
+furthest behind is shown. The bar goes when the program says so, when the
+command ends or when the shell exits. A shell that never reports its prompt,
+like fish or sh, or one inside ssh, cannot say that a command ended, so there a
+bar the program leaves behind stays until the next one replaces it or the shell
+exits. Some programs send OSC 9;4 only when they believe they are in Windows
+Terminal, so not every program that shows progress there will show it here.
+Settings ▸ Terminal ▸ *Progress Bars* turns it off. To try it:
+
+```sh
+printf '\033]9;4;1;40\033\\'; sleep 5
+```
+
+One limit applies to all of this: a terminal is read only once it has been on
+screen. A background tab of a restored session that you have not opened since
+launch raises nothing until you first show it, and what it printed before that
+is replayed as history, without bells or progress.
 
 ### Keyboard shortcuts
 
@@ -440,6 +501,7 @@ The bell works everywhere either way.
 | `⌘⇧W` | Close the window |
 | `⌥⌘←` / `⌥⌘→` | Focus the previous / next pane |
 | `⌘⇧Enter` | Zoom the active pane / show every pane again |
+| `⌘⇧U` | Go to the latest unread notification's terminal |
 | `⌘B` | Toggle the primary sidebar |
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |

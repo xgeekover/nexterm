@@ -11,6 +11,7 @@ import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
 import { useTerminalFileDrop } from './hooks/useTerminalFileDrop.js';
+import { useAttention } from './hooks/useAttention.js';
 import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
@@ -31,6 +32,10 @@ export default function App() {
   useUnsavedGuard();
   // Files dropped from the OS on a terminal pane go in as their paths.
   useTerminalFileDrop();
+  // The window coming back to the front marks the terminal on screen read,
+  // and every terminal's progress goes to the taskbar. Once, here: mounted
+  // twice, the taskbar would be told everything twice.
+  useAttention();
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);

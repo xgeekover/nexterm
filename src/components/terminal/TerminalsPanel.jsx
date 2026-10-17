@@ -20,8 +20,10 @@ import { useSystemStore } from '../../stores/systemStore.js';
 import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
+import { UnreadPill } from './AttentionIndicators.jsx';
 import { StartupCommandsDialog } from './StartupCommandsDialog.jsx';
 import { activityLabel } from '../../lib/tabActivity.js';
+import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js';
 import { startupCommandOf, startupCount } from '../../lib/startupCommands.js';
 import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
@@ -115,6 +117,10 @@ export function TerminalsPanel() {
   const savedGroups = useTerminalStore((s) => s.savedGroups);
   const savedWorkspaces = useTerminalStore((s) => s.savedWorkspaces);
   const workspaceName = useTerminalStore((s) => s.workspaceName);
+  // Unread entries per terminal — the same counts the tab chips and the
+  // group switcher draw, from the same selector, so the side bar and the
+  // strip cannot disagree about who is waiting.
+  const unreadCounts = useTerminalStore((s) => unreadCountByTab(s.notifications));
   // The status bar already decides how a cwd is written (`~` off Windows,
   // last two segments, ellipsis in front). Same helper here so the bar and
   // this panel cannot describe one terminal's directory differently.
@@ -602,6 +608,8 @@ export function TerminalsPanel() {
     const isActive = isActiveGroup && tab.id === activeTabId;
     // A tab that is its pane's visible one, in a group that is off screen.
     const isPaneVisible = !isActive && tab.id === paneActiveTabId;
+    const unread = unreadCounts[tab.id] ?? 0;
+    const status = [activityLabel(tab), unread > 0 ? unreadLabel(unread) : ''].filter(Boolean).join(', ');
     return (
       <div
         key={tab.id}
@@ -621,7 +629,7 @@ export function TerminalsPanel() {
         style={{ paddingLeft: padFor(level) }}
         // Same sentence the tab chip carries, from the same place, so the two
         // cannot describe one terminal differently.
-        title={activityLabel(tab) ? `${tab.cwd || tab.title} — ${activityLabel(tab)}` : tab.cwd || tab.title}
+        title={status ? `${tab.cwd || tab.title} — ${status}` : tab.cwd || tab.title}
         className={cn(
           ROW,
           'relative',
@@ -638,6 +646,7 @@ export function TerminalsPanel() {
           <>
             <ActivityDot tab={tab} />
             <span className="truncate">{tab.title}</span>
+            <UnreadPill count={unread} />
             {tab.cwd && (
               // The END of a path is the part that identifies it; the front is
               // the part every terminal shares. So this drops leading segments
@@ -796,6 +805,9 @@ export function TerminalsPanel() {
           const editingGroup = draft?.kind === 'group' && draft.id === group.id;
           // The pane level only exists on screen when the group is split.
           const tabLevel = isSplit ? 2 : 1;
+          // Summed over every pane, so a collapsed group still says it.
+          const groupUnread = unreadIn(unreadCounts, panes.flatMap(({ pane }) => pane.tabIds));
+          const unreadNote = groupUnread > 0 ? unreadLabel(groupUnread) : '';
 
           return (
             <div key={group.id}>
@@ -817,8 +829,8 @@ export function TerminalsPanel() {
                 style={{ paddingLeft: padFor(0) }}
                 title={
                   isActiveGroup
-                    ? `${group.name} — on screen`
-                    : `${group.name} — click to switch to this group`
+                    ? `${group.name} — on screen${unreadNote ? `, ${unreadNote}` : ''}`
+                    : `${group.name} — ${unreadNote ? `${unreadNote}, ` : ''}click to switch to this group`
                 }
                 aria-current={isActiveGroup ? 'true' : undefined}
                 className={cn(
@@ -850,6 +862,7 @@ export function TerminalsPanel() {
                 ) : (
                   <>
                     <span className="truncate">{group.name || `Group ${gi + 1}`}</span>
+                    <UnreadPill count={groupUnread} />
                     <span
                       className={cn(
                         'ml-auto flex items-center gap-1 text-ui-sm shrink-0',
@@ -892,6 +905,8 @@ export function TerminalsPanel() {
                   const paneCollapsed = collapsed.has(pane.id);
                   const isActivePane = isActiveGroup && group.activePaneId === pane.id;
                   const PaneIcon = direction === 'vertical' ? Rows2 : Columns2;
+                  // So a collapsed pane still says which of them waits.
+                  const paneUnread = unreadIn(unreadCounts, pane.tabIds);
                   return (
                     <React.Fragment key={pane.id}>
                       <div
@@ -906,7 +921,9 @@ export function TerminalsPanel() {
                           else if (e.key === 'ArrowRight' && paneCollapsed) toggle(pane.id);
                         }}
                         style={{ paddingLeft: padFor(1) }}
-                        title={`Pane ${pi + 1} · ${paneTabs.length} terminal${paneTabs.length === 1 ? '' : 's'}`}
+                        title={`Pane ${pi + 1} · ${paneTabs.length} terminal${paneTabs.length === 1 ? '' : 's'}${
+                          paneUnread > 0 ? ` · ${unreadLabel(paneUnread)}` : ''
+                        }`}
                         className={cn(
                           ROW,
                           'relative',
@@ -927,6 +944,7 @@ export function TerminalsPanel() {
                         </span>
                         <PaneIcon size={13} className="shrink-0" />
                         <span className="truncate">Pane {pi + 1}</span>
+                        <UnreadPill count={paneUnread} />
                         <span className="ml-auto text-ui-sm shrink-0">{paneTabs.length}</span>
                       </div>
 

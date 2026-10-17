@@ -900,6 +900,46 @@ Only the browser mock was tested.
 - Setting off → nothing reopens. Back on → what is open now comes back next
   launch.
 
+### V40 — the terminal that wants you is marked, and progress shows
+
+Only the browser mock and the macOS build were tested. The taskbar half is
+Windows-only and has never run.
+
+- Four terminals in two groups, OpenCode in each with notifications on (see
+  the README). Ask each something and switch to another terminal while it
+  works → when one finishes or asks for permission, its pane gets an orange
+  ring, its tab and group chip and its side bar rows a count, and the bell an
+  unread entry. The terminal you are typing into gets none of it.
+- `Ctrl+Shift+U` from inside another terminal → the newest one's terminal, in
+  its group, cursor in it; ring and count gone. Again → the next one. With
+  nothing unread → nothing happens, and `Ctrl+U` still clears the shell's line.
+- Bell list: an unread row is bold, clicking it goes there and leaves it
+  dimmed; *Mark all read* clears every ring; the bell is muted with no number.
+- Minimise NexTerm while OpenCode works → the desktop notification as before;
+  restore the window with that terminal active → its ring goes.
+- Claude Code with `/config` → notifications → *Terminal Bell*, in a
+  background terminal → a ring and one "Bell" entry, counting up, and no
+  desktop notification. In PowerShell,
+  `Start-Sleep 3; Write-Host -NoNewline ([char]7)`, then switch to another
+  terminal within three seconds → the same. With
+  `1..3 | % { Start-Sleep 3; Write-Host -NoNewline ([char]7) }` → still one
+  entry, "×3".
+- Progress, in PowerShell:
+  `Write-Host -NoNewline "$([char]27)]9;4;1;40$([char]7)"; Start-Sleep 5`
+  → a blue bar under the tab, 40% wide, the taskbar button green at 40%, both
+  gone when the command ends. Repeat with `9;4;2;60` (red), `9;4;4;60`
+  (yellow / paused) and `9;4;3` (sliding; the taskbar's own animation).
+- Two terminals with progress, one at `2` (error) → the taskbar shows the
+  error. Close that tab → the other's bar. Close both → the taskbar button is
+  plain again.
+- Record what winget (`winget install --id Git.Git` in a background terminal,
+  cancel it), PowerShell 7 with `$PSStyle.Progress.UseOSCIndicator = $true`
+  and `Invoke-WebRequest` of a large file, and Claude Code while it works each
+  do. Some send OSC 9;4 only inside Windows Terminal (they check
+  `WT_SESSION`); say which.
+- Settings ▸ Terminal: *Progress Bars* off while a bar shows → the tab bar and
+  the taskbar both clear at once. *Terminal Bell* off → bells do nothing.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

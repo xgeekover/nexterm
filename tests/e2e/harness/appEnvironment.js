@@ -452,6 +452,11 @@ export class AppEnvironment {
       case 'toggle_pane_zoom':
         this.terminal.togglePaneZoom();
         return null;
+      case 'go_to_unread_notification':
+        return this.terminal.goToLatestUnread();
+      case 'mark_notifications_read':
+        this.terminal.markAllNotificationsRead();
+        return null;
       case 'save_all':
         await this.editor.saveAll();
         return null;

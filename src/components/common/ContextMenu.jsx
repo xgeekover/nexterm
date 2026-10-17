@@ -160,6 +160,10 @@ export function ContextMenu({
     <div
       ref={menuRef}
       role="menu"
+      // A menu that opened by itself takes no keyboard and waits to be
+      // clicked; one that took the keyboard holds commands that would move it
+      // (`menuOnScreen` in src/lib/workspaceFocus.js) until it closes.
+      data-opened-by-itself={takeFocus ? undefined : ''}
       tabIndex={-1}
       onContextMenu={(e) => e.preventDefault()}
       style={{

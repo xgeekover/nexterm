@@ -24,6 +24,7 @@
  * right depth: effects are where the real backend would be needed, and that
  * is what driving the app is for (see TEST_INFRA.md).
  */
+import { readFileSync } from 'node:fs';
 import { register } from 'node:module';
 
 // `import.meta.url` straight through, never via `.pathname`. On Windows that
@@ -285,8 +286,8 @@ scenario('RN-13', 'notifications waiting in the status bar', () => {
   reset();
   useTerminalStore.setState({
     notifications: [
-      { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1 },
-      { id: 'n2', tabId: 't1', title: 'tests', exitCode: 0, durationMs: 38000, at: 2 },
+      { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1, read: false },
+      { id: 'n2', tabId: 't1', title: 'tests', exitCode: 0, durationMs: 38000, at: 2, read: false },
     ],
   });
 });
@@ -726,7 +727,7 @@ scenario(
 
 /** The class list of the status bar's notification badge, or null when it is not drawn. */
 function notificationBadgeClass(html) {
-  // React writes a bare `data-*` attribute out as `="true"`.
+  // The attribute holds the unread count.
   return /<span\b[^>]*\sdata-notification-count="[^"]*"[^>]*\sclass="([^"]*)"/.exec(html)?.[1] ?? null;
 }
 
@@ -736,11 +737,11 @@ scenario(
   () => {
     reset();
     // cmd's prompt can say a command ended but not how, so its notifications
-    // carry no code at all.
+    // carry no code at all. Unread, as every entry is made, so the badge counts them.
     useTerminalStore.setState({
       notifications: [
-        { id: 'n1', tabId: 't1', title: 'ping -n 15 localhost', exitCode: null, durationMs: 14000, at: 1 },
-        { id: 'n2', tabId: 't1', title: 'build.cmd', exitCode: null, durationMs: 61000, at: 2 },
+        { id: 'n1', tabId: 't1', title: 'ping -n 15 localhost', exitCode: null, durationMs: 14000, at: 1, read: false },
+        { id: 'n2', tabId: 't1', title: 'build.cmd', exitCode: null, durationMs: 61000, at: 2, read: false },
       ],
     });
   },
@@ -760,24 +761,28 @@ scenario(
  */
 const { NotificationList } = await import('../../src/components/layout/NotificationCenter.jsx');
 
-/** The bell's own button — the one that opens the list — as `{ label, title }`, or null. */
+/** The bell's own button — the one that opens the list — as `{ label, title, state, cls, count }`, or null. */
 function bellButton(html) {
-  // The button that holds the count badge — not just the first one with
-  // `aria-expanded`: off macOS the title bar's Application Menu comes first,
-  // and the suite decides "off macOS" from `navigator.platform`, which Node 20
-  // (CI, on every OS) does not have and Node 24 does.
-  const button = [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].find(([, , inner]) =>
-    /\sdata-notification-count[=\s>]/.test(inner)
+  // Found by its own attribute — not the first button with `aria-expanded`:
+  // off macOS the title bar's Application Menu comes first, and the suite
+  // decides "off macOS" from `navigator.platform`, which Node 20 (CI, on every
+  // OS) does not have and Node 24 does. Nor by the count inside it, which a
+  // bell with nothing unread does not draw.
+  const button = [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].find(([, attrs]) =>
+    /\sdata-notification-bell="/.test(attrs)
   );
-  const attrs = button?.[1];
-  if (attrs === undefined) return null;
+  if (!button) return null;
+  const [, attrs, inner] = button;
   return {
     label: visibleText(/\saria-label="([^"]*)"/.exec(attrs)?.[1] ?? ''),
     title: visibleText(/\stitle="([^"]*)"/.exec(attrs)?.[1] ?? ''),
+    state: /\sdata-notification-bell="([^"]*)"/.exec(attrs)?.[1] ?? null,
+    cls: /\sclass="([^"]*)"/.exec(attrs)?.[1] ?? '',
+    count: /\sdata-notification-count="([^"]*)"/.exec(inner)?.[1] ?? null,
   };
 }
 
-/** A program's message, as `notifyFromProgram` puts it in the list. */
+/** A program's message, as `notifyFromProgram` puts it in the list: unread. */
 const programNote = (id, extra = {}) => ({
   id,
   kind: 'program',
@@ -786,6 +791,7 @@ const programNote = (id, extra = {}) => ({
   title: 'opencode',
   body: 'Session done',
   at: 1,
+  read: false,
   ...extra,
 });
 
@@ -802,9 +808,12 @@ scenario(
     expectThat(!/\bbg-vsc-error\b/.test(cls), `a message from a program is counted as a failure: "${cls}"`);
     const bell = bellButton(html);
     expectThat(bell, 'no bell button');
-    expectThat(bell.label === '1 message from a program', `the bell is called ${JSON.stringify(bell.label)}`);
     expectThat(
-      bell.title === '1 message from a program while you were elsewhere',
+      bell.label === '1 message from a program \u{2014} 1 unread notification',
+      `the bell is called ${JSON.stringify(bell.label)}`
+    );
+    expectThat(
+      bell.title === '1 message from a program while you were elsewhere \u{2014} 1 unread notification',
       `the bell's tooltip says ${JSON.stringify(bell.title)}`
     );
   }
@@ -819,17 +828,19 @@ scenario(
       notifications: [
         programNote('p1'),
         programNote('p2', { title: 'Claude Code', body: 'Claude is waiting for your input' }),
-        { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1 },
+        { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1, read: false },
       ],
     });
   },
   (html) => {
     expectThat(/\bbg-vsc-error\b/.test(notificationBadgeClass(html) ?? ''), 'a failed command no longer turns the badge red');
     const bell = bellButton(html);
+    // The red, in words: a colour is not something a screen reader reads out.
     expectThat(
-      bell?.label === '1 finished command and 2 messages from programs',
+      bell?.label === '1 finished command and 2 messages from programs \u{2014} 3 unread notifications, 1 of them a failed command',
       `the bell is called ${JSON.stringify(bell?.label)}`
     );
+    expectThat(bell.title.endsWith('3 unread notifications, 1 of them a failed command'), `the bell's tooltip says ${JSON.stringify(bell.title)}`);
     expectText(html, '3');
   }
 );
@@ -1003,11 +1014,11 @@ scenario(
   }
 );
 
-const { COMMANDS, configurableCommands } = await import('../../src/lib/keybindings.js');
+const { COMMANDS, configurableCommands, keysFor } = await import('../../src/lib/keybindings.js');
 
 scenario(
   'RN-61',
-  'Settings names every shortcut a focused terminal never sees, and only those',
+  'Settings names every bound shortcut a focused terminal never sees, and only those',
   () => {
     reset();
     useSettingsStore.setState({ isSettingsModalOpen: true });
@@ -1017,11 +1028,21 @@ scenario(
     // while ten commands were.
     const note = visibleText(html).split('\n').find((line) => line.startsWith('Over a focused terminal'));
     expectThat(note, 'no note about what a focused terminal never sees');
+    // A command claimed over a terminal takes keys from the shell only when
+    // it has some: one with no chord (Mark All Notifications Read, as
+    // shipped) takes nothing, and naming it would say otherwise.
+    let unbound = 0;
     for (const { id, title } of configurableCommands()) {
       const named = note.includes(title);
-      if (COMMANDS[id].overTerminal) expectThat(named, `${title} is taken ahead of the terminal, and the note does not say so`);
-      else expectThat(!named, `the note says ${title} is taken ahead of the terminal; it is not`);
+      const bound = keysFor(id).length > 0;
+      if (COMMANDS[id].overTerminal && bound) expectThat(named, `${title} is taken ahead of the terminal, and the note does not say so`);
+      else if (COMMANDS[id].overTerminal) {
+        unbound += 1;
+        expectThat(!named, `the note says ${title} is taken ahead of the terminal; it has no keys to take`);
+      } else expectThat(!named, `the note says ${title} is taken ahead of the terminal; it is not`);
     }
+    // Otherwise the case above checks nothing.
+    expectThat(unbound > 0, 'setup: every command claimed over a terminal has keys, so an unbound one is never tried');
   }
 );
 
@@ -1499,6 +1520,761 @@ const { StartupCommandsDialog, StartupCommandField } = await import(
     expectThat(/\srole="alert"/.test(html), 'the reason is not announced');
     expectThat(/\saria-invalid="true"/.test(html), 'the field is not marked invalid');
     expectThat(/\saria-describedby="startup-slot-0-error"/.test(html), 'the field does not point at its reason');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+// ---- Which terminal is waiting for you ----------------------------------------
+
+/**
+ * Every attention ring drawn, in order, as `{ kind, pane, tag }`. A ring is
+ * the last thing in its pane, after the pane's strip and body, so the pane it
+ * belongs to is the strip drawn last before it.
+ */
+function attentionRings(html) {
+  return [...html.matchAll(/<div\b[^>]*\sdata-attention-ring="([^"]+)"[^>]*>/g)].map((m) => ({
+    kind: m[1],
+    pane: [...html.slice(0, m.index).matchAll(/\sdata-tab-strip="([^"]+)"/g)].at(-1)?.[1] ?? null,
+    tag: m[0],
+  }));
+}
+
+/** The markup of a chip: spans, an icon and a button inside, never a div, so up to its own closing tag. */
+const chipMarkup = (html, attr, id) =>
+  new RegExp(`<div\\b[^>]*\\s${attr}="${id}"[^>]*>[\\s\\S]*?</div>`).exec(html)?.[0] ?? null;
+const tabChip = (html, id) => chipMarkup(html, 'data-tab-chip', id);
+const groupChip = (html, id) => chipMarkup(html, 'data-group-chip', id);
+
+/** The TERMINALS side bar's row whose name is `name` — a terminal's title or a group's name. */
+function sideRow(html, name) {
+  const rows = [...html.matchAll(/<div\b[^>]*\sdata-row="[^"]*"[^>]*>[\s\S]*?<\/div>/g)].map((m) => m[0]);
+  // `Pane {n}` comes out as `Pane <!-- -->1`.
+  return rows.find((row) => row.replace(/<!-- -->/g, '').includes(`<span class="truncate">${name}</span>`)) ?? null;
+}
+
+/** The unread pill in some markup, as `{ count, text, label }`, or null when there is none. */
+function pillIn(markup) {
+  const m = /<span\b([^>]*)\sdata-unread-count="([^"]*)"([^>]*)>([^<]*)<\/span>/.exec(markup ?? '');
+  if (!m) return null;
+  return { count: m[2], text: m[4], label: /\saria-label="([^"]*)"/.exec(m[1] + m[3])?.[1] ?? null, tag: m[0] };
+}
+
+/** The progress bar in some markup, as `{ state, value, width, fill }`, or null when there is none. */
+function progressIn(markup) {
+  const m = /<span\b([^>]*)\sdata-progress-state="([^"]+)"([^>]*)>(<span\b[^>]*>)<\/span><\/span>/.exec(markup ?? '');
+  if (!m) return null;
+  return {
+    state: m[2],
+    value: /\sdata-progress-value="([^"]*)"/.exec(m[1] + m[3])?.[1] ?? null,
+    width: /\sstyle="width:\s*([^;"]+)/.exec(m[4])?.[1] ?? null,
+    fill: /\sclass="([^"]*)"/.exec(m[4])?.[1] ?? '',
+  };
+}
+
+/** `n` entries for `tabId`, as the store makes them; `read` as given. */
+const entriesFor = (tabId, n, read = false) =>
+  Array.from({ length: n }, (_, i) => programNote(`${tabId}-${read ? 'r' : 'u'}${i}`, { tabId, tabTitle: tabId, read }));
+
+scenario(
+  'RN-78',
+  'a terminal waiting in a pane that is not the active one: that pane rings, and only that one',
+  () => {
+    arrangeThreePanes();
+    useTerminalStore.setState({
+      // t-a waits; t-c's entry has been read, which rings nothing.
+      notifications: [...entriesFor('t-a', 1), ...entriesFor('t-c', 1, true)],
+    });
+  },
+  (html) => {
+    const rings = attentionRings(html);
+    expectThat(
+      JSON.stringify(rings.map((r) => [r.kind, r.pane])) === '[["unread","pane-a"]]',
+      `rings drawn: ${JSON.stringify(rings.map((r) => [r.kind, r.pane]))}, not one unread ring on pane-a`
+    );
+    // Over the pane, and never in the way: drops find their pane with
+    // elementFromPoint, which must go straight through it.
+    expectThat(/pointer-events-none/.test(rings[0].tag), 'the ring takes the pointer');
+    expectThat(/aria-hidden="true"/.test(rings[0].tag), 'the ring is read out');
+    expectThat(/\bring-vsc-attention\b/.test(rings[0].tag), `the ring is not drawn in the attention colour: ${rings[0].tag}`);
+    expectThat(/\banimate-attention-pulse\b/.test(rings[0].tag), 'the ring does not pulse');
+    // Inside the pane body, in the margin it keeps round the terminal: laid
+    // over the whole pane it cut the first column of every row in half.
+    expectThat((paneBody(html, 'pane-a') ?? '').includes('data-attention-ring="unread"'), 'the ring is not drawn in the pane body');
+    expectThat(/\binset-px\b/.test(rings[0].tag) && /\bring-2\b/.test(rings[0].tag), `the ring is not 2px, one in: ${rings[0].tag}`);
+    const title = visibleText(/\stitle="([^"]*)"/.exec(tabChip(html, 't-a') ?? '')?.[1] ?? '');
+    expectThat(title.endsWith('1 unread notification'), `the tab's tooltip does not say it is waiting: ${JSON.stringify(title)}`);
+  }
+);
+
+scenario(
+  'RN-79',
+  'the counts on the tab chip, the group chips and the side bar \u{2014} "9+" past nine, nothing for what was read',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [tab('t1', { title: 'alpha' }), tab('t2', { title: 'bravo' }), tab('t3', { title: 'charlie' }), tab('t4', { title: 'delta' })],
+      activeTabId: 't1',
+      groups: [
+        { ...baseGroups([])[0], tree: { type: 'leaf', id: 'pane-1', tabIds: ['t1', 't4'], activeTabId: 't1' } },
+        {
+          id: 'group-2',
+          name: 'Group 2',
+          createdAt: 0,
+          tree: { type: 'leaf', id: 'pane-2', tabIds: ['t2', 't3'], activeTabId: 't2' },
+          activePaneId: 'pane-2',
+        },
+      ],
+      notifications: [
+        ...entriesFor('t4', 12),
+        ...entriesFor('t2', 2),
+        ...entriesFor('t2', 1, true),
+        ...entriesFor('t3', 1),
+        ...entriesFor('t1', 1, true),
+      ],
+    });
+  },
+  (html) => {
+    const expect = (where, markup, text, count) => {
+      expectThat(markup, `${where} is not drawn`);
+      const pill = pillIn(markup);
+      if (text === null) {
+        expectThat(pill === null, `${where} has a pill for entries already read: ${JSON.stringify(pill)}`);
+        return;
+      }
+      expectThat(pill, `${where} has no unread pill`);
+      expectThat(pill.text === text, `${where}'s pill says ${JSON.stringify(pill.text)}, not ${text}`);
+      const words = `${count} unread notification${count === 1 ? '' : 's'}`;
+      expectThat(pill.label === words, `${where}'s pill is read out as ${JSON.stringify(pill.label)}, not "${words}"`);
+    };
+    expect('the tab chip "delta"', tabChip(html, 't4'), '9+', 12);
+    expect('the tab chip "alpha"', tabChip(html, 't1'), null);
+    expect('the chip of the group on screen', groupChip(html, 'group-1'), '9+', 12);
+    expect('the chip of the group off screen', groupChip(html, 'group-2'), '3', 3);
+    expect('the side bar row "delta"', sideRow(html, 'delta'), '9+', 12);
+    expect('the side bar row "bravo"', sideRow(html, 'bravo'), '2', 2);
+    expect('the side bar row "charlie"', sideRow(html, 'charlie'), '1', 1);
+    expect('the side bar row "alpha"', sideRow(html, 'alpha'), null);
+    expect('the side bar row "Group 2"', sideRow(html, 'Group 2'), '3', 3);
+    // In line, right after the title and before the \u{2715}. Laid over the
+    // chip's corner it covered the \u{2715} and sat against the next tab's
+    // title, reading as that one's.
+    for (const [where, markup, title] of [
+      ['the tab chip', tabChip(html, 't4'), '<span class="truncate max-w-[120px]">delta</span>'],
+      ['the group chip', groupChip(html, 'group-2'), '<span class="truncate max-w-[140px]">Group 2</span>'],
+    ]) {
+      const tag = pillIn(markup).tag;
+      expectThat(markup.includes(`${title}${tag}`), `${where}'s count is not right after its title`);
+      expectThat(!/\babsolute\b/.test(tag), `${where}'s count is laid over the chip again: ${tag}`);
+      // Fixed height under the chip's; gives no ground to a long title; one line.
+      for (const cls of ['h-[14px]', 'shrink-0', 'whitespace-nowrap']) {
+        expectThat(tag.includes(cls), `${where}'s count has no ${cls}: ${tag}`);
+      }
+    }
+    expectThat(!/\babsolute\b/.test(pillIn(sideRow(html, 'delta')).tag), 'the side bar count is laid over its row');
+    const groupTitle = visibleText(/\stitle="([^"]*)"/.exec(groupChip(html, 'group-2'))?.[1] ?? '');
+    expectThat(groupTitle.includes(', 3 unread notifications. Click to switch'), `the group's tooltip: ${JSON.stringify(groupTitle)}`);
+    // The dot is about what the terminal is doing, and stays out of this.
+    expectThat(!/data-activity=/.test(tabChip(html, 't4')), 'a dot drawn for unread entries');
+  }
+);
+
+/** A group of one pane holding `tabIds`. */
+const groupOf = (id, tabIds) => ({
+  id,
+  name: id,
+  createdAt: 0,
+  tree: { type: 'leaf', id: `pane-${id}`, tabIds, activeTabId: tabIds[0] },
+  activePaneId: `pane-${id}`,
+});
+
+const PROGRESS = {
+  t1: { state: 'normal', value: 40 },
+  t2: { state: 'error', value: null },
+  t5: { state: 'warning', value: 55 },
+  t3: { state: 'indeterminate', value: null },
+  t4: { state: 'normal', value: 70 },
+  t6: { state: 'indeterminate', value: null },
+};
+
+function arrangeProgress() {
+  reset();
+  useTerminalStore.setState({
+    tabs: ['t1', 't2', 't3', 't4', 't5', 't6'].map((id) => tab(id)),
+    activeTabId: 't1',
+    groups: [groupOf('group-1', ['t1', 't2', 't5']), groupOf('group-2', ['t3', 't4']), groupOf('group-3', ['t6'])],
+    activeGroupId: 'group-1',
+    progress: PROGRESS,
+  });
+}
+
+scenario(
+  'RN-80',
+  'progress along the bottom of each tab chip, and each group chip showing its tabs as one',
+  arrangeProgress,
+  (html) => {
+    const expect = (where, markup, state, width, colour) => {
+      const bar = progressIn(markup);
+      expectThat(bar, `${where} draws no progress bar`);
+      expectThat(bar.state === state, `${where}'s bar is ${bar.state}, not ${state}`);
+      expectThat(bar.width === width, `${where}'s bar is ${bar.width} wide, not ${width}`);
+      expectThat(new RegExp(`\\b${colour}\\b`).test(bar.fill), `${where}'s bar is not ${colour}: ${bar.fill}`);
+    };
+    expect('the tab at 40%', tabChip(html, 't1'), 'normal', '40%', 'bg-vsc-accent');
+    // An error with no amount is a full bar.
+    expect('the failed tab', tabChip(html, 't2'), 'error', '100%', 'bg-vsc-error');
+    expect('the paused tab', tabChip(html, 't5'), 'warning', '55%', 'bg-vsc-warn');
+    // An error beats a warning beats a normal bar beats an indeterminate one.
+    expect('the group with an error', groupChip(html, 'group-1'), 'error', '100%', 'bg-vsc-error');
+    expect('the group at 70% and busy', groupChip(html, 'group-2'), 'normal', '70%', 'bg-vsc-accent');
+    const busy = progressIn(groupChip(html, 'group-3'));
+    expectThat(busy?.state === 'indeterminate', `the busy group's bar is ${JSON.stringify(busy)}`);
+    expectThat(busy.width === null && /\bw-\[30%\]/.test(busy.fill) && /\banimate-progress-indeterminate\b/.test(busy.fill), `an indeterminate bar is not a sliding segment: ${JSON.stringify(busy)}`);
+    expectThat(!/\sdata-progress-state=/.test(paneBody(html, 'pane-group-1') ?? ''), 'a bar drawn over the terminal');
+    // The same in words, for a screen reader: a chip is named from its content.
+    const words = (markup) => /<span data-progress-words="" class="sr-only">([^<]*)<\/span>/.exec(markup ?? '')?.[1] ?? null;
+    for (const [where, markup, said] of [
+      ['the tab at 40%', tabChip(html, 't1'), '40% done'],
+      ['the failed tab', tabChip(html, 't2'), 'error'],
+      ['the paused tab', tabChip(html, 't5'), 'paused at 55%'],
+      ['the group at 70% and busy', groupChip(html, 'group-2'), '70% done'],
+      ['the busy group', groupChip(html, 'group-3'), 'working'],
+    ]) {
+      expectThat(words(markup) === said, `${where} says ${JSON.stringify(words(markup))}, not "${said}"`);
+    }
+  }
+);
+
+scenario(
+  'RN-81',
+  'with Progress Bars off, no bar is drawn even from bars the store still has',
+  () => {
+    arrangeProgress();
+    // Turning it off empties the map (terminalStore's settings subscription);
+    // the bars are put back behind it, as a report already on its way could
+    // be. What is left is what a component must not draw.
+    useSettingsStore.getState().setSetting('terminalProgress', false);
+    useTerminalStore.setState({ progress: PROGRESS });
+  },
+  (html) => {
+    expectThat(Object.keys(useTerminalStore.getState().progress).length === 6, 'setup: the store no longer has the bars');
+    expectThat(!/\sdata-progress-state=/.test(html), 'a bar is drawn with Progress Bars off');
+  }
+);
+
+scenario(
+  'RN-82',
+  'every entry read: the bell stays, muted and without a number',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      notifications: [
+        programNote('p1', { read: true }),
+        { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1, read: true },
+      ],
+    });
+  },
+  (html) => {
+    const bell = bellButton(html);
+    expectThat(bell, 'the bell is gone with entries still in it');
+    expectThat(bell.state === 'read', `the bell says ${JSON.stringify(bell.state)}`);
+    expectThat(bell.count === null, `the bell still counts ${bell.count}`);
+    expectThat(/\btext-vsc-muted\b/.test(bell.cls), `the bell is not muted: ${bell.cls}`);
+    expectThat(bell.label.endsWith('\u{2014} all read'), `the bell is called ${JSON.stringify(bell.label)}`);
+  }
+);
+
+scenario(
+  'RN-83',
+  'the bell counts what is unread, and a failure already read does not turn it red',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      notifications: [
+        programNote('p1'),
+        programNote('p2', { title: 'Claude Code', body: 'Claude is waiting for your input' }),
+        { id: 'n1', tabId: 't1', title: 'build', exitCode: 1, durationMs: 252000, at: 1, read: true },
+      ],
+    });
+  },
+  (html) => {
+    const bell = bellButton(html);
+    expectThat(bell?.count === '2', `the bell counts ${bell?.count}, not the 2 unread of 3`);
+    expectThat(bell.state === 'unread' && !/\btext-vsc-muted\b/.test(bell.cls), `the bell is muted with 2 unread: ${bell.cls}`);
+    const cls = notificationBadgeClass(html);
+    expectThat(!/\bbg-vsc-error\b/.test(cls ?? ''), `a failure already read turns the badge red: "${cls}"`);
+    expectThat(bell.label.endsWith('\u{2014} 2 unread notifications'), `the bell is called ${JSON.stringify(bell.label)}`);
+  }
+);
+
+{
+  const id = 'RN-84';
+  const description = 'the list draws unread entries bold with a dot, read ones dimmed, and a bell with its count';
+  const started = Date.now();
+  try {
+    reset();
+    const html = renderToString(
+      React.createElement(NotificationList, {
+        notifications: [
+          programNote('p1', { title: 'Permission needed' }),
+          { id: 'n1', tabId: 't1', title: 'tests', exitCode: 0, durationMs: 38000, at: 1, read: true },
+          { id: 'b1', kind: 'bell', tabId: 't2', tabTitle: 'Terminal 2', title: 'Terminal 2', body: '', count: 3, at: 3, read: false },
+          { id: 'b2', kind: 'bell', tabId: 't3', tabTitle: 'Terminal 3', title: 'Terminal 3', body: '', count: 1, at: 2, read: true },
+        ],
+        onGo() {},
+        onDismiss() {},
+      })
+    );
+    const rows = html.split(/(?=<div\b[^>]*\sdata-notification-entry=)/).slice(1);
+    const kinds = rows.map((r) => /\sdata-notification-entry="([^"]+)"/.exec(r)?.[1]);
+    expectThat(JSON.stringify(kinds) === '["program","command","bell","bell"]', `the entries are drawn as ${JSON.stringify(kinds)}`);
+    const unread = rows.map((r) => /\sdata-unread="([^"]+)"/.exec(r)?.[1]);
+    expectThat(JSON.stringify(unread) === '["true","false","true","false"]', `read and unread are drawn as ${JSON.stringify(unread)}`);
+    rows.forEach((row, i) => {
+      const isUnreadRow = unread[i] === 'true';
+      const dot = /<span aria-hidden="true"(?: data-unread-dot="")? class="([^"]*rounded-full[^"]*)"><\/span>/.exec(row)?.[1] ?? '';
+      expectThat(/\bbg-vsc-attention\b/.test(dot) === isUnreadRow, `row ${i + 1}: the dot is ${isUnreadRow ? 'missing' : 'drawn on a read entry'}`);
+      expectThat(/font-semibold/.test(row) === isUnreadRow, `row ${i + 1}: ${isUnreadRow ? 'not bold while unread' : 'bold once read'}`);
+      // Read is said by colour, not by fading: faded, the 11px lines were 3:1.
+      expectThat(!/opacity-60/.test(row), `row ${i + 1}: faded`);
+      const title = /<span class="(truncate text-ui [^"]*)">/.exec(row)?.[1] ?? '';
+      expectThat(
+        isUnreadRow ? /\btext-vsc-fg font-semibold\b/.test(title) : /^truncate text-ui text-vsc-muted\b/.test(title),
+        `row ${i + 1}: the title is ${JSON.stringify(title)} while ${isUnreadRow ? 'unread' : 'read'}`
+      );
+      // A muted line under the row's highlight would be under 4.5:1; it brightens there.
+      for (const [, cls] of row.matchAll(/class="([^"]*text-vsc-muted[^"]*)"/g)) {
+        if (/text-ui/.test(cls)) expectThat(/group-hover\/note:text-vsc-fg/.test(cls) && /group-focus-within\/note:text-vsc-fg/.test(cls), `row ${i + 1}: a muted line stays muted highlighted: ${cls}`);
+      }
+      // The \u{2715} is there for the keyboard, not only for the pointer.
+      const dismissCls = /<button\b[^>]*\saria-label="Dismiss"[^>]*\sclass="([^"]*)"/.exec(row)?.[1] ?? '';
+      expectThat(
+        /group-focus-within\/note:opacity-100/.test(dismissCls) && /focus-visible:opacity-100/.test(dismissCls),
+        `row ${i + 1}: the Dismiss button stays invisible with the keyboard on it: ${dismissCls}`
+      );
+      expectThat(/<button\b[^>]*\sdata-notification-go=""/.test(row), `row ${i + 1}: no entry button for the keyboard to land on`);
+      expectThat(visibleText(row).includes('Unread:') === isUnreadRow, `row ${i + 1}: the unread state is not said in words`);
+    });
+    // A bell is the terminal's name, its own icon, and how many times it rang.
+    expectThat(/lucide-bell-ring/.test(rows[2]) && /lucide-bell-ring/.test(rows[3]), 'a bell entry has no bell icon');
+    expectThat(visibleText(rows[2]).includes('Bell \u{00d7}3'), `the bell that rang three times says ${JSON.stringify(visibleText(rows[2]).trim())}`);
+    expectThat(/\bBell\b/.test(visibleText(rows[3])) && !visibleText(rows[3]).includes('\u{00d7}'), 'a bell that rang once shows a count');
+    const go = buttonsIn(html).filter((b) => b.title.startsWith('Go to '));
+    expectThat(go[2]?.title === 'Go to Terminal 2', `the bell's entry goes to ${JSON.stringify(go[2]?.title)}`);
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+scenario(
+  'RN-85',
+  'a flash on the terminal being typed into draws the ring once, with nothing unread',
+  () => {
+    reset();
+    useTerminalStore.setState({ attentionFlash: { t1: 7 } });
+  },
+  (html) => {
+    const rings = attentionRings(html);
+    expectThat(
+      JSON.stringify(rings.map((r) => [r.kind, r.pane])) === '[["flash","pane-1"]]',
+      `rings drawn: ${JSON.stringify(rings.map((r) => [r.kind, r.pane]))}`
+    );
+    expectThat(/\banimate-attention-flash\b/.test(rings[0].tag) && /pointer-events-none/.test(rings[0].tag), `the flash: ${rings[0].tag}`);
+  }
+);
+
+scenario(
+  'RN-86',
+  'files dragged over a waiting pane: the drop says what it will do, and the ring steps aside',
+  () => {
+    arrangeThreePanes();
+    useTerminalStore.setState({ notifications: [...entriesFor('t-a', 1), ...entriesFor('t-c', 1)] });
+    usePathDropStore.setState({ target: { paneId: 'pane-a', count: 2 } });
+  },
+  (html) => {
+    expectText(html, 'Insert 2 paths');
+    const rings = attentionRings(html);
+    expectThat(
+      JSON.stringify(rings.map((r) => r.pane)) === '["pane-c"]',
+      `rings drawn on ${JSON.stringify(rings.map((r) => r.pane))}, not only on pane-c`
+    );
+    // The count is still on the tab: stepping aside is the ring's alone.
+    expectThat(pillIn(tabChip(html, 't-a'))?.text === '1', 'the waiting tab lost its count');
+  }
+);
+
+scenario(
+  'RN-87',
+  'the settings window offers the terminal bell, the focused flash and progress bars, at their defaults',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const rows = [
+      ['terminal.integrated.bellAttention', 'Terminal Bell', true],
+      ['terminal.integrated.attentionFlashFocused', 'Flash the Terminal You Are In', false],
+      ['terminal.integrated.progress', 'Progress Bars', true],
+    ];
+    const notify = html.indexOf('terminal.integrated.programNotifications');
+    const next = html.indexOf('terminal.integrated.suggestions');
+    for (const [key, title, checked] of rows) {
+      expectText(html, title);
+      const at = html.indexOf(key);
+      expectThat(at !== -1, `rendered without ${key}`);
+      expectThat(notify < at && at < next, `${key} is not with the terminal's notifications`);
+      const box = /<input\b[^>]*type="checkbox"[^>]*>/.exec(html.slice(at))?.[0] ?? '';
+      expectThat(/\schecked=""/.test(box) === checked, `${title} is drawn ${checked ? 'unchecked' : 'checked'}: ${box}`);
+    }
+  }
+);
+
+scenario(
+  'RN-88',
+  'the same three rows draw what was chosen, each one turned from its default',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+    // A row that drew its default whatever the value would pass RN-87; the
+    // flash, off by default, would pass it with no value at all.
+    useSettingsStore.getState().setSetting('terminalBellAttention', false);
+    useSettingsStore.getState().setSetting('terminalAttentionFlashFocused', true);
+    useSettingsStore.getState().setSetting('terminalProgress', false);
+  },
+  (html) => {
+    for (const [key, checked] of [
+      ['terminal.integrated.bellAttention', false],
+      ['terminal.integrated.attentionFlashFocused', true],
+      ['terminal.integrated.progress', false],
+    ]) {
+      const box = /<input\b[^>]*type="checkbox"[^>]*>/.exec(html.slice(html.indexOf(key)))?.[0] ?? '';
+      expectThat(/\schecked=""/.test(box) === checked, `${key} is drawn ${checked ? 'unchecked' : 'checked'}: ${box}`);
+    }
+  }
+);
+
+// ---- The frame round a terminal --------------------------------------------------
+
+/** The opening tag of a pane body, or null. */
+const paneBodyTag = (html, paneId) => new RegExp(`<div\\b[^>]*\\sdata-pane-body="${paneId}"[^>]*>`).exec(html)?.[0] ?? null;
+
+{
+  const id = 'RN-89';
+  const description = "a pane body keeps the same 3px margin with the ring and without it, in the terminal theme's own colour";
+  const started = Date.now();
+  try {
+    // Without and with a waiting terminal: a margin that came with the ring
+    // would resize the terminal each time, and a shell told it lost a column
+    // redraws its prompt. Laid over the terminal instead, the ring cut the
+    // first column in half.
+    reset();
+    useSettingsStore.getState().setSetting('terminalTheme', 'monokai');
+    const quiet = paneBodyTag(renderArranged(), 'pane-1');
+    useTerminalStore.setState({ tabs: [tab('t1'), tab('t2')], groups: baseGroups(['t1', 't2']), notifications: entriesFor('t2', 1) });
+    const html = renderArranged();
+    const ringing = paneBodyTag(html, 'pane-1');
+    expectThat(attentionRings(html).length === 1, 'setup: the pane does not ring');
+    expectThat(quiet === ringing, `the body changes with the ring:\n  ${quiet}\n  ${ringing}`);
+    expectThat(/\sstyle="[^"]*padding:3px/.test(ringing ?? ''), `no 3px margin round the terminal: ${ringing}`);
+    // Monokai's background, so the margin reads as the terminal's, not as a border.
+    expectThat(/background-color:#272822/.test(ringing ?? ''), `the margin is not in the terminal's colour: ${ringing}`);
+    reset();
+    expectThat(!/background-color/.test(paneBodyTag(renderArranged(), 'pane-1') ?? ''), 'the default theme paints a background of its own over the pane');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+{
+  const id = 'RN-90';
+  const description = 'the active pane is marked in the frame, outermost, only where there is another pane to tell it from';
+  const started = Date.now();
+  try {
+    const activeIn = (html) => attrOrder(html, 'data-tab-strip').filter((pane) => /data-active-pane=""/.test(paneBody(html, pane) ?? ''));
+    arrangeThreePanes();
+    useTerminalStore.setState({ notifications: entriesFor('t-b', 1) });
+    const three = renderArranged();
+    expectThat(JSON.stringify(activeIn(three)) === '["pane-b"]', `the active line is on ${JSON.stringify(activeIn(three))}, not pane-b alone`);
+    const line = /<div\b[^>]*\sdata-active-pane=""[^>]*>/.exec(three)[0];
+    expectThat(/\binset-0\b/.test(line) && /\bring-1\b/.test(line) && /\bring-vsc-focus\b/.test(line), `not a 1px focus line on the edge: ${line}`);
+    expectThat(/pointer-events-none/.test(line) && /aria-hidden="true"/.test(line), `the line is in the way: ${line}`);
+    // Both on one pane: the ring one pixel in, so the two read as two things.
+    expectThat(/data-attention-ring="unread"/.test(paneBody(three, 'pane-b') ?? ''), 'setup: pane-b does not ring');
+    // Painted under the strip and the terminal, a ring on the pane's own box never showed.
+    expectThat(!/<div\b[^>]*class="[^"]*ring-vsc-focus[^"]*"[^>]*>\s*<div\b[^>]*data-tab-strip/.test(three), 'the pane box still carries the ring the strip hid');
+    reset();
+    expectThat(activeIn(renderArranged()).length === 0, 'a lone pane is marked active');
+    arrangeThreePanes({ zoomedPaneId: 'pane-b' });
+    expectThat(activeIn(renderArranged()).length === 0, 'a zoomed pane, alone on screen, is marked active');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+scenario(
+  'RN-91',
+  'zoomed, with terminals waiting in the hidden panes: the zoom chip says how many, and the side bar which pane',
+  () => {
+    arrangeThreePanes({ zoomedPaneId: 'pane-b' });
+    // Two in pane-a, one in pane-c, both hidden; one in pane-b, on screen.
+    useTerminalStore.setState({ notifications: [...entriesFor('t-a', 2), ...entriesFor('t-c', 1), ...entriesFor('t-b', 1)] });
+  },
+  (html) => {
+    const chip = zoomedChip(html);
+    expectThat(chip, 'no zoom chip');
+    expectThat(/\sdata-hidden-unread="3"/.test(chip), `the chip counts ${/\sdata-hidden-unread="([^"]*)"/.exec(chip)?.[1] ?? 'nothing'} waiting in hidden panes, not 3`);
+    expectThat(/\bring-vsc-attention\b/.test(chip), 'the chip is not in the attention colour');
+    const pill = pillIn(chip);
+    expectThat(pill?.text === '3' && pill.label === '3 unread notifications in hidden panes', `the chip's count: ${JSON.stringify(pill)}`);
+    expectThat(chip.includes(`<span>Zoomed</span>${pill.tag}`), 'the count is not right after "Zoomed"');
+    const title = visibleText(/\stitle="([^"]*)"/.exec(chip)?.[1] ?? '');
+    expectThat(title.includes('still running; 3 unread notifications in hidden panes.'), `the chip's tooltip: ${JSON.stringify(title)}`);
+    for (const [pane, n] of [['Pane 1', '2'], ['Pane 2', '1'], ['Pane 3', '1']]) {
+      const got = pillIn(sideRow(html, pane))?.text ?? null;
+      expectThat(got === n, `the side bar's ${pane} row counts ${got}, not ${n}`);
+    }
+  }
+);
+
+scenario(
+  'RN-92',
+  'zoomed, with only the pane on screen waiting: the zoom chip stays as it was',
+  () => {
+    arrangeThreePanes({ zoomedPaneId: 'pane-b' });
+    useTerminalStore.setState({ notifications: entriesFor('t-b', 1) });
+  },
+  (html) => {
+    const chip = zoomedChip(html);
+    expectThat(!/data-hidden-unread/.test(chip) && !pillIn(chip), 'the chip counts the pane on screen as hidden');
+    expectThat(/\bring-vsc-accent\b/.test(chip), 'the chip is in the attention colour with nothing hidden waiting');
+  }
+);
+
+// ---- The bell's list from the keyboard ------------------------------------------
+
+const { escapeFocusTarget, neighbourEntry, entryButtonIn } = await import('../../src/components/layout/NotificationCenter.jsx');
+
+{
+  const id = 'RN-93';
+  const description = "the bell's list keeps the keyboard: Escape gives it to the bell, Mark all read and Dismiss to an entry";
+  const started = Date.now();
+  try {
+    // What decides where the keyboard goes is a function each; where it is
+    // used is an effect and a click, which a server render never runs — so
+    // that part is read from the source, as SW-13 reads the settings window's.
+    const bell = { name: 'bell' };
+    const inside = { contains: () => true };
+    const outside = { contains: () => false };
+    expectThat(escapeFocusTarget(inside, {}, bell) === bell, 'Escape from inside the list leaves the keyboard on a control that is going');
+    expectThat(escapeFocusTarget(outside, {}, bell) === null, 'Escape takes the keyboard from a terminal beside the open list');
+    expectThat(escapeFocusTarget(null, {}, bell) === null && escapeFocusTarget(inside, null, bell) === null, 'no list or no focus, and still somewhere to go');
+    const go = (name) => ({ querySelector: (sel) => (sel === '[data-notification-go]' ? { name } : null) });
+    expectThat(neighbourEntry({ nextElementSibling: go('next'), previousElementSibling: go('prev') })?.name === 'next', 'a dismissed entry hands the keyboard to the one after it');
+    expectThat(neighbourEntry({ nextElementSibling: null, previousElementSibling: go('prev') })?.name === 'prev', 'the last entry dismissed hands it to the one before');
+    expectThat(neighbourEntry({ nextElementSibling: null, previousElementSibling: null }) === null, 'the only entry dismissed names an entry');
+    expectThat(entryButtonIn(go('first'))?.name === 'first' && entryButtonIn(null) === null, 'the first entry is not found');
+    const src = readFileSync(new URL('../../src/components/layout/NotificationCenter.jsx', import.meta.url), 'utf8');
+    for (const [what, pattern] of [
+      ['Escape gives the keyboard back', /const back = escapeFocusTarget\(rootRef\.current, document\.activeElement, bellRef\.current, openerRef\.current\);\s*setOpen\(false\);\s*back\?\.focus\(\);/],
+      ['Mark all read moves the keyboard before it disables itself', /if \(document\.activeElement === e\.currentTarget\) entryButtonIn\(dialogRef\?\.current\)\?\.focus\(\);\s*onMarkAllRead\?\.\(\);/],
+      ['Dismiss hands the keyboard on', /const next = neighbourEntry\(row\);\s*if \(next\) next\.focus\(\);\s*else leaveIfInside\(\);\s*\}\s*dismiss\(note\.id\);/],
+      ['Clear all gives the keyboard to the workspace', /leaveIfInside\(\);\s*clearAll\(\);/],
+    ]) {
+      expectThat(pattern.test(src), `not wired: ${what}`);
+    }
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+scenario(
+  'RN-95',
+  "the only group's chip: its count in line after the name, and no empty slot where a \u{2715} would be",
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [tab('t1'), tab('t2')], groups: baseGroups(['t1', 't2']), notifications: entriesFor('t2', 2) });
+  },
+  (html) => {
+    const chip = groupChip(html, 'group-1');
+    const pill = pillIn(chip);
+    expectThat(pill?.text === '2', `the group chip counts ${JSON.stringify(pill?.text)}`);
+    expectThat(chip.includes(`<span class="truncate max-w-[140px]">Group 1</span>${pill.tag}`), 'the count is not right after the name');
+    // A blank \u{2715}-sized slot kept the badge off the terminal count while
+    // the badge sat over the corner; in line, there is nothing to keep it off.
+    expectThat(!/<button\b/.test(chip), 'setup: the only group has a \u{2715}');
+    expectThat(!/data-close-room/.test(chip) && !/<span aria-hidden="true"[^>]*class="w-\[15px\]/.test(chip), 'the empty slot is back');
+  }
+);
+
+{
+  const id = 'RN-96';
+  const description = 'a press on the frame round a terminal gives that terminal the keyboard, and the page never takes it';
+  const started = Date.now();
+  try {
+    const { pressOnPaneFrame } = await import('../../src/components/terminal/AttentionIndicators.jsx');
+    const focused = [];
+    const input = { focus: (opts) => focused.push(opts) };
+    const body = { querySelector: (sel) => (sel === '.xterm-helper-textarea' ? input : null) };
+    let prevented = 0;
+    const press = (target, currentTarget = body) => ({ target, currentTarget, preventDefault: () => (prevented += 1) });
+    // On the margin itself (and on the lines drawn in it, which the pointer
+    // goes through): focus stays put, and goes to the terminal.
+    expectThat(pressOnPaneFrame(press(body)) === true, 'a press on the frame is not taken');
+    expectThat(prevented === 1, 'the press on the frame still lets the browser move focus to the page');
+    expectThat(focused.length === 1 && focused[0]?.preventScroll === true, `the terminal is not focused, or scrolls to: ${JSON.stringify(focused)}`);
+    // Anything inside the body handles its own press.
+    expectThat(pressOnPaneFrame(press({ inside: true })) === false && prevented === 1 && focused.length === 1, 'a press on the terminal itself is taken from it');
+    // No terminal in the pane: nothing to give it to, nothing held.
+    const empty = { querySelector: () => null };
+    expectThat(pressOnPaneFrame({ target: empty, currentTarget: empty, preventDefault: () => (prevented += 1) }) === false && prevented === 1, 'an empty pane holds the press');
+    const src = readFileSync(new URL('../../src/components/terminal/TerminalSplitContainer.jsx', import.meta.url), 'utf8');
+    expectThat(/data-pane-body=\{paneId\}\s*onMouseDown=\{pressOnPaneFrame\}/.test(src), 'not wired: the pane body does not take a press on its frame');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+const { focusBackTarget, NotificationPopover } = await import('../../src/components/layout/NotificationCenter.jsx');
+
+{
+  const id = 'RN-97';
+  const description = 'closed from inside, the list gives the keyboard back to what had it before it opened \u{2014} the editor too';
+  const started = Date.now();
+  try {
+    const root = { contains: (el) => el?.inList === true };
+    const editor = { focus() {}, isConnected: true, name: 'editor' };
+    const bell = { focus() {}, isConnected: true, inList: true, name: 'bell' };
+    expectThat(focusBackTarget(editor, root) === editor, 'what had the keyboard before the list is not given it back');
+    expectThat(focusBackTarget({ ...editor, isConnected: false }, root) === null, 'focus is given to something no longer on the page');
+    expectThat(focusBackTarget(bell, root) === null, 'the bell, going with the list, is given the keyboard back');
+    expectThat(focusBackTarget(null, root) === null, 'nothing remembered, and still somewhere to go');
+    // Escape: back to the editor while it is there, else to the bell.
+    const inside = { inList: true };
+    expectThat(escapeFocusTarget(root, inside, bell, editor) === editor, 'Escape does not give the editor its keyboard back');
+    expectThat(escapeFocusTarget(root, inside, bell, { ...editor, isConnected: false }) === bell, 'Escape with the editor gone does not fall back to the bell');
+    const src = readFileSync(new URL('../../src/components/layout/NotificationCenter.jsx', import.meta.url), 'utf8');
+    for (const [what, pattern] of [
+      // As the bell is pressed: a click in Chromium focuses the bell first.
+      ['remembered as the bell is pressed', /onPointerDown=\{rememberOpener\}/],
+      ['remembered as the bell is pressed from the keyboard', /onKeyDown=\{\(e\) => \{\s*if \(e\.key === 'Enter' \|\| e\.key === ' '\) rememberOpener\(\);/],
+      ['only as the list opens', /const rememberOpener = \(\) => \{\s*if \(!open\) openerRef\.current = document\.activeElement;/],
+      ['Clear all and the last Dismiss give it back first', /const back = focusBackTarget\(openerRef\.current, rootRef\.current\);\s*if \(back\) back\.focus\(\);\s*else focusWorkspace\(\);/],
+    ]) {
+      expectThat(pattern.test(src), `not wired: ${what}`);
+    }
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+{
+  const id = 'RN-98';
+  const description = "the open list says it is the bell's, and a jump to another terminal closes it";
+  const started = Date.now();
+  try {
+    reset();
+    const notifications = [programNote('p1'), { id: 'n1', tabId: 't1', title: 'build', exitCode: 0, durationMs: 1000, at: 0, read: true }];
+    const html = renderToString(
+      React.createElement(NotificationPopover, {
+        dialogRef: { current: null },
+        anchor: { right: 4, bottom: 26 },
+        summary: { dialog: 'Notifications', heading: 'While you were elsewhere' },
+        unread: 1,
+        notifications,
+        onMarkAllRead() {},
+        onClearAll() {},
+        onGo() {},
+        onDismiss() {},
+      })
+    );
+    // What looks for open dialogs before moving the keyboard leaves this one
+    // out by this name (workspaceFocus.js): it is not modal.
+    const root = /^<div\b[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(/\sdata-bell-list=""/.test(root) && /\srole="dialog"/.test(root), `the list's own box: ${root}`);
+    expectThat(attrOrder(html, 'data-notification-entry').length === 2, 'the entries are not in it');
+    const buttons = buttonsIn(html).map((b) => b.text);
+    expectThat(buttons.includes('Mark all read') && buttons.includes('Clear all'), `the header has ${JSON.stringify(buttons.slice(0, 2))}`);
+    const src = readFileSync(new URL('../../src/components/layout/NotificationCenter.jsx', import.meta.url), 'utf8');
+    expectThat(/const activeTabId = useTerminalStore\(\(s\) => s\.activeTabId\);/.test(src), 'not wired: the list does not follow the active terminal');
+    expectThat(/useEffect\(\(\) => \{\s*setOpen\(false\);\s*\}, \[activeTabId\]\);/.test(src), 'not wired: another terminal becoming active leaves the list open');
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+// ---- What the stylesheet must keep ------------------------------------------------
+
+/** WCAG relative luminance of `#rrggbb`. */
+function luminance(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (a, b) => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+/** Hue of `#rrggbb`, in degrees. */
+function hue(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const max = Math.max(r, g, b);
+  const d = max - Math.min(r, g, b);
+  if (d === 0) return 0;
+  const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return (h * 60 + 360) % 360;
+}
+
+{
+  const id = 'RN-94';
+  const description = 'the stylesheet: an attention colour of its own, frames that survive forced colours, and motion that stops';
+  const started = Date.now();
+  try {
+    // CSS is not drawn by a server render; what it must say is read from it.
+    const css = readFileSync(new URL('../../src/styles/index.css', import.meta.url), 'utf8');
+    const token = (name) => new RegExp(`--vsc-${name}:\\s*(#[0-9a-fA-F]{6})`).exec(css)?.[1] ?? null;
+    const [attention, onAttention, warn, error, terminal] = ['attention', 'attention-fg', 'warn', 'error', 'terminal-bg'].map(token);
+    // A paused bar (warn) and a count (attention) can share one chip.
+    const apart = (a, b) => Math.min(Math.abs(hue(a) - hue(b)), 360 - Math.abs(hue(a) - hue(b)));
+    expectThat(apart(attention, warn) >= 15, `the attention colour ${attention} is ${apart(attention, warn).toFixed(0)}\u{00b0} from the warning colour ${warn}`);
+    expectThat(apart(attention, error) >= 15, `the attention colour ${attention} is ${apart(attention, error).toFixed(0)}\u{00b0} from the error colour ${error}`);
+    expectThat(contrast(onAttention, attention) >= 4.5, `a count on the pill is ${contrast(onAttention, attention).toFixed(2)}:1`);
+    expectThat(contrast(attention, terminal) >= 3, `the ring is ${contrast(attention, terminal).toFixed(2)}:1 against the terminal`);
+    // Forced colours drop box shadows — the rings — and repaint backgrounds.
+    const forced = /@media \(forced-colors: active\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+    for (const [what, pattern] of [
+      ['the attention ring a real border', /\[data-attention-ring\] \{\s*border: 2px solid Highlight;/],
+      ['the active line a real border', /\[data-active-pane\] \{\s*border: 1px solid CanvasText;/],
+      ['the pill an edge of its own', /\[data-unread-count\] \{\s*border: 1px solid/],
+      ['the system colours kept as given', /forced-color-adjust: none/],
+      ['a progress bar something to draw with', /\[data-progress-fill\] \{\s*forced-color-adjust: none;\s*background: Highlight;/],
+      ['a paused bar unlike a normal one', /\[data-progress-state="warning"\] \[data-progress-fill\] \{\s*background: repeating-linear-gradient\(/],
+      ['a failed bar unlike a paused one', /\[data-progress-state="error"\] \[data-progress-fill\] \{\s*background: repeating-linear-gradient\(90deg, CanvasText/],
+      ['the zoom chip an edge', /\[data-zoomed-chip\] \{\s*box-shadow: none !important;\s*outline: 1px solid ButtonText;/],
+      ['the zoom chip the attention edge while a hidden pane waits', /\[data-zoomed-chip\]\[data-hidden-unread\] \{\s*outline: 2px solid Highlight;/],
+    ]) {
+      expectThat(pattern.test(forced), `in forced colours, not: ${what}`);
+    }
+    // Reduced motion, by the OS and by the setting: off outright, not sped up.
+    for (const cls of ['animate-attention-pulse', 'animate-attention-flash', 'animate-progress-indeterminate']) {
+      expectThat(new RegExp(`:root\\.reduce-motion \\.${cls}[^{]*\\{[^}]*animation: none !important`).test(css) || new RegExp(`:root\\.reduce-motion \\.${cls},[\\s\\S]*?\\{\\s*animation: none !important`).test(css), `the setting does not stop .${cls}`);
+      const os = /@media \(prefers-reduced-motion: reduce\) \{\s*\.animate-attention-pulse,([\s\S]*?)\n\}/.exec(css)?.[0] ?? '';
+      expectThat(os.includes(`.${cls}`) && os.includes('animation: none !important'), `the OS preference does not stop .${cls}`);
+    }
     results.push({ id, description, ok: true, ms: Date.now() - started });
   } catch (err) {
     failed += 1;

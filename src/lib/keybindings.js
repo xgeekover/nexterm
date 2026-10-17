@@ -178,6 +178,46 @@ export const COMMANDS = {
     overTerminal: true,
     run: (ctx) => ctx.setCommandPaletteOpen(true, 'history'),
   },
+  'go-to-unread-notification': {
+    title: 'Go to Latest Unread Notification',
+    // Keyboard and palette only: no menu has a place for it, and an id menu.rs
+    // does not have would be one the native menu cannot show.
+    menuId: null,
+    // The whole point is to get from the terminal you are in to the one that
+    // is waiting, and a focused terminal is this app's resting state. ⇧⌘U
+    // never reaches the pty, and off macOS Ctrl+Shift+U is not a bare
+    // Ctrl+letter — xterm sends nothing for it — the reasoning that lets
+    // Search in Files take Ctrl+Shift+F. Ctrl+U itself stays the shell's
+    // (KB-12). Monaco binds ⌘U / Ctrl+U and ⌘K ⌘U, never this chord, so
+    // nothing is taken from the editor either.
+    overTerminal: true,
+    // Not over a dialog — Settings, a question: the key is the dialog's, and
+    // a jump behind it sent the next keys to a terminal the dialog covered.
+    // Nor while a menu that took the keyboard is open: it takes focus back,
+    // and with it its own pane, as soon as its owner draws again. Both are
+    // asked only when the chord matches. The bell's list is neither: it
+    // closes itself when the jump moves the active tab.
+    enabled: (ctx) => !ctx.isDialogOpen?.() && !ctx.isMenuOpen?.(),
+    // Over the command palette it closes the palette first. Jumping under it
+    // gave the terminal the keyboard while the palette stayed up — keys to
+    // the shell, Escape no longer closing it. The palette's own row runs the
+    // store's action itself, having closed.
+    run: (ctx) => {
+      if (ctx.isCommandPaletteOpen) ctx.setCommandPaletteOpen?.(false);
+      ctx.goToLatestUnread?.();
+    },
+  },
+  'mark-notifications-read': {
+    title: 'Mark All Notifications Read',
+    menuId: null,
+    // No chord of its own, so nothing is taken from the shell as shipped. A
+    // chord the user gives it is meant to work where the jump's does, from a
+    // focused terminal — the app's resting state. As for every command
+    // claimed over a terminal, a bare Ctrl+letter chosen for it is then the
+    // app's; Settings names every such command. KB-11 holds the list.
+    overTerminal: true,
+    run: (ctx) => ctx.markAllNotificationsRead?.(),
+  },
   'find-in-terminal': {
     title: 'Find in Terminal',
     // The scrollback is 5000 lines deep, and a find bar that stops working the
@@ -289,6 +329,9 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'clear-terminal', key: 'mod+l' },
   { command: 'search-in-files', key: 'mod+shift+f' },
   { command: 'command-history', key: 'mod+shift+h' },
+  // U for unread. Mark All Notifications Read has no chord: it is one click
+  // in the bell's list, and the palette has it.
+  { command: 'go-to-unread-notification', key: 'mod+shift+u' },
   { command: 'find-in-terminal', key: 'mod+f' },
   // Two spellings of "bigger", because `+` is the shifted `=` on most layouts
   // and people press whichever they think of. The menu shows the first.

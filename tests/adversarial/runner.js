@@ -96,6 +96,8 @@ import './paste_warning.test.js';
 import './batch_job_reply.test.js';
 import './explorer_trash.test.js';
 import './editor_session_restore.test.js';
+import './terminal_progress.test.js';
+import './attention.test.js';
 
 async function run() {
   console.log('====================================================');

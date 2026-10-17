@@ -56,6 +56,8 @@ export default {
 
           error: v('error'),
           warn: v('warn'),
+          attention: v('attention'),
+          'attention-fg': v('attention-fg'),
           ok: v('ok'),
           info: v('info'),
           'git-modified': v('git-modified'),

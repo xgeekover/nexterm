@@ -3,6 +3,7 @@ import { hasMod } from '../lib/platform.js';
 import { dispatchKeydown, dispatchKeydownOverTerminal } from '../lib/keybindings.js';
 import { useShortcuts } from './useShortcuts.js';
 import { windowControls } from '../lib/menuActions.js';
+import { dialogOnScreen, menuOnScreen } from '../lib/workspaceFocus.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
@@ -41,6 +42,8 @@ export function useKeybindings() {
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const openFind = useTerminalStore((s) => s.openFind);
+  const goToLatestUnread = useTerminalStore((s) => s.goToLatestUnread);
+  const markAllNotificationsRead = useTerminalStore((s) => s.markAllNotificationsRead);
 
   // Defaults plus whatever the user changed. Re-resolved only when the
   // overrides change, not on every keypress — and resolved in ONE place, so
@@ -59,6 +62,9 @@ export function useKeybindings() {
       // Reloading is a development tool. In a packaged build it silently
       // destroys every running shell — see the `reload-guard` binding.
       blockReload: !import.meta.env.DEV,
+      // Asked only by a command whose chord was pressed (`enabled`).
+      isDialogOpen: () => dialogOnScreen(),
+      isMenuOpen: () => menuOnScreen(),
       isCommandPaletteOpen,
       activeEditorTabId,
       setCommandPaletteOpen,
@@ -76,6 +82,8 @@ export function useKeybindings() {
       createTerminalTab,
       clearTerminal,
       openFind,
+      goToLatestUnread,
+      markAllNotificationsRead,
       zoomFont,
       resetZoom,
       closeWindow: windowControls.close,
@@ -124,6 +132,8 @@ export function useKeybindings() {
     createTerminalTab,
     clearTerminal,
     openFind,
+    goToLatestUnread,
+    markAllNotificationsRead,
     zoomFont,
     resetZoom,
   ]);

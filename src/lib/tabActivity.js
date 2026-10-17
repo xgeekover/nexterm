@@ -143,19 +143,26 @@ export function notificationFor(tab, exitCode, activeTabId, afterMs, now = Date.
  * message (`kind: 'program'`, see `notifyFromProgram` in terminalStore.js) is
  * not a command finishing, and a bell holding one says so: "2 finished
  * commands" for something OpenCode said would be wrong about what is in it.
+ * Nor is a terminal's bell (`kind: 'bell'`, see `bellFromTerminal`), one
+ * entry however many times it rang.
  */
 export function notificationSummary(notifications = []) {
   const list = Array.isArray(notifications) ? notifications : [];
   const programs = list.filter((n) => n?.kind === 'program').length;
-  const commands = list.length - programs;
+  const bells = list.filter((n) => n?.kind === 'bell').length;
+  const commands = list.length - programs - bells;
   const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   const messages = programs > 0 ? count(programs, 'message from a program', 'messages from programs') : '';
-  const both = (commandWords) => [commands > 0 ? commandWords : '', messages].filter(Boolean).join(' and ');
+  const rings = bells > 0 ? count(bells, 'bell from a terminal', 'bells from terminals') : '';
+  // "a and b", "a, b and c".
+  const joined = (parts) => (parts.length <= 2 ? parts.join(' and ') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`);
+  const all = (commandWords) => joined([commands > 0 ? commandWords : '', messages, rings].filter(Boolean));
+  const notOnlyCommands = programs > 0 || bells > 0;
   return {
-    label: both(count(commands, 'finished command', 'finished commands')),
-    title: `${both(`${count(commands, 'command', 'commands')} finished`)} while you were elsewhere`,
-    heading: programs > 0 ? 'While you were elsewhere' : 'Finished while you were elsewhere',
-    dialog: programs > 0 ? 'Notifications' : 'Finished commands',
+    label: all(count(commands, 'finished command', 'finished commands')),
+    title: `${all(`${count(commands, 'command', 'commands')} finished`)} while you were elsewhere`,
+    heading: notOnlyCommands ? 'While you were elsewhere' : 'Finished while you were elsewhere',
+    dialog: notOnlyCommands ? 'Notifications' : 'Finished commands',
   };
 }
 

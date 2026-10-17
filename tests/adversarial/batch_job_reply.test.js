@@ -486,7 +486,9 @@ describe('cmd batch-job reply: through the store, the bus and real xterm', () =>
     const view = read('../../src/components/terminal/TerminalView.jsx');
     assert.match(view, /onData: \(data\) => writeRaw\(tabId, data\),/, 'the keyboard types through the store');
     const registry = read('../../src/components/terminal/terminalRegistry.js');
-    assert.match(registry, /attachOutput\(sessionId, \(data\) => writeOutput\(entry, data\)\)/);
+    // Every chunk, kept or live: kept ones are only marked as history around
+    // the same write (TP-43).
+    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at\) => \{[^}]*writeOutput\(entry, data\);/);
     assert.match(registry, /if \(!useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\)\) \{/, 'judged as each chunk arrives');
     assert.match(registry, /setBatchJobScreenReader\(\(tabId\) => \{\s*const entry = instances\.get\(tabId\);\s*return entry && !entry\.disposed \? screenRow\(entry\.term\) : null;/);
     const store = read('../../src/stores/terminalStore.js');

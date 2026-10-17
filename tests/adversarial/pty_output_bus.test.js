@@ -148,7 +148,13 @@ describe('Output a tab printed before its terminal existed', () => {
 
   test('PB-07: wired — the registry attaches through the bus, and the store starts it first', () => {
     const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
-    assert.match(registry, /ptyUnlisten = attachOutput\(sessionId, \(data\) => writeOutput\(entry, data\)\);/);
+    // Kept output is written as history (`entry.history`, see TP-43): its
+    // progress reports and bells are over by the time it is shown, and the
+    // history ends whatever the write does.
+    assert.match(
+      registry,
+      /ptyUnlisten = attachOutput\(sessionId, \(data, kept, at\) => \{\s*if \(kept\) entry\.history\.before\(at\);\s*try \{\s*writeOutput\(entry, data\);\s*\} finally \{\s*if \(kept\) entry\.history\.after\(entry\.term\);\s*\}\s*\}\);/
+    );
     // Which writes every chunk into the terminal, whatever else it looks for
     // in it (cmd's batch-job question, src/lib/batchJobReply.js).
     const writer = registry.slice(registry.indexOf('function writeOutput(entry, data) {'));

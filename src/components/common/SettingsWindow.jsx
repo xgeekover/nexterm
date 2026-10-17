@@ -343,6 +343,36 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       control: 'checkbox',
     },
     {
+      id: 'terminalBellAttention',
+      section: 'terminal',
+      key: 'terminalBellAttention',
+      settingKey: 'terminal.integrated.bellAttention',
+      title: 'Terminal Bell',
+      description:
+        'When a program rings the bell in a terminal you are not looking at, that terminal asks for your attention: its pane gets a ring, its tab a count, and the status bar\'s bell an entry. Repeated rings add up in one entry. Never shown as a desktop notification. Off, the bell is ignored.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalAttentionFlashFocused',
+      section: 'terminal',
+      key: 'terminalAttentionFlashFocused',
+      settingKey: 'terminal.integrated.attentionFlashFocused',
+      title: 'Flash the Terminal You Are In',
+      description:
+        'A notification or a bell from the terminal you are typing into never adds an entry, since you are already looking at it. On, its pane\'s ring flashes once instead, so you notice it happened.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalProgress',
+      section: 'terminal',
+      key: 'terminalProgress',
+      settingKey: 'terminal.integrated.progress',
+      title: 'Progress Bars',
+      description:
+        'Shows the progress a program reports with OSC 9;4, the sequence Windows Terminal understands, as a thin bar under its tab and its group, and on Windows on the taskbar button too. Off, every bar is taken down at once.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalSuggestions',
       section: 'terminal',
       key: 'terminalSuggestions',
@@ -573,6 +603,9 @@ export function SettingsWindow() {
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
+  const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
+  const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
+  const terminalProgress = useSettingsStore((s) => s.terminalProgress);
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
   const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
   const terminalSplitCwd = useSettingsStore((s) => s.terminalSplitCwd);
@@ -602,6 +635,9 @@ export function SettingsWindow() {
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
     terminalProgramNotifications,
+    terminalBellAttention,
+    terminalAttentionFlashFocused,
+    terminalProgress,
     terminalDefaultCwd,
     terminalDefaultCwdPath,
     terminalSplitCwd,

@@ -166,6 +166,7 @@ fn main() {
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
             commands::notification::show_desktop_notification,
+            commands::taskbar::set_taskbar_progress,
             commands::clipboard::clipboard_read,
             commands::agent::agent_sessions,
             commands::app::app_set_unsaved,
