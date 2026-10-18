@@ -43,11 +43,15 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'New Terminal Tab',
         'Clear Terminal',
         'Toggle Pane Zoom',
+        'Equalize Splits',
+        'Swap Pane With…',
+        'Rename Terminal…',
+        'Close Terminal',
         'Go to Latest Unread Notification',
         'Mark All Notifications Read',
         'Save All Files',
       ],
-      'The palette offers exactly the six commands the app implements'
+      'The palette offers exactly the ten commands the app implements'
     );
   });
 

@@ -45,6 +45,8 @@ import {
   startCommand,
 } from '../lib/agents.js';
 import { stripTrailingSep, toPosix } from '../lib/paths.js';
+import { equalizeAll, equalizeLineOf, swapChoices } from '../components/terminal/splitLayout.js';
+import { typingHidden, withoutSecret } from '../lib/secretInput.js';
 import { isNetworkPath } from '../lib/terminalLinks.js';
 import {
   followCommandLine,
@@ -91,6 +93,9 @@ const pendingResizes = new Map();
 // only while a group IS zoomed, and `settle` drops it the moment it stops
 // making sense (see `zoomedPaneOf`). Never persisted: a zoom is a way of
 // looking at a layout, not part of it.
+
+/** How many renames have been asked for from outside a pane — each request's `seq`. */
+let renameRequests = 0;
 
 let paneCounter = 1;
 const makePaneId = () => `pane-${paneCounter++}`;
@@ -309,6 +314,21 @@ export function panesOnScreen(group) {
   return collectLeaves(treeOnScreen(group));
 }
 
+/**
+ * Why `group`'s panes cannot be swapped right now, in words for the palette
+ * and the pane menu — or null when they can.
+ *
+ * A zoomed group refuses (spec P3): the other panes are hidden, so there is
+ * nothing on screen to choose from or to see change, and a swap made blind
+ * would only show itself when the zoom ended. Unzooming first is one key.
+ */
+export function swapBlockedReason(group) {
+  if (!group?.tree) return 'No group is on screen';
+  if (zoomedPaneOf(group)) return 'Unavailable while a pane is zoomed: the other panes are hidden. Unzoom it first (Toggle Pane Zoom).';
+  if (collectLeaves(group.tree).length < 2) return 'This group has one pane: there is no other pane to swap it with.';
+  return null;
+}
+
 /** `group` with no zoom: the key goes, rather than staying behind as null. */
 function withoutZoom(group) {
   if (!group || !('zoomedPaneId' in group)) return group;
@@ -406,6 +426,20 @@ function splitAt(node, paneId, newLeaf, direction, insertFirst) {
     children: insertFirst ? [newLeaf, n] : [n, newLeaf],
     sizes: evenSizes(2),
   }));
+}
+
+/**
+ * `tree` after a split that made pane `newPaneId`: with "Equal Splits" on
+ * (`terminalEqualizeOnSplit`), the line that split belongs to at equal shares
+ * (`equalizeLineOf`); off, as it was — the split pane halved, the rest of
+ * the line keeping the sizes the user gave it. Every way of making a split
+ * goes through here: Split Right/Down, a pane's buttons, a tab dropped on a
+ * pane's edge, Move to New Pane.
+ */
+function equalizedAfterSplit(tree, newPaneId) {
+  if (useSettingsStore.getState().terminalEqualizeOnSplit !== true) return tree;
+  const parent = collectSplits(tree).find((split) => split.children.some((child) => child.id === newPaneId));
+  return parent ? equalizeLineOf(tree, parent.id) : tree;
 }
 
 /**
@@ -1037,6 +1071,27 @@ const commandEndsBySession = new Map();
 const endsOf = (sessionId) => commandEndsBySession.get(sessionId) ?? 0;
 
 /**
+ * The sessions whose typing is hidden right now — a password prompt (spec
+ * P4) — as the backend last said (`pty-echo`), by SESSION and whether or not
+ * a tab holds it yet. A shell's rc can ask for a passphrase as it starts,
+ * which is told before `pty_spawn`'s answer reaches the store: restoring a
+ * session, opening a workspace or a saved group all meet it. Kept here, the
+ * store's per-terminal `secretInput` is worked out from it whenever either
+ * changes (`secretInputFor`), so the tab that takes the session is locked
+ * the moment it does. Gone with the session (`pty-exit`).
+ */
+const secretBySession = new Set();
+
+/** `secretInput` as `tabs` and `secretBySession` say it is — `current` itself when that is what it already says. */
+function secretInputFor(tabs, current) {
+  const next = {};
+  for (const tab of tabs) if (tab.sessionId && secretBySession.has(tab.sessionId)) next[tab.id] = true;
+  const keys = Object.keys(next);
+  const same = current && keys.length === Object.keys(current).length && keys.every((id) => current[id]);
+  return same ? current : next;
+}
+
+/**
  * Who wants to hear that a command ended (`onCommandEnded`).
  *
  * An event rather than a field of the store: what hears it — the side bar's
@@ -1292,6 +1347,26 @@ export function __setSubmitInfersRunning(on) {
 export const AGENT_PROMPT_WAIT_MS = 3000;
 let agentPromptWaitMs = AGENT_PROMPT_WAIT_MS;
 
+/** How often the typing guard asks the backend again while a terminal is asking for a password (`untilTypingSafe`). */
+const HIDDEN_RECHECK_MS = 250;
+
+/**
+ * How long an ask of the backend (`pty_input_hidden`) may take before the
+ * guard stops waiting for it and goes by the events alone: a backend that
+ * never answers must not hold a startup command, or an agent, forever.
+ */
+const HIDDEN_ASK_TIMEOUT_MS = 1000;
+
+/** Test hook: told each time the typing guard looks again while it waits. */
+let typingGuardProbe = null;
+
+/** Test hook: set what hears the typing guard look again. Returns what it replaced. */
+export function __setTypingGuardProbe(probe) {
+  const previous = typingGuardProbe;
+  typingGuardProbe = typeof probe === 'function' ? probe : null;
+  return previous;
+}
+
 /** Test hook: how long an agent waits for a first prompt. Returns what it replaced. */
 export function __setAgentPromptWaitMs(ms) {
   const previous = agentPromptWaitMs;
@@ -1448,7 +1523,13 @@ function runsCmd(tab) {
 const batchJobReplies = createBatchJobReplies({
   enabled: () => useSettingsStore.getState().terminalAutoReplyBatchJob !== false,
   isCmd: (tabId) => runsCmd(useTerminalStore.getState().tabs.find((t) => t.id === tabId)),
-  reply: (tabId, text) => useTerminalStore.getState().writeRaw(tabId, text),
+  // Never into a password prompt (spec P4) — cmd's question is never one, and
+  // Windows reports none, but an answer typed on the user's behalf is held
+  // to the same rule as every other.
+  reply: (tabId, text) => {
+    if (typingHidden(useTerminalStore.getState(), tabId)) return undefined;
+    return useTerminalStore.getState().writeRaw(tabId, text);
+  },
 });
 
 /** A machine left running overnight must not grow this without bound. */
@@ -1848,6 +1929,30 @@ export const useTerminalStore = create((set, get, api) => {
   };
 
   /**
+   * Whether the backend reads `sessionId`'s terminal as asking for a password
+   * right now (`pty_input_hidden`): true, false, or null where it cannot tell
+   * (Windows, an unreadable mode, a session already gone).
+   */
+  const backendSaysHidden = async (sessionId) => {
+    if (!sessionId) return null;
+    let timer = null;
+    try {
+      const answer = await Promise.race([
+        invoke('pty_input_hidden', { session_id: sessionId }),
+        // No answer in time: "cannot tell", like Windows — the events decide.
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(null), HIDDEN_ASK_TIMEOUT_MS);
+        }),
+      ]);
+      return typeof answer === 'boolean' ? answer : null;
+    } catch (_) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  /**
    * Wait until `tabId`'s shell has drawn its first prompt, which it says with
    * the first OSC 133 "D" its session reports. Resolves with:
    *
@@ -1882,6 +1987,72 @@ export const useTerminalStore = create((set, get, api) => {
         if (result) finish(result);
       });
     });
+
+  /**
+   * Wait until text may be typed into `tabId` on the user's behalf — a
+   * startup command, an agent started or resumed (spec P4): its shell has
+   * drawn its first prompt (`untilPromptReady`), and its typing is not
+   * hidden. A terminal asking for a password — sudo in an rc file, an ssh
+   * key's passphrase, a `read -s` — takes whatever is typed as the password,
+   * shown nowhere, and a command typed there would be sent as one.
+   *
+   * The wait is the one there already was, no longer: until the prompt wait
+   * is up (AGENT_PROMPT_WAIT_MS after the shell started). Resolves with what
+   * `untilPromptReady` did — 'ready', 'timeout' or 'gone' — or with 'hidden'
+   * when the terminal was still asking for a password when the wait was up:
+   * then nothing may be typed, and the caller says so in the terminal.
+   *
+   * What the USER types and pastes is never held: answering the prompt is
+   * the whole point, and pasting from a password manager is how most people
+   * do it.
+   */
+  const untilTypingSafe = async (tabId) => {
+    const readiness = await untilPromptReady(tabId);
+    if (readiness === 'gone') return readiness;
+    const tab = get().tabs.find((t) => t.id === tabId);
+    const sessionId = tab?.sessionId;
+    const deadline = (tab?.spawnedAt ?? 0) + agentPromptWaitMs;
+    const gone = (state) => {
+      const now = state.tabs.find((t) => t.id === tabId);
+      return !now || now.sessionId !== sessionId || Boolean(now.exited);
+    };
+    // The backend is asked at most every HIDDEN_RECHECK_MS, however often the
+    // store changes meanwhile: a program retitling its terminal writes to the
+    // store many times a second, and each write used to be an ask.
+    let askedAt = -Infinity;
+    const askBackend = async () => {
+      const wait = askedAt + HIDDEN_RECHECK_MS - Date.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      askedAt = Date.now();
+      return backendSaysHidden(sessionId);
+    };
+    for (;;) {
+      typingGuardProbe?.();
+      if (gone(get())) return 'gone';
+      // The events first, then the backend itself, right before typing: the
+      // watch reads at most every 250 ms, so a prompt that has just come up
+      // may not have been told yet — the backend reads the terminal now.
+      const told = typingHidden(get(), tabId);
+      const hiddenNow = told || (await askBackend()) === true;
+      if (gone(get())) return 'gone';
+      if (!hiddenNow) return readiness;
+      const left = deadline - Date.now();
+      if (left <= 0) return 'hidden';
+      // Looked at again when the events say something else, or the next
+      // ask is due — not on every write to the store.
+      await new Promise((resolve) => {
+        const timer = setTimeout(done, Math.min(left, HIDDEN_RECHECK_MS));
+        const unsubscribe = api.subscribe((state) => {
+          if (gone(state) || typingHidden(state, tabId) !== told) done();
+        });
+        function done() {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
+        }
+      });
+    }
+  };
 
   /**
    * Remember that `agent` is being typed into `tabId`, right before it is.
@@ -2194,6 +2365,19 @@ export const useTerminalStore = create((set, get, api) => {
       tabs: state.tabs.map((t) =>
         t.id === tabId ? { ...t, agent, agentResumeOffered: false, agentResumeNotice: null } : t
       ),
+    }));
+  };
+
+  /**
+   * Undo `takeOffer` for a resume that typed nothing after all (a password
+   * prompt was up, `untilTypingSafe`): the offer is back on screen with the
+   * record it was taken with, and the terminal holds no conversation.
+   */
+  const giveOfferBack = (tabId, agent) => {
+    opencodeResumers.delete(tabId);
+    continuedLatest.delete(tabId);
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, agent, agentResumeOffered: true, agentTyped: null } : t)),
     }));
   };
 
@@ -2929,6 +3113,15 @@ export const useTerminalStore = create((set, get, api) => {
     // otherwise re-render all of them ten times a second.
     progress: {},
 
+    // ---- Which terminals are asking for a password (spec P4) --------------
+    //
+    // tab id -> true while its typing is hidden: echo off in canonical mode,
+    // as the backend reads it (`pty-echo`, src/lib/secretInput.js). Its own
+    // map, as `progress` is: the lock marks subscribe to one terminal's
+    // boolean, and nothing else redraws. Gone with the shell — its exit, a
+    // restart — and with the terminal (`pruneAttention`).
+    secretInput: {},
+
     /**
      * A progress report from `tabId`'s terminal (`parseProgress`'s shape).
      *
@@ -3377,6 +3570,149 @@ export const useTerminalStore = create((set, get, api) => {
       });
     },
 
+    /**
+     * Equalize Splits (spec P2): every split of a group — the one on screen
+     * unless `groupId` says otherwise — at equal shares, nested splits
+     * included, counted in panes so that three panes side by side come out
+     * a third each however the splits nest (see `equalizeAll` in
+     * splitLayout.js). The same sizes a drag would leave, so they are saved
+     * and restored like any other; `ResizableSplit` puts the live panels to
+     * them. A zoomed group is equalized too — out of sight, ready for when
+     * the zoom ends. Returns whether anything changed; when nothing did,
+     * nothing is written.
+     */
+    equalizeSplits: (groupId = null) => {
+      let changed = false;
+      set((state) => {
+        const group = resolveGroup(state, groupId, null);
+        if (!group) return {};
+        const tree = equalizeAll(group.tree);
+        if (tree === group.tree) return {};
+        changed = true;
+        return { groups: updateGroup(state, group.id, (g) => ({ ...g, tree })) };
+      });
+      return changed;
+    },
+
+    /**
+     * Swap Pane With… (spec P3): pane `paneId` and pane `otherPaneId` of one
+     * group trade contents — every terminal each holds, and which one each
+     * shows. The panes themselves stay where they are, with their ids and
+     * their sizes, so the layout keeps its shape; only the terminals move,
+     * and the terminal being typed into keeps the keyboard: the active pane
+     * follows it to its new place.
+     *
+     * Nothing is remounted for it: a terminal's xterm lives in the registry,
+     * and a pane showing another terminal just attaches that one's element
+     * (TerminalView), so the programs, their scrollback and their screens are
+     * the same objects after the swap. Each is refitted to its new pane's
+     * size, as after any move.
+     *
+     * Refused — returning false, writing nothing — for the same pane twice, a
+     * pane that is not in the group, and a zoomed group (`swapBlockedReason`).
+     */
+    swapPanes: (paneId, otherPaneId, groupId = null) => {
+      let swapped = false;
+      set((state) => {
+        if (!paneId || !otherPaneId || paneId === otherPaneId) return {};
+        const group = resolveGroup(state, groupId, paneId);
+        if (!group || swapBlockedReason(group)) return {};
+        const leaves = collectLeaves(group.tree);
+        const a = leaves.find((l) => l.id === paneId);
+        const b = leaves.find((l) => l.id === otherPaneId);
+        if (!a || !b) return {};
+        const contentsOf = (leaf) => ({ tabIds: [...leaf.tabIds], activeTabId: leaf.activeTabId });
+        let tree = replaceNode(group.tree, a.id, (n) => ({ ...n, ...contentsOf(b) }));
+        tree = replaceNode(tree, b.id, (n) => ({ ...n, ...contentsOf(a) }));
+        const followed = { [a.id]: b.id, [b.id]: a.id };
+        const activePaneId = followed[group.activePaneId] ?? group.activePaneId;
+        swapped = true;
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({ ...g, tree, activePaneId })),
+        });
+      });
+      return swapped;
+    },
+
+    /**
+     * What "Swap Pane With…" offers from the active pane of a group (the one
+     * on screen by default): `panes`, the other panes by the terminal each
+     * shows and where it is (`swapChoices`), and `note`, why there are none
+     * to offer (`swapBlockedReason`) — a zoomed group offers none.
+     */
+    swapTargets: (groupId = null) => {
+      const state = get();
+      const group = resolveGroup(state, groupId, null);
+      const note = swapBlockedReason(group);
+      if (note) return { panes: [], note, fromPaneId: group?.activePaneId ?? null };
+      return { panes: swapChoices(group.tree, state.tabs, group.activePaneId), note: null, fromPaneId: group.activePaneId };
+    },
+
+    /** `swapPanes` from the active pane of the group on screen — what the palette's pick does. */
+    swapActivePane: (otherPaneId) => {
+      const group = get().getActiveGroup();
+      if (!group) return false;
+      return get().swapPanes(group.activePaneId, otherPaneId, group.id);
+    },
+
+    /**
+     * A rename asked for from outside the pane — "Rename Terminal…" in the
+     * command palette: `{ tabId, seq }`, or null. The pane showing that
+     * terminal takes it (`takeRenameRequest`) and opens its tab's inline
+     * editor, which brings a hidden strip back over the terminal while it is
+     * open (spec P1). Not saved; a new request replaces one not yet taken.
+     */
+    renameRequest: null,
+
+    /**
+     * Whether `tabId`'s terminal is asking for a password right now, by the
+     * events and by the backend itself (`pty_input_hidden`) — for text typed
+     * on the user's behalf from outside the store (the palette's history).
+     */
+    typingHiddenNow: async (tabId) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) return false;
+      return typingHidden(get(), tabId) || (await backendSaysHidden(tab.sessionId)) === true;
+    },
+
+    /**
+     * What the backend said of `sessionId`'s typing (`pty-echo`): kept by
+     * session, whether or not a tab holds it yet (`secretBySession`), and
+     * the per-terminal map worked out again from it.
+     */
+    noteInputHidden: (sessionId, secret) => {
+      if (!sessionId) return;
+      if (secret) secretBySession.add(sessionId);
+      else secretBySession.delete(sessionId);
+      set((state) => {
+        const secretInput = secretInputFor(state.tabs, state.secretInput);
+        return secretInput === state.secretInput ? state : { secretInput };
+      });
+    },
+
+    /** Forget every session's password prompt — a fresh start (and the suites' resets). */
+    forgetInputHidden: () => {
+      secretBySession.clear();
+      set((state) => (Object.keys(state.secretInput ?? {}).length === 0 ? state : { secretInput: {} }));
+    },
+
+    /** Ask for `tabId` (by default the active terminal) to be renamed in its pane. Returns whether there is such a terminal. */
+    requestTabRename: (tabId = null) => {
+      const id = tabId ?? get().activeTabId;
+      if (!id || !get().tabs.some((t) => t.id === id)) return false;
+      renameRequests += 1;
+      set({ renameRequest: { tabId: id, seq: renameRequests } });
+      return true;
+    },
+
+    /** The pending rename for `tabId`, taken (cleared) — or null when there is none for it. */
+    takeRenameRequest: (tabId) => {
+      const request = get().renameRequest;
+      if (!request || request.tabId !== tabId) return null;
+      set({ renameRequest: null });
+      return request;
+    },
+
     // ---- Tab management used by the Terminals panel's context menus ----
     /** Close every other terminal in the pane that holds `tabId`. */
     closeOthersInGroup: async (tabId) => {
@@ -3768,7 +4104,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, target.id, (g) =>
             withoutZoom({
               ...g,
-              tree: splitAt(g.tree, at, newLeaf, direction, false),
+              tree: equalizedAfterSplit(splitAt(g.tree, at, newLeaf, direction, false), newPaneId),
             })
           ),
         });
@@ -3930,7 +4266,7 @@ export const useTerminalStore = create((set, get, api) => {
         groups = updateGroup(groups, targetGroup.id, (g) =>
           withoutZoom({
             ...g,
-            tree: splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst),
+            tree: equalizedAfterSplit(splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst), newPaneId),
             activePaneId: newPaneId,
           })
         );
@@ -4138,8 +4474,9 @@ export const useTerminalStore = create((set, get, api) => {
       unlisteners.push(await listen('pty-exit', (payload) => {
         const { session_id, exit_code } = payload || {};
         if (!session_id) return;
-        // Nothing more will come from this shell to count.
+        // Nothing more will come from this shell to count — nor to ask for.
         commandEndsBySession.delete(session_id);
+        secretBySession.delete(session_id);
 
         // Nor to show, when no tab holds it: its output was kept for a
         // terminal that will never exist. A tab closed before its shell's end
@@ -4167,6 +4504,8 @@ export const useTerminalStore = create((set, get, api) => {
         const gone = get().tabs.filter((t) => t.sessionId === session_id).map((t) => t.id);
         dropProgressAfterOutput(gone);
         set((state) => ({
+          // Nothing is asking for a password in a shell that has ended.
+          secretInput: secretInputFor(state.tabs, withoutSecret(state.secretInput, gone)),
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember that this shell is gone. Without it the tab looked
@@ -4182,6 +4521,13 @@ export const useTerminalStore = create((set, get, api) => {
             };
           }),
         }));
+      }));
+      // Whether a terminal is asking for a password: echo off in canonical
+      // mode (src-tauri/src/pty/echo_watch.rs), said only when it changes.
+      unlisteners.push(await listen('pty-echo', (payload) => {
+        const { session_id, secret } = payload || {};
+        if (!session_id || typeof secret !== 'boolean') return;
+        get().noteInputHidden(session_id, secret);
       }));
       // OSC 7 (see src-tauri/src/pty/osc.rs / shell_integration.rs): the
       // shell reports its live working directory on every prompt. Update
@@ -4598,8 +4944,15 @@ export const useTerminalStore = create((set, get, api) => {
         return null;
       }
 
-      const readiness = await untilPromptReady(targetId);
+      const readiness = await untilTypingSafe(targetId);
       if (readiness === 'gone') return null;
+      if (readiness === 'hidden') {
+        // Not typed into a password prompt, and said where it would have been.
+        const label = agentLabel(kind);
+        const note = `${label} not started — this terminal was asking for a password, and NexTerm types nothing into a password prompt. Answer the prompt, then start ${label} here yourself, or open a new ${label} terminal.`;
+        if (!notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
+        return null;
+      }
       recordAgent(targetId, started.agent, readiness === 'ready');
       await get().writeRaw(targetId, `${started.command}\r`);
       return started.agent;
@@ -4680,8 +5033,16 @@ export const useTerminalStore = create((set, get, api) => {
       }
       takeOffer(targetId, agent, { continued });
 
-      const readiness = await untilPromptReady(targetId);
+      const readiness = await untilTypingSafe(targetId);
       if (readiness === 'gone') return false;
+      if (readiness === 'hidden') {
+        // Not typed into a password prompt: the offer comes back, as it was
+        // taken, and the terminal says why nothing happened.
+        giveOfferBack(targetId, agent);
+        const why = 'Not resumed — this terminal is asking for a password, and typing is hidden. Answer it, then resume.';
+        if (!notifyTerminal(targetId, why)) console.warn(`[TerminalStore] ${why}`);
+        return false;
+      }
       if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
       recordAgent(targetId, agent, readiness === 'ready');
       await get().writeRaw(targetId, `${command}\r`);
@@ -4797,8 +5158,12 @@ export const useTerminalStore = create((set, get, api) => {
         tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, startupCommand: line } : t)),
       }));
 
-      const readiness = await untilPromptReady(tabId);
+      const readiness = await untilTypingSafe(tabId);
       if (readiness === 'gone') return false;
+      if (readiness === 'hidden') {
+        notifyTerminal(tabId, `startup command not typed — this terminal is asking for a password, and typing is hidden: ${line}`);
+        return false;
+      }
       if (get().tabs.find((t) => t.id === tabId)?.running) {
         notifyTerminal(tabId, `startup command not typed — something is already running here: ${line}`);
         return false;
@@ -4921,6 +5286,8 @@ export const useTerminalStore = create((set, get, api) => {
         cancelProgress(tabId);
         set((state) => ({
           progress: withoutProgress(state.progress, [tabId]),
+          // Nor a password prompt: that was the old shell's.
+          secretInput: withoutSecret(state.secretInput, [tabId]),
           tabs: state.tabs.map((t) =>
             t.id === tabId
               ? {
@@ -5165,8 +5532,19 @@ function pruneAttention(state) {
     : state.notifications;
   const progress = keepLive(state.progress, live);
   const attentionFlash = keepLive(state.attentionFlash, live);
-  if (notifications === state.notifications && progress === state.progress && attentionFlash === state.attentionFlash) return;
-  useTerminalStore.setState({ notifications, progress, attentionFlash });
+  // A closed terminal's password prompt went with it, a restarted one's with
+  // its old shell, and a terminal that has just taken a shell asking for one
+  // is locked (spec P4; `secretBySession`).
+  const secretInput = secretInputFor(state.tabs, keepLive(state.secretInput, live));
+  if (
+    notifications === state.notifications &&
+    progress === state.progress &&
+    attentionFlash === state.attentionFlash &&
+    secretInput === state.secretInput
+  ) {
+    return;
+  }
+  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput });
 }
 
 // Attention upkeep, on every change to the store:

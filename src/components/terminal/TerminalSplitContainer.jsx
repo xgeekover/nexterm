@@ -14,9 +14,11 @@ import { Panel, Group, Separator, useGroupRef } from 'react-resizable-panels';
 import {
   sizesOf,
   layoutOf,
-  panelMinSize,
   shouldReconcile,
   sizesFromLayout,
+  swapChoices,
+  swapLabel,
+  panelMinSizeOf,
 } from './splitLayout.js';
 import {
   SplitSquareHorizontal,
@@ -31,8 +33,9 @@ import {
   Sparkles,
   Maximize2,
   Minimize2,
+  ArrowLeftRight,
 } from 'lucide-react';
-import { useTerminalStore, treeOnScreen, zoomedPaneOf } from '../../stores/terminalStore.js';
+import { useTerminalStore, treeOnScreen, zoomedPaneOf, swapBlockedReason } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { AgentResumeBanner } from './AgentResumeBanner.jsx';
@@ -46,8 +49,8 @@ import {
   PaneFrame,
   TabProgress,
   UnreadPill,
-  paneBodyBackground,
   pressOnPaneFrame,
+  selectPaneBodyBackground,
 } from './AttentionIndicators.jsx';
 import { useGroupSummaryLabels } from './statusBoardModel.js';
 import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
@@ -56,6 +59,9 @@ import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { copyText } from '../../lib/copyText.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
 import { pathDropLabel } from '../../lib/terminalFileDrop.js';
+import { LockBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
+import { headerCloseGestures, stripShown, useRefocusAfterMenu, useStripOverlay } from './stripReveal.js';
+import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -646,6 +652,7 @@ function TerminalPane({
   const resumeAgent = useTerminalStore((s) => s.resumeAgent);
   const dismissAgentResume = useTerminalStore((s) => s.dismissAgentResume);
   const listAgentSessions = useTerminalStore((s) => s.listAgentSessions);
+  const swapPanes = useTerminalStore((s) => s.swapPanes);
 
   const { drag, beginDrag, cancelActiveDrag } = useContext(DragContext);
 
@@ -657,7 +664,7 @@ function TerminalPane({
   const renamingTabRef = useRef(null);
   // Right-click menus: a tab chip's "Rename", and the strip's empty area.
   const [chipMenu, setChipMenu] = useState(null); // { x, y, tabId }
-  const [paneMenu, setPaneMenu] = useState(null); // { x, y }
+  const [paneMenu, setPaneMenu] = useState(null); // { x, y, swap: { panes, note } }
 
   const dropZone = drag?.active && drag.targetPaneId === paneId ? drag.zone : null;
 
@@ -688,12 +695,64 @@ function TerminalPane({
   const pathDropHere = usePathDropStore((s) => s.target?.paneId === paneId);
   const ringAside = Boolean(dropZone) || pathDropHere;
   // The terminal's own background, for the margin the frame is drawn in.
-  const frameBackground = useSettingsStore((s) => paneBodyBackground(s.terminalTheme));
+  const frameBackground = useSettingsStore(selectPaneBodyBackground);
 
   // Where in THIS strip the dragged tab would go in, as a slot — the chip it
   // would land before, or `paneTabs.length` for after the last — or null.
   const insertAt =
     dropZone === 'tabs' ? markerSlot(drag.slot, paneTabs.map((t) => t.id), drag.tabId) : null;
+
+  // ---- A hidden strip (spec P1) ------------------------------------------
+  // With "Hide the Tab Strip of a Single Terminal" on, a pane holding one
+  // terminal draws a 6 px handle in place of its strip (`StripHandle`), and
+  // the strip itself in an overlay laid over the terminal's top edge, right
+  // below the handle — up while it was opened from the handle (a toggle),
+  // during any drag (it is a drop target then: merging a tab back into this
+  // pane), and while its menus or a rename in it are open
+  // (`useStripOverlay`, stripReveal.js). Never on hover: a hand coming down
+  // onto the terminal must not meet a strip that slid in under it. A zoomed
+  // pane keeps its strip: its "Zoomed" chip is what says other panes are
+  // hidden and still running.
+  const hideSingleStrip = useSettingsStore((s) => s.terminalHideSingleTabStrip === true);
+  const stripHidden = hideSingleStrip && paneTabs.length === 1 && !zoomed;
+  const paneRef = useRef(null);
+  const overlayRef = useRef(null);
+  const handleRef = useRef(null);
+  const holds = {
+    dragging: Boolean(drag?.active),
+    menuOpen: Boolean(chipMenu || paneMenu),
+    renaming: Boolean(renamingTabId),
+  };
+  const held = stripHidden && (holds.dragging || holds.menuOpen || holds.renaming);
+  const stripOverlay = useStripOverlay(stripHidden, { overlayRef, handleRef, held });
+  const overlayShown = stripHidden && stripShown({ open: stripOverlay.open, ...holds });
+  // What closes a terminal or this pane from its header — none of the
+  // one-click ways in the opened strip of a hidden one (stripReveal.js).
+  const closeGestures = headerCloseGestures({ stripHidden, canClose });
+  // A click (or Enter) on the handle: a toggle. Opened from the keyboard,
+  // the keyboard goes into the strip — its chip.
+  const toggleStrip = (info) => {
+    const nowOpen = stripOverlay.handleClick(info);
+    if (nowOpen && info?.pointerType === 'keyboard') {
+      setTimeout(() => overlayRef.current?.querySelector('[data-tab-chip]')?.focus({ preventScroll: true }), 0);
+    }
+  };
+
+  // A menu of this pane closed with the keyboard left on the page: back to
+  // the terminal (stripReveal.js).
+  useRefocusAfterMenu(holds.menuOpen, paneRef);
+  // Which of this pane's terminals is asking for a password, for the words
+  // on their chips (the badge draws itself): booleans, compared one by one.
+  const lockedByTab = useTerminalStore(useShallow((s) => node.tabIds.map((id) => Boolean(s.secretInput?.[id]))));
+  const lockedOf = (tabId) => lockedByTab[node.tabIds.indexOf(tabId)] ?? false;
+
+  /** What "Swap With" in the pane menu offers from this pane, read as the menu opens. */
+  const swapMenuFor = () => {
+    const state = useTerminalStore.getState();
+    const group = state.groups.find((g) => g.id === groupId);
+    const note = swapBlockedReason(group);
+    return { note, panes: note ? [] : swapChoices(group.tree, state.tabs, paneId) };
+  };
 
   const beginRenameTab = (tab) => {
     renamingTabRef.current = tab.id;
@@ -716,236 +775,315 @@ function TerminalPane({
     setRenamingTabId(null);
   };
 
-  return (
+  // "Rename Terminal…" from the command palette: the pane showing that
+  // terminal opens its chip's editor — over the terminal when the strip is
+  // hidden, which the rename then holds up until it is done. Through a ref,
+  // so the effect runs once per request and reads this render's tabs.
+  const renameAsked = useTerminalStore((s) =>
+    s.renameRequest && node.tabIds.includes(s.renameRequest.tabId) ? s.renameRequest.seq : 0
+  );
+  const takeRenameRef = useRef(null);
+  takeRenameRef.current = () => {
+    const request = useTerminalStore.getState().renameRequest;
+    const tab = request && paneTabs.find((t) => t.id === request.tabId);
+    if (!tab) return;
+    useTerminalStore.getState().takeRenameRequest(tab.id);
+    if (boundTab?.id !== tab.id) bindPaneToTab(paneId, tab.id, groupId);
+    beginRenameTab(tab);
+  };
+  useEffect(() => {
+    if (renameAsked) takeRenameRef.current?.();
+  }, [renameAsked]);
+
+  // Tab strip — each chip is a drag handle. Right-clicking empty space in the
+  // strip (not a chip or a button) opens the pane menu. An element, not a
+  // component: drawn in line above the terminal, or — hidden — inside the
+  // overlay (`StripOverlay`), and the same strip either way.
+  const strip = (
     <div
-      onMouseDown={() => setActivePane(paneId, groupId)}
-      onFocusCapture={() => setActivePane(paneId, groupId)}
-      // Which pane is active is drawn in the body's frame (`PaneFrame`): a
-      // ring on this box was painted over by the strip and the terminal.
-      className="flex flex-col h-full w-full bg-vsc-terminal overflow-hidden"
+      data-tab-strip={paneId}
+      className={cn(
+        'relative h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none',
+        // Over the terminal, it needs an edge to read as a bar of its own.
+        stripHidden && 'shadow-widget',
+        // Dropping a tab here is how a pane is merged back into tabs, so it
+        // has to look like somewhere you can drop.
+        dropZone === 'tabs' && 'bg-vsc-accent/15 ring-1 ring-inset ring-vsc-accent'
+      )}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setPaneMenu({ x: e.clientX, y: e.clientY, swap: swapMenuFor() });
+      }}
     >
-      {/* Tab strip — each chip is a drag handle. Right-clicking empty space
-          in the strip (not a chip or a button) opens the pane menu. */}
-      <div
-        data-tab-strip={paneId}
-        className={cn(
-          'relative h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none',
-          // Dropping a tab here is how a pane is merged back into tabs, so it
-          // has to look like somewhere you can drop.
-          dropZone === 'tabs' && 'bg-vsc-accent/15 ring-1 ring-inset ring-vsc-accent'
-        )}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          setPaneMenu({ x: e.clientX, y: e.clientY });
-        }}
-      >
-        {/* The row of chips: it scrolls once they do not fit, and a drag near
-            either end of it scrolls it (see `createAutoScroller`). */}
-        <div data-chip-row="" className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
-          {paneTabs.map((tab, i) => {
-            const isActive = tab.id === boundTab?.id;
-            const isBeingDragged = drag?.active && drag.tabId === tab.id;
-            const unread = unreadOf(tab.id);
-            // What the dot says, then what the pill says — one sentence for
-            // both, so hovering answers "why is that one red" and "what does
-            // it want" alike. With neither, how to use the chip.
-            const status = [activityLabel(tab), unread > 0 ? unreadLabel(unread) : ''].filter(Boolean).join(', ');
+      {/* The row of chips: it scrolls once they do not fit, and a drag near
+          either end of it scrolls it (see `createAutoScroller`). */}
+      <div data-chip-row="" className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
+        {paneTabs.map((tab, i) => {
+          const isActive = tab.id === boundTab?.id;
+          const isBeingDragged = drag?.active && drag.tabId === tab.id;
+          const unread = unreadOf(tab.id);
+          // What the dot says, then what the pill says — one sentence for
+          // both, so hovering answers "why is that one red" and "what does
+          // it want" alike. With neither, how to use the chip.
+          const status = [
+            activityLabel(tab),
+            lockedOf(tab.id) ? TYPING_HIDDEN_LABEL : '',
+            unread > 0 ? unreadLabel(unread) : '',
+          ]
+            .filter(Boolean)
+            .join(', ');
 
-            if (renamingTabId === tab.id) {
-              return (
-                <div key={tab.id} className="flex items-center h-[22px]">
-                  <input
-                    autoFocus
-                    data-rename-input=""
-                    value={tabDraft}
-                    onFocus={(e) => e.target.select()}
-                    onChange={(e) => setTabDraft(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      if (e.key === 'Enter') commitRenameTab();
-                      else if (e.key === 'Escape') cancelRenameTab();
-                    }}
-                    onBlur={commitRenameTab}
-                    className="w-[110px] h-[20px] px-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
-                  />
-                </div>
-              );
-            }
-
+          if (renamingTabId === tab.id) {
             return (
-              <div
-                key={tab.id}
-                role="tab"
-                tabIndex={0}
-                aria-selected={isActive}
-                aria-grabbed={isBeingDragged}
-                data-tab-chip={tab.id}
-                // The activity is said in words as well as drawn as a dot —
-                // a colour is not something a screen reader can read out, and
-                // "why is that one red" should be answerable by hovering.
-                title={
-                  status
-                    ? `${tab.title} — ${status}`
-                    : `${tab.title} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
-                }
-                onPointerDown={(e) => {
-                  if (e.button !== 0) return;
-                  beginDrag(tab, e);
-                }}
-                onMouseDown={(e) => {
-                  // Middle-click closes the tab, as it does on an editor tab.
-                  if (e.button === 1) {
-                    e.preventDefault();
+              <div key={tab.id} className="flex items-center h-[22px]">
+                <input
+                  autoFocus
+                  data-rename-input=""
+                  value={tabDraft}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setTabDraft(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
                     e.stopPropagation();
-                    closeTab(tab.id);
-                  }
-                }}
-                onClick={() => {
-                  if (Date.now() - lastDragEndAt < 200) return;
-                  bindPaneToTab(paneId, tab.id, groupId);
-                  switchTab(tab.id);
-                }}
-                onDoubleClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  // A dblclick is two down/up cycles under the same 4px
-                  // threshold that gates a real drag, so neither should ever
-                  // arm one — this just guarantees it, defensively.
-                  cancelActiveDrag();
-                  beginRenameTab(tab);
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setChipMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
+                    if (e.key === 'Enter') commitRenameTab();
+                    else if (e.key === 'Escape') cancelRenameTab();
+                    else return;
+                    // The key is the rename's, and nothing else's. Done from
+                    // the keyboard, the keyboard goes back to the terminal —
+                    // but only once this key is over: moved there inside its
+                    // keydown, the terminal took the same Enter as a key of
+                    // its own and the shell ran an empty line (review). The
+                    // field unmounting would otherwise leave it on the page,
+                    // and a hidden strip's overlay goes away with it. (Its
+                    // blur then finds the editor closed.)
                     e.preventDefault();
-                    bindPaneToTab(paneId, tab.id, groupId);
-                    switchTab(tab.id);
-                  }
-                }}
-                className={cn(
-                  'relative group flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
-                  'cursor-grab active:cursor-grabbing touch-none transition-colors',
-                  isActive
-                    ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
-                    : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover',
-                  isBeingDragged && 'opacity-40'
-                )}
-              >
-                {insertAt === i && <InsertionMarker side="before" />}
-                {insertAt === paneTabs.length && i === paneTabs.length - 1 && (
-                  <InsertionMarker side="after" />
-                )}
-                <ActivityDot tab={tab} className="mr-1.5" />
-                <span
-                  className={cn(
-                    'truncate max-w-[120px]',
-                    // A shell that has exited still has its scrollback worth
-                    // reading, so the tab stays — but it should not look live.
-                    tab.exited && 'line-through opacity-60'
-                  )}
-                >
-                  {tab.title}
-                </span>
-                {/* In line, after the title and before the ✕: over the corner
-                    it covered the ✕ and sat beside the next tab's title,
-                    reading as that one's. It never comes or goes between a
-                    press and its release — the store holds a pane's
-                    mark-read until the pointer is up — so the ✕ cannot move
-                    out from under a click. */}
-                <UnreadPill count={unread} className="ml-1.5" />
-
-                {/* Same slot, size and reveal as an editor tab's: a fixed box
-                    so the chip does not change width on hover, hidden until
-                    the pointer is over the chip, and always there on the
-                    active one. Shown on the last tab too — closing it closes
-                    the pane, which is what Close Pane does anyway. */}
-                <span className="relative flex items-center justify-center w-3.5 h-3.5 shrink-0 ml-1.5">
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    // The chip starts a drag on pointerdown; without this,
-                    // pressing the button arms one and the click that would
-                    // have closed the tab drags it instead.
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.id);
-                    }}
-                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                    title="Close Terminal"
-                    aria-label={`Close ${tab.title}`}
-                    className={cn(
-                      'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover hover:text-vsc-error',
-                      'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
-                      isActive && 'opacity-100'
-                    )}
-                  >
-                    <X size={14} />
-                  </button>
-                </span>
-                <TabProgress tabId={tab.id} />
+                    const input = paneRef.current?.querySelector('[data-pane-body] .xterm-helper-textarea');
+                    setTimeout(() => input?.focus({ preventScroll: true }), 0);
+                  }}
+                  onBlur={commitRenameTab}
+                  className="w-[110px] h-[20px] px-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
+                />
               </div>
             );
-          })}
+          }
 
-          <button
-            type="button"
-            onClick={() => createTab(null, { paneId, groupId })}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-            className={cn(paneHeaderBtn, 'shrink-0')}
-            title={`New Terminal in this pane (${shortcut('new-terminal')})`}
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-
-        <div className="flex items-center gap-0.5 px-1 shrink-0">
-          <PaneZoomControl
-            zoomed={zoomed}
-            canZoom={canZoom}
-            hiddenPanes={hiddenPanes}
-            hiddenTabIds={hiddenTabIds}
-            onToggle={() => onToggleZoom?.(paneId)}
-            shortcut={shortcut}
-          />
-          <button
-            type="button"
-            onClick={onSplitH}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-            className={paneHeaderBtn}
-            title={`Split Right (${shortcut('split-right')})`}
-          >
-            <SplitSquareHorizontal size={14} />
-          </button>
-          <button
-            type="button"
-            onClick={onSplitV}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-            className={paneHeaderBtn}
-            title={`Split Down (${shortcut('split-down')})`}
-          >
-            <SplitSquareVertical size={14} />
-          </button>
-          {canClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-              className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
-              title={`Close Pane (${shortcut('close-pane')})`}
+          return (
+            <div
+              key={tab.id}
+              role="tab"
+              tabIndex={0}
+              aria-selected={isActive}
+              aria-grabbed={isBeingDragged}
+              data-tab-chip={tab.id}
+              // The activity is said in words as well as drawn as a dot —
+              // a colour is not something a screen reader can read out, and
+              // "why is that one red" should be answerable by hovering.
+              title={
+                status
+                  ? `${tab.title} — ${status}`
+                  : `${tab.title} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
+              }
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                beginDrag(tab, e);
+              }}
+              onMouseDown={(e) => {
+                // Middle-click closes the tab, as it does on an editor tab —
+                // not in the opened strip, which carries nothing that
+                // destroys (`headerCloseGestures`, stripReveal.js).
+                if (e.button === 1 && closeGestures.chipMiddleClick) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  closeTab(tab.id);
+                }
+              }}
+              onClick={() => {
+                if (Date.now() - lastDragEndAt < 200) return;
+                bindPaneToTab(paneId, tab.id, groupId);
+                switchTab(tab.id);
+              }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                // A dblclick is two down/up cycles under the same 4px
+                // threshold that gates a real drag, so neither should ever
+                // arm one — this just guarantees it, defensively.
+                cancelActiveDrag();
+                beginRenameTab(tab);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setChipMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  bindPaneToTab(paneId, tab.id, groupId);
+                  switchTab(tab.id);
+                }
+              }}
+              className={cn(
+                'relative group flex items-center px-2 h-[22px] rounded-sm text-ui-sm whitespace-nowrap',
+                'cursor-grab active:cursor-grabbing touch-none transition-colors',
+                isActive
+                  ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
+                  : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover',
+                isBeingDragged && 'opacity-40'
+              )}
             >
-              <X size={14} />
-            </button>
-          )}
-        </div>
+              {insertAt === i && <InsertionMarker side="before" />}
+              {insertAt === paneTabs.length && i === paneTabs.length - 1 && (
+                <InsertionMarker side="after" />
+              )}
+              <ActivityDot tab={tab} className="mr-1.5" />
+              <span
+                className={cn(
+                  'truncate max-w-[120px]',
+                  // A shell that has exited still has its scrollback worth
+                  // reading, so the tab stays — but it should not look live.
+                  tab.exited && 'line-through opacity-60'
+                )}
+              >
+                {tab.title}
+              </span>
+              {/* In line, after the title and before the ✕: over the corner
+                  it covered the ✕ and sat beside the next tab's title,
+                  reading as that one's. It never comes or goes between a
+                  press and its release — the store holds a pane's
+                  mark-read until the pointer is up — so the ✕ cannot move
+                  out from under a click. */}
+              <UnreadPill count={unread} className="ml-1.5" />
+              {/* Over the chip's own top-left corner, taking no room: a lock
+                  coming must not move the ✕ or the "+" under a pointer. */}
+              <LockBadge tabId={tab.id} />
+
+              {/* Same slot, size and reveal as an editor tab's: a fixed box
+                  so the chip does not change width on hover, hidden until
+                  the pointer is over the chip, and always there on the
+                  active one. Shown on the last tab too — closing it closes
+                  the pane, which is what Close Pane does anyway. Not in the
+                  opened strip of a hidden one: a second click or tap meant
+                  for the handle just above lands there, and it killed a
+                  shell. Its right-click menu, the palette and the keyboard
+                  close it there. */}
+              {closeGestures.chipButton && (
+              <span className="relative flex items-center justify-center w-3.5 h-3.5 shrink-0 ml-1.5">
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  // The chip starts a drag on pointerdown; without this,
+                  // pressing the button arms one and the click that would
+                  // have closed the tab drags it instead.
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeTab(tab.id);
+                  }}
+                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                  title="Close Terminal"
+                  aria-label={`Close ${tab.title}`}
+                  className={cn(
+                    'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover hover:text-vsc-error',
+                    'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+                    isActive && 'opacity-100'
+                  )}
+                >
+                  <X size={14} />
+                </button>
+              </span>
+              )}
+              <TabProgress tabId={tab.id} />
+            </div>
+          );
+        })}
+
+        <button
+          type="button"
+          onClick={() => createTab(null, { paneId, groupId })}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          className={cn(paneHeaderBtn, 'shrink-0')}
+          title={`New Terminal in this pane (${shortcut('new-terminal')})`}
+        >
+          <Plus size={14} />
+        </button>
       </div>
+
+      <div className="flex items-center gap-0.5 px-1 shrink-0">
+        <PaneZoomControl
+          zoomed={zoomed}
+          canZoom={canZoom}
+          hiddenPanes={hiddenPanes}
+          hiddenTabIds={hiddenTabIds}
+          onToggle={() => onToggleZoom?.(paneId)}
+          shortcut={shortcut}
+        />
+        <button
+          type="button"
+          onClick={onSplitH}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          className={paneHeaderBtn}
+          title={`Split Right (${shortcut('split-right')})`}
+        >
+          <SplitSquareHorizontal size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={onSplitV}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          className={paneHeaderBtn}
+          title={`Split Down (${shortcut('split-down')})`}
+        >
+          <SplitSquareVertical size={14} />
+        </button>
+        {closeGestures.paneButton && (
+          <button
+            type="button"
+            onClick={onClose}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            className={cn(paneHeaderBtn, 'hover:text-vsc-error')}
+            title={`Close Pane (${shortcut('close-pane')})`}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div
+      ref={paneRef}
+      onMouseDown={() => setActivePane(paneId, groupId)}
+      onFocusCapture={() => setActivePane(paneId, groupId)}
+      data-strip-hidden={stripHidden ? '' : undefined}
+      // Which pane is active is drawn in the body's frame (`PaneFrame`): a
+      // ring on this box was painted over by the strip and the terminal.
+      // `relative` for the overlay strip, which is laid over the body.
+      className="relative flex flex-col h-full w-full bg-vsc-terminal overflow-hidden"
+    >
+      {/* The strip in line, or — hidden — its handle, 6 px of layout that
+          never changes height (the strip comes back in the overlay below). */}
+      {stripHidden ? (
+        <StripHandle
+          paneId={paneId}
+          tabId={boundTab?.id ?? null}
+          title={boundTab?.title ?? 'Terminal'}
+          unread={boundTab ? unreadOf(boundTab.id) : 0}
+          open={overlayShown}
+          handleRef={handleRef}
+          onToggle={toggleStrip}
+          onPress={stripOverlay.handlePointerDown}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setPaneMenu({ x: e.clientX, y: e.clientY, swap: swapMenuFor() });
+          }}
+        />
+      ) : (
+        strip
+      )}
 
       <ContextMenu
         open={Boolean(chipMenu)}
@@ -981,6 +1119,16 @@ function TerminalPane({
                     if (target?.cwd) copyText(target.cwd);
                   },
                 },
+                // Where the opened strip of a hidden one (which has no ✕)
+                // lets a terminal be closed: a menu, two deliberate clicks.
+                { type: 'separator', key: 'close-sep' },
+                {
+                  key: 'close-tab',
+                  label: 'Close Terminal',
+                  icon: X,
+                  danger: true,
+                  onSelect: () => closeTab(chipMenu.tabId),
+                },
               ]
             : []
         }
@@ -1015,6 +1163,41 @@ function TerminalPane({
             icon: Pencil,
             onSelect: () => onRenameGroup?.(groupId),
           },
+          // A hidden strip's handle opens this menu, and its opened strip has
+          // no ✕ and no Close Pane: closing is here, two deliberate clicks away.
+          ...(closeGestures.menuCloseTerminal && boundTab
+            ? [
+                { type: 'separator', key: 'close-sep' },
+                { key: 'close-tab', label: 'Close Terminal', icon: X, danger: true, onSelect: () => closeTab(boundTab.id) },
+                ...(closeGestures.menuClosePane ? [{ key: 'close-pane', label: 'Close Pane', icon: X, danger: true, onSelect: onClose }] : []),
+              ]
+            : []),
+          // "Swap Pane With…" (spec P3), the palette's list: this pane trades
+          // its terminals with the one picked. While zoomed the other panes
+          // are hidden, so the row is there, unavailable, saying why; a group
+          // of one pane has nothing to offer and shows nothing.
+          ...(zoomed && paneMenu?.swap?.note
+            ? [
+                { type: 'separator', key: 'swap-sep' },
+                {
+                  key: 'swap-blocked',
+                  label: 'Swap Pane With…',
+                  icon: ArrowLeftRight,
+                  disabled: true,
+                  disabledReason: paneMenu.swap.note,
+                },
+              ]
+            : paneMenu?.swap?.panes?.length
+              ? [
+                  { type: 'separator', key: 'swap-sep' },
+                  ...paneMenu.swap.panes.map((choice) => ({
+                    key: `swap-${choice.paneId}`,
+                    label: swapLabel(choice),
+                    icon: ArrowLeftRight,
+                    onSelect: () => swapPanes(paneId, choice.paneId, groupId),
+                  })),
+                ]
+              : []),
         ]}
       />
 
@@ -1079,6 +1262,12 @@ function TerminalPane({
         <DropIndicator zone={dropZone} />
         <PathDropHighlight paneId={paneId} />
       </div>
+
+      {stripHidden && (
+        <StripOverlay shown={overlayShown} boxRef={overlayRef} guard={stripOverlay.overlayGuard}>
+          {strip}
+        </StripOverlay>
+      )}
     </div>
   );
 }
@@ -1143,7 +1332,8 @@ function ResizableSplit({ node, groupId, renderChild }) {
   );
 
   const direction = node.direction === 'vertical' ? 'vertical' : 'horizontal';
-  const minSize = panelMinSize(node.children.length);
+  // Small enough that a line of equal panes is truly equal (`panelMinSizeOf`).
+  const minSize = panelMinSizeOf(node);
 
   return (
     <Group

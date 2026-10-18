@@ -68,6 +68,15 @@ pub fn pty_kill(state: State<AppState>, session_id: String) -> Result<(), String
     state.pty_manager.kill(&session_id)
 }
 
+/// Whether the program reading a terminal has its typing hidden right now —
+/// a password prompt (spec P4) — read there and then; `null` where it cannot
+/// be told (Windows). What the typing guard asks right before it types on the
+/// user's behalf (src/stores/terminalStore.js, `untilTypingSafe`).
+#[tauri::command(rename_all = "snake_case")]
+pub fn pty_input_hidden(state: State<AppState>, session_id: String) -> Result<Option<bool>, String> {
+    state.pty_manager.input_hidden(&session_id)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn pty_list_sessions(state: State<AppState>) -> Result<Vec<PtySessionInfo>, String> {
     Ok(state.pty_manager.list_sessions())

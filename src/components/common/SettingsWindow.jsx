@@ -3,7 +3,21 @@ import { X, Search, RotateCcw } from 'lucide-react';
 import { useSettingsStore, FONT_SIZE_RANGE } from '../../stores/settingsStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { fuzzyMatch, cn } from '../../lib/utils.js';
-import { TERMINAL_THEMES, TERMINAL_THEME_IDS } from '../../lib/terminalThemes.js';
+import { ThemeGallery } from './ThemeGallery.jsx';
+import { THEME_PREVIEWING, pendingThemeUndo, resetAllQuestion } from './themeGalleryModel.js';
+import { ConfirmDialog } from './ConfirmDialog.jsx';
+
+/**
+ * What Reset All does. Imported themes are a setting, so Reset All deletes
+ * them — for good, and with them any the gallery's Undo could still bring
+ * back. With some to lose it asks first (`askReset(question)`); with none it
+ * resets at once, as it always has.
+ */
+export function resetAll(askReset) {
+  const question = resetAllQuestion(useSettingsStore.getState(), pendingThemeUndo());
+  if (question) askReset(question);
+  else useSettingsStore.getState().resetSettings();
+}
 import { isWindows } from '../../lib/platform.js';
 import { expandHome } from '../../lib/paths.js';
 import { isNetworkPath } from '../../lib/terminalLinks.js';
@@ -34,10 +48,17 @@ import { KeybindingSettings, CHORD_RECORDER } from './KeybindingSettings.jsx';
  * Escape on the field recording a shortcut belongs to that field: it ends the
  * recording, and the window stays. This listener runs in the capture phase,
  * ahead of the field's own, so it used to take that Escape and close the
- * whole window.
+ * whole window. The same for an Escape inside the theme gallery while it is
+ * previewing a theme: it takes the preview back (ThemeGallery.jsx), and a
+ * second Escape closes the window. A second press, not a held one: an Escape
+ * held to end a preview closed the window with its repeats.
  */
 export function settingsWindowKey(e) {
-  if (e.key === 'Escape') return e.target?.closest?.(`[${CHORD_RECORDER}]`) ? null : 'close';
+  if (e.key === 'Escape') {
+    if (e.repeat) return null;
+    const theirs = e.target?.closest?.(`[${CHORD_RECORDER}]`) || e.target?.closest?.(`[${THEME_PREVIEWING}]`);
+    return theirs ? null : 'close';
+  }
   if (e.key === 'Tab') return 'trap';
   return null;
 }
@@ -236,9 +257,11 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       key: 'terminalTheme',
       settingKey: 'terminal.integrated.theme',
       title: 'Color Theme',
-      description: 'Specifies the color theme used in the terminal.',
-      control: 'select',
-      options: TERMINAL_THEME_IDS.map((id) => ({ value: id, label: TERMINAL_THEMES[id].label })),
+      description:
+        'The colors of every terminal. Point at a theme, or move to it with the arrow keys, to try it on every terminal; click it or press Enter to keep it. Escape, or leaving the themes without choosing one, goes back to the one you had. Import adds a dark theme from a file — NexTerm is dark throughout, so light themes are refused.',
+      // Drawn by ThemeGallery.jsx, which reads and writes the theme settings
+      // itself: previewing must not go through `onChange`, which saves.
+      control: 'themeGallery',
     },
     {
       id: 'terminalDefaultShell',
@@ -291,6 +314,27 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         { value: 'inherited', label: 'The terminal being split' },
         { value: 'default', label: 'Same as a new terminal' },
       ],
+    },
+    // ---- Split layout (stage 3, spec P1 and P2) ----
+    {
+      id: 'terminalEqualizeOnSplit',
+      section: 'terminal',
+      key: 'terminalEqualizeOnSplit',
+      settingKey: 'terminal.integrated.equalizeOnSplit',
+      title: 'Equal Splits',
+      description:
+        'A new split gives every pane in its row, or its column, the same share — three panes side by side get a third each. Disabled: the pane being split is halved and the others keep the sizes you gave them. "Equalize Splits" in the command palette evens out the whole group once, whichever this is.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalHideSingleTabStrip',
+      section: 'terminal',
+      key: 'terminalHideSingleTabStrip',
+      settingKey: 'terminal.integrated.hideSingleTabStrip',
+      title: 'Hide the Tab Strip of a Single Terminal',
+      description:
+        'A pane holding one terminal shows a thin handle instead of its tab strip, and the terminal gets the rest of the height. Click the handle (or press Enter on it) to bring the strip up over the top of the terminal; it goes again on Escape, a click elsewhere, or when the pointer leaves it. It also comes up while a tab is being dragged and while its menu or a rename is open — never just because the pointer passes by, and never resizing the terminal. The handle shows the terminal\'s unread count, progress and password lock as small marks, with their words in its tooltip. A second terminal in the pane brings the strip back for good; a zoomed pane always shows it. Rename Terminal and Close Terminal are in the command palette too.',
+      control: 'checkbox',
     },
     {
       id: 'terminalDefaultCwdPath',
@@ -623,6 +667,8 @@ function SettingRow({ item, value, isDefault, onChange, onReset, note }) {
           <TextLikeControl item={item} value={value} onCommit={onChange} />
         )}
 
+        {item.control === 'themeGallery' && <ThemeGallery />}
+
         {/* What the backend said about this value — a path that is not there,
             typically. Said here rather than left to be discovered when a
             terminal quietly opens somewhere else. */}
@@ -667,6 +713,8 @@ export function SettingsWindow() {
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
   const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
   const terminalSplitCwd = useSettingsStore((s) => s.terminalSplitCwd);
+  const terminalEqualizeOnSplit = useSettingsStore((s) => s.terminalEqualizeOnSplit);
+  const terminalHideSingleTabStrip = useSettingsStore((s) => s.terminalHideSingleTabStrip);
   const editorFontSize = useSettingsStore((s) => s.editorFontSize);
   const editorTabSize = useSettingsStore((s) => s.editorTabSize);
   const editorWordWrap = useSettingsStore((s) => s.editorWordWrap);
@@ -704,6 +752,8 @@ export function SettingsWindow() {
     terminalDefaultCwd,
     terminalDefaultCwdPath,
     terminalSplitCwd,
+    terminalEqualizeOnSplit,
+    terminalHideSingleTabStrip,
     editorFontSize,
     editorTabSize,
     editorWordWrap,
@@ -714,6 +764,8 @@ export function SettingsWindow() {
   };
 
   const [query, setQuery] = useState('');
+  // What Reset All is asking before it runs, or null (`resetAllQuestion`).
+  const [resetQuestion, setResetQuestion] = useState(null);
   const [activeSection, setActiveSection] = useState('editor');
   // Per-item validation messages, keyed by item id. Async because the only
   // honest answer to "is that a directory?" comes from the backend.
@@ -768,6 +820,7 @@ export function SettingsWindow() {
     if (!isOpen) return;
     setQuery('');
     setActiveSection('editor');
+    setResetQuestion(null);
     const raf = requestAnimationFrame(() => searchRef.current?.focus());
     return () => cancelAnimationFrame(raf);
   }, [isOpen]);
@@ -917,7 +970,7 @@ export function SettingsWindow() {
 
           <button
             type="button"
-            onClick={() => resetSettings()}
+            onClick={() => resetAll(setResetQuestion)}
             className="flex-shrink-0 h-[26px] px-2.5 rounded-[3px] text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover transition-colors"
           >
             Reset All
@@ -995,6 +1048,24 @@ export function SettingsWindow() {
           </div>
         </div>
       </div>
+      {/* Over the window, in the window's tree: its Escape and Tab are the
+          dialog's (it listens on `window` in the capture phase, ahead of the
+          window's own listener on `document`), and a press on its dim area
+          is not a press on the window's. Cancel is focused: the answer that
+          loses nothing. */}
+      <ConfirmDialog
+        open={Boolean(resetQuestion)}
+        title={resetQuestion?.title}
+        message={resetQuestion?.message}
+        confirmLabel={resetQuestion?.confirmLabel}
+        danger
+        initialFocus="cancel"
+        onConfirm={() => {
+          setResetQuestion(null);
+          resetSettings();
+        }}
+        onCancel={() => setResetQuestion(null)}
+      />
     </div>
   );
 }

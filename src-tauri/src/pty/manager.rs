@@ -353,6 +353,40 @@ impl PtyManager {
         let sessions_map_clone = self.sessions.clone();
         let session_weak = Arc::downgrade(&session);
 
+        // Whether the terminal is asking for a password (spec P4): read from
+        // the line discipline after output, at most every 250 ms, on a thread
+        // of its own; `pty-echo` only when it changes. See echo_watch.rs —
+        // and why there is nothing of the kind on Windows.
+        #[cfg(unix)]
+        let echo_watch = {
+            let probed = Arc::downgrade(&session);
+            let told = app_handle.clone();
+            let id = session_id.clone();
+            super::echo_watch::EchoWatch::start(
+                format!("pty-echo-{session_id}"),
+                super::echo_watch::ECHO_CHECK_INTERVAL,
+                move || {
+                    let session = probed.upgrade()?;
+                    let master = session.master.lock();
+                    super::echo_watch::input_hidden(master.as_ref())
+                },
+                move |secret| {
+                    let payload = crate::models::PtyEchoPayload { session_id: id.clone(), secret };
+                    let _ = told.emit("pty-echo", &payload);
+                },
+            )
+            .map_err(|e| format!("Failed to spawn PTY echo watch thread: {e}"))
+        };
+        #[cfg(unix)]
+        let echo_watch = match echo_watch {
+            Ok(watch) => watch,
+            Err(e) => {
+                // As for the reader below: no shell left behind unseen.
+                let _ = self.kill(&session_id);
+                return Err(e);
+            }
+        };
+
         let reader_thread = thread::Builder::new()
             .name(format!("pty-reader-{session_id}"))
             .spawn(move || {
@@ -382,6 +416,9 @@ impl PtyManager {
                             if chunk.is_empty() {
                                 continue;
                             }
+                            // One flag per chunk; the watch does the rest.
+                            #[cfg(unix)]
+                            echo_watch.output();
                             let filtered = filter.feed(chunk);
                             if !filtered.output.is_empty() {
                                 let payload = PtyOutputPayload {
@@ -475,6 +512,11 @@ impl PtyManager {
                     None
                 };
 
+                // A terminal that ends on a password prompt is told it is not
+                // one any more — before it is told it ended.
+                #[cfg(unix)]
+                echo_watch.finish();
+
                 let exit_payload = PtyExitPayload {
                     session_id: session_id_clone.clone(),
                     exit_code,
@@ -544,6 +586,36 @@ impl PtyManager {
         sender
             .send(data.as_bytes().to_vec())
             .map_err(|_| format!("PTY session is no longer accepting input: {session_id}"))
+    }
+
+    /// Whether the program reading `session_id`'s terminal has its typing
+    /// hidden right now — a password prompt (spec P4) — read from the line
+    /// discipline there and then (echo_watch.rs). `Ok(None)` where that
+    /// cannot be told: an unreadable mode, and Windows, where a ConPTY host
+    /// cannot read its client's console mode at all. An unknown session is
+    /// an error.
+    ///
+    /// The typing guard asks this right before it types on the user's
+    /// behalf, so a prompt the events have not told it of yet — the watch
+    /// reads at most every 250 ms — still stops it.
+    pub fn input_hidden(&self, session_id: &str) -> Result<Option<bool>, String> {
+        let session = {
+            let sessions = self.sessions.lock();
+            sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| format!("PTY session not found: {session_id}"))?
+        };
+        #[cfg(unix)]
+        {
+            let master = session.master.lock();
+            Ok(super::echo_watch::input_hidden(master.as_ref()))
+        }
+        #[cfg(not(unix))]
+        {
+            drop(session);
+            Ok(None)
+        }
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -1194,6 +1266,49 @@ mod canonical_limit_tests {
         let p = probe(true, "raw-big");
         let n = CANON_LINE_LIMIT * 4;
         assert_eq!(p.deliver(n), n + 1, "raw mode must deliver a large paste intact");
+    }
+
+    /// `pty_input_hidden`: the answer the typing guard asks for right before
+    /// it types (spec P4) — read from the terminal there and then, not from
+    /// the last event.
+    #[test]
+    fn input_hidden_reads_the_terminal_of_a_live_session_and_refuses_an_unknown_one() {
+        let mgr = PtyManager::new();
+        assert!(mgr.input_hidden("nope").is_err(), "an unknown session is an error, not an answer");
+        for (id, script, expected) in [("hidden", "stty sane -echo; cat", Some(true)), ("shown", "stty sane; cat", Some(false))] {
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+                .expect("openpty");
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(script);
+            let child = pair.slave.spawn_command(cmd).expect("spawn");
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().expect("reader");
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+            let tx = spawn_writer_thread(pair.master.take_writer().expect("writer"), id).unwrap();
+            mgr.sessions.lock().insert(
+                id.into(),
+                Arc::new(PtySession {
+                    id: id.into(),
+                    shell: "/bin/sh".into(),
+                    created_at: Utc::now(),
+                    master: Mutex::new(pair.master),
+                    input: Mutex::new(Some(tx)),
+                    child: Mutex::new(child),
+                }),
+            );
+            std::thread::sleep(Duration::from_millis(400)); // let `stty` take effect
+            assert_eq!(mgr.input_hidden(id), Ok(expected), "{script}");
+            let _ = mgr.kill(id);
+        }
     }
 
     #[test]

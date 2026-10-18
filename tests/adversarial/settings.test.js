@@ -38,6 +38,9 @@ const SETTINGS_KEYS = [
   'terminalCursorBlink',
   'terminalScrollback',
   'terminalTheme',
+  // Edited by the theme gallery's Import and Delete rather than a control of
+  // its own; still a setting the window edits and persists.
+  'terminalCustomThemes',
   'terminalSuggestions',
   'terminalStickyHeader',
   'terminalCopyOnSelect',
@@ -49,6 +52,8 @@ const SETTINGS_KEYS = [
   'terminalDefaultCwd',
   'terminalDefaultCwdPath',
   'terminalSplitCwd',
+  'terminalHideSingleTabStrip',
+  'terminalEqualizeOnSplit',
   'terminalNotifyAfterSeconds',
   'terminalProgramNotifications',
   'terminalAttentionFlashFocused',
@@ -114,6 +119,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalCursorBlink: false,
       terminalScrollback: 10000,
       terminalTheme: 'dracula',
+      terminalCustomThemes: [{ id: 'custom:probe', label: 'Probe', theme: { background: '#101010' } }],
       terminalSuggestions: false,
       terminalCopyOnSelect: false,
       terminalMouseReporting: false,
