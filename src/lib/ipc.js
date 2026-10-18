@@ -58,6 +58,21 @@ function namesAnotherMachine(path) {
 const MOCK_MAX_KIND_PATHS = 64;
 const MOCK_MAX_KIND_PATH_BYTES = 4096;
 
+/** Folders `git_branch` looks in for a repository, and the longest name it hands back — the backend's (src-tauri/src/fs/git.rs). */
+const MOCK_BRANCH_WALK_MAX = 64;
+const MOCK_BRANCH_CHARS_MAX = 100;
+/** What a branch name may not hold — the backend's `ref_name_ok` and `invisible`. */
+const MOCK_BRANCH_REFUSED = /[\u{0000}-\u{001f}\u{007f}-\u{009f}\u{00ad}\u{034f}\u{061c}\u{115f}\u{1160}\u{17b4}\u{17b5}\u{180b}-\u{180f}\u{200b}\u{200e}\u{200f}\u{2028}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{206f}\u{3164}\u{feff}\u{ffa0}\u{fff9}-\u{fffb}\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f} ~^:?*[\\]/u;
+
+/** A branch name as the backend hands it back (`branch_name`), or null for one it refuses. */
+function mockBranchName(name) {
+  const text = String(name);
+  if (!text || text === '@' || /^[-/]/.test(text) || /[/.]$/.test(text)) return null;
+  if (text.includes('..') || text.includes('//') || text.includes('@{') || MOCK_BRANCH_REFUSED.test(text)) return null;
+  if (!text.split('/').every((part) => !part.startsWith('.') && !part.endsWith('.lock'))) return null;
+  const chars = Array.from(text);
+  return chars.length <= MOCK_BRANCH_CHARS_MAX ? text : `${chars.slice(0, MOCK_BRANCH_CHARS_MAX - 1).join('')}\u{2026}`;
+}
 
 export function isTauri() {
   if (typeof window === 'undefined') return false;
@@ -113,6 +128,12 @@ class BrowserMockBridge {
     // function of the path answering one (or null to let that path move).
     this.trashed = [];
     this.trashRefusal = null;
+    // The repositories `git_branch` knows, by the folder that holds `.git`,
+    // as `{ branch, detached }` — the suites add their own. And every folder
+    // it was asked about, oldest first (the last 200): the suites count IPC
+    // by it.
+    this.gitBranches = { '/workspace': { branch: 'main', detached: false } };
+    this.branchLookups = [];
   }
 
   /**
@@ -507,6 +528,64 @@ class BrowserMockBridge {
             { path: '/workspace/README.md', status: 'untracked', staged: false },
           ],
         };
+      }
+
+      // git_branch — the branch a terminal's folder is on, for the TERMINALS
+      // side bar (src-tauri/src/fs/git.rs `branch_of`). Refused as the backend
+      // refuses: what Tauri cannot read into `dir: String`, in its own words;
+      // and, answered null, by spelling — empty, overlong, holding NUL, `..`
+      // in it, another machine, or not absolute on the platform the mock
+      // plays (`systemInfo.os`: on Windows `C:\…`, `C:/…` and `\\?\C:\…`,
+      // elsewhere `/…`). Then the nearest of 64 folders, from `dir` up, that
+      // `gitBranches` holds a repository for, its name checked as the backend
+      // checks it, and `repo` the folder's `.git`.
+      //
+      // What it does not model, and the backend's own tests cover: there is no
+      // disk here, so any folder spelled right is taken to exist; no links
+      // (none followed, none refused); no mapped network drives; no `.git`
+      // files — worktrees and submodules — and no reftable; no Windows
+      // devices; and nothing is ever unreadable.
+      case 'git_branch': {
+        const wire = JSON.parse(JSON.stringify(args ?? {}));
+        if (!Object.prototype.hasOwnProperty.call(wire, 'dir')) {
+          throw new Error('invalid args `dir` for command `git_branch`: command git_branch missing required key dir');
+        }
+        const { dir } = wire;
+        if (typeof dir !== 'string') {
+          throw new Error(`invalid args \`dir\` for command \`git_branch\`: invalid type: ${dir === null ? 'null' : typeof dir === 'number' ? `integer \`${dir}\`` : typeof dir}, expected a string`);
+        }
+        this.branchLookups.push(dir);
+        if (this.branchLookups.length > 200) this.branchLookups.shift();
+        if (!dir || dir.includes('\0') || new TextEncoder().encode(dir).length > MOCK_MAX_KIND_PATH_BYTES) return null;
+        if (namesAnotherMachine(dir)) return null;
+        const windows = this.systemInfo.os === 'windows';
+        let drive = '';
+        let rest = dir;
+        if (windows) {
+          const match = /^(?:\\\\\?\\)?([A-Za-z]):[\\/](.*)$/s.exec(dir);
+          if (!match) return null;
+          drive = `${match[1].toUpperCase()}:`;
+          rest = match[2];
+        } else if (!dir.startsWith('/')) {
+          return null;
+        }
+        const parts = rest.split(windows ? /[\\/]/ : '/').filter(Boolean);
+        if (parts.includes('..')) return null;
+        const sep = windows ? '\\' : '/';
+        const spell = (names) => (windows ? `${drive}${sep}${names.join(sep)}` : `/${names.join('/')}`);
+        // A key of `gitBranches` as the backend would see the folder: on
+        // Windows the drive's case is not the folder's.
+        const keyOf = (folder) =>
+          Object.keys(this.gitBranches).find((k) => (windows ? k.toLowerCase() === folder.toLowerCase() : k === folder));
+        for (let up = 0; up < MOCK_BRANCH_WALK_MAX && up <= parts.length; up += 1) {
+          const folder = spell(parts.slice(0, parts.length - up));
+          const key = keyOf(folder);
+          const repo = key === undefined ? null : this.gitBranches[key];
+          if (!repo) continue;
+          const branch = mockBranchName(repo.branch ?? '');
+          return branch === null ? null : { branch, detached: repo.detached === true, repo: `${key}${sep}.git` };
+        }
+        return null;
       }
 
       case 'fs_read_dir': {

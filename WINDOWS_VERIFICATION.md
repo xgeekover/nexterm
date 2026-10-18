@@ -940,6 +940,41 @@ Windows-only and has never run.
 - Settings ▸ Terminal: *Progress Bars* off while a bar shows → the tab bar and
   the taskbar both clear at once. *Terminal Bell* off → bells do nothing.
 
+### V41 — the TERMINALS panel says what each terminal is doing
+
+Only the browser mock and the macOS build were tested.
+
+- Terminals in cmd, PowerShell, Git Bash and WSL, each in a git repository →
+  each row's second line shows its branch; the WSL one shows none. `cd` to a
+  folder outside any repository → the branch goes.
+- In cmd, `git switch -c v41-test` → the row shows `v41-test` when the
+  command ends. A second terminal in a subfolder of the same repository
+  follows within a second. Switch back and delete the branch afterwards.
+- A folder on a mapped network drive (`Z:`), and a local link to one
+  (`mklink /D C:\Temp\z Z:\` from an elevated prompt, then `cd C:\Temp\z`) →
+  no branch, and nothing is shown on the network share's side (no access in
+  its log, no credential prompt). Disconnect the drive → the panel does not
+  hang.
+- Drives that Windows does not call network drives: a `subst` drive pointing
+  into a mapped drive (`subst Y: Z:\proj`), a cloud or rclone mount that
+  shows as a local disk, and a volume mounted into a folder. Record for each
+  whether a branch shows and whether the share sees any access; a hang must
+  not spread to other terminals' branches.
+- Four OpenCode terminals with notifications on (see V40) → rows show
+  *OpenCode* and *Running*; when one asks for permission its row says
+  *Waiting* with the message as its last notification; reading it dims the
+  line.
+- *Sort by Attention* on → the waiting terminal moves to the top of its pane
+  and its group to the top; off → your own order. Right-click a row while
+  sorted → *Close Terminals to the Right* is unavailable. Keep the pointer on
+  a row while something becomes waiting → nothing moves and the sort button
+  shows a dot; move off the rows or switch to another app → the order catches
+  up. Double-click a waiting row → that row, not its neighbour, is renamed. On
+  a touch screen, tap a row while another becomes waiting → the tapped row is
+  the one activated.
+- Settings ▸ Terminal: each *Show …* row turns its piece off; with branch,
+  agent and last notification all off the rows are one line.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

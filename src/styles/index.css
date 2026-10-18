@@ -364,6 +364,29 @@ code, kbd, pre, .font-mono {
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
+  /* The TERMINALS side bar (stage 2). The sort toggle says it is pressed
+     with a fill, which this mode repaints away: an edge instead. (A read
+     note and an unread one differ by the unread dot above, not by colour:
+     GrayText, the obvious choice, reads as "disabled", and some
+     high-contrast palettes paint it louder than the text it was meant to
+     quieten.) */
+  [data-sort-toggle][aria-pressed="true"] {
+    outline: 1px solid ButtonText;
+    outline-offset: -1px;
+  }
+  /* The state icons set a colour of their own, which an SVG keeps in this
+     mode (its `preserve-parent-color` only covers an inherited colour): an
+     orange bell on a light high-contrast page is under 3:1. The text colour
+     instead — the word beside each icon says which state it is. */
+  [data-status-icon] {
+    color: CanvasText;
+  }
+  /* "A newer order is waiting" is a dot on the sort button, in a colour
+     this mode would repaint to nothing. */
+  [data-pending-dot] {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

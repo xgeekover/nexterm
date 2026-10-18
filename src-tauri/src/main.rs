@@ -158,6 +158,7 @@ fn main() {
             commands::fs::fs_copy_path,
             commands::fs::fs_set_root,
             commands::fs::git_status,
+            commands::fs::git_branch,
             commands::fs::fs_search,
             commands::fs::fs_list_files,
             commands::fs::fs_path_kinds,

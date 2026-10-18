@@ -84,9 +84,10 @@ const { useEditorStore } = await import('../../src/stores/editorStore.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
+const { useBranchStore } = await import('../../src/stores/branchStore.js');
 const { default: App } = await import('../../src/App.jsx');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -2217,6 +2218,853 @@ const { focusBackTarget, NotificationPopover } = await import('../../src/compone
     results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
   }
 }
+
+// ---- The TERMINALS side bar's status board (stage 2) ----------------------------
+
+/** A terminal row of the side bar, from its opening tag to its own end — it holds spans only, never a div. */
+function terminalRow(html, tabId) {
+  return new RegExp(`<div\\b[^>]*\\sdata-terminal-row="${tabId}"[^>]*>[\\s\\S]*?</div>`).exec(html)?.[0] ?? null;
+}
+
+/** The opening tag of `markup`'s first element. */
+const openingTag = (markup) => /^<[^>]*>/.exec(markup ?? '')?.[0] ?? '';
+
+/** The class list of a tag. */
+const classOf = (tag) => /\sclass="([^"]*)"/.exec(tag ?? '')?.[1] ?? '';
+
+/** The opening tag of the first element in `markup` carrying `attr` (any value), or null. */
+const tagWith = (markup, attr) => new RegExp(`<[a-z]+\\b[^>]*\\s${attr}(?:="[^"]*")?[^>]*>`).exec(markup ?? '')?.[0] ?? null;
+
+/** The value of `attr` in `tag`, entities decoded, or null. */
+const attrOf = (tag, attr) => {
+  const m = new RegExp(`\\s${attr}="([^"]*)"`).exec(tag ?? '');
+  return m ? visibleText(m[1]) : null;
+};
+
+/** The lucide icon an `<svg>` tag draws ("bell-ring"), or null. */
+const iconOf = (tag) => /\bclass="lucide lucide-([a-z0-9-]+)/.exec(tag ?? '')?.[1] ?? null;
+
+/**
+ * The state on a row's second line: `{ tag, state, value, icon, iconTag,
+ * shown, words }`, or null — `shown` what is drawn (short), `words` what is
+ * read out (whole); the same when the short form is the whole one.
+ */
+function statusIn(markup) {
+  const m = /<span\b([^>]*\sdata-status-state="([^"]*)"[^>]*)>(?:(<svg\b[^>]*>)[\s\S]*?<\/svg>)?(?:<span class="tabular-nums">([^<]*)<\/span>|<span aria-hidden="true" class="tabular-nums">([^<]*)<\/span><span class="sr-only">([^<]*)<\/span>)<\/span>/.exec(markup ?? '');
+  if (!m) return null;
+  return {
+    tag: `<span${m[1]}>`,
+    state: m[2],
+    value: /\sdata-status-value="([^"]*)"/.exec(m[1])?.[1] ?? null,
+    iconTag: m[3] ?? '',
+    icon: iconOf(m[3]),
+    shown: m[4] ?? m[5],
+    words: m[4] ?? m[6],
+  };
+}
+
+/** The rows in the order the side bar draws them: group names, `Pane n`, and terminal ids. */
+function sideOrder(html) {
+  return [...html.matchAll(/<div\b[^>]*\sdata-row="[^"]*"[^>]*>[\s\S]*?<\/div>/g)]
+    .map((m) => m[0])
+    .map((row) => /\sdata-terminal-row="([^"]+)"/.exec(row)?.[1] ?? /<span class="truncate">([^<]*)<\/span>/.exec(row.replace(/<!-- -->/g, ''))?.[1] ?? null)
+    .filter(Boolean);
+}
+
+const NOTE_AGO_MS = 3 * 60 * 1000;
+
+/** An agent the side bar believes runs: a record, typed at a prompt into this very shell (`agentRuns`). */
+const running = (id, kind, extra = {}) => ({ agent: { kind, sessionId: `${kind}-1` }, agentTyped: { sessionId: `sess-${id}` }, ...extra });
+
+/**
+ * Three terminals: one with every item; one paused with a read note on a
+ * detached head — the active one, drawn on the selection colour; one with
+ * nothing to say.
+ */
+function arrangeBoard() {
+  reset();
+  const now = Date.now();
+  useTerminalStore.setState({
+    tabs: [
+      tab('sb-1', { title: 'agent', cwd: '/repo/app', ...running('sb-1', 'opencode') }),
+      tab('sb-2', { title: 'paused', cwd: '/detached/x', ...running('sb-2', 'claude') }),
+      tab('sb-3', { title: 'quiet', cwd: '/nowhere' }),
+    ],
+    activeTabId: 'sb-2',
+    groups: [groupOf('group-1', ['sb-1', 'sb-2', 'sb-3'])],
+    activeGroupId: 'group-1',
+    progress: { 'sb-2': { state: 'warning', value: 40 } },
+    notifications: [
+      programNote('n-1', { tabId: 'sb-1', tabTitle: 'agent', title: 'Build', body: 'Permission needed', at: now - NOTE_AGO_MS, read: false }),
+      programNote('n-2', { tabId: 'sb-2', tabTitle: 'paused', title: 'paused', body: 'Build finished', at: now - NOTE_AGO_MS, read: true }),
+    ],
+  });
+  useBranchStore.setState({
+    branches: {
+      '/repo/app': { branch: 'feat/board', detached: false },
+      '/detached/x': { branch: 'abc1234', detached: true },
+      '/nowhere': null,
+    },
+  });
+}
+
+scenario(
+  'RN-99',
+  'a side bar row with every item: agent, state, branch and last note on its second line, each with its words',
+  arrangeBoard,
+  (html) => {
+    const full = terminalRow(html, 'sb-1');
+    expectThat(full, 'the row "agent" is not drawn');
+    // Line 1 as it was: title, pill, folder.
+    expectThat(full.includes('<span class="truncate">agent</span>'), 'the title is not on the row');
+    expectThat(pillIn(full)?.text === '1', 'the unread pill is gone from the first line');
+    expectThat(/truncate-start/.test(full), 'the folder is not on the first line');
+    // Line 2, under the title.
+    const line = tagWith(full, 'data-status-line');
+    expectThat(line && attrOf(line, 'data-status-line') === 'sb-1', `no second line: ${full}`);
+    for (const cls of ['h-[16px]', 'pl-[32px]', 'overflow-hidden']) expectThat(classOf(line).includes(cls), `the second line has no ${cls}: ${line}`);
+    expectThat(full.indexOf('data-status-line') > full.indexOf('<span class="truncate">agent</span>'), 'the second line is not under the title');
+
+    const agent = tagWith(full, 'data-agent');
+    expectThat(attrOf(agent, 'data-agent') === 'opencode', `the agent: ${agent}`);
+    expectText(full, 'OpenCode');
+
+    const status = statusIn(full);
+    expectThat(status?.state === 'waiting', `the state is ${JSON.stringify(status)}, not waiting`);
+    expectThat(status.words === 'Waiting', `the state reads ${JSON.stringify(status.words)}`);
+    // The icon is for the eye; its colour never carries the state alone.
+    expectThat(/aria-hidden="true"/.test(status.iconTag), 'the icon is read out');
+    expectThat(/\btext-vsc-attention\b/.test(status.iconTag), `the waiting icon is not in the attention colour: ${status.iconTag}`);
+
+    const branch = tagWith(full, 'data-branch');
+    expectThat(attrOf(branch, 'data-branch') === 'feat/board', `the branch: ${branch}`);
+    expectThat(attrOf(branch, 'title') === 'Branch feat/board', `the branch's tooltip: ${attrOf(branch, 'title')}`);
+    expectThat(!/data-branch-detached/.test(branch), 'a branch drawn as a detached head');
+    expectThat(iconOf(tagWith(full.slice(full.indexOf(branch)), 'class="lucide')) === 'git-branch', 'a branch without the branch icon');
+    expectThat(full.includes('<bdi>feat/board</bdi>'), 'the branch name is not isolated in a <bdi>');
+
+    const note = tagWith(full, 'data-last-note');
+    expectThat(attrOf(note, 'data-last-note') === 'unread', `the note: ${note}`);
+    expectThat(!/\btext-vsc-muted\b/.test(classOf(note)), 'an unread note is drawn muted');
+    expectThat(attrOf(note, 'title') === 'Build \u{2014} Permission needed\n3m ago', `the note's tooltip: ${JSON.stringify(attrOf(note, 'title'))}`);
+    expectThat(full.includes('<bdi>Build \u{2014} Permission needed</bdi>'), 'the note does not read "title \u{2014} body"');
+
+    // One sentence to a screen reader.
+    const words = visibleText(line ? full.slice(full.indexOf(line)) : '').replace(/\n+/g, '');
+    expectThat(
+      words === 'OpenCode, Waiting, branch feat/board, last notification, unread: Build \u{2014} Permission needed',
+      `the second line reads ${JSON.stringify(words)}`
+    );
+
+    // Paused, at an amount, on a detached head, its note read.
+    const paused = terminalRow(html, 'sb-2');
+    const p = statusIn(paused);
+    expectThat(p?.state === 'progress' && p.value === '40' && p.words === 'Paused 40%', `the paused row: ${JSON.stringify(p)}`);
+    expectThat(p.icon === 'circle-pause' && /\btext-vsc-warn\b/.test(p.iconTag), `a paused state without its icon in the warning colour: ${p.iconTag}`);
+    expectThat(attrOf(tagWith(paused, 'data-agent'), 'data-agent') === 'claude', 'the agent of "paused"');
+    expectText(paused, 'Claude Code');
+    const read = tagWith(paused, 'data-last-note');
+    expectThat(attrOf(read, 'data-last-note') === 'read', `the read note: ${read}`);
+    // Its title is only the terminal's name, so the line is the body alone.
+    expectThat(paused.includes('<bdi>Build finished</bdi>'), 'the read note does not read its body alone');
+
+    // Nothing to say: the line is there, empty, and the row no shorter.
+    const quiet = terminalRow(html, 'sb-3');
+    expectThat(/data-status-line="sb-3"/.test(quiet), 'the quiet row has no second line');
+    for (const attr of ['data-agent', 'data-status-state', 'data-branch', 'data-last-note']) {
+      expectThat(!quiet.includes(attr), `the quiet row draws ${attr}`);
+    }
+  }
+);
+
+scenario(
+  'RN-100',
+  'with the branch, the agent and the last note all off, terminal rows are one line again, folder and group counts kept',
+  () => {
+    arrangeBoard();
+    const set = useSettingsStore.getState().setSetting;
+    set('terminalsPanelBranch', false);
+    set('terminalsPanelAgent', false);
+    set('terminalsPanelLastNote', false);
+  },
+  (html) => {
+    for (const id of ['sb-1', 'sb-2', 'sb-3']) {
+      const row = terminalRow(html, id);
+      expectThat(row, `the row ${id} is not drawn`);
+      const cls = classOf(openingTag(row));
+      expectThat(cls.includes('h-[22px]') && !cls.includes('h-[38px]') && !cls.includes('flex-col'), `the row ${id} is not one line: ${cls}`);
+      // Today's markup: no line boxes, no kept dot slot.
+      expectThat(!row.includes('h-[20px]') && !row.includes('w-[6px]'), `the row ${id} still has two lines' parts`);
+      expectThat(/truncate-start/.test(row), `the folder is gone from ${id}, and only the second line was turned off`);
+    }
+    for (const attr of ['data-status-line', 'data-agent', 'data-status-state', 'data-branch', 'data-last-note']) {
+      expectThat(!new RegExp(`\\s${attr}="`).test(html), `drawn with every item off: ${attr}`);
+    }
+    expectThat(pillIn(terminalRow(html, 'sb-1'))?.text === '1', 'the pill went with the second line');
+    // The group's counts are not a second-line item: one compact mark per
+    // group, which the chip's tooltip carries whatever the settings.
+    expectThat(attrOf(tagWith(sideRow(html, 'group-1'), 'data-group-summary'), 'data-group-summary') === '1 waiting, 1 running', 'the group row lost its counts with the second line');
+  }
+);
+
+scenario(
+  'RN-101',
+  'every terminal row is the same height whatever it holds, a split group\u{2019}s included, with the folder off',
+  () => {
+    arrangeBoard();
+    useSettingsStore.getState().setSetting('terminalsPanelFolder', false);
+    useTerminalStore.setState((s) => ({
+      tabs: [...s.tabs, tab('sb-4', { title: 'gone', exited: true }), tab('sb-5', { title: 'busy', running: true })],
+      groups: [
+        ...s.groups,
+        {
+          id: 'group-2',
+          name: 'Split',
+          createdAt: 0,
+          tree: {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              { type: 'leaf', id: 'pane-s1', tabIds: ['sb-4'], activeTabId: 'sb-4' },
+              { type: 'leaf', id: 'pane-s2', tabIds: ['sb-5'], activeTabId: 'sb-5' },
+            ],
+          },
+          activePaneId: 'pane-s1',
+        },
+      ],
+    }));
+  },
+  (html) => {
+    const ids = ['sb-1', 'sb-2', 'sb-3', 'sb-4', 'sb-5'];
+    for (const id of ids) {
+      const row = terminalRow(html, id);
+      expectThat(row, `the row ${id} is not drawn`);
+      const cls = classOf(openingTag(row));
+      expectThat(/(^|\s)h-\[38px\](\s|$)/.test(cls) && !cls.includes('h-[22px]'), `the row ${id} is not the two-line height: ${cls}`);
+      // The boxes inside are fixed too, and the dot keeps its place whether
+      // or not it is drawn, so a command starting does not move the title.
+      expectThat(row.includes('h-[20px]') && row.includes('h-[16px]'), `the row ${id}'s lines are not fixed: ${row}`);
+      expectThat(/<span aria-hidden="true" class="w-\[6px\] shrink-0/.test(row), `the row ${id} has no kept place for its dot`);
+      expectThat(!/truncate-start/.test(row), `the row ${id} shows its folder with the folder off`);
+    }
+    expectThat(/data-activity="running"/.test(terminalRow(html, 'sb-5')), 'the running dot is not drawn in its place');
+    expectThat(statusIn(terminalRow(html, 'sb-4'))?.state === 'exited', 'the exited row says nothing');
+    // Group and pane rows stay one line, and say which they are: the order
+    // holds still while the pointer moves over any of them (aimHold.js).
+    for (const [name, attr] of [['group-1', 'data-group-row="group-1"'], ['Split', 'data-group-row="group-2"'], ['Pane 1', 'data-pane-row="pane-s1"'], ['Pane 2', 'data-pane-row="pane-s2"']]) {
+      const row = sideRow(html, name);
+      expectThat(row && classOf(openingTag(row)).includes('h-[22px]'), `the row "${name}" is not one line: ${openingTag(row)}`);
+      expectThat(openingTag(row).includes(attr), `the row "${name}" does not carry ${attr}: ${openingTag(row)}`);
+    }
+  }
+);
+
+scenario(
+  'RN-102',
+  'a group row counts its terminals waiting, running and failed, in icons with words; the chip says it once, in words only',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        tab('g-wait', { title: 'wait' }),
+        tab('g-run', { title: 'run', running: true }),
+        tab('g-bar', { title: 'bar' }),
+        tab('g-fail', { title: 'fail', lastExitCode: 2 }),
+        tab('g-gone', { title: 'gone', exited: true, lastExitCode: 1 }),
+        tab('q-1', { title: 'calm', running: true }),
+      ],
+      activeTabId: 'q-1',
+      groups: [groupOf('busy', ['g-wait', 'g-run', 'g-bar', 'g-fail', 'g-gone']), groupOf('quiet', ['q-1'])],
+      activeGroupId: 'quiet',
+      progress: { 'g-bar': { state: 'normal', value: 10 } },
+      notifications: [programNote('w-1', { tabId: 'g-wait', tabTitle: 'wait' })],
+    });
+  },
+  (html) => {
+    const row = sideRow(html, 'busy');
+    expectThat(row, 'the group row is not drawn');
+    const summary = tagWith(row, 'data-group-summary');
+    const label = '1 waiting, 2 running, 1 failed';
+    expectThat(attrOf(summary, 'data-group-summary') === label, `the summary: ${summary}`);
+    // What it counts is TERMINALS, beside a pill counting NOTIFICATIONS.
+    const words = `terminals: ${label}`;
+    expectThat(attrOf(summary, 'aria-label') === words && attrOf(summary, 'title') === words && /\srole="img"/.test(summary), `the summary's words: ${summary}`);
+    const items = [...row.matchAll(/<span\b[^>]*\sdata-summary-item="([^"]+)"\s+data-summary-count="([^"]+)"[^>]*>(<svg\b[^>]*>)/g)].map((m) => [m[1], m[2], iconOf(m[3]), m[3]]);
+    expectThat(
+      JSON.stringify(items.map((i) => i.slice(0, 3))) === JSON.stringify([['waiting', '1', 'bell-ring'], ['running', '2', 'circle-play'], ['failed', '1', 'circle-x']]),
+      `the summary draws ${JSON.stringify(items.map((i) => i.slice(0, 3)))}`
+    );
+    expectThat(/text-vsc-attention/.test(items[0][3]) && /text-vsc-error/.test(items[2][3]) && /aria-hidden="true"/.test(items[0][3]), `the summary's icons: ${JSON.stringify(items)}`);
+    const calmRow = sideRow(html, 'quiet');
+    expectThat(attrOf(tagWith(calmRow, 'data-group-summary'), 'data-group-summary') === '1 running', `the quiet group's summary: ${tagWith(calmRow, 'data-group-summary')}`);
+    // The row's tooltip names both counts for what they count.
+    const rowTitle = attrOf(openingTag(row), 'title');
+    expectThat(rowTitle === `busy \u{2014} 1 unread notification; ${words}. Click to switch to this group`, `the group row's tooltip: ${JSON.stringify(rowTitle)}`);
+
+    const chip = groupChip(html, 'busy');
+    const title = attrOf(openingTag(chip), 'title');
+    expectThat(title.startsWith(`busy \u{2014} 5 terminals (${label})`), `the chip's tooltip: ${JSON.stringify(title)}`);
+    // Said once: the summary's "2 running" and not again as a sentence.
+    expectThat(!title.includes('one of them'), `the chip's tooltip says the activity twice: ${JSON.stringify(title)}`);
+    expectThat(new RegExp(`<span data-group-summary-words="" class="sr-only">, ${label}</span>`).test(chip), `the chip's name does not carry the summary: ${chip}`);
+    expectThat(!/data-group-summary=/.test(chip), 'the chip draws the summary; only its tooltip and name carry it');
+    const calm = groupChip(html, 'quiet');
+    const calmTitle = attrOf(openingTag(calm), 'title');
+    expectThat(calmTitle.startsWith('quiet \u{2014} 1 terminal (1 running)'), `the quiet chip's tooltip: ${JSON.stringify(calmTitle)}`);
+  }
+);
+
+scenario(
+  'RN-103',
+  'a detached head does not pass for a branch: a commit icon and the word',
+  arrangeBoard,
+  (html) => {
+    const row = terminalRow(html, 'sb-2');
+    const tag = tagWith(row, 'data-branch');
+    expectThat(attrOf(tag, 'data-branch') === 'abc1234' && /data-branch-detached=""/.test(tag), `the detached head: ${tag}`);
+    expectThat(attrOf(tag, 'title') === 'Detached HEAD at abc1234', `its tooltip: ${attrOf(tag, 'title')}`);
+    const from = row.slice(row.indexOf(tag));
+    expectThat(iconOf(tagWith(from, 'class="lucide')) === 'git-commit-horizontal', `a detached head drawn with the branch icon: ${from.slice(0, 300)}`);
+    expectThat(/<span class="min-w-0 truncate">detached <!-- --><bdi>abc1234<\/bdi><\/span>/.test(from) || /<span class="min-w-0 truncate">detached <bdi>abc1234<\/bdi><\/span>/.test(from), `the detached head does not say "detached": ${from.slice(0, 400)}`);
+  }
+);
+
+scenario(
+  'RN-104',
+  'each state has a legible icon of its own beside its word, never a character glyph',
+  () => {
+    reset();
+    const ids = ['s-wait', 's-err', 's-prog', 's-pause', 's-work', 's-run', 's-fail', 's-exit'];
+    useTerminalStore.setState({
+      tabs: [
+        tab('s-wait'),
+        tab('s-err'),
+        tab('s-prog'),
+        tab('s-pause'),
+        tab('s-work'),
+        tab('s-run', { running: true }),
+        tab('s-fail', { lastExitCode: 1 }),
+        tab('s-exit', { exited: true }),
+      ],
+      activeTabId: 's-run',
+      groups: [groupOf('states', ids)],
+      activeGroupId: 'states',
+      progress: {
+        's-err': { state: 'error', value: 20 },
+        's-prog': { state: 'normal', value: 60 },
+        's-pause': { state: 'warning', value: 30 },
+        's-work': { state: 'indeterminate', value: null },
+      },
+      notifications: [programNote('sw-1', { tabId: 's-wait', tabTitle: 's-wait' })],
+    });
+  },
+  (html) => {
+    // [state, icon, drawn, read out]: a bar's amount alone is drawn — "In
+    // progress 100%" took 108 of a narrow line's 156 pixels — and the whole
+    // words are read out and are the line's tooltip.
+    const want = {
+      's-wait': ['waiting', 'bell-ring', 'Waiting', 'Waiting'],
+      's-err': ['error', 'circle-alert', 'Error 20%', 'Error 20%'],
+      's-prog': ['progress', 'chart-pie', '60%', 'In progress 60%'],
+      's-pause': ['progress', 'circle-pause', 'Paused 30%', 'Paused 30%'],
+      's-work': ['working', 'loader-circle', 'Working', 'Working'],
+      's-run': ['running', 'circle-play', 'Running', 'Running'],
+      's-fail': ['failed', 'circle-x', 'Failed', 'Failed'],
+      's-exit': ['exited', 'circle-stop', 'Exited', 'Exited'],
+    };
+    for (const [id, [state, icon, shown, words]] of Object.entries(want)) {
+      const s = statusIn(terminalRow(html, id));
+      expectThat(s, `${id} draws no state`);
+      expectThat(
+        s.state === state && s.icon === icon && s.shown === shown && s.words === words,
+        `${id}: ${JSON.stringify([s.state, s.icon, s.shown, s.words])}, not ${JSON.stringify([state, icon, shown, words])}`
+      );
+      expectThat(/\swidth="12"/.test(s.iconTag), `${id}'s icon is not 12px: ${s.iconTag}`);
+      const line = tagWith(terminalRow(html, id), 'data-status-line');
+      expectThat(attrOf(line, 'title') === words, `${id}'s line tooltip does not have the whole words: ${line}`);
+    }
+    // The old characters, which were a smudge (\u{25CC}) and a speck (\u{25B8}) at 11px.
+    for (const id of Object.keys(want)) {
+      const row = terminalRow(html, id);
+      const line = row.slice(row.indexOf('data-status-line'));
+      for (const glyph of ['\u{25C6}', '\u{25D1}', '\u{2016}', '\u{25CC}', '\u{25B8}', '\u{2715}', '\u{25A0}', '!']) {
+        expectThat(!visibleText(line).includes(glyph), `${id}'s state is still drawn as ${glyph}`);
+      }
+    }
+  }
+);
+
+scenario(
+  'RN-105',
+  'when line 2 is narrow: the state never gives way, the branch gives way first, the agent is whole or gone, the note ends in an ellipsis',
+  arrangeBoard,
+  (html) => {
+    const full = terminalRow(html, 'sb-1');
+    const status = statusIn(full);
+    expectThat(/\bshrink-0\b/.test(classOf(status.tag)) && /\bwhitespace-nowrap\b/.test(classOf(status.tag)), `the state can give way: ${status.tag}`);
+    // A share to start from, and nothing it cannot give up: at a line's edge
+    // it is cut by its own ellipsis, never clipped mid-glyph by the line.
+    const note = classOf(tagWith(full, 'data-last-note'));
+    expectThat(/(^|\s)flex-\[1_1_40%\](\s|$)/.test(note) && /(^|\s)min-w-0(\s|$)/.test(note), `the note: ${note}`);
+    expectThat(/<span class="min-w-0 truncate"><bdi>Build \u{2014} Permission needed<\/bdi><\/span><\/span>/u.test(full), 'the note\u{2019}s text does not truncate with an ellipsis');
+    const branch = classOf(tagWith(full, 'data-branch'));
+    expectThat(/(^|\s)shrink-\[1000000\](\s|$)/.test(branch) && /(^|\s)min-w-\[10px\](\s|$)/.test(branch), `the branch does not give way first, down to its icon: ${branch}`);
+    expectThat(!/max-w-\[/.test(branch), `the branch is capped instead of giving way: ${branch}`);
+    // Whole or not at all: it never shrinks to "Ope\u{2026}" or a sliver.
+    const agent = classOf(tagWith(full, 'data-agent'));
+    expectThat(/\bshrink-0\b/.test(agent) && /\bwhitespace-nowrap\b/.test(agent) && !/\btruncate\b/.test(agent), `the agent can be cut down: ${agent}`);
+    const line = tagWith(full, 'data-status-line');
+    expectThat(attrOf(line, 'title') === 'OpenCode \u{2014} Waiting', `the line's tooltip: ${line}`);
+
+    // Wired: the name is left out by measurement, read out when it is, and
+    // the note is told whether it is drawn.
+    const board = readFileSync(new URL('../../src/components/terminal/StatusBoard.jsx', import.meta.url), 'utf8');
+    expectThat(/const agentShown = Boolean\(agent\) && fits;/.test(board), 'not wired: the agent is drawn whether it fits or not');
+    expectThat(/<span key="agent" data-agent-hidden=\{tab\.agent\.kind\} className="sr-only">/.test(board), 'an agent left out for width is no longer read out');
+    expectThat(/noteLine\(note, \{ agentShown \}\)/.test(board), 'the note is not told whether the agent is drawn');
+    expectThat(/agentFits\(\{/.test(board) && /new ResizeObserver\(check\)/.test(board), 'not wired: the agent is not measured against the line, or not again when it is resized');
+  }
+);
+
+scenario(
+  'RN-106',
+  'on the active row, secondary text is the plain foreground, not the muted grey that falls under 4.5:1 there',
+  arrangeBoard,
+  (html) => {
+    const active = terminalRow(html, 'sb-2');
+    const other = terminalRow(html, 'sb-1');
+    expectThat(/\bbg-vsc-selection\b/.test(classOf(openingTag(active))), 'the active row is not on the selection colour');
+    for (const [what, attr] of [['agent', 'data-agent'], ['branch', 'data-branch'], ['read note', 'data-last-note']]) {
+      const cls = classOf(tagWith(active, attr));
+      expectThat(/\btext-vsc-fg\b/.test(cls) && !/\btext-vsc-muted\b/.test(cls), `the active row's ${what} is muted: ${cls}`);
+    }
+    const folder = /<span class="([^"]*truncate-start[^"]*)">/.exec(active)?.[1] ?? '';
+    expectThat(/\btext-vsc-fg\b/.test(folder) && !/\btext-vsc-muted\b/.test(folder), `the active row's folder is muted: ${folder}`);
+    // Elsewhere, muted as before.
+    for (const attr of ['data-agent', 'data-branch']) {
+      expectThat(/\btext-vsc-muted\b/.test(classOf(tagWith(other, attr))), `an inactive row's ${attr} is not muted`);
+    }
+  }
+);
+
+scenario(
+  'RN-107',
+  'read and unread notes differ by a mark, not by colour alone',
+  arrangeBoard,
+  (html) => {
+    const unread = terminalRow(html, 'sb-1');
+    const read = terminalRow(html, 'sb-2');
+    const from = (row) => row.slice(row.indexOf(tagWith(row, 'data-last-note')));
+    expectThat(/^<span\b[^>]*data-last-note="unread"[^>]*><span aria-hidden="true" data-unread-dot=""/.test(from(unread)), `an unread note has no unread dot: ${from(unread).slice(0, 300)}`);
+    expectThat(!/data-unread-dot/.test(from(read)), 'a read note has the unread dot');
+  }
+);
+
+/**
+ * Two groups in the user's order: an idle one, then one split in two panes
+ * whose terminals are in no particular order of urgency.
+ */
+function arrangeSortable(sortOn) {
+  reset();
+  useTerminalStore.setState({
+    tabs: [
+      tab('a-1', { title: 'a-idle' }),
+      tab('a-2', { title: 'a-gone', exited: true }),
+      tab('b-1', { title: 'b-gone', exited: true }),
+      tab('b-2', { title: 'b-wait' }),
+      tab('b-3', { title: 'b-idle' }),
+      tab('b-4', { title: 'b-fail', lastExitCode: 1 }),
+      tab('b-5', { title: 'b-run', running: true }),
+    ],
+    activeTabId: 'a-1',
+    groups: [
+      groupOf('first', ['a-1', 'a-2']),
+      {
+        id: 'second',
+        name: 'second',
+        createdAt: 0,
+        tree: {
+          type: 'split',
+          id: 'split-b',
+          direction: 'horizontal',
+          sizes: [50, 50],
+          children: [
+            { type: 'leaf', id: 'pane-b1', tabIds: ['b-1', 'b-2'], activeTabId: 'b-1' },
+            { type: 'leaf', id: 'pane-b2', tabIds: ['b-3', 'b-4', 'b-5'], activeTabId: 'b-3' },
+          ],
+        },
+        activePaneId: 'pane-b1',
+      },
+    ],
+    activeGroupId: 'first',
+    notifications: [programNote('wait-1', { tabId: 'b-2', tabTitle: 'b-wait' })],
+  });
+  if (sortOn) useSettingsStore.getState().setSetting('terminalsPanelSortAttention', true);
+}
+
+const USER_ORDER = ['first', 'a-1', 'a-2', 'second', 'Pane 1', 'b-1', 'b-2', 'Pane 2', 'b-3', 'b-4', 'b-5'];
+
+scenario(
+  'RN-108',
+  'sorted by attention: the group with a terminal waiting first, each pane most urgent first, the store and the chips untouched',
+  () => arrangeSortable(true),
+  (html) => {
+    const order = sideOrder(html).filter((x) => USER_ORDER.includes(x));
+    const want = ['second', 'Pane 1', 'b-2', 'b-1', 'Pane 2', 'b-4', 'b-5', 'b-3', 'first', 'a-1', 'a-2'];
+    expectThat(JSON.stringify(order) === JSON.stringify(want), `the side bar draws ${JSON.stringify(order)}, not ${JSON.stringify(want)}`);
+    expectThat(/<div\b[^>]*\sdata-sorted="attention"/.test(html), 'the list does not say it is sorted');
+    // Nothing is aimed at, nothing is held, and nothing waits to be shown.
+    expectThat(!/data-order-held=/.test(html) && !/data-order-pending=/.test(html), 'an order held with nothing aimed at');
+    const toggle = tagWith(html, 'data-sort-toggle');
+    expectThat(/aria-pressed="true"/.test(toggle) && attrOf(toggle, 'aria-label') === 'Sort by Attention', `the sort toggle: ${toggle}`);
+    expectThat(attrOf(toggle, 'title').startsWith('Sorted by attention'), `the toggle's tooltip does not explain: ${toggle}`);
+    // A view only: the order the user made is the one kept, and the chips draw it.
+    const s = useTerminalStore.getState();
+    expectThat(JSON.stringify(s.groups.map((g) => g.id)) === '["first","second"]', 'the store\u{2019}s group order changed');
+    expectThat(JSON.stringify(s.groups[1].tree.children[1].tabIds) === '["b-3","b-4","b-5"]', 'the store\u{2019}s pane order changed');
+    expectThat(JSON.stringify(attrOrder(html, 'data-group-chip')) === '["first","second"]', `the chips are sorted too: ${attrOrder(html, 'data-group-chip')}`);
+  }
+);
+
+scenario(
+  'RN-109',
+  'the same terminals unsorted: the user\u{2019}s order exactly, and the toggle not pressed, under the same name',
+  () => arrangeSortable(false),
+  (html) => {
+    const order = sideOrder(html).filter((x) => USER_ORDER.includes(x));
+    expectThat(JSON.stringify(order) === JSON.stringify(USER_ORDER), `the side bar draws ${JSON.stringify(order)}`);
+    expectThat(!/data-sorted=/.test(html), 'the list says it is sorted');
+    const toggle = tagWith(html, 'data-sort-toggle');
+    // One name whatever the state: aria-pressed says which.
+    expectThat(/aria-pressed="false"/.test(toggle) && attrOf(toggle, 'aria-label') === 'Sort by Attention', `the sort toggle: ${toggle}`);
+  }
+);
+
+const BOARD_SETTINGS = [
+  ['terminal.sidebar.showFolder', 'Show Folder', true, 'terminalsPanelFolder'],
+  ['terminal.sidebar.showGitBranch', 'Show Git Branch', true, 'terminalsPanelBranch'],
+  ['terminal.sidebar.showAgentStatus', 'Show Agent and Status', true, 'terminalsPanelAgent'],
+  ['terminal.sidebar.showLastNotification', 'Show Last Notification', true, 'terminalsPanelLastNote'],
+  ['terminal.sidebar.sortByAttention', 'Sort by Attention', false, 'terminalsPanelSortAttention'],
+];
+
+/** The checkbox of the settings row whose key is `key`, and the row's description, from the markup. */
+function settingRow(html, key) {
+  const at = html.indexOf(key);
+  if (at === -1) return null;
+  const rest = html.slice(at);
+  return {
+    at,
+    box: /<input\b[^>]*type="checkbox"[^>]*>/.exec(rest)?.[0] ?? '',
+    description: visibleText(/<p\b[^>]*>([\s\S]*?)<\/p>/.exec(rest)?.[1] ?? ''),
+  };
+}
+
+scenario(
+  'RN-110',
+  'the settings window offers the five side bar rows after the progress bars, at their defaults, each saying what it does',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const progress = html.indexOf('terminal.integrated.progress');
+    const next = html.indexOf('terminal.integrated.suggestions');
+    let last = progress;
+    for (const [key, title, checked] of BOARD_SETTINGS) {
+      expectText(html, title);
+      const row = settingRow(html, key);
+      expectThat(row, `rendered without ${key}`);
+      expectThat(last < row.at && row.at < next, `${key} is not in order after the progress bars`);
+      last = row.at;
+      expectThat(/\schecked=""/.test(row.box) === checked, `${title} is drawn ${checked ? 'unchecked' : 'checked'}: ${row.box}`);
+    }
+    const branch = settingRow(html, 'terminal.sidebar.showGitBranch').description;
+    for (const words of ['.git', 'never on a timer', 'nothing the repository configures is ever run', 'WSL', 'network folder']) {
+      expectThat(branch.includes(words), `Show Git Branch does not say "${words}": ${branch}`);
+    }
+    const sort = settingRow(html, 'terminal.sidebar.sortByAttention').description;
+    for (const words of ['turning this off shows it again', 'Close Terminals to the Right', 'over a terminal or group row', 'a double-click after', 'being renamed', 'leaving the window', 'a dot on the sort button']) {
+      expectThat(sort.includes(words), `Sort by Attention does not say "${words}": ${sort}`);
+    }
+  }
+);
+
+scenario(
+  'RN-111',
+  'the five side bar rows draw what was chosen, each one turned from its default',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+    for (const [, , checked, name] of BOARD_SETTINGS) useSettingsStore.getState().setSetting(name, !checked);
+  },
+  (html) => {
+    for (const [key, title, checked] of BOARD_SETTINGS) {
+      const { box } = settingRow(html, key) ?? { box: '' };
+      expectThat(/\schecked=""/.test(box) === !checked, `${title} is drawn ${checked ? 'checked' : 'unchecked'}, its default: ${box}`);
+    }
+  }
+);
+
+const { keepUserOrderItems, SORTED_REASON, subjectExists, agentFits, compactStatusText, NOTE_SHARE, BRANCH_MIN_PX } = await import(
+  '../../src/components/terminal/statusBoardModel.js'
+);
+const { createAimHold, DOUBLE_CLICK_MS, PRESS_GRACE_MS } = await import('../../src/components/terminal/aimHold.js');
+
+/** A case with no store to arrange and no tree to draw: `body` throws when something is wrong. */
+function check(id, description, body) {
+  const started = Date.now();
+  try {
+    body();
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+check('RN-115', 'what fits on a second line: the agent whole or not at all, at the widths the review measured', () => {
+  // A side bar 220 px wide leaves line 2 156 px; 249 \u{2192} 185; 287 \u{2192} 223; 351 \u{2192} 287.
+  // "OpenCode" is about 50 px at 11px, "Claude Code" about 62, a short state 40\u{2013}60.
+  const line = (innerPx, extra) => ({ innerPx, gapPx: 6, hasBranch: true, hasNote: true, ...extra });
+  const cases = [
+    [line(156, { agentPx: 50, statusPx: 52 }), false],
+    [line(185, { agentPx: 50, statusPx: 52 }), false],
+    [line(223, { agentPx: 50, statusPx: 52 }), true],
+    [line(287, { agentPx: 62, statusPx: 52 }), true],
+    [line(223, { agentPx: 62, statusPx: 60 }), false],
+    // Nothing beside it but the state.
+    [{ innerPx: 120, gapPx: 6, agentPx: 62, statusPx: 52 }, true],
+    [{ innerPx: 110, gapPx: 6, agentPx: 62, statusPx: 52 }, false],
+    // Exactly enough is enough.
+    [{ innerPx: 100, gapPx: 0, agentPx: 40, statusPx: 0, hasNote: true }, true],
+    [{ innerPx: 0, agentPx: 10 }, false],
+  ];
+  for (const [given, want] of cases) {
+    expectThat(agentFits(given) === want, `agentFits(${JSON.stringify(given)}) is ${!want}`);
+  }
+  expectThat(NOTE_SHARE === 0.4 && BRANCH_MIN_PX === 10, `the note's share and the branch's least: ${NOTE_SHARE}, ${BRANCH_MIN_PX}`);
+  for (const [status, want] of [
+    [{ state: 'progress', word: 'In progress', value: 100 }, '100%'],
+    [{ state: 'progress', word: 'In progress' }, 'In progress'],
+    [{ state: 'progress', word: 'Paused', value: 40, paused: true }, 'Paused 40%'],
+    [{ state: 'error', word: 'Error', value: 20 }, 'Error 20%'],
+    [{ state: 'waiting', word: 'Waiting' }, 'Waiting'],
+    [{ state: 'none', word: '' }, ''],
+  ]) {
+    expectThat(compactStatusText(status) === want, `compactStatusText(${JSON.stringify(status)}) is ${JSON.stringify(compactStatusText(status))}`);
+  }
+});
+
+check('RN-112', 'sorted, the menu items that act on the user\u{2019}s order are off and say why; nothing else is touched', () => {
+  const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8');
+  // The item exists under the key the rule names, and every menu of the
+  // panel passes through the rule.
+  expectThat(/key: 'close-right',\s*label: 'Close Terminals to the Right'/.test(panel), 'the tab menu has no "close-right" item for the rule to find');
+  expectThat(/const menuItems = \(\) => keepUserOrderItems\(panelMenuItems\(\), sorted\);/.test(panel), 'not wired: the panel\u{2019}s menus do not pass through keepUserOrderItems');
+  const items = [
+    { key: 'open', label: 'Open' },
+    { key: 'close', label: 'Close' },
+    { key: 'close-others', label: 'Close Others in Pane' },
+    { key: 'close-right', label: 'Close Terminals to the Right' },
+    { type: 'separator', key: 's1' },
+  ];
+  const sortedItems = keepUserOrderItems(items, true);
+  const right = sortedItems.find((i) => i.key === 'close-right');
+  expectThat(right.disabled === true && right.disabledReason === SORTED_REASON, `sorted, "Close Terminals to the Right": ${JSON.stringify(right)}`);
+  expectThat(SORTED_REASON === 'Turn off Sort by Attention to use your own order', `the reason: ${SORTED_REASON}`);
+  for (const item of sortedItems.filter((i) => i.key !== 'close-right')) {
+    expectThat(item === items.find((i) => i.key === item.key), `sorted, ${item.key} was changed too`);
+  }
+  expectThat(keepUserOrderItems(items, false) === items, 'unsorted, the menu was changed');
+});
+
+check('RN-113', 'the order holds while the pointer is over a row, from a press until a double-click\u{2019}s worth after its click, and lets go when the pointer or the window leaves', () => {
+  let now = 0;
+  let timers = [];
+  const setTimer = (fn, ms) => {
+    const t = { fn, at: now + ms };
+    timers.push(t);
+    return t;
+  };
+  const clearTimer = (t) => {
+    timers = timers.filter((x) => x !== t);
+  };
+  const advance = (ms) => {
+    const until = now + ms;
+    for (;;) {
+      const due = timers.filter((t) => t.at <= until).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      timers = timers.filter((t) => t !== due);
+      now = due.at;
+      due.fn();
+    }
+    now = until;
+  };
+  const heard = [];
+  const aim = createAimHold({ onChange: (held) => heard.push(held), setTimer, clearTimer });
+  expectThat(DOUBLE_CLICK_MS >= 500 && PRESS_GRACE_MS >= 300, `the double-click and grace times: ${DOUBLE_CLICK_MS}, ${PRESS_GRACE_MS}`);
+  expectThat(aim.held === false, 'held before anything happened');
+
+  // Over a row, moving or resting, however long: held. A pointer that came
+  // to rest on a row is about to click it.
+  aim.pointerAt(true);
+  advance(60_000);
+  expectThat(aim.held, 'let go while the pointer rested on a row');
+  // Off the rows — empty space, another section — let go at once.
+  aim.pointerAt(false);
+  expectThat(!aim.held, 'held with the pointer off the rows');
+
+  // A click lets go only a double-click's worth after it: the second click
+  // of a double-click lands where the first did.
+  aim.pressed();
+  aim.pressEnded();
+  aim.clicked();
+  advance(DOUBLE_CLICK_MS - 1);
+  expectThat(aim.held, 'let go between the two clicks of a double-click');
+  aim.pressed();
+  aim.pressEnded();
+  aim.clicked();
+  advance(DOUBLE_CLICK_MS - 1);
+  expectThat(aim.held, 'let go right after a double-click\u{2019}s second click');
+  advance(1);
+  expectThat(!aim.held, 'still held a double-click\u{2019}s worth after the click');
+
+  // A long press holds; the finger lifting (it "leaves" then) does not let
+  // go before its click, nor for a double-tap's worth after.
+  aim.pressed();
+  advance(5000);
+  aim.pressEnded();
+  advance(PRESS_GRACE_MS - 1);
+  expectThat(aim.held, 'a tap let go before its click came');
+  aim.clicked();
+  advance(DOUBLE_CLICK_MS - 1);
+  expectThat(aim.held, 'a tap let go before a double-tap could follow');
+  advance(1);
+  expectThat(!aim.held, 'a tap held for good');
+
+  // A press dragged off its row: no click, so the grace runs out.
+  aim.pressed();
+  aim.pressEnded();
+  advance(PRESS_GRACE_MS);
+  expectThat(!aim.held, 'a press with no click held for good');
+
+  // A click with no press (the keyboard's) holds nothing.
+  aim.clicked();
+  advance(DOUBLE_CLICK_MS);
+  expectThat(!aim.held, 'a click without a press held the order');
+
+  // Leaving the window lets go at once, and nothing left over re-holds it.
+  aim.pointerAt(true);
+  aim.pressed();
+  aim.release();
+  expectThat(!aim.held, 'leaving the window did not let go');
+  const before = heard.length;
+  advance(5000);
+  expectThat(heard.length === before && !aim.held, 'a timer left over changed the hold after the window was left');
+  expectThat(heard.every((h, i) => i === 0 || h !== heard[i - 1]), `told the same thing twice: ${JSON.stringify(heard)}`);
+
+  // Disposed, it holds nothing and says nothing.
+  aim.pointerAt(true);
+  aim.pressed();
+  const told = heard.length;
+  aim.dispose();
+  expectThat(!aim.held, 'disposed, it still holds');
+  advance(5000);
+  expectThat(heard.length === told, 'disposed, it still talks');
+
+  // Wired.
+  const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8');
+  const hold = readFileSync(new URL('../../src/components/terminal/aimHold.js', import.meta.url), 'utf8');
+  expectThat(/const \[aiming, recheckAim\] = useAimHold\(sorted, listMenuOpen\);/.test(panel), 'not wired: the panel does not take the hold, frozen while a list menu is open');
+  expectThat(/const holding = aiming \|\| listMenuOpen \|\| liveDraft\?\.kind === 'tab' \|\| liveDraft\?\.kind === 'group';/.test(panel), 'not wired: what holds the order');
+  expectThat(/useLayoutEffect\(\(\) => \{\s*if \(sorted\) recheckAim\(\);\s*\}\);/.test(panel), 'not wired: what is under a still pointer is not asked again after a redraw');
+  expectThat(/window\.addEventListener\('blur', close\)/.test(panel), 'a menu from the panel stays open when the window is left');
+  for (const [what, pattern] of [
+    ['the pointer over a row, or not', /window\.addEventListener\('pointermove', move, \{ capture: true, passive: true \}\)/],
+    ['a press on a row', /window\.addEventListener\('pointerdown', down, true\)/],
+    ['a press is the primary button\u{2019}s (a right-click sends no click to end it)', /if \(e\.button === 0 && onRow\(e\.target\)\) aim\.pressed\(\);/],
+    ['a press ending anywhere', /window\.addEventListener\('pointerup', up, true\)/],
+    ['a click landing', /window\.addEventListener\('click', click, true\)/],
+    ['the pointer leaving the window', /window\.addEventListener\('pointerout', out, true\)/],
+    ['the window losing focus', /window\.addEventListener\('blur', leave\)/],
+    ['the window being hidden', /document\.addEventListener\('visibilitychange', hidden\)/],
+    ['what is under a still pointer', /document\.elementFromPoint\(where\.at\.x, where\.at\.y\)/],
+    ['the pointer over an open menu is not the pointer leaving the rows', /if \(!where\.frozen\) aim\.pointerAt\(onRow\(e\.target\)\);/],
+    ['a finger lifting is not a pointer resting on a row', /if \(e\.pointerType !== 'mouse'\) \{\s*where\.at = null;\s*aim\.pointerAt\(false\);/],
+    ['only rows the sort moves', /'\[data-terminal-row\], \[data-group-row\], \[data-pane-row\]'/],
+  ]) {
+    expectThat(pattern.test(hold), `not wired in aimHold.js: ${what}`);
+  }
+});
+
+check('RN-116', 'a menu or a rename whose subject is gone closes, and holds nothing', () => {
+  const has = {
+    tab: (id) => id === 't-1',
+    group: (id) => id === 'g-1',
+    pane: (id) => id === 'p-1',
+    saved: (id) => id === 's-1',
+    workspace: (id) => id === 'w-1',
+  };
+  for (const [kind, alive, gone] of [['tab', 't-1', 't-2'], ['group', 'g-1', 'g-2'], ['pane', 'p-1', 'p-2'], ['saved', 's-1', 's-2'], ['workspace', 'w-1', 'w-2']]) {
+    expectThat(subjectExists(kind, alive, has), `a ${kind} that exists is taken for gone`);
+    expectThat(!subjectExists(kind, gone, has), `a ${kind} that is gone is taken for one that exists`);
+  }
+  for (const kind of ['empty', 'workspace-bar', 'workspace-list', 'workspace-startup-list', 'workspace-name']) {
+    expectThat(subjectExists(kind, null, has), `${kind} has no subject to lose`);
+  }
+  const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8');
+  expectThat(/const liveMenu = menu && subjectExists\(menu\.kind, menu\.id, has\) \? menu : null;/.test(panel), 'not wired: a menu counts after its subject is gone');
+  expectThat(/const liveDraft = draft && subjectExists\(draft\.kind, draft\.id, has\) \? draft : null;/.test(panel), 'not wired: a rename counts after its subject is gone');
+  expectThat(/if \(menu && !liveMenu\) setMenu\(null\);\s*if \(draft && !liveDraft\) setDraft\(null\);/.test(panel), 'a dead menu or rename is never dropped');
+  expectThat(/open=\{Boolean\(liveMenu\)\}/.test(panel), 'a menu whose subject is gone is still drawn');
+  expectThat(/tab: \(id\) => tabById\.has\(id\) && layout\.some\(\(entry\) => entry\.tabIds\.includes\(id\)\)/.test(panel), 'a terminal is taken to exist without being in any pane');
+});
+
+check('RN-114', 'what keeps the side bar cheap and readable: narrow subscriptions, contrast on the active row, forced colours', () => {
+  // A progress update ten times a second must redraw one line (S9): the
+  // panel reading the bars would redraw every row, and a line declared
+  // inside the panel would be remounted on every one of them.
+  const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8');
+  const board = readFileSync(new URL('../../src/components/terminal/StatusBoard.jsx', import.meta.url), 'utf8');
+  expectThat(!/\bs\.progress\b/.test(panel), 'the TERMINALS panel subscribes to the progress bars');
+  expectThat(/^export const TerminalStatusLine = memo\(function TerminalStatusLine\(/m.test(board), 'the second line is not a memoised module-level component');
+  expectThat(/useTerminalStore\(\(s\) => \(showAgent \? s\.progress\?\.\[tabId\] \?\? null : null\)\)/.test(board), 'the second line does not subscribe to its own bar alone');
+  expectThat(/^export const GroupSummary = memo\(function GroupSummary\(/m.test(board), 'the group summary is not a memoised module-level component');
+  const css = readFileSync(new URL('../../src/styles/index.css', import.meta.url), 'utf8');
+  // 11px text needs 4.5:1. On the active row the muted grey falls short, the
+  // plain foreground does not.
+  const token = (name) => new RegExp(`--vsc-${name}:\\s*(#[0-9a-fA-F]{6})`).exec(css)?.[1] ?? null;
+  const ratio = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  const [fg, muted, selection, sidebar] = ['fg', 'muted', 'selection', 'sidebar-bg'].map(token);
+  expectThat(ratio(fg, selection) >= 4.5, `the foreground on the selection is ${ratio(fg, selection).toFixed(2)}:1`);
+  expectThat(ratio(muted, sidebar) >= 4.5, `muted text on the side bar is ${ratio(muted, sidebar).toFixed(2)}:1`);
+  const forced = /@media \(forced-colors: active\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+  expectThat(/\[data-sort-toggle\]\[aria-pressed="true"\] \{\s*outline: 1px solid ButtonText;/.test(forced), 'in forced colours, the pressed sort toggle has no edge');
+  expectThat(/\[data-unread-dot\] \{\s*forced-color-adjust: none;\s*background: Highlight;/.test(forced), 'in forced colours, the unread dot is not drawn');
+  expectThat(/\[data-status-icon\] \{\s*color: CanvasText;/.test(forced), 'in forced colours, the state icons keep their own colours');
+  for (const file of [board]) expectThat((file.match(/data-status-icon=""/g) || []).length === 2, 'a state icon (line 2 or the group summary) is not marked for forced colours');
+  expectThat(!/\[data-last-note[^\]]*\][^{]*\{[^}]*GrayText/.test(forced), 'in forced colours, a read note is painted GrayText again (it reads as disabled, and some palettes make it the loudest text)');
+  expectThat(/\[data-pending-dot\] \{\s*forced-color-adjust: none;\s*background: Highlight;/.test(forced), 'in forced colours, the "newer order waiting" dot is black on black');
+  expectThat(/data-pending-dot=""/.test(panel), 'the "newer order waiting" dot is not marked for forced colours');
+  // Fast Refresh swaps a module in place only when it exports components
+  // alone; one helper exported beside them reloads the whole app on every edit.
+  for (const [file, source] of [['TerminalsPanel.jsx', panel], ['StatusBoard.jsx', board]]) {
+    // A component is a capitalised function, or a capitalised const made by
+    // memo() or forwardRef(); a capitalised string (`ROW`) is not one.
+    const exported = [...source.matchAll(/^export (const|function|let|class|var) (\w+)(.*)$/gm)].map((m) => ({ kind: m[1], name: m[2], rest: m[3] }));
+    const helpers = exported.filter(
+      ({ kind, name, rest }) => !/^[A-Z]/.test(name) || (kind === 'const' ? !/^ = (?:memo|forwardRef)\(/.test(rest) : kind !== 'function')
+    );
+    expectThat(exported.length > 0 && helpers.length === 0, `${file} exports more than components: ${JSON.stringify(helpers.map((h) => h.name))}`);
+    expectThat(!/^export \{/m.test(source), `${file} re-exports something`);
+  }
+});
 
 // ---- What the stylesheet must keep ------------------------------------------------
 

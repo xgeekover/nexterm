@@ -44,6 +44,10 @@ that layout the next time you open it.
   pane gets an orange ring and its tab, its group and its row in the side bar
   get a count. `⌘⇧U` (`Ctrl+Shift+U` elsewhere) goes straight to the latest
   one. A program that reports progress draws a thin bar under its tab.
+- **The TERMINALS panel is a status board.** Each terminal's row says which
+  agent runs in it and what it is doing, which git branch its folder is on,
+  and the last thing it told you; each group's row counts what is waiting,
+  running and failed. *Sort by Attention* puts what needs you first.
 - **Save a group, or the whole desk.** *Save Group…* keeps one group's layout
   and each terminal's current directory. *Save All Groups…* snapshots every
   group at once under a name, and restoring it brings the entire session back —
@@ -483,6 +487,56 @@ One limit applies to all of this: a terminal is read only once it has been on
 screen. A background tab of a restored session that you have not opened since
 launch raises nothing until you first show it, and what it printed before that
 is replayed as history, without bells or progress.
+
+### The TERMINALS panel as a status board
+
+Each terminal's row in the TERMINALS side bar has two lines. The first is the
+one it always had: its name, its unread count and its folder. The second says
+what it is doing right now:
+
+- **The agent and its state.** *Claude Code* or *OpenCode* when one runs in
+  the terminal, then a state, always as a symbol and a word: *Waiting* when it
+  has an unread entry in the bell (that is the only thing that means waiting —
+  nothing is guessed), *Error*, *In progress 40%*, *Paused 40%* and *Working*
+  from the program's progress report, *Running* while a command runs,
+  *Failed* when the last one exited with an error, *Exited* when the shell is
+  gone.
+- **The git branch of its folder**, or *detached* and the commit when the head
+  is detached.
+- **The last notification**, dimmed once read. Hover it for the whole text
+  and how long ago it came.
+
+Each group's row counts its terminals that are waiting, running and failed,
+and a group chip says the same when you hover it.
+
+The branch is read from the folder's `.git/HEAD` file. No git program runs
+for it, so nothing a repository configures can run, and there is no process
+per terminal. It is read again when the terminal changes folder, when a
+command ends in any terminal of the same repository, when the open folder's
+git status changes, when the terminal's program sends a notification or rings
+the bell, and when you switch to the terminal; it is never polled. There is
+no branch for a folder on another machine (a network share or a mapped network
+drive, including one reached through a link), for a WSL terminal (Windows
+reaches WSL's files over the network), for a repository in git's newer
+reftable format, for a `.git` that cannot be read, or for a branch whose name
+hides invisible characters. A lookup that takes longer than three seconds
+shows no branch, and that folder is not asked again until the first answer
+has come back.
+
+**Sort by Attention**, the button in the panel's header or Settings ▸
+Terminal, lists waiting terminals first, then failed ones, then running ones,
+in each pane and across groups. It only changes what is shown: turn it off and
+your own order is back, and menu items that act on your order, such as *Close
+Terminals to the Right*, are unavailable while it is on. The order holds still
+while you aim: while the pointer is on a row, from a press until its click and
+a possible double-click are done, while a menu from the list is open and while
+you rename a row. A dot on the sort button says the list is waiting to
+re-sort; moving the pointer off the rows or switching to another app lets it
+catch up at once.
+
+Settings ▸ Terminal has *Show Folder*, *Show Git Branch*, *Show Agent and
+Status* and *Show Last Notification*. With the last three off, rows are one
+line again.
 
 ### Keyboard shortcuts
 

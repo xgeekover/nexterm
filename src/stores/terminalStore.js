@@ -11,6 +11,7 @@ import { saveState, loadVersionedState, SCHEMA_VERSION } from '../lib/persistenc
 import { isViewShown, useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
 import { notificationFor, submitsLine } from '../lib/tabActivity.js';
+import { agentRuns } from '../lib/terminalStatus.js';
 import { createRateLimiter, routeProgramNotification, windowAttention } from '../lib/programNotifications.js';
 import { PROGRESS_INTERVAL_MS, createLatestThrottle, nextProgress, sameProgress } from '../lib/terminalProgress.js';
 import {
@@ -1036,6 +1037,75 @@ const commandEndsBySession = new Map();
 const endsOf = (sessionId) => commandEndsBySession.get(sessionId) ?? 0;
 
 /**
+ * Who wants to hear that a command ended (`onCommandEnded`).
+ *
+ * An event rather than a field of the store: what hears it — the side bar's
+ * branch lookups (src/hooks/useBranchLookups.js), as a `git checkout` changes
+ * the branch — needs the moment, not a value to render, and a counter in the
+ * state would be one more thing every subscriber of the store compares.
+ */
+const commandEndListeners = new Set();
+
+/**
+ * Call `listener(tabIds)` each time a command ends — the shell's OSC 133 "D"
+ * (`pty-command-done`) — with the ids of the tabs holding that shell, once
+ * the store has taken the end in. Returns what stops it. A listener that
+ * throws is reported and the rest still hear it.
+ */
+export function onCommandEnded(listener) {
+  if (typeof listener !== 'function') return () => {};
+  commandEndListeners.add(listener);
+  return () => {
+    commandEndListeners.delete(listener);
+  };
+}
+
+function commandEnded(tabIds) {
+  if (tabIds.length === 0) return;
+  for (const listener of [...commandEndListeners]) {
+    try {
+      listener(tabIds);
+    } catch (err) {
+      console.warn('[TerminalStore] a command-end listener failed:', err);
+    }
+  }
+}
+
+/**
+ * Who wants to hear that a program in a terminal called for the user
+ * (`onProgramSignal`) — for the same reason as `commandEndListeners`: an
+ * agent that switched branches says nothing else until it exits, and its
+ * message is the moment to look at the branch again.
+ */
+const programSignalListeners = new Set();
+
+/**
+ * Call `listener(tabId)` each time a program in terminal `tabId` notifies
+ * (`notifyFromProgram` — not for a note read from output kept from before
+ * the terminal was shown, which is old news) or rings its bell
+ * (`bellFromTerminal`, unless the bell is turned off), whatever becomes of
+ * it. Returns what stops it. A listener that throws is reported and the rest
+ * still hear it.
+ */
+export function onProgramSignal(listener) {
+  if (typeof listener !== 'function') return () => {};
+  programSignalListeners.add(listener);
+  return () => {
+    programSignalListeners.delete(listener);
+  };
+}
+
+function programSignalled(tabId) {
+  for (const listener of [...programSignalListeners]) {
+    try {
+      listener(tabId);
+    } catch (err) {
+      console.warn('[TerminalStore] a program-signal listener failed:', err);
+    }
+  }
+}
+
+/**
  * tab id -> the line being typed at its prompt, followed from every write
  * (`followCommandLine` in src/lib/startupCommands.js). Kept out of the store:
  * it changes with every key and nothing draws it. What it yields is: a tab's
@@ -1870,15 +1940,19 @@ export const useTerminalStore = create((set, get, api) => {
    * it: watched from this line on, so its exit ends the record, and offered
    * back after a restart if it is still running when the app closes.
    *
-   * Not over a record that is already live: NexTerm records its own agents
-   * (`startAgent`, `resumeAgent`) before typing them, and this sees that line
-   * too. A record still being OFFERED is replaced — the user started the
-   * agent themselves instead of pressing Resume. And not in a shell that has
-   * never reported a command's end (fish, sh): nothing could ever end the
-   * record, and an agent long gone would be offered back on every launch.
+   * Not over a record that is live — believed to be running (`agentRuns`):
+   * NexTerm records its own agents (`startAgent`, `resumeAgent`) before
+   * typing them, and this sees that line too. A record still being OFFERED is
+   * replaced — the user started the agent themselves instead of pressing
+   * Resume. So is one nothing watches: typed blind into a shell whose first
+   * prompt came too late (conda, nvm), that agent's exit could never end its
+   * record, and every agent typed by hand after it went unrecorded and
+   * unnamed. And not in a shell that has never reported a command's end
+   * (fish, sh): nothing could ever end the record, and an agent long gone
+   * would be offered back on every launch.
    */
   const noteTypedAgent = (tab, line) => {
-    if (tab.agent && !tab.agentResumeOffered) return;
+    if (tab.agent && !tab.agentResumeOffered && agentRuns(tab)) return;
     if (endsOf(tab.sessionId) === 0) return;
     const typed = agentFromCommandLine(line);
     if (!typed) return;
@@ -2808,6 +2882,7 @@ export const useTerminalStore = create((set, get, api) => {
       if (!tab) return null;
       const settings = useSettingsStore.getState();
       if (settings.terminalBellAttention === false) return { inApp: false, flash: false };
+      programSignalled(tabId);
       const route = routeProgramNotification({
         occasion: 'always',
         activeTab: state.activeTabId === tabId,
@@ -2967,6 +3042,7 @@ export const useTerminalStore = create((set, get, api) => {
           console.warn('[TerminalStore] could not show a desktop notification:', err);
         });
       }
+      if (!fromHistory) programSignalled(tabId);
       return route;
     },
 
@@ -4057,6 +4133,7 @@ export const useTerminalStore = create((set, get, api) => {
         for (const t of get().tabs) {
           if (t.sessionId === session_id && !t.agent) forgetAgentTitle(t.id);
         }
+        commandEnded(ended);
       }));
       unlisteners.push(await listen('pty-exit', (payload) => {
         const { session_id, exit_code } = payload || {};

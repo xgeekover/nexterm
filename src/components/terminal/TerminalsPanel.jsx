@@ -1,7 +1,8 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Archive,
+  ArrowDownWideNarrow,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -17,19 +18,55 @@ import {
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
+import { useSettingsStore } from '../../stores/settingsStore.js';
 import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
 import { UnreadPill } from './AttentionIndicators.jsx';
+import { GroupSummary, TerminalStatusLine } from './StatusBoard.jsx';
+import {
+  LIST_MENUS,
+  keepUserOrderItems,
+  secondaryText,
+  subjectExists,
+  summaryWords,
+  useGroupRanks,
+  useGroupSummaryLabels,
+  useRanksHeldWhile,
+  useTabRanks,
+} from './statusBoardModel.js';
+import { useAimHold } from './aimHold.js';
 import { StartupCommandsDialog } from './StartupCommandsDialog.jsx';
 import { activityLabel } from '../../lib/tabActivity.js';
 import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js';
 import { startupCommandOf, startupCount } from '../../lib/startupCommands.js';
+import { sortByAttention } from '../../lib/terminalStatus.js';
 import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
 
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
 const INDENT = 10;
+
+/**
+ * A terminal row while any second-line item is on (S1): two lines in ONE
+ * height for every terminal row, whatever each one holds — a row with no
+ * agent, no branch and nothing said is as tall as one with all three. So no
+ * row changes height when a status arrives or leaves, and nothing below it
+ * moves under the pointer. 20px for the first line (the 22px row's content),
+ * 16px for the second, 1px of air above and below.
+ *
+ * With every second-line item off the row is `ROW`, exactly as before.
+ */
+const TAB_ROW_TWO_LINE = 'h-[38px] flex flex-col justify-center pr-2 text-ui cursor-default select-none w-full text-left';
+const LINE_ONE = 'h-[20px] flex items-center gap-1.5 min-w-0';
+/**
+ * The second line starts under the title: the icon (14px), a gap (6px), the
+ * activity dot's slot (6px) and another gap (6px). The dot's slot is kept on
+ * two-line rows even with no dot in it, so a command starting — the dot
+ * appearing — does not push the title sideways.
+ */
+const LINE_TWO_INDENT = 'pl-[32px]';
+
 
 /**
  * Left padding for a row at tree depth `level` (0 = group). Level 1 lands at
@@ -126,6 +163,15 @@ export function TerminalsPanel() {
   // this panel cannot describe one terminal's directory differently.
   const homeDir = useSystemStore((s) => s.homeDir);
   const platform = useSystemStore((s) => s.os);
+  // What each terminal row shows (S8). Booleans, so a setting elsewhere
+  // changing redraws nothing here.
+  const showFolder = useSettingsStore((s) => s.terminalsPanelFolder !== false);
+  const showBranch = useSettingsStore((s) => s.terminalsPanelBranch !== false);
+  const showAgent = useSettingsStore((s) => s.terminalsPanelAgent !== false);
+  const showLastNote = useSettingsStore((s) => s.terminalsPanelLastNote !== false);
+  const sorted = useSettingsStore((s) => s.terminalsPanelSortAttention === true);
+  const setSetting = useSettingsStore((s) => s.setSetting);
+  const twoLine = showBranch || showAgent || showLastNote;
 
   const switchTab = useTerminalStore((s) => s.switchTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
@@ -172,19 +218,105 @@ export function TerminalsPanel() {
 
   const tabById = useMemo(() => new Map(tabs.map((t) => [t.id, t])), [tabs]);
 
-  /** [{ group, panes: [{ pane, direction }], tabCount }] in switcher order. */
+  /**
+   * [{ group, index, panes: [{ pane, direction }], tabIds, tabCount }] in
+   * switcher order — the user's. `index` is the group's place in it, which
+   * names an unnamed group whatever order the side bar shows; `tabIds` are
+   * all of its terminals, the same array for as long as `groups` is.
+   */
   const layout = useMemo(
     () =>
-      groups.map((group) => {
+      groups.map((group, index) => {
         const panes = collectPanes(group.tree);
-        return {
-          group,
-          panes,
-          tabCount: panes.reduce((n, { pane }) => n + pane.tabIds.length, 0),
-        };
+        const tabIds = panes.flatMap(({ pane }) => pane.tabIds);
+        return { group, index, panes, tabIds, tabCount: tabIds.length };
       }),
     [groups]
   );
+
+  /**
+   * Sorted by attention (S7): the groups by their most urgent terminal, and
+   * the terminals of each pane by their own state — a VIEW of the store's
+   * order, never a change to it, so turning the sort off shows the user's
+   * order again exactly. Stable: equals keep the user's order. Only the
+   * ranks are subscribed to, never the bars themselves (StatusBoard.jsx).
+   *
+   * The arrow keys walk the rows in the order they are drawn (`onKeyDown`
+   * reads them off the DOM), so the keyboard follows the sorted order too.
+   * Nothing in this panel can be dragged, so there is no drag to switch off
+   * while sorted; the group chips above the terminals keep the user's order
+   * and stay draggable, since that is the order they change.
+   */
+  const liveTabRanks = useTabRanks(sorted);
+  const liveGroupRanks = useGroupRanks(sorted, layout);
+
+  // A menu, or a name being edited, whose subject is gone is no menu and no
+  // edit: ⌘W closing the terminal being renamed unmounts the input without a
+  // blur, and a menu whose terminal closed under it drew empty — and either
+  // held the sorted order for the rest of the session. They count for
+  // nothing from the render the subject goes in, and are dropped (below).
+  const has = {
+    tab: (id) => tabById.has(id) && layout.some((entry) => entry.tabIds.includes(id)),
+    group: (id) => layout.some((entry) => entry.group.id === id),
+    pane: (id) => layout.some((entry) => entry.panes.some(({ pane }) => pane.id === id)),
+    saved: (id) => savedGroups.some((entry) => entry.id === id),
+    workspace: (id) => savedWorkspaces.some((entry) => entry.id === id),
+  };
+  const liveMenu = menu && subjectExists(menu.kind, menu.id, has) ? menu : null;
+  const liveDraft = draft && subjectExists(draft.kind, draft.id, has) ? draft : null;
+  useEffect(() => {
+    if (menu && !liveMenu) setMenu(null);
+    if (draft && !liveDraft) setDraft(null);
+  }, [menu, liveMenu, draft, liveDraft]);
+  const listMenuOpen = Boolean(liveMenu) && LIST_MENUS.has(liveMenu.kind);
+
+  // The drawn order holds still while it is aimed at (S7, revised): the
+  // pointer over a row, a press until its click and a double-click's worth
+  // after (aimHold.js), a menu from the list open, a row's name being edited
+  // in place.
+  const [aiming, recheckAim] = useAimHold(sorted, listMenuOpen);
+  const holding = aiming || listMenuOpen || liveDraft?.kind === 'tab' || liveDraft?.kind === 'group';
+  // What is under a pointer that did not move can change with a redraw: a
+  // row closed from under it, a menu that covered the rows gone. Asked after
+  // every redraw of the sorted list, before it is painted.
+  useLayoutEffect(() => {
+    if (sorted) recheckAim();
+  });
+  const tabRanks = useRanksHeldWhile(holding, liveTabRanks);
+  const groupRanks = useRanksHeldWhile(holding, liveGroupRanks);
+  const shownLayout = useMemo(
+    () => (sorted ? sortByAttention(layout, (entry) => groupRanks[entry.group.id]) : layout),
+    [sorted, layout, groupRanks]
+  );
+  /** A pane's terminals in the order the side bar draws them. */
+  const shownOrder = (tabIds) => (sorted ? sortByAttention(tabIds, (id) => tabRanks[id]) : tabIds);
+  // Held, the drawn order can be behind the live one, and the side bar says
+  // so on its sort button rather than looking current. Worked out only while
+  // something is held, by comparing the two ORDERS (ranks can differ and
+  // still sort the same).
+  const orderKey = (gRanks, tRanks) =>
+    sortByAttention(layout, (entry) => gRanks[entry.group.id])
+      .map(({ group, panes }) => `${group.id}:${panes.map(({ pane }) => sortByAttention(pane.tabIds, (id) => tRanks[id]).join(',')).join('|')}`)
+      .join(';');
+  const orderPending =
+    sorted &&
+    holding &&
+    (tabRanks !== liveTabRanks || groupRanks !== liveGroupRanks) &&
+    orderKey(groupRanks, tabRanks) !== orderKey(liveGroupRanks, liveTabRanks);
+
+  /** Each group's summary in words, for its row's tooltip (the row draws it as `GroupSummary`). */
+  const groupSummaries = useGroupSummaryLabels(useMemo(() => layout.map((entry) => entry.tabIds), [layout]));
+
+  // A menu from the panel closes when the window is left, as a native one
+  // does: a menu left open across an app switch would hold a sorted order
+  // still for as long as the user is elsewhere — or, released, let the list
+  // re-sort behind it.
+  useEffect(() => {
+    if (!menu) return undefined;
+    const close = () => setMenu(null);
+    window.addEventListener('blur', close);
+    return () => window.removeEventListener('blur', close);
+  }, [menu]);
 
   /** Which group and pane hold `tabId` right now. */
   const locate = (tabId) => {
@@ -555,7 +687,9 @@ export function TerminalsPanel() {
     setMenu({ x: e.clientX, y: e.clientY, kind, id });
   };
 
-  const menuItems = () => {
+  const menuItems = () => keepUserOrderItems(panelMenuItems(), sorted);
+
+  const panelMenuItems = () => {
     if (!menu) return [];
     const at = { x: menu.x, y: menu.y };
     if (menu.kind === 'group') {
@@ -602,7 +736,16 @@ export function TerminalsPanel() {
     next?.focus();
   };
 
-  /** One terminal row, rendered at `level` (1 in a flat group, 2 in a split one). */
+  /**
+   * One terminal row, rendered at `level` (1 in a flat group, 2 in a split one).
+   *
+   * One line, as it always was, while every second-line item is off; two
+   * lines of one fixed height while any is on (`TAB_ROW_TWO_LINE`). The
+   * first line is the same in both: icon, activity dot, title, unread pill,
+   * and the folder on the right (`showFolder`). The second is its own
+   * component (`TerminalStatusLine`), subscribed to its own tab's pieces, so
+   * a program's progress redraws that line and nothing else in the panel.
+   */
   const renderTab = (tab, level, isActiveGroup, paneActiveTabId) => {
     const editing = draft?.kind === 'tab' && draft.id === tab.id;
     const isActive = isActiveGroup && tab.id === activeTabId;
@@ -610,10 +753,21 @@ export function TerminalsPanel() {
     const isPaneVisible = !isActive && tab.id === paneActiveTabId;
     const unread = unreadCounts[tab.id] ?? 0;
     const status = [activityLabel(tab), unread > 0 ? unreadLabel(unread) : ''].filter(Boolean).join(', ');
+    const folder =
+      showFolder && tab.cwd ? (
+        // The END of a path is the part that identifies it; the front is
+        // the part every terminal shares. So this drops leading segments
+        // first (`…/project/src`) and, when even that will not fit, lets
+        // the ellipsis fall at the START instead of the end.
+        <span className={cn('ml-auto text-ui-sm shrink-0 truncate-start max-w-[45%]', secondaryText(isActive))}>
+          <bdi>{cwdLabel(tab.cwd, { platform, homeDir })}</bdi>
+        </span>
+      ) : null;
     return (
       <div
         key={tab.id}
         data-row
+        data-terminal-row={tab.id}
         role="button"
         tabIndex={0}
         onClick={() => activateTab(tab.id)}
@@ -631,7 +785,7 @@ export function TerminalsPanel() {
         // cannot describe one terminal differently.
         title={status ? `${tab.cwd || tab.title} — ${status}` : tab.cwd || tab.title}
         className={cn(
-          ROW,
+          twoLine ? TAB_ROW_TWO_LINE : ROW,
           'relative',
           isActive
             ? 'bg-vsc-selection text-vsc-selection-fg'
@@ -639,22 +793,44 @@ export function TerminalsPanel() {
         )}
       >
         <IndentGuides level={level} />
-        <TermIcon size={14} className="shrink-0 text-vsc-muted" />
-        {editing ? (
-          renameInput
+        {twoLine ? (
+          <>
+            <span className={LINE_ONE}>
+              <TermIcon size={14} className="shrink-0 text-vsc-muted" />
+              {editing ? (
+                renameInput
+              ) : (
+                <>
+                  <span aria-hidden="true" className="w-[6px] shrink-0 flex items-center">
+                    <ActivityDot tab={tab} />
+                  </span>
+                  <span className="truncate">{tab.title}</span>
+                  <UnreadPill count={unread} />
+                  {folder}
+                </>
+              )}
+            </span>
+            <TerminalStatusLine
+              tab={tab}
+              showAgent={showAgent}
+              showBranch={showBranch}
+              showLastNote={showLastNote}
+              active={isActive}
+              className={LINE_TWO_INDENT}
+            />
+          </>
         ) : (
           <>
-            <ActivityDot tab={tab} />
-            <span className="truncate">{tab.title}</span>
-            <UnreadPill count={unread} />
-            {tab.cwd && (
-              // The END of a path is the part that identifies it; the front is
-              // the part every terminal shares. So this drops leading segments
-              // first (`…/project/src`) and, when even that will not fit, lets
-              // the ellipsis fall at the START instead of the end.
-              <span className="ml-auto text-ui-sm text-vsc-muted shrink-0 truncate-start max-w-[45%]">
-                <bdi>{cwdLabel(tab.cwd, { platform, homeDir })}</bdi>
-              </span>
+            <TermIcon size={14} className="shrink-0 text-vsc-muted" />
+            {editing ? (
+              renameInput
+            ) : (
+              <>
+                <ActivityDot tab={tab} />
+                <span className="truncate">{tab.title}</span>
+                <UnreadPill count={unread} />
+                {folder}
+              </>
             )}
           </>
         )}
@@ -740,6 +916,39 @@ export function TerminalsPanel() {
       <div className="h-panel-header shrink-0 flex items-center justify-between px-3 border-b border-vsc-border select-none">
         <span className="text-ui-sm uppercase tracking-wide font-semibold text-vsc-fg">Terminals</span>
         <div className="flex items-center gap-0.5">
+          {/* The Sort by Attention setting, where its effect is: a list in an
+              order other than the tab strip's needs to say so, and a pressed
+              button is that. One name whatever its state — `aria-pressed`
+              says which — and the explanation in its tooltip. While the
+              drawn order is held behind a newer one, a dot on it says so. */}
+          <button
+            type="button"
+            aria-label="Sort by Attention"
+            aria-pressed={sorted}
+            data-sort-toggle=""
+            data-order-pending={orderPending ? '' : undefined}
+            onClick={() => setSetting('terminalsPanelSortAttention', !sorted)}
+            title={
+              sorted
+                ? `Sorted by attention: waiting first, then failed, running, idle, exited. Click for your own order.${
+                    orderPending ? '\nA newer order is waiting until you stop aiming at a row.' : ''
+                  }`
+                : 'Waiting first, then failed, running, idle, exited. Your own order comes back when you turn it off.'
+            }
+            className={cn(
+              'relative p-1 rounded-sm hover:text-vsc-fg-bright hover:bg-vsc-item-hover',
+              sorted ? 'text-vsc-fg-bright bg-vsc-item-active' : 'text-vsc-muted'
+            )}
+          >
+            <ArrowDownWideNarrow size={16} aria-hidden="true" />
+            {orderPending && (
+              <span
+                aria-hidden="true"
+                data-pending-dot=""
+                className="pointer-events-none absolute top-[3px] right-[3px] w-[5px] h-[5px] rounded-full bg-vsc-attention"
+              />
+            )}
+          </button>
           <button
             type="button"
             onClick={() => createGroup()}
@@ -796,9 +1005,11 @@ export function TerminalsPanel() {
         ref={listRef}
         onKeyDown={onKeyDown}
         onContextMenu={(e) => openMenu(e, 'empty', null)}
+        data-sorted={sorted ? 'attention' : undefined}
+        data-order-held={sorted && holding ? '' : undefined}
         className="flex-1 overflow-y-auto py-1"
       >
-        {layout.map(({ group, panes, tabCount }, gi) => {
+        {shownLayout.map(({ group, index: gi, panes, tabIds: groupTabIds, tabCount }) => {
           const groupCollapsed = collapsed.has(group.id);
           const isActiveGroup = group.id === activeGroupId;
           const isSplit = panes.length > 1;
@@ -806,13 +1017,20 @@ export function TerminalsPanel() {
           // The pane level only exists on screen when the group is split.
           const tabLevel = isSplit ? 2 : 1;
           // Summed over every pane, so a collapsed group still says it.
-          const groupUnread = unreadIn(unreadCounts, panes.flatMap(({ pane }) => pane.tabIds));
+          const groupUnread = unreadIn(unreadCounts, groupTabIds);
           const unreadNote = groupUnread > 0 ? unreadLabel(groupUnread) : '';
+          // Two counts sit side by side on this row — the pill's unread
+          // NOTIFICATIONS and the summary's waiting TERMINALS — so the
+          // tooltip names each for what it counts.
+          const said = [isActiveGroup ? 'on screen' : '', unreadNote, summaryWords(groupSummaries[gi])]
+            .filter(Boolean)
+            .join('; ');
 
           return (
             <div key={group.id}>
               <div
                 data-row
+                data-group-row={group.id}
                 role="button"
                 tabIndex={0}
                 onClick={() => setActiveGroup(group.id)}
@@ -829,8 +1047,10 @@ export function TerminalsPanel() {
                 style={{ paddingLeft: padFor(0) }}
                 title={
                   isActiveGroup
-                    ? `${group.name} — on screen${unreadNote ? `, ${unreadNote}` : ''}`
-                    : `${group.name} — ${unreadNote ? `${unreadNote}, ` : ''}click to switch to this group`
+                    ? `${group.name} — ${said}`
+                    : said
+                      ? `${group.name} — ${said}. Click to switch to this group`
+                      : `${group.name} — click to switch to this group`
                 }
                 aria-current={isActiveGroup ? 'true' : undefined}
                 className={cn(
@@ -869,6 +1089,11 @@ export function TerminalsPanel() {
                         isActiveGroup ? '' : 'text-vsc-muted'
                       )}
                     >
+                      {/* How many of its terminals wait, run and failed (S6).
+                          Always, whatever the second-line settings: it is
+                          one compact mark per group, and the chip's tooltip
+                          says the same regardless. */}
+                      <GroupSummary tabIds={groupTabIds} className="mr-1" />
                       {isSplit && (
                         <Columns2 size={12} className="shrink-0" aria-label={`${panes.length} panes`} />
                       )}
@@ -891,7 +1116,7 @@ export function TerminalsPanel() {
 
               {!groupCollapsed &&
                 panes.map(({ pane, direction }, pi) => {
-                  const paneTabs = pane.tabIds.map((id) => tabById.get(id)).filter(Boolean);
+                  const paneTabs = shownOrder(pane.tabIds).map((id) => tabById.get(id)).filter(Boolean);
 
                   // A group with a single pane folds that level away entirely.
                   if (!isSplit) {
@@ -911,6 +1136,7 @@ export function TerminalsPanel() {
                     <React.Fragment key={pane.id}>
                       <div
                         data-row
+                        data-pane-row={pane.id}
                         role="button"
                         tabIndex={0}
                         onClick={() => setActivePane(pane.id, group.id)}
@@ -1059,7 +1285,7 @@ export function TerminalsPanel() {
         // Remounting on a drill-down re-runs ContextMenu's placement pass, so a
         // taller "Move to Group" list still flips off the window edge.
         key={`${menu?.kind ?? 'none'}:${menu?.view ?? 'root'}`}
-        open={Boolean(menu)}
+        open={Boolean(liveMenu)}
         x={menu?.x ?? 0}
         y={menu?.y ?? 0}
         onClose={() => setMenu(null)}

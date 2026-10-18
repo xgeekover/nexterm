@@ -26,7 +26,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::fs::{is_network_path, link_leads_off_machine};
+use crate::fs::{is_network_path, link_leads_off_machine_by, on_a_network_drive, QuietDriveErrors};
 
 /// Paths `path_kinds` answers in one call; the webview splits a row's
 /// candidates into calls of this many (`MAX_KIND_PATHS` in
@@ -64,12 +64,18 @@ pub fn refusal(path: &str, windows: bool) -> Option<String> {
 /// as one — and a broken link is nothing. Every link in the way is known to
 /// stay on this machine by then.
 pub fn path_kind(path: &str) -> Option<&'static str> {
-    if refusal(path, cfg!(windows)).is_some() || on_a_network_drive(path) {
+    path_kind_by(path, &on_a_network_drive)
+}
+
+/// `path_kind`, with the mapped-drive check handed in so that the suites can
+/// say a drive is one.
+fn path_kind_by(path: &str, network_drive: &dyn Fn(&str) -> bool) -> Option<&'static str> {
+    if refusal(path, cfg!(windows)).is_some() || network_drive(path) {
         return None;
     }
-    let _quiet = os::QuietDriveErrors::new();
+    let _quiet = QuietDriveErrors::new();
     let path = Path::new(path);
-    if link_leads_off_machine(path) {
+    if link_leads_off_machine_by(path, network_drive) {
         return None;
     }
     let meta = fs::metadata(path).ok()?;
@@ -153,12 +159,6 @@ fn absolute_is_a_device(path: &str) -> bool {
     std::path::absolute(path).map_or(true, |absolute| is_network_path(&absolute.to_string_lossy()))
 }
 
-/// Whether `path` is on a mapped network drive (Windows: `GetDriveTypeW` on
-/// its drive's root, which reads the drive's type without reaching it).
-fn on_a_network_drive(path: &str) -> bool {
-    os::on_a_network_drive(path)
-}
-
 /// What showing a path in the file manager does with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevealAction {
@@ -187,15 +187,21 @@ pub fn reveal_action(is_dir: bool, os: &str) -> RevealAction {
 /// The path `fs_reveal_path` shows, and how — refused, with the reason, for
 /// anything `path_kind` would not look at and for a path that does not exist.
 pub fn reveal_target(path: &str) -> Result<(PathBuf, RevealAction), String> {
+    reveal_target_by(path, &on_a_network_drive)
+}
+
+/// `reveal_target`, with the mapped-drive check handed in so that the suites
+/// can say a drive is one.
+fn reveal_target_by(path: &str, network_drive: &dyn Fn(&str) -> bool) -> Result<(PathBuf, RevealAction), String> {
     if let Some(reason) = refusal(path, cfg!(windows)) {
         return Err(reason);
     }
-    if on_a_network_drive(path) {
+    if network_drive(path) {
         return Err(format!("Path is on a network drive: {path}"));
     }
-    let _quiet = os::QuietDriveErrors::new();
+    let _quiet = QuietDriveErrors::new();
     let given = Path::new(path);
-    if link_leads_off_machine(given) {
+    if link_leads_off_machine_by(given, network_drive) {
         return Err(format!("Path goes through a link to another machine: {path}"));
     }
     let meta = fs::metadata(given).map_err(|e| format!("Cannot show '{path}': {e}"))?;
@@ -227,18 +233,6 @@ pub fn show(target: &Path, action: RevealAction) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 mod os {
     use std::path::Path;
-
-    /// Nothing to quiet: macOS asks no one to insert a disk.
-    pub struct QuietDriveErrors;
-    impl QuietDriveErrors {
-        pub fn new() -> Self {
-            QuietDriveErrors
-        }
-    }
-
-    pub fn on_a_network_drive(_: &str) -> bool {
-        false
-    }
 
     /// Whether LaunchServices takes `dir` for a package — an app, a bundle —
     /// which is what decides whether showing it launches it: by its
@@ -299,45 +293,12 @@ mod os {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
-    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
     use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
-    use windows_sys::Win32::System::Diagnostics::Debug::{SetThreadErrorMode, SEM_FAILCRITICALERRORS};
-    use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
     use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
         text.encode_wide().chain(std::iter::once(0)).collect()
-    }
-
-    /// While it lives, this thread shows no "insert a disk" box: an empty
-    /// card reader or DVD drive named in the output fails its lookup quietly.
-    pub struct QuietDriveErrors(u32);
-    impl QuietDriveErrors {
-        pub fn new() -> Self {
-            let mut before = 0;
-            // SAFETY: plain call; `before` outlives it.
-            unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut before) };
-            QuietDriveErrors(before)
-        }
-    }
-    impl Drop for QuietDriveErrors {
-        fn drop(&mut self) {
-            // SAFETY: plain call; the old mode is optional.
-            unsafe { SetThreadErrorMode(self.0, std::ptr::null_mut()) };
-        }
-    }
-
-    /// `X:\…` (or `\\?\X:\…`) on a drive whose type is DRIVE_REMOTE.
-    pub fn on_a_network_drive(path: &str) -> bool {
-        let plain = path.strip_prefix(r"\\?\").unwrap_or(path);
-        let bytes = plain.as_bytes();
-        if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
-            return false;
-        }
-        let root = wide(std::ffi::OsStr::new(&format!("{}:\\", bytes[0] as char)));
-        // SAFETY: `root` is NUL-terminated and outlives the call.
-        unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
     }
 
     /// Explorer showing `dir`, by `ShellExecuteExW` with the verb "explore".
@@ -380,17 +341,6 @@ mod os {
 #[cfg(not(any(target_os = "macos", windows)))]
 mod os {
     use std::path::Path;
-
-    pub struct QuietDriveErrors;
-    impl QuietDriveErrors {
-        pub fn new() -> Self {
-            QuietDriveErrors
-        }
-    }
-
-    pub fn on_a_network_drive(_: &str) -> bool {
-        false
-    }
 
     /// Never asked for (`reveal_action` reveals folders here); revealing is
     /// the answer that cannot run anything.
@@ -520,6 +470,34 @@ mod tests {
         assert!(err.contains("link to another machine"), "{err}");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&share);
+    }
+
+    /// Found in review: a local link onto a mapped network drive — `Z:\…`,
+    /// which no spelling gives away — was followed to see what it was. Here a
+    /// folder is said to be on such a drive (the check is handed in), and a
+    /// link onto it, directly or through another, is answered without being
+    /// followed; shown, it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_onto_a_mapped_network_drive_is_answered_without_being_followed() {
+        let dir = scratch("ontodrive");
+        let drive = scratch("ontodrive-share");
+        fs::create_dir_all(drive.join("inner")).unwrap();
+        std::os::unix::fs::symlink(&drive, dir.join("via")).unwrap();
+        std::os::unix::fs::symlink("via", dir.join("hop")).unwrap();
+        let mapped = s(&drive);
+        let on_drive = move |path: &str| path.starts_with(&mapped);
+        for path in [dir.join("via"), dir.join("hop"), dir.join("via").join("inner")] {
+            let path = s(&path);
+            assert_eq!(path_kind_by(&path, &|_| false), Some("dir"), "premise: {path} is reachable");
+            assert!(reveal_target_by(&path, &|_| false).is_ok(), "premise: {path} can be shown");
+            assert_eq!(path_kind_by(&path, &on_drive), None, "{path} was looked at");
+            let err = reveal_target_by(&path, &on_drive).unwrap_err();
+            assert!(err.contains("link to another machine"), "{path}: {err}");
+        }
+        assert_eq!(path_kind_by(&s(&drive.join("inner")), &on_drive), None, "on the drive itself");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&drive);
     }
 
     /// Found in review: `nul\.`, `nul\`, `nul\x\..`, `COM1::$DATA` and

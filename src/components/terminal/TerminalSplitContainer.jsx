@@ -49,6 +49,7 @@ import {
   paneBodyBackground,
   pressOnPaneFrame,
 } from './AttentionIndicators.jsx';
+import { useGroupSummaryLabels } from './statusBoardModel.js';
 import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
 import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
@@ -1239,6 +1240,15 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
   // Its own again, for the same reason: unread entries per terminal, the
   // same frozen object for as long as the list is the same.
   const unreadCounts = useTerminalStore((s) => unreadCountByTab(s.notifications));
+  // What each group's terminals add up to, in words ("2 waiting, 1 failed"),
+  // for the chip's tooltip and accessible name only (S6): the chip already
+  // has a dot, a count and a bar, and a fourth mark would crowd it. Strings
+  // compared one by one, so a bar moving in a group does not redraw this.
+  const groupTabIdLists = useMemo(
+    () => groups.map((group) => collectPanes(group.tree).flatMap((pane) => pane.tabIds)),
+    [groups]
+  );
+  const summaries = useGroupSummaryLabels(groupTabIdLists);
   const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const createGroup = useTerminalStore((s) => s.createGroup);
   const closeGroup = useTerminalStore((s) => s.closeGroup);
@@ -1331,6 +1341,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
           // Every group keeps its own zoom across switches, so the chip says
           // which ones will come back with panes hidden.
           const zoomed = Boolean(zoomedPaneOf(group));
+          const summary = summaries[i] ?? '';
 
           if (renamingGroupId === group.id) {
             return (
@@ -1363,12 +1374,16 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               tabIndex={0}
               aria-selected={isActive}
               aria-grabbed={isBeingDragged}
+              // With a summary, the summary says what the older activity
+              // sentence said ("1 running"), and says it once.
               title={`${group.name} — ${terminals} terminal${terminals === 1 ? '' : 's'}${
-                activity === 'running'
-                  ? ', one of them running a command'
-                  : activity === 'failed'
-                    ? ', one of them ended on a failure'
-                    : ''
+                summary
+                  ? ` (${summary})`
+                  : activity === 'running'
+                    ? ', one of them running a command'
+                    : activity === 'failed'
+                      ? ', one of them ended on a failure'
+                      : ''
               }${zoomed ? ', one pane zoomed' : ''}${
                 unread > 0 ? `, ${unreadLabel(unread)}` : ''
               }. Click to switch, drag to reorder, drop a terminal here to move it, double-click to rename.`}
@@ -1420,6 +1435,13 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
               <UnreadPill count={unread} />
               {zoomed && <Maximize2 size={10} aria-label="one pane zoomed" className="shrink-0 opacity-70" />}
               <span className="text-[10px] tabular-nums opacity-60">{terminals}</span>
+              {/* The chip is named from its content; this is the summary's
+                  part of that name, said and not drawn. */}
+              {summary && (
+                <span data-group-summary-words="" className="sr-only">
+                  {`, ${summary}`}
+                </span>
+              )}
               {canClose && (
                 <button
                   type="button"

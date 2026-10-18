@@ -42,6 +42,26 @@ pub fn git_status(state: State<AppState>) -> Result<Option<fs::git::GitStatus>, 
     Ok(state.workspace.root().and_then(|root| fs::git::status_of(&root)))
 }
 
+/// The branch the folder `dir` is on — a terminal's, for its row in the
+/// TERMINALS side bar — as `{ branch, detached, repo }`, or `null`: not a
+/// repository, no branch, or a folder that is not looked at (not absolute, on
+/// another machine or a mapped network drive, through a link to either). See
+/// `fs::git::branch_of`, which reads `HEAD` and never runs git.
+///
+/// Not confined to the open folder, for the reason `fs_path_kinds` gives:
+/// a terminal can be anywhere, and its shell can read the same file. What
+/// leaves here is a checked branch name and which repository folder it was
+/// read in, nothing of what is in the folder.
+///
+/// On the blocking pool, like `fs_path_kinds`: a folder on a slow drive must
+/// not hold one of the async runtime's worker threads.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn git_branch(dir: String) -> Result<Option<fs::git::BranchInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || fs::git::branch_of(&dir))
+        .await
+        .map_err(|e| format!("Looking up the branch stopped unexpectedly: {e}"))
+}
+
 /// Search the open folder's files.
 ///
 /// Confined by construction: the walk starts at the workspace root, so there
@@ -417,6 +437,7 @@ mod dispatch_tests {
     /// on the event-loop thread.
     const MUST_BE_ASYNC: &[&str] = &[
         "git_status",
+        "git_branch",
         "fs_search",
         "fs_list_files",
         "fs_read_dir",
@@ -516,11 +537,12 @@ mod dispatch_tests {
     /// `fs_list_files` hand their work to the blocking pool themselves, and
     /// turning either into an attribute-`async` command would quietly undo
     /// that. The same for the two the pointer reaches in a terminal's output,
-    /// `fs_path_kinds` and `fs_reveal_path`: a name on a slow drive waits.
+    /// `fs_path_kinds` and `fs_reveal_path`: a name on a slow drive waits —
+    /// and for `git_branch`, asked about every terminal's folder.
     #[test]
     fn the_copy_and_the_listing_run_on_the_blocking_pool() {
         let src = source();
-        for name in ["fs_copy_path", "fs_list_files", "fs_path_kinds", "fs_reveal_path"] {
+        for name in ["fs_copy_path", "fs_list_files", "fs_path_kinds", "fs_reveal_path", "git_branch"] {
             // By line, so a checkout with CRLF endings reads the same, and
             // from a line that starts with the signature, so this test's own
             // text is never taken for it.
