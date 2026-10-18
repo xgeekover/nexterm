@@ -39,6 +39,8 @@ that layout the next time you open it.
   pane fill its group and hides the rest — tmux's `Prefix z`, iTerm2's
   *Maximize Active Pane*. The hidden ones keep running; press it again and the
   split comes back exactly as it was.
+- **Tidy panes.** *Equalize Splits*, *Swap Pane With…*, and a tab strip that
+  steps aside for panes with one terminal.
 - **See which terminal wants you.** When a program in a terminal you are not
   looking at says something, rings the bell or finishes a long command, that
   pane gets an orange ring and its tab, its group and its row in the side bar
@@ -180,6 +182,29 @@ current folder, in the same shell — a Git Bash split stays Git Bash, in the
 same directory. Settings ▸ Terminal ▸ *Split Directory* makes splits start
 like any new terminal instead (VS Code's `terminal.integrated.splitCwd`).
 
+**Even out and rearrange panes.** *Equalize Splits* in the command palette
+gives every pane of the group the same share, nested splits included, and
+Settings ▸ Terminal ▸ *Equal Splits* does it on every new split. *Swap Pane
+With…* in the palette, or in a pane's menu, lists the other panes of the group
+and trades places with the one you pick: the terminals move as they are,
+programs and scrollback included, and the cursor stays in yours. It is
+unavailable while a pane is zoomed, since the other panes are hidden.
+
+**Hide a lone tab strip.** With Settings ▸ Terminal ▸ *Hide the Tab Strip of a
+Single Terminal* on, a pane with one terminal shrinks its strip to a thin
+handle along the top, and the terminal gets the rest of the row. The handle
+marks an unread entry, progress and a password lock, and says which in its
+tooltip. Click it and the strip opens just below it, over the terminal; click
+the handle again, click elsewhere, or press Escape while the strip has the
+keyboard to close it. Escape typed in the terminal is the program's, as it
+always is: it does not close the strip. The opened strip has no close buttons,
+so a click that misses the handle cannot end a terminal: close it from the
+handle's right-click menu, the command palette or `⌘W`. The strip also opens
+while you drag a tab, so you can still drop one there, and while its menu or
+rename is open. Pointing at the pane never opens it, so a click meant for the
+terminal's first row always reaches the terminal, and the terminal is never
+resized by it. A second tab brings the full strip back.
+
 **Zoom a pane.** In a split group, `⌘⇧Enter` (`Ctrl+Shift+Enter` on Windows
 and Linux), the ⤢ button in a pane's tab strip, Terminal → *Toggle Pane Zoom*
 or the command palette makes that pane fill the whole group. The other panes
@@ -266,6 +291,21 @@ not count, and a paste that carries an escape sequence is always asked about;
 bracketed-paste markers are stripped from everything pasted, so a pasted
 `ESC[201~` cannot end the bracket early and run what follows. Settings ▸
 Terminal ▸ *Multi-Line Paste Warning*: Auto, Always or Never.
+
+**A lock marks a password prompt.** On macOS and Linux, while a program in a
+terminal reads input without showing it — `sudo`, `ssh`, `read -s`, a
+password prompt — its tab, its row in the TERMINALS panel and, with the tab
+strip hidden, the pane's handle show a lock: "Typing is hidden (password
+prompt)". NexTerm tells this from the terminal's own settings: input that is
+neither shown nor read a line at a time is how every shell's line editor and
+every full-screen program works, so only hidden input read line by line
+counts. While the lock is on, nothing NexTerm types for you goes into that
+terminal — a layout's startup command, an agent's start or resume, the answer
+to cmd's batch-job question. It waits for the prompt to be answered, and if
+the terminal is still asking when the wait runs out, it is not typed and the
+terminal says why. What you type and paste is never held back, so a password
+manager still works. Windows gives no way to read this from outside a console
+program, so there is no lock on Windows.
 
 **Drop a file to type its path.** Drag files or folders from Windows Explorer
 or Finder — or a row from NexTerm's own Explorer — onto a terminal, and their
@@ -393,6 +433,20 @@ application, and this one has git in it already.
 window — editor font, terminal font/size/line-height, cursor style and blinking,
 scrollback, colour theme, command suggestions, copy on select, what a
 right-click does, and mouse reporting.
+
+**Pick or import a terminal theme.** Settings ▸ Terminal shows every terminal
+theme as a card with its colours. Point at a card, or move to it with the arrow
+keys, and every terminal shows it at once; Escape, moving away or closing
+Settings puts your theme back, and a click or Enter chooses it. *Import
+Theme…* reads a theme you pick and switches to it: a Ghostty theme file, a Windows Terminal colour scheme
+(`.json`, one scheme or a `schemes` list to choose from) or an iTerm2
+`.itermcolors` file. Up to 20 imported themes sit beside the built-in ones and
+can be deleted (with an undo); colours a file leaves out come from NexTerm's own. A theme with a
+light background is refused, because the rest of NexTerm is dark, and so is
+a file that is too large, has a colour NexTerm cannot read, or carries XML
+declarations other than the one iTerm2 always writes. The import says which.
+Imported themes are settings, so *Reset All* removes them too, and asks first
+when there are any.
 
 ### Notifications from programs
 

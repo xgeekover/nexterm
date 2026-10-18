@@ -975,6 +975,40 @@ Only the browser mock and the macOS build were tested.
 - Settings ▸ Terminal: each *Show …* row turns its piece off; with branch,
   agent and last notification all off the rows are one line.
 
+### V42 — tidy panes, no false password lock, imported themes
+
+Only the browser mock and the macOS build were tested.
+
+- Settings ▸ Terminal ▸ *Hide the Tab Strip of a Single Terminal* on → a pane
+  with one terminal shows a thin handle instead of its strip. Moving the
+  pointer over the terminal's first row and clicking there reaches the
+  terminal (and the find bar's ✕ and the resume banner's buttons work).
+  Click the handle → the strip opens just below it, over the terminal, without
+  resizing it (a full-screen program does not redraw); click the handle again
+  → it closes. Double-click the handle, and click twice a few pixels below it
+  → nothing closes, splits or opens; the opened strip has no close buttons.
+  On a touch screen, tap the handle, then tap it again a little low → it
+  closes and nothing else happens; tap the handle and then *+* → a new tab.
+  In OpenCode, press Escape in the terminal while the strip is open →
+  OpenCode gets it; the strip stays. Switch to another app and back with the
+  strip open from the keyboard → Escape still closes it. Drag a tab from
+  another pane onto it → it merges; onto its edge → it splits. Double-click
+  the opened strip's tab → rename, and Enter does not run anything in the
+  shell. Add a second tab → the full strip is back.
+- *Equalize Splits* in a group of three panes → equal shares, also nested.
+  *Swap Pane With…* → the two terminals trade places with their programs and
+  scrollback; while a pane is zoomed it is unavailable and says why.
+- No lock ever appears on Windows: `runas /user:Administrator cmd` in cmd,
+  `ssh user@host` at its password prompt in PowerShell, and `Read-Host
+  -AsSecureString` all show no lock, and nothing else does either.
+- With a startup command in a saved group, open it while another terminal
+  waits at a password prompt → the startup command is typed into its own
+  terminal as before.
+- Import a Windows Terminal color scheme (`settings.json`'s `schemes` list, or
+  one scheme saved as `.json`) → pick one, the terminals switch; a light
+  scheme such as *One Half Light* is refused with its reason. Delete it →
+  Dark Modern, with an undo.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
