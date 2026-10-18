@@ -76,6 +76,42 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       subtitle: 'Fill the group with the active pane, or show every pane again',
       hint: hint('toggle-pane-zoom'),
     },
+    // Spec P2 and P3: no chord of their own, so no hint unless one is bound.
+    {
+      type: 'command',
+      id: 'cmd-equalize-splits',
+      command: 'equalize_splits',
+      title: 'Equalize Splits',
+      subtitle: 'Give every pane of the group on screen the same share, nested splits included',
+      hint: hint('equalize-splits'),
+    },
+    {
+      type: 'command',
+      id: 'cmd-swap-pane',
+      command: 'swap_pane',
+      title: 'Swap Pane With…',
+      subtitle: "Trade the active pane's terminals with another pane of this group",
+      hint: hint('swap-pane'),
+      // Picked, it does not run: the palette turns into the list of panes
+      // to swap with (mode 'swap-pane'), keeping what had the keyboard.
+      opens: 'swap-pane',
+    },
+    // The active terminal's tab, reachable without its strip — a hidden one
+    // (spec P1), or a strip scrolled out of reach.
+    {
+      type: 'command',
+      id: 'cmd-rename-terminal',
+      command: 'rename_terminal',
+      title: 'Rename Terminal…',
+      subtitle: "Edit the active terminal's name in its tab",
+    },
+    {
+      type: 'command',
+      id: 'cmd-close-terminal',
+      command: 'close_terminal',
+      title: 'Close Terminal',
+      subtitle: 'Close the active terminal and end its shell',
+    },
     {
       type: 'command',
       id: 'cmd-go-to-unread-notification',
@@ -136,8 +172,10 @@ export function canHaveFocusBack(opener, { body, onPage }) {
 /**
  * The palette's result groups for `query`, in display order.
  *
- * `mode` is 'all' (⌘K — files and commands), 'files' (⌘P — files only) or
- * 'history' (⌘⇧H — command lines already run), and `bindings` decides which
+ * `mode` is 'all' (⌘K — files and commands), 'files' (⌘P — files only),
+ * 'history' (⌘⇧H — command lines already run) or 'swap-pane' (the panes
+ * "Swap Pane With…" offers: `panes`, or `panesNote` saying why there are
+ * none), and `bindings` decides which
  * shortcut each command advertises.
  * Empty groups are dropped so the rendered list and the keyboard selection
  * always run over exactly the same items.
@@ -159,6 +197,8 @@ export function buildPaletteGroups({
   bindings = DEFAULT_RESOLVED,
   recentRoots = [],
   history = [],
+  panes = [],
+  panesNote = null,
   limit = FILE_RESULT_LIMIT,
 } = {}) {
   const q = (query || '').toLowerCase().trim();
@@ -200,6 +240,27 @@ export function buildPaletteGroups({
         hint: entry.count > 1 ? `${entry.count}×` : 'Ran once',
       }));
     return rows.length > 0 ? [{ label: 'history', items: rows }] : [];
+  }
+
+  // "Swap Pane With…" as a pick: the other panes of the group on screen
+  // (`panes`, from `swapChoices` in splitLayout.js), each by the title of the
+  // terminal it shows and where it is. When there is none to offer —
+  // zoomed, or a group of one pane — `panesNote` says why, and the group is
+  // kept for that note alone: an empty palette reading "No matching
+  // commands or files" would not say what to do instead.
+  if (mode === 'swap-pane') {
+    const rows = (Array.isArray(panes) ? panes : [])
+      .filter((pane) => !q || fuzzyMatch(q, pane.title ?? '') || String(pane.place ?? '').toLowerCase().includes(q))
+      .map((pane) => ({
+        type: 'pane',
+        id: `pane-${pane.paneId}`,
+        paneId: pane.paneId,
+        title: pane.title,
+        subtitle: [pane.place, pane.terminals > 1 ? `${pane.terminals} terminals` : ''].filter(Boolean).join(', '),
+        hint: `Pane ${pane.index + 1} of ${pane.count}`,
+      }));
+    if (rows.length === 0 && !panesNote) return [];
+    return [{ label: 'swap with', items: rows, ...(panesNote ? { note: panesNote } : {}) }];
   }
 
   // A path typed with either separator: the paths are matched with `/`.

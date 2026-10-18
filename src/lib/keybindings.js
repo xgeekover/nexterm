@@ -125,6 +125,27 @@ export const COMMANDS = {
     overTerminal: true,
     run: (ctx) => ctx.togglePaneZoom?.(),
   },
+  // Spec P2 and P3. Palette commands with no chord of their own and no place
+  // in the native menu (menu.rs has none to give them), so nothing is taken
+  // from a shell as shipped. A chord a user gives either is meant for the
+  // panes a terminal is in — a focused terminal is this app's resting state —
+  // so it is claimed ahead of xterm, as Toggle Pane Zoom's is; left to
+  // xterm, it did nothing there. As for every command claimed over a
+  // terminal, a bare Ctrl+letter chosen for one is then the app's; Settings
+  // names them. KB-11 holds the list.
+  'equalize-splits': {
+    title: 'Equalize Splits',
+    menuId: null,
+    overTerminal: true,
+    run: (ctx) => ctx.equalizeSplits?.(),
+  },
+  'swap-pane': {
+    title: 'Swap Pane With…',
+    menuId: null,
+    overTerminal: true,
+    // A pick of the other panes, in the palette: which one is the question.
+    run: (ctx) => ctx.setCommandPaletteOpen?.(true, 'swap-pane'),
+  },
   'new-terminal': {
     title: 'New Terminal',
     run: (ctx) => ctx.createTerminalTab?.(),

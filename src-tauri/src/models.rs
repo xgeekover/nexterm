@@ -52,6 +52,17 @@ pub struct PtyTitlePayload {
     pub title: String,
 }
 
+/// `pty-echo`: whether the program reading a terminal has its typing hidden —
+/// echo off in canonical mode, a password prompt (src/pty/echo_watch.rs).
+/// Sent only when it changes, and `secret: false` once as a session that
+/// ended secret ends. unix-only, like what sends it.
+#[cfg(unix)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PtyEchoPayload {
+    pub session_id: String,
+    pub secret: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PtySessionInfo {
     pub id: String,

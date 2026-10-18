@@ -100,6 +100,12 @@ import './terminal_progress.test.js';
 import './attention.test.js';
 import './terminal_status.test.js';
 import './branch_store.test.js';
+import './theme_import.test.js';
+import './theme_gallery.test.js';
+import './split_polish.test.js';
+import './secret_input.test.js';
+import './split_lock_headless.test.js';
+import './strip_overlay_mounted.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -30,6 +30,13 @@
  * Rule for this file only: literal hex is expected and required — the whole
  * point is reproducing each theme's real published colours. Every other
  * file in this app must keep using design tokens instead.
+ *
+ * Imported themes (spec P5) are the user's own and live in the settings
+ * store (`terminalCustomThemes`, written by src/lib/themeImport.js), never
+ * here. `getTerminalThemeEntry` is the one place an id becomes a theme, for
+ * built-in and imported ones alike: the registry, the pane frame and the
+ * gallery all ask it, so a theme can never be known to one of them and
+ * unknown to another.
  */
 
 export const TERMINAL_THEMES = {
@@ -285,10 +292,128 @@ export const TERMINAL_THEME_IDS = Object.keys(TERMINAL_THEMES);
 
 export const DEFAULT_TERMINAL_THEME_ID = 'dark-modern';
 
-/** Look up a theme entry, falling back to the default for an unknown id
- * (e.g. a settings value from an older/newer app version). */
-export function getTerminalThemeEntry(themeId) {
-  return TERMINAL_THEMES[themeId] || TERMINAL_THEMES[DEFAULT_TERMINAL_THEME_ID];
+/** The 16 ANSI colours, in palette order: index N of a theme file is entry N here. */
+export const ANSI_COLOR_KEYS = [
+  'black',
+  'red',
+  'green',
+  'yellow',
+  'blue',
+  'magenta',
+  'cyan',
+  'white',
+  'brightBlack',
+  'brightRed',
+  'brightGreen',
+  'brightYellow',
+  'brightBlue',
+  'brightMagenta',
+  'brightCyan',
+  'brightWhite',
+];
+
+/** Every colour a theme here sets — the shape of each built-in `theme` above. */
+export const THEME_COLOR_KEYS = [
+  'background',
+  'foreground',
+  'cursor',
+  'cursorAccent',
+  'selectionBackground',
+  ...ANSI_COLOR_KEYS,
+];
+
+/**
+ * The app's own token for each colour: what `dark-modern` draws with, and what
+ * an imported theme that leaves a colour out is given instead. Read live by
+ * terminalRegistry.js's `readTheme()` and named as `var(...)` by the gallery's
+ * cards, so neither keeps a copy of src/styles/index.css.
+ */
+export const APP_THEME_TOKENS = {
+  background: '--vsc-terminal-bg',
+  foreground: '--vsc-fg',
+  cursor: '--vsc-fg-bright',
+  cursorAccent: '--vsc-terminal-bg',
+  selectionBackground: '--vsc-selection',
+  black: '--vsc-ansi-black',
+  red: '--vsc-ansi-red',
+  green: '--vsc-ansi-green',
+  yellow: '--vsc-ansi-yellow',
+  blue: '--vsc-ansi-blue',
+  magenta: '--vsc-ansi-magenta',
+  cyan: '--vsc-ansi-cyan',
+  white: '--vsc-ansi-white',
+  brightBlack: '--vsc-ansi-bright-black',
+  brightRed: '--vsc-ansi-bright-red',
+  brightGreen: '--vsc-ansi-bright-green',
+  brightYellow: '--vsc-ansi-bright-yellow',
+  brightBlue: '--vsc-ansi-bright-blue',
+  brightMagenta: '--vsc-ansi-bright-magenta',
+  brightCyan: '--vsc-ansi-bright-cyan',
+  brightWhite: '--vsc-ansi-bright-white',
+};
+
+/** What an imported theme's id starts with — never a built-in id, so the two cannot collide. */
+export const CUSTOM_THEME_PREFIX = 'custom:';
+
+/** How many imported themes are kept. A gallery, not a library: past this, delete one first. */
+export const MAX_CUSTOM_THEMES = 20;
+
+/**
+ * An imported theme by id, as an entry shaped like the built-ins above plus
+ * `custom: true` — or null. Only well-formed entries count: the list comes
+ * from storage, and src/lib/themeImport.js's `sanitizeCustomThemes` already
+ * dropped anything else on load, but a caller handing in something odd must
+ * get "unknown", not an exception.
+ */
+function customThemeEntry(themeId, customThemes) {
+  if (typeof themeId !== 'string' || !themeId.startsWith(CUSTOM_THEME_PREFIX) || !Array.isArray(customThemes)) return null;
+  const found = customThemes.find((t) => t && t.id === themeId && t.theme && typeof t.theme === 'object');
+  return found ? { label: found.label, theme: found.theme, custom: true } : null;
+}
+
+/**
+ * Look up a theme entry — built-in, or one of `customThemes` (the settings
+ * store's `terminalCustomThemes`) — falling back to the default for an
+ * unknown id: a settings value from an older or newer app version, a light
+ * theme that has since been removed, an imported theme that was deleted.
+ *
+ * `Object.hasOwn`, not `TERMINAL_THEMES[themeId]`: an id of "constructor" or
+ * "__proto__" would otherwise find Object.prototype's own members.
+ */
+export function getTerminalThemeEntry(themeId, customThemes) {
+  if (typeof themeId === 'string' && Object.hasOwn(TERMINAL_THEMES, themeId)) return TERMINAL_THEMES[themeId];
+  return customThemeEntry(themeId, customThemes) || TERMINAL_THEMES[DEFAULT_TERMINAL_THEME_ID];
+}
+
+/**
+ * The colours an entry draws with. `appColors` is the app's own palette
+ * (terminalRegistry.js's `readTheme()`): all of `dark-modern`, and whatever an
+ * imported theme left out — so a file that names only a background and eight
+ * colours still draws a whole terminal, in the default theme's other colours.
+ */
+export function themeColorsOf(entry, appColors) {
+  if (!entry || entry.followsAppTheme || !entry.theme) return appColors;
+  if (!entry.custom) return entry.theme;
+  return { ...appColors, ...entry.theme };
+}
+
+/** Every theme the gallery offers, built-ins first in their order, then the imported ones in theirs. */
+export function terminalThemeChoices(customThemes) {
+  const builtIn = TERMINAL_THEME_IDS.map((id) => ({ id, ...TERMINAL_THEMES[id], custom: false }));
+  const imported = (Array.isArray(customThemes) ? customThemes : [])
+    .filter((t) => t && typeof t.id === 'string' && customThemeEntry(t.id, customThemes))
+    .map((t) => ({ id: t.id, label: t.label, theme: t.theme, custom: true }));
+  return [...builtIn, ...imported];
+}
+
+/**
+ * The theme every terminal is showing: one the gallery is previewing, else the
+ * one chosen. The preview (`terminalThemePreview`) is never saved — only
+ * choosing a theme writes `terminalTheme` — so a preview cannot outlive the
+ * window that made it.
+ */
+export function shownTerminalThemeId(state) {
+  return state?.terminalThemePreview ?? state?.terminalTheme;
 }
 
 export default TERMINAL_THEMES;

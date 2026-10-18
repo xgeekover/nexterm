@@ -310,12 +310,16 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // menu items. The two notification commands are the bell's: its list
       // has Mark All Read, and the palette has both.
       'all-commands',
+      // The split polish commands (stage 3): palette commands, as the
+      // notification pair are; menu.rs has no entry for either.
+      'equalize-splits',
       'escape',
       'focus-next-pane',
       'focus-previous-pane',
       'go-to-unread-notification',
       'mark-notifications-read',
       'reload-guard',
+      'swap-pane',
     ]);
   });
 
@@ -328,6 +332,13 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // The history palette. Bound to ⌘⇧H precisely BECAUSE Ctrl+R — the
       // obvious key for it — is reverse-i-search and KB-12 keeps it.
       'command-history',
+      // The split polish commands (stage 3): no chord of their own, so
+      // nothing is taken from the shell as shipped. A chord the user gives
+      // either is meant for the pane a terminal is in — the app's resting
+      // state — so it has to work from a focused terminal, as Toggle Pane
+      // Zoom's does. As for everything on this list, a bare Ctrl+letter
+      // chosen for one is then the app's (SW-10 names them in Settings).
+      'equalize-splits',
       // Ctrl+F off macOS, which readline uses for forward-char. Taken on
       // purpose: a find bar that stops working whenever a terminal has focus
       // would never work at all, VS Code makes the same trade, and Settings
@@ -356,6 +367,8 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // broken — and neither spelling is a bare Ctrl+letter, so the shell
       // gives up nothing. KB-15 holds the spelling.
       'split-right',
+      // Equalize Splits' twin (above): the pick of panes to swap with.
+      'swap-pane',
       // ⌘⇧Enter, and Ctrl+Shift+Enter off macOS. Zooming the pane a terminal
       // is in is what the command is for, like Split Right. Neither spelling
       // is a control byte: xterm sends Ctrl+Shift+Enter as a plain Enter. Off

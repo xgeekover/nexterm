@@ -457,6 +457,17 @@ export class AppEnvironment {
       case 'mark_notifications_read':
         this.terminal.markAllNotificationsRead();
         return null;
+      case 'equalize_splits':
+        this.terminal.equalizeSplits();
+        return null;
+      case 'rename_terminal':
+        this.terminal.requestTabRename();
+        return null;
+      case 'close_terminal': {
+        const tabId = this.terminal.activeTabId;
+        if (tabId) await this.terminal.closeTab(tabId);
+        return null;
+      }
       case 'save_all':
         await this.editor.saveAll();
         return null;
