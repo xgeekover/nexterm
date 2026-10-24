@@ -28,12 +28,12 @@ export const usePastePromptStore = create((set, get) => ({
    * 'cancel' first: the dialog is modal, so a second paste can only come from
    * outside it, and the paste in front of the user is the newer one.
    */
-  ask: (tabId, { lines = 0, bracketed = false, escape = false } = {}) =>
+  ask: (tabId, { lines = 0, bracketed = false, escape = false, markersLost = false } = {}) =>
     new Promise((resolve) => {
       waiting?.resolve('cancel');
       const id = nextId++;
       waiting = { id, resolve };
-      set({ prompt: { id, tabId, lines, bracketed: Boolean(bracketed), escape: Boolean(escape) } });
+      set({ prompt: { id, tabId, lines, bracketed: Boolean(bracketed), escape: Boolean(escape), markersLost: Boolean(markersLost) } });
     }),
 
   /** Answer the question on screen; anything but 'paste' or 'oneLine' is 'cancel'. */

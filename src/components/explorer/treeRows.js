@@ -360,6 +360,19 @@ export function failureText(err) {
   return typeof err === 'string' ? err : String(err?.message ?? err ?? '');
 }
 
+/**
+ * The reason in a failure's words, without the path the backend appends to
+ * it: "Path has a name that ends in a dot or a space, which Windows would
+ * read as another: C:\proj\a." is "Path has a name … read as another". Room
+ * beside a name being typed is a few words, and the path is the one being
+ * typed; the whole text stays the tooltip.
+ */
+export function failureReason(text) {
+  const words = String(text ?? '');
+  const reason = words.replace(/:\s+(?:[A-Za-z]:[\\/]|\\\\|\/).*$/s, '').trim();
+  return reason || words;
+}
+
 /** "a.js", "a.js and b.js", "a.js, b.js and 3 other files". */
 function unsavedChangesIn(names) {
   if (names.length === 0) return '';

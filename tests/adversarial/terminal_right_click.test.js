@@ -790,6 +790,31 @@ describe('Right-click: the binding, on a page that dispatches like a browser', (
     }
   });
 
+  test('RC-21: the menu of a handled press is cancelled where it lands — on the paste question that opened under the pointer too', async () => {
+    // V22, Windows: two lines on the clipboard, a right-click. The question
+    // opened between the press and the release, and the menu — which follows
+    // the release on Windows — went to the question's overlay, outside the
+    // terminal. Nothing cancelled it there, and the webview's own menu opened
+    // over the question.
+    const p = page({ platform: 'windows' });
+    const overlay = new FakeNode('paste-question', p.document.body ?? p.container.parentNode);
+    const down = p.dispatch(p.screen, { type: 'mousedown', button: 2, buttons: 2 });
+    assert.ok(down.defaultPrevented, 'precondition: the press is the terminal\'s');
+    p.dispatch(overlay, { type: 'mouseup', button: 2, buttons: 0 });
+    const menu = p.dispatch(overlay, { type: 'contextmenu', button: 2 });
+    assert.equal(menu.defaultPrevented, true, 'the webview\'s menu does not open over the question');
+
+    // Only that press's menu: a later one (the keyboard's menu key, a press
+    // somewhere the terminal did not claim) is left alone.
+    const later = p.dispatch(overlay, { type: 'contextmenu', button: 2 });
+    assert.equal(later.defaultPrevented, false, 'a second menu is not the press\'s');
+    p.dispatch(overlay, { type: 'mousedown', button: 2, buttons: 2 });
+    const unclaimed = p.dispatch(overlay, { type: 'contextmenu', button: 2 });
+    assert.equal(unclaimed.defaultPrevented, false, 'a right-click the terminal never claimed keeps its menu');
+    await p.settled();
+    p.term.dispose();
+  });
+
   test('RC-20: teardown — the browser mock\'s clipboard is left empty for whatever runs next', () => {
     mockBridge.clipboard = { text: '', has_image: false };
     assert.deepEqual(mockBridge.clipboard, { text: '', has_image: false });

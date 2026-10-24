@@ -60,6 +60,7 @@ export function useKeybindings() {
       bindings,
       isMod: hasMod(e),
       isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
+      isInTerminal: Boolean(e.target?.closest?.('.xterm')),
       // Reloading is a development tool. In a packaged build it silently
       // destroys every running shell — see the `reload-guard` binding.
       blockReload: !import.meta.env.DEV,

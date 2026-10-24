@@ -864,3 +864,18 @@ describe('Editor tab drag: one press, from pointerdown to release', () => {
     assert.equal(wasJustDragged(), true, 'the end of a drag was not marked');
   });
 });
+
+describe('Editor tab strip: the active tab is in view', () => {
+  test('a tab off the end of a narrow strip is scrolled into view; one in view stays where it is', () => {
+    // V39: a narrow group's x.txt, made active from the Explorer, stayed
+    // under the next group — neither seen nor reachable.
+    const scrollLeftToShow = (...a) => exported('EditorTabs.jsx', 'scrollLeftToShow')(...a);
+    const row = { left: 309, right: 627 };
+    assert.equal(scrollLeftToShow(row, { left: 745, right: 838 }, 0), 211, 'off the right end: its right edge to the strip\'s');
+    assert.equal(scrollLeftToShow(row, { left: 250, right: 343 }, 120), 61, 'off the left end: its left edge to the strip\'s');
+    assert.equal(scrollLeftToShow(row, { left: 400, right: 480 }, 50), 50, 'in view: left alone');
+    assert.equal(scrollLeftToShow(row, { left: 500, right: 900 }, 0), 191, 'wider than the strip: its start in view');
+    assert.equal(scrollLeftToShow(row, { left: 280, right: 300 }, 10), 0, 'never before the start');
+    assert.equal(scrollLeftToShow(null, null, 33), 33);
+  });
+});

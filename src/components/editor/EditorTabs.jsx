@@ -1,4 +1,4 @@
-import React, { createContext, useContext } from 'react';
+import React, { createContext, useContext, useEffect, useRef } from 'react';
 import { X, Circle, FileCode2, FileJson, FileText, File, SplitSquareHorizontal, SplitSquareVertical } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
@@ -104,6 +104,20 @@ export function stripSlotAt(chips, row, clientX) {
 }
 
 /**
+ * The `scrollLeft` that brings the active chip wholly into view of a strip
+ * too narrow for its tabs — `row` and `chip` as `getBoundingClientRect`
+ * gives them — or the current one when it is in view already. Off the end,
+ * a tab opened or picked from the Explorer stayed covered by the next group
+ * and could be neither seen nor reached (V39).
+ */
+export function scrollLeftToShow(row, chip, scrollLeft) {
+  if (!row || !chip) return scrollLeft;
+  if (chip.left < row.left) return Math.max(0, scrollLeft - (row.left - chip.left));
+  if (chip.right > row.right) return scrollLeft + Math.min(chip.right - row.right, chip.left - row.left);
+  return scrollLeft;
+}
+
+/**
  * Which gap of a strip holding `tabIds` to draw the drop marker in, or null
  * for none.
  *
@@ -163,6 +177,17 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
 
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
+  const rowRef = useRef(null);
+  const activeId = activeTab?.id ?? null;
+  // The active tab in view of a strip too narrow for its tabs (V39).
+  useEffect(() => {
+    const row = rowRef.current;
+    if (!row || !activeId) return;
+    const chip = [...row.querySelectorAll('[data-tab-chip]')].find((el) => el.getAttribute('data-tab-chip') === activeId);
+    if (!chip) return;
+    const next = scrollLeftToShow(row.getBoundingClientRect(), chip.getBoundingClientRect(), row.scrollLeft);
+    if (next !== row.scrollLeft) row.scrollLeft = next;
+  }, [activeId, paneTabs.length]);
   // The gap a drop here would land in, while a drag is over this strip —
   // unless that drop would leave the tab where it is (see `markerSlot`).
   const dropIndex =
@@ -177,7 +202,7 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
     >
       {/* The row scrolls when there are more tabs than fit, and only what of
           it is on screen counts as a place to drop (see `stripSlotAt`). */}
-      <div data-editor-tab-row={paneId} className="flex-1 flex items-center overflow-x-auto no-scrollbar">
+      <div ref={rowRef} data-editor-tab-row={paneId} className="flex-1 flex items-center overflow-x-auto no-scrollbar">
         {paneTabs.map((tab, i) => {
           const isActive = tab.id === activeTab?.id;
           const isBeingDragged = drag?.active && drag.tabId === tab.id;

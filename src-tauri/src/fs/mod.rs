@@ -1803,8 +1803,10 @@ mod tests {
     #[test]
     fn a_file_that_is_not_text_is_refused_as_such() {
         let dir = scratch("binary");
+        // Not "nul.bin": Windows 10 reads NUL with any extension as the NUL
+        // device, so the write went nowhere and the read failed as a device.
         let cases: [(&str, &[u8]); 3] = [
-            ("nul.bin", b"a\0b"),
+            ("nul-bytes.bin", b"a\0b"),
             ("utf16.txt", b"h\0e\0l\0l\0o\0"),
             ("latin1.txt", b"caf\xe9"),
         ];

@@ -800,7 +800,8 @@ continues the terminal being split. Git Bash reports its directory as
 `/c/Users/…`, which has to be handed to Windows as `C:\Users\…`; that was
 checked only against the browser mock. Never run on Windows.
 
-- cmd: `cd C:\Windows`, then Ctrl+D → the new pane is cmd, at `C:\Windows`.
+- cmd: `cd C:\Windows`, then Split Right (Ctrl+Alt+D; Ctrl+D is cmd's EOF) →
+  the new pane is cmd, at `C:\Windows`.
 - PowerShell (from a profile) → the split is PowerShell, same folder.
 - Git Bash: `cd /c/Users` → the split is Git Bash at `/c/Users`. *Duplicate
   Tab* on it opens there too (it used to fall back to the workspace root).
@@ -861,8 +862,10 @@ Shift+Insert never pressed.
 - cmd: Ctrl+V, Shift+Insert and a right-click paste of two lines → asked.
   *Paste* runs both, *Paste as One Line* runs one line, *Cancel* sends nothing.
   Ctrl+V then Enter at once → nothing pasted (Cancel has focus).
-- One line with a trailing newline → not asked. OpenCode / pwsh 7 (bracketed
-  paste) → not asked under Auto; a paste containing `ESC[201~` → asked.
+- One line with a trailing newline → not asked. OpenCode (bracketed paste) →
+  not asked under Auto, except on Windows 10, where ConPTY drops the markers
+  and it is asked; a paste containing `ESC[201~` → asked. PowerShell 7.6
+  (PSReadLine 2.4.5) never asks for bracketed paste, so it is asked.
 - An image-only clipboard into OpenCode still attaches; a dropped file still
   types its path. Right-click paste from the find field, then Cancel → focus
   back in the find field. Ctrl+W while asked → the question closes.
@@ -1057,6 +1060,48 @@ paragraph above. Reported in full on #34.
   Code session, the app hands `CLAUDECODE` down to its terminals, and a
   `claude` started there saves no transcript — so there is nothing to resume.
   That is why *Before you start* now says where not to launch it from.
+
+## What the PR #56 run found
+
+Run on 2026-10-24 against PR #56's CI build (`15cc607`, reporting 0.20.0),
+Windows 10 Pro 22H2 19045.5371 (ko-KR), WebView2 155.0.4283.62. V22–V42: eight
+passed, twelve failed, V25 could not be checked (OpenCode was broken on the
+machine, independent of NexTerm, so every OpenCode step was "could not
+check"). Most failures were Windows 10's console host, not the app — which is
+why the fixes below say where ConPTY stops.
+
+- **V30, V37: the Explorer row menu was always the empty-area menu**, on every
+  platform, since the tree's rebuild: the row's `contextmenu` reached the
+  tree's own handler. Copy, Paste, Rename and Delete were unreachable. The row
+  stops its event now.
+- **V26: a shell that exited was never reported.** Windows 10's console host
+  keeps the output pipe open after its shell has gone, until
+  `ClosePseudoConsole` — which ran only after the end it was waiting for. The
+  console hosts outlived the app, too. The shell's process is now waited for
+  on Windows, and its console closed when it ends.
+- **V35, V41: Git Bash under `%TEMP%` is in `/tmp/…`**, a mount only it knows:
+  a split there opened at the workspace root and no branch was shown. Git
+  Bash now reports its directory as Windows spells it (`pwd -W`).
+- **V22: a right-click paste of two lines opened WebView2's menu** over the
+  question: on Windows the menu follows the release, which lands on the
+  question that opened under the pointer.
+- **V29: Ctrl+R reloaded the page** outside a terminal (WebView2 155 no longer
+  swallows it), and **Alt+F4 did nothing** with a terminal focused (xterm
+  cancelled it). Both handled now; Ctrl+R in a terminal is still the shell's.
+- **V36, V38: two things ConPTY on Windows 10 does not pass on** — the switch
+  to the alternate screen, and bracketed paste's markers. A Git Bash that had
+  asked for bracketed paste ran the first of two pasted lines unasked; a
+  program quiet for more than 3 s while quitting left cmd's question
+  unanswered. On Windows 10 (and builds not yet known) neither is relied on
+  now. Windows 11 was not measured, and is left as it was.
+- **Not the app, so not changed:** Clear Terminal's output coming back after a
+  resize (V27) needs `ClearPseudoConsole`, which the inbox ConPTY of Windows 10
+  does not have; an OSC 9;4 with nothing visible after it is held by ConPTY
+  until the next prompt (V40); PowerShell 7.6 with PSReadLine 2.4.5 never
+  turns bracketed paste on, so it is asked about (V38).
+- **Doc corrections:** Split Right is Ctrl+Alt+D off macOS (V35 said Ctrl+D,
+  which is EOF); Ctrl+click on a printed `..\README.md` is V34's reveal in the
+  file manager — the editor's terminal links need `path:line` (V39).
 
 ## Reporting
 

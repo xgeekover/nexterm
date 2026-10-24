@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import headless from '@xterm/headless';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { encodeModifiedEnter, installModifyOtherKeys } from '../../src/lib/modifyOtherKeys.js';
-import { legacyAltArrowSequence } from '../../src/lib/terminalCompat.js';
+import { isWindowCloseChord, legacyAltArrowSequence } from '../../src/lib/terminalCompat.js';
 import { suggestionKeyAction, lineAfterKey, rankedSuggestions, NEW_LINE } from '../../src/lib/suggestionLayer.js';
 import { handleClipboardKey } from '../../src/lib/terminalClipboard.js';
 import { installHangulInlineIme } from '../../src/lib/hangulInlineIme.js';
@@ -88,6 +88,8 @@ function keyHandler({
   const EMPTY_SUGGEST_STATE = { visible: false, items: [] };
   const scope = {
     legacyAltArrowSequence,
+    isWindowCloseChord,
+    isWindows: false,
     isMac: true,
     entry: {
       term: {
