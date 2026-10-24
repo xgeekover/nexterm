@@ -381,6 +381,19 @@ code, kbd, pre, .font-mono {
   [data-status-icon] {
     color: CanvasText;
   }
+  /* A hidden strip's handle (stage 3): its unread dot and its grip are
+     drawn as backgrounds, which this mode repaints away — system colours
+     instead, Highlight for the dot as the ring is, CanvasText for the grip.
+     The padlock beside the dot is a glyph in the text colour and needs
+     nothing; the shapes, not the colours, tell the marks apart. */
+  [data-handle-mark="unread"] {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  [data-handle-grip] {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
   /* "A newer order is waiting" is a dot on the sort button, in a colour
      this mode would repaint to nothing. */
   [data-pending-dot] {

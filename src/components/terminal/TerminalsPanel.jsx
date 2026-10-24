@@ -24,6 +24,8 @@ import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
 import { UnreadPill } from './AttentionIndicators.jsx';
 import { GroupSummary, TerminalStatusLine } from './StatusBoard.jsx';
+import { TabMarks } from './HiddenStrip.jsx';
+import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import {
   LIST_MENUS,
   keepUserOrderItems,
@@ -158,6 +160,9 @@ export function TerminalsPanel() {
   // group switcher draw, from the same selector, so the side bar and the
   // strip cannot disagree about who is waiting.
   const unreadCounts = useTerminalStore((s) => unreadCountByTab(s.notifications));
+  // Which terminals are asking for a password, for the rows' tooltips (the
+  // lock itself draws itself, `TabMarks`). The same object until one changes.
+  const secretInput = useTerminalStore((s) => s.secretInput);
   // The status bar already decides how a cwd is written (`~` off Windows,
   // last two segments, ellipsis in front). Same helper here so the bar and
   // this panel cannot describe one terminal's directory differently.
@@ -752,7 +757,11 @@ export function TerminalsPanel() {
     // A tab that is its pane's visible one, in a group that is off screen.
     const isPaneVisible = !isActive && tab.id === paneActiveTabId;
     const unread = unreadCounts[tab.id] ?? 0;
-    const status = [activityLabel(tab), unread > 0 ? unreadLabel(unread) : ''].filter(Boolean).join(', ');
+    // The chip's sentence, lock included (spec P4), so the two cannot
+    // describe one terminal differently.
+    const status = [activityLabel(tab), secretInput?.[tab.id] ? TYPING_HIDDEN_LABEL : '', unread > 0 ? unreadLabel(unread) : '']
+      .filter(Boolean)
+      .join(', ');
     const folder =
       showFolder && tab.cwd ? (
         // The END of a path is the part that identifies it; the front is
@@ -805,7 +814,9 @@ export function TerminalsPanel() {
                     <ActivityDot tab={tab} />
                   </span>
                   <span className="truncate">{tab.title}</span>
-                  <UnreadPill count={unread} />
+                  {/* The lock (a password prompt) and the count, as the tab
+                      chip draws them — on a line of fixed height. */}
+                  <TabMarks tabId={tab.id} unread={unread} />
                   {folder}
                 </>
               )}
@@ -828,7 +839,7 @@ export function TerminalsPanel() {
               <>
                 <ActivityDot tab={tab} />
                 <span className="truncate">{tab.title}</span>
-                <UnreadPill count={unread} />
+                <TabMarks tabId={tab.id} unread={unread} />
                 {folder}
               </>
             )}

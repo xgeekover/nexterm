@@ -86,6 +86,7 @@ const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
 const { useBranchStore } = await import('../../src/stores/branchStore.js');
 const { default: App } = await import('../../src/App.jsx');
+const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
 const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore];
 
@@ -3129,6 +3130,528 @@ function hue(hex) {
     results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
   }
 }
+
+// ---- Split polish (stage 3, part A): a hidden tab strip --------------------
+//
+// With "Hide the Tab Strip of a Single Terminal" on, a pane holding one
+// terminal draws a 6 px HANDLE in place of its strip — in layout, always the
+// same height — and the same strip in an overlay laid over the top of the
+// pane, faded out and transparent to the pointer until it is opened from the
+// handle (or held by a drag, a menu, a rename). When it opens and closes is
+// stripReveal.js's (split_polish.test.js) and the browser's
+// (split_lock_headless.test.js); what is drawn in each state is checked here.
+
+const { StripOverlay, StripHandle } = await import('../../src/components/terminal/HiddenStrip.jsx');
+
+/** The markup of one pane: from its outermost box (the one marked with whether its strip is hidden) to the next pane's. */
+function paneMarkup(html, paneId) {
+  const body = html.indexOf(`data-pane-body="${paneId}"`);
+  if (body === -1) return null;
+  // The pane's own box opens before its strip, its handle or its body.
+  const open = html.lastIndexOf('<div', html.lastIndexOf('flex flex-col h-full w-full bg-vsc-terminal', body));
+  const after = html.slice(body);
+  const next = after.slice(1).search(/class="relative flex flex-col h-full w-full bg-vsc-terminal/);
+  return html.slice(open, next === -1 ? html.length : body + 1 + next);
+}
+
+/** The opening tag of the overlay strip in some markup, or null. */
+const overlayTag = (markup) => /<div\b[^>]*\sdata-strip-overlay=""[^>]*>/.exec(markup ?? '')?.[0] ?? null;
+/** The handle's markup — a button holding spans only — or null. */
+const handleOf = (markup) => /<button\b[^>]*\sdata-strip-handle="[^"]*"[^>]*>[\s\S]*?<\/button>/.exec(markup ?? '')?.[0] ?? null;
+
+/**
+ * A terminal asking for a password is told by its SESSION (`pty-echo`), and
+ * the store works out which terminals that locks: `locked` names the tabs
+ * whose sessions are asking. Every arrangement forgets what the one before
+ * it said.
+ */
+function lockSessions(tabIds = []) {
+  useTerminalStore.getState().forgetInputHidden();
+  for (const id of tabIds) useTerminalStore.getState().noteInputHidden(`sess-${id}`, true);
+}
+
+function arrangeHidden({ tabIds = ['t1'], extra = {}, hide = true, locked = [] } = {}) {
+  reset();
+  useTerminalStore.setState({
+    tabs: tabIds.map((id) => tab(id)),
+    activeTabId: tabIds[0],
+    groups: baseGroups(tabIds),
+    ...extra,
+  });
+  lockSessions(locked);
+  if (hide) useSettingsStore.getState().setSetting('terminalHideSingleTabStrip', true);
+}
+
+scenario(
+  'RN-130',
+  'a single terminal with the strip hidden: a 6 px handle above the terminal, the strip itself in a faded overlay',
+  () => arrangeHidden(),
+  (html) => {
+    const pane = paneMarkup(html, 'pane-1');
+    expectThat(pane, 'no pane drawn');
+    expectThat(/^<div\b[^>]*\sdata-strip-hidden=""/.test(pane), `the pane does not say its strip is hidden: ${pane.slice(0, 200)}`);
+    const handle = handleOf(pane);
+    expectThat(handle, 'no handle on a pane whose strip is hidden');
+    const tag = openingTag(handle);
+    const body = pane.indexOf('data-pane-body="pane-1"');
+    expectThat(pane.indexOf(handle) < body, 'the handle is not above the terminal');
+    for (const word of ['h-[6px]', 'shrink-0', 'w-full']) {
+      expectThat(classOf(tag).split(/\s+/).includes(word), `the handle is not "${word}": ${classOf(tag)}`);
+    }
+    expectThat(/\stype="button"/.test(tag), 'the handle is not a button (Enter and Tab reach it)');
+    expectThat(/\saria-expanded="false"/.test(tag), 'the handle does not say the strip is down');
+    const words = attrOf(tag, 'aria-label') ?? '';
+    expectThat(words === 't1. Show its tab strip', `the handle's words: ${JSON.stringify(words)}`);
+    expectThat(!/data-handle-mark=/.test(handle), 'a mark with nothing to say');
+    const strip = pane.indexOf('data-tab-strip="pane-1"');
+    expectThat(strip > body, 'the strip is still drawn in line, taking its height');
+    const overlay = overlayTag(pane);
+    expectThat(overlay, 'no overlay to bring the strip back in');
+    expectThat(pane.indexOf(overlay) < strip, 'the strip is not inside the overlay');
+    const cls = classOf(overlay);
+    for (const word of ['absolute', 'top-[6px]', 'left-0', 'right-0', 'z-30', 'opacity-0', 'pointer-events-none']) {
+      expectThat(cls.split(/\s+/).includes(word), `the hidden overlay is not "${word}": ${cls}`);
+    }
+    expectThat(/\sdata-shown="false"/.test(overlay), 'the overlay is drawn shown with nothing to show it');
+    // Drawn by its state alone: focus left inside it (the window lost and
+    // regained focus) drew a strip the state said was closed, which neither
+    // Escape nor the handle could then put away.
+    expectThat(!cls.includes('focus-within:'), `the overlay is drawn by focus, not by its state: ${cls}`);
+    expectThat(tabChip(pane, 't1'), "the overlay's strip has no chip for the terminal");
+    // Nothing that destroys: no tab ✕, no Close Pane — a second click or tap
+    // just below the handle once killed a shell there. Closing is in the
+    // right-click menus, the palette and the keyboard.
+    const overlayStrip = pane.slice(pane.indexOf(overlay));
+    const destructive = buttonsIn(overlayStrip).filter((b) => /^Close /.test(b.title) || /^Close /.test(b.label ?? ''));
+    expectThat(destructive.length === 0, `the opened strip offers ${JSON.stringify(destructive.map((b) => b.title || b.label))}`);
+    expectThat(!/data-pane-corner=/.test(html), 'the corner indicator is back');
+  }
+);
+
+scenario(
+  'RN-131',
+  'a second terminal in the pane brings the real strip back; with the setting off one terminal keeps its strip',
+  () => arrangeHidden({ tabIds: ['t1', 't2'] }),
+  (html) => {
+    const pane = paneMarkup(html, 'pane-1');
+    expectThat(!/^<div\b[^>]*\sdata-strip-hidden=""/.test(pane), 'two terminals and the strip is hidden');
+    expectThat(pane.indexOf('data-tab-strip="pane-1"') < pane.indexOf('data-pane-body="pane-1"'), 'the strip is not above the terminal');
+    expectThat(!overlayTag(pane) && !handleOf(pane), 'an overlay or a handle with the strip in line');
+    // The strip in line keeps its ✕ on each tab.
+    const closers = buttonsIn(pane).filter((b) => /^Close /.test(b.label ?? ''));
+    expectThat(closers.length === 2, `the in-line strip lost its tab ✕: ${JSON.stringify(closers)}`);
+    reset();
+    useTerminalStore.setState({ notifications: entriesFor('t1', 2) });
+    const plain = paneMarkup(renderArranged(), 'pane-1');
+    expectThat(useSettingsStore.getState().terminalHideSingleTabStrip === false, 'setup: the default is off');
+    expectThat(plain.indexOf('data-tab-strip="pane-1"') < plain.indexOf('data-pane-body="pane-1"'), 'off by default, and the strip went');
+    expectThat(!overlayTag(plain) && !handleOf(plain), 'off, and an overlay or a handle is drawn');
+  }
+);
+
+scenario(
+  'RN-132',
+  "the handle keeps what the strip's chip would say — the count, the bar, the lock — as small marks, in words",
+  () =>
+    arrangeHidden({
+      extra: {
+        notifications: entriesFor('t1', 2),
+        progress: { t1: { state: 'normal', value: 40 } },
+      },
+      locked: ['t1'],
+    }),
+  (html) => {
+    const pane = paneMarkup(html, 'pane-1');
+    const handle = handleOf(pane);
+    expectThat(handle, 'no handle');
+    // Told apart by shape, not by colour alone: a padlock, a dot, a bar.
+    const unreadMark = tagWith(handle, 'data-handle-mark="unread"');
+    expectThat(unreadMark && /\brounded-full\b/.test(classOf(unreadMark)) && /\bw-\[4px\]/.test(classOf(unreadMark)), `no unread dot: ${unreadMark}`);
+    const lockMark = /<span\b[^>]*\sdata-handle-mark="lock"[^>]*>([\s\S]*?)<\/span>/.exec(handle)?.[1] ?? '';
+    expectThat(iconOf(lockMark) === 'lock', `the lock mark is not a padlock: ${lockMark}`);
+    const bar = progressIn(handle);
+    expectThat(bar?.state === 'normal' && bar.value === '40', `the handle's bar: ${JSON.stringify(bar)}`);
+    const tag = openingTag(handle);
+    const words = attrOf(tag, 'aria-label') ?? '';
+    expectThat(
+      words === 't1 — Typing is hidden (password prompt), 2 unread notifications, 40% done. Show its tab strip',
+      `the handle's words: ${JSON.stringify(words)}`
+    );
+    expectThat(attrOf(tag, 'title') === words, 'the tooltip says something else');
+    expectThat(classOf(tag).split(/\s+/).includes('h-[6px]'), 'the handle grew with its marks');
+    // The overlay's chip says it too, for when the strip is up.
+    expectThat(pillIn(tabChip(pane, 't1'))?.count === '2', "the overlay chip's pill is missing");
+  }
+);
+
+scenario(
+  'RN-133',
+  'the handle stays, at its one height, whatever it has to say — and bars off draws no bar',
+  () => arrangeHidden({ extra: { progress: { t1: { state: 'normal', value: 40 } } } }),
+  (html) => {
+    expectThat(progressIn(handleOf(paneMarkup(html, 'pane-1'))), 'setup: a bar on the handle');
+    useSettingsStore.getState().setSetting('terminalProgress', false);
+    const off = handleOf(paneMarkup(renderArranged(), 'pane-1'));
+    expectThat(off && !progressIn(off), 'bars off, and the handle still draws one');
+    useSettingsStore.getState().setSetting('terminalProgress', true);
+    useTerminalStore.setState({ progress: {}, notifications: entriesFor('t1', 3, true) });
+    const quiet = handleOf(paneMarkup(renderArranged(), 'pane-1'));
+    expectThat(quiet && !/data-handle-mark=/.test(quiet) && !progressIn(quiet), 'read entries, and the handle still marks them');
+    expectThat(classOf(openingTag(quiet)).split(/\s+/).includes('h-[6px]'), 'the handle changed height');
+  }
+);
+
+scenario(
+  'RN-134',
+  'a zoomed pane keeps its strip and its "Zoomed" chip, one terminal or not',
+  () => {
+    arrangeThreePanes({ zoomedPaneId: 'pane-b' });
+    useSettingsStore.getState().setSetting('terminalHideSingleTabStrip', true);
+  },
+  (html) => {
+    const pane = paneMarkup(html, 'pane-b');
+    expectThat(pane.indexOf('data-tab-strip="pane-b"') < pane.indexOf('data-pane-body="pane-b"'), "the zoomed pane's strip is hidden");
+    expectThat(zoomedChip(pane), 'the "Zoomed" chip went with it');
+    expectThat(!overlayTag(pane) && !handleOf(pane), 'an overlay or a handle on a zoomed pane');
+    // Unzoomed, each of the three one-terminal panes hides its strip.
+    arrangeThreePanes();
+    useSettingsStore.getState().setSetting('terminalHideSingleTabStrip', true);
+    const all = renderArranged();
+    expectThat(buttonsIn(pane).some((b) => b.title.startsWith('Close Pane')), "the zoomed pane's own strip lost Close Pane");
+    for (const id of ['pane-a', 'pane-b', 'pane-c']) {
+      const markup = paneMarkup(all, id);
+      expectThat(overlayTag(markup) && handleOf(markup), `${id}: no overlay or no handle`);
+      expectThat(!buttonsIn(markup).some((b) => b.title.startsWith('Close Pane')), `${id}: Close Pane in the opened strip`);
+      expectThat(markup.indexOf(`data-tab-strip="${id}"`) > markup.indexOf(`data-pane-body="${id}"`), `${id}: the strip is in line`);
+    }
+  }
+);
+
+check('RN-135', 'the overlay opened: opaque, taking the pointer, below the handle; down: neither', () => {
+  const draw = (props) =>
+    overlayTag(renderToString(React.createElement(StripOverlay, props, React.createElement('div', { 'data-tab-strip': 'p' }))));
+  const shown = draw({ shown: true });
+  const cls = classOf(shown);
+  expectThat(/\sdata-shown="true"/.test(shown), 'not marked shown');
+  expectThat(cls.includes('opacity-100') && !cls.includes('pointer-events-none') && !cls.split(/\s+/).includes('opacity-0'), `shown, but: ${cls}`);
+  // Below the handle, never over it: a second click on the handle is the
+  // handle's, so there is no window in which the strip ignores the pointer.
+  expectThat(cls.split(/\s+/).includes('top-[6px]') && !cls.split(/\s+/).includes('top-0'), `the strip is not laid below its 6 px handle: ${cls}`);
+  // Under Reduce Motion every transition is instant (index.css), this one included.
+  expectThat(/\btransition-\[opacity,transform\]/.test(cls) && /\bduration-100\b/.test(cls), `no short fade: ${cls}`);
+});
+
+check('RN-136', 'the handle on its own: a count past nine in words, the strip-is-up state, no mark for nothing', () => {
+  reset();
+  for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+  const none = renderToString(React.createElement(StripHandle, { paneId: 'p', tabId: 't1', title: 'one', unread: 0 }));
+  expectThat(!/data-handle-mark=/.test(none) && !progressIn(none), `a mark with nothing to show: ${none}`);
+  const counted = renderToString(React.createElement(StripHandle, { paneId: 'p', tabId: 't1', title: 'one', unread: 12, open: true }));
+  expectThat(/data-handle-mark="unread"/.test(counted), 'no unread mark');
+  expectThat((attrOf(openingTag(counted), 'aria-label') ?? '').includes('12 unread notifications'), 'the words do not count them');
+  expectThat(/\saria-expanded="true"/.test(openingTag(counted)), 'the strip is up and the handle does not say so');
+});
+
+scenario(
+  'RN-137',
+  'the settings window offers Equal Splits and Hide the Tab Strip after Split Directory, off, saying what each does',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const split = html.indexOf('terminal.integrated.splitCwd');
+    let last = split;
+    for (const [key, title] of [
+      ['terminal.integrated.equalizeOnSplit', 'Equal Splits'],
+      ['terminal.integrated.hideSingleTabStrip', 'Hide the Tab Strip of a Single Terminal'],
+    ]) {
+      expectText(html, title);
+      const row = settingRow(html, key);
+      expectThat(row, `rendered without ${key}`);
+      expectThat(last < row.at, `${key} is not after Split Directory`);
+      last = row.at;
+      expectThat(!/\schecked=""/.test(row.box), `${title} is on by default: ${row.box}`);
+    }
+    const equal = settingRow(html, 'terminal.integrated.equalizeOnSplit').description;
+    for (const words of ['a third each', 'keep the sizes you gave them', 'Equalize Splits']) {
+      expectThat(equal.includes(words), `Equal Splits does not say "${words}": ${equal}`);
+    }
+    const hide = settingRow(html, 'terminal.integrated.hideSingleTabStrip').description;
+    for (const words of ['thin handle', 'Click the handle', 'Escape', 'pointer leaves it', 'being dragged', 'never just because the pointer passes by', 'never resizing the terminal', 'password lock', 'zoomed pane', 'command palette']) {
+      expectThat(hide.includes(words), `Hide the Tab Strip does not say "${words}": ${hide}`);
+    }
+  }
+);
+
+check('RN-138', "in forced colours the handle's marks keep a system colour each, the unread one and the lock's apart", () => {
+  const css = readFileSync(new URL('../../src/styles/index.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const forced = /@media \(forced-colors: active\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+  expectThat(/\[data-handle-mark="unread"\] \{\s*forced-color-adjust: none;\s*background: Highlight;/.test(forced), 'the unread dot is repainted away');
+  expectThat(!/\[data-handle-mark="lock"\] \{[^}]*background/.test(forced), 'the padlock is painted over with a background');
+  expectThat(/\[data-handle-grip\] \{\s*forced-color-adjust: none;\s*background: CanvasText;/.test(forced), "the handle's grip disappears");
+});
+
+// ---- The terminal theme gallery (spec P5) ----------------------------------------
+
+/** A gallery card's markup — the wrapper holds only spans and buttons, so its first </div> closes it. */
+const themeCard = (html, id) => new RegExp(`<div\\b[^>]*\\sdata-theme-card="${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*>[\\s\\S]*?<\\/div>`).exec(html)?.[0] ?? null;
+const pressedCards = (html) =>
+  attrOrder(html, 'data-theme-card').filter((id) => /<button\b[^>]*\saria-checked="true"/.test(themeCard(html, id) ?? ''));
+/** The opening tag of a card's own button (the radio). */
+const cardRadio = (html, id) => /<button\b[^>]*>/.exec(themeCard(html, id) ?? '')?.[0] ?? '';
+const swatchesIn = (markup) => [...(markup ?? '').matchAll(/<span class="block h-\[10px\] rounded-\[2px\]" style="background:([^"]+)"/g)].map((m) => m[1]);
+const mineTheme = { id: 'custom:mine', label: 'Mine', theme: { background: '#0a0b0c', red: '#ff0000' } };
+
+scenario(
+  'RN-160',
+  'Settings draws the theme gallery: a card per built-in theme, the chosen one pressed, Import and an empty notice',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const { TERMINAL_THEME_IDS } = TERMINAL_THEMES_MODULE;
+    expectThat(JSON.stringify(attrOrder(html, 'data-theme-card')) === JSON.stringify(TERMINAL_THEME_IDS), `the cards are ${JSON.stringify(attrOrder(html, 'data-theme-card'))}`);
+    expectThat(JSON.stringify(pressedCards(html)) === '["dark-modern"]', `pressed: ${JSON.stringify(pressedCards(html))}`);
+    expectThat(!/<option value="monokai"/.test(html), 'the old theme <select> is still drawn');
+    // A radio group, one Tab stop, the arrows inside it (T14).
+    expectThat(/<div\b[^>]*role="radiogroup"[^>]*aria-label="Terminal color themes"/.test(html), 'the cards are not a radio group');
+    const radios = TERMINAL_THEMES_MODULE.TERMINAL_THEME_IDS.map((id) => cardRadio(html, id));
+    expectThat(radios.every((tag) => /\srole="radio"/.test(tag) && !/aria-pressed/.test(tag)), `a card is not a radio: ${radios[0]}`);
+    const stops = radios.filter((tag) => /\stabindex="0"/i.test(tag));
+    expectThat(stops.length === 1 && /aria-checked="true"/.test(stops[0]), `the Tab stops among the cards: ${stops.length}, on the chosen one: ${stops[0]}`);
+    expectThat(radios.every((tag) => /\stabindex="(-1|0)"/i.test(tag)), 'a card is out of the roving order');
+    expectThat(/\stitle="Tomorrow Night"/.test(cardRadio(html, 'tomorrow-night')), 'a card whose name may be cut has no tooltip with the whole of it');
+    // The notice keeps to the visible part of the list, so an Undo is never scrolled away (T3).
+    expectThat(/class="[^"]*\bsticky\b[^"]*\bbottom-0\b[^"]*"[^>]*data-theme-notice=""/.test(html), 'the notice is not held in view');
+    const dark = themeCard(html, 'dark-modern');
+    expectThat(/<svg\b/.test(dark), 'the chosen card has no check mark — its only sign in forced colours');
+    expectThat(!/<svg\b/.test(themeCard(html, 'nord')), 'a card that is not chosen has a check mark');
+    expectThat(/forced-color-adjust-none/.test(dark), 'the sample is repainted away in forced colours');
+    expectThat(!/#[0-9a-fA-F]{3,6}\b/.test(dark), `Dark Modern's card names literal colours instead of the app's tokens: ${dark}`);
+    expectThat(/background:var\(--vsc-terminal-bg\)/.test(dark), 'Dark Modern is not drawn in the terminal token');
+    expectThat(swatchesIn(dark).length === 16 && swatchesIn(themeCard(html, 'nord')).length === 16, 'a card does not show all 16 colours');
+    expectThat(swatchesIn(themeCard(html, 'monokai'))[1] === '#F92672', `Monokai's red swatch is ${swatchesIn(themeCard(html, 'monokai'))[1]}`);
+    expectThat(!/aria-label="Delete /.test(html), 'a built-in theme can be deleted');
+    expectThat(buttonsIn(html).some((b) => b.text === 'Import Theme…'), 'no Import button');
+    const input = /<input\b[^>]*type="file"[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(/\bclass="hidden"/.test(input) && /tabindex="-1"/i.test(input), `the file input is on screen: ${input}`);
+    expectThat(!/\saccept=/.test(input), 'an accept filter would grey out Ghostty files, which have no extension');
+    expectThat(/<div\b[^>]*role="status"[^>]*aria-live="polite"[^>]*>\s*<\/div>/.test(html), 'there is no empty live region waiting for the first result');
+    expectText(html, '0 of 20 imported;');
+  }
+);
+
+scenario(
+  'RN-161',
+  'an imported theme: its own card, marked Imported with a delete button, pressed when chosen, and the pane frame in its background',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+    useSettingsStore.getState().setSetting('terminalCustomThemes', [mineTheme]);
+    useSettingsStore.getState().setSetting('terminalTheme', 'custom:mine');
+  },
+  (html) => {
+    expectThat(attrOrder(html, 'data-theme-card').at(-1) === 'custom:mine', 'the imported card is not after the built-ins');
+    expectThat(JSON.stringify(pressedCards(html)) === '["custom:mine"]', `pressed: ${JSON.stringify(pressedCards(html))}`);
+    const card = themeCard(html, 'custom:mine');
+    expectText(card, 'Mine');
+    expectText(card, 'Imported');
+    expectThat(buttonsIn(card).some((b) => b.label === 'Delete Mine'), 'no delete button on the imported card');
+    const deleteButton = /<button\b[^>]*aria-label="Delete Mine"[^>]*>/.exec(card)?.[0] ?? '';
+    expectThat(/\stabindex="-1"/i.test(deleteButton), `the delete button is a Tab stop of its own: ${deleteButton}`);
+    expectThat(/aria-keyshortcuts="Delete"/.test(cardRadio(html, 'custom:mine')), 'the keyboard way to delete is not announced');
+    const swatches = swatchesIn(card);
+    expectThat(swatches[1] === '#ff0000', `its red is ${swatches[1]}`);
+    expectThat(swatches[2] === 'var(--vsc-ansi-green)', `a colour the file left out is not the default's token: ${swatches[2]}`);
+    expectThat(/background:#0a0b0c/.test(card), 'its sample is not on its background');
+    expectText(html, '1 of 20 imported;');
+    expectThat(/background-color:#0a0b0c/.test(paneBodyTag(html, 'pane-1') ?? ''), `the frame round the terminal is not the imported background: ${paneBodyTag(html, 'pane-1')}`);
+  }
+);
+
+scenario(
+  'RN-162',
+  'the pane frame follows a preview, and a chosen theme that is gone is drawn and marked as the default',
+  () => {
+    reset();
+    useSettingsStore.getState().setSetting('terminalTheme', 'nord');
+    useSettingsStore.setState({ terminalThemePreview: 'monokai' });
+  },
+  (html) => {
+    expectThat(/background-color:#272822/.test(paneBodyTag(html, 'pane-1') ?? ''), `the frame is not the previewed theme's: ${paneBodyTag(html, 'pane-1')}`);
+    useSettingsStore.setState({ terminalThemePreview: null, isSettingsModalOpen: true });
+    useSettingsStore.getState().setSetting('terminalTheme', 'custom:gone');
+    const gone = renderArranged();
+    expectThat(!/background-color/.test(paneBodyTag(gone, 'pane-1') ?? ''), 'a missing theme paints a background of its own');
+    expectThat(JSON.stringify(pressedCards(gone)) === '["dark-modern"]', `pressed: ${JSON.stringify(pressedCards(gone))}`);
+  }
+);
+
+{
+  const id = 'RN-163';
+  const description = 'the gallery notice: an import, a refusal, a choice of schemes, a delete with Undo';
+  const started = Date.now();
+  try {
+    const { ThemeNotice } = await import('../../src/components/common/ThemeGallery.jsx');
+    const draw = (notice) => renderToString(React.createElement(ThemeNotice, { notice, onPick() {}, onUndo() {}, onDismiss() {} }));
+    /** What a screen reader is told: the live region's content alone. */
+    const announced = (markup) => visibleText(/<div\b[^>]*role="status"[^>]*>([\s\S]*?)<\/div>/.exec(markup)?.[1] ?? '').trim();
+    const ok = draw({ kind: 'ok', text: 'Imported "Night" and switched the terminals to it.', detail: 'Not in the file, so taken from the default theme: selection.' });
+    expectText(ok, 'Imported "Night"');
+    expectText(ok, 'taken from the default theme: selection.');
+    expectThat(/data-theme-notice="ok"/.test(ok), 'no notice drawn');
+    expectThat(announced(ok) === 'Imported "Night" and switched the terminals to it.', `announced: ${JSON.stringify(announced(ok))}`);
+    expectThat(buttonsIn(ok).some((b) => b.label === 'Dismiss'), 'no way to dismiss it');
+    const error = draw({ kind: 'error', text: '"x.json" was not imported. It is not valid JSON.' });
+    expectThat(/border-vsc-error text-vsc-error/.test(error), 'a refusal is not drawn as an error');
+    expectText(error, 'It is not valid JSON.');
+    const pick = draw({
+      kind: 'pick',
+      fileName: 'settings.json',
+      text: '"settings.json" holds 2 color schemes. Choose one to import:',
+      total: 2,
+      schemes: [
+        { ok: true, name: 'Campbell', theme: { background: '#0c0c0c' }, filled: [] },
+        { ok: false, name: 'One Half Light', error: '"One Half Light" has a light background (#fafafa).' },
+      ],
+    });
+    expectText(pick, '"settings.json" holds 2 color schemes. Choose one to import:');
+    expectThat(buttonsIn(pick).some((b) => b.text === 'Campbell'), 'the importable scheme is not a button');
+    expectThat(!buttonsIn(pick).some((b) => b.text.includes('One Half Light')), 'a refused scheme is offered');
+    expectText(pick, 'One Half Light: "One Half Light" has a light background (#fafafa).');
+    // Only the summary is read out — not every button and every reason (T14).
+    expectThat(announced(pick) === '"settings.json" holds 2 color schemes. Choose one to import:', `announced: ${JSON.stringify(announced(pick))}`);
+    // Nothing importable: the reasons, and no invitation to choose (T9).
+    const none = draw({
+      kind: 'pick',
+      fileName: 'light.json',
+      text: 'None of the 2 color schemes in "light.json" can be imported:',
+      total: 2,
+      schemes: [
+        { ok: false, name: 'A', error: 'It has a light background.' },
+        { ok: false, name: 'B', error: 'It has a light background.' },
+      ],
+    });
+    expectThat(!/Choose one/.test(visibleText(none)), 'a list with nothing to choose asks to choose');
+    expectText(none, 'B: It has a light background.');
+    const deleted = draw({ kind: 'deleted', text: 'Deleted "B".', undo: { entry: {}, index: 0, wasChosen: false } });
+    expectThat(buttonsIn(deleted).some((b) => b.text === 'Undo'), 'a delete offers no Undo');
+    const nothing = draw(null);
+    expectThat(/<div\b[^>]*role="status"[^>]*aria-live="polite"[^>]*><\/div>/.test(nothing) && visibleText(nothing).trim() === '', `no notice is not an empty live region: ${nothing}`);
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+// ---- The password lock (stage 3, part B) -------------------------------------
+//
+// A terminal whose typing is hidden — echo off in canonical mode, a password
+// prompt (src-tauri/src/pty/echo_watch.rs) — carries a lock wherever its tab
+// says something about it: a badge over the chip's corner that takes no room
+// (a lock in line moved the chip's ✕ under the pointer), a mark on a hidden
+// strip's handle, an in-line lock on the side bar's row (whose only target is
+// the whole row). These cases check that each one shows it, in words, and
+// that nothing else does.
+
+/** The lock in some markup, as `{ tag, label, title }`, or null when there is none. */
+function lockIn(markup) {
+  const tag = /<span\b[^>]*\sdata-lock-mark="[^"]*"[^>]*>/.exec(markup ?? '')?.[0];
+  if (!tag) return null;
+  return { tag, label: attrOf(tag, 'aria-label'), title: attrOf(tag, 'title'), role: attrOf(tag, 'role') };
+}
+
+const LOCK_WORDS = 'Typing is hidden (password prompt)';
+
+scenario(
+  'RN-140',
+  "a terminal asking for a password: a badge over its chip's corner that takes no room, the words in the chip's tooltip; an in-line lock on its side bar row",
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2')],
+      groups: baseGroups(['t1', 't2']),
+      notifications: entriesFor('t1', 2),
+    });
+    lockSessions(['t1']);
+  },
+  (html) => {
+    const chip = tabChip(html, 't1');
+    const lock = lockIn(chip);
+    expectThat(lock, 'no lock on the chip');
+    expectThat(lock.role === 'img' && lock.label === LOCK_WORDS, `the lock does not say it: ${lock.tag}`);
+    const cls = classOf(lock.tag).split(/\s+/);
+    // Legible (10 px, an 8 px padlock) and clear of the activity dot, which
+    // starts 8 px into the chip: the badge ends where the dot begins.
+    expectThat(iconOf(chip.slice(chip.indexOf(lock.tag))) === 'lock' && /\swidth="8"/.test(chip.slice(chip.indexOf(lock.tag))), 'the padlock is not 8 px');
+    for (const word of ['absolute', 'pointer-events-none', '-top-[2px]', '-left-[2px]', 'w-[10px]', 'h-[10px]', 'text-vsc-warn']) {
+      expectThat(cls.includes(word), `the chip's lock is not "${word}" — it must take no room, and no pointer: ${lock.tag}`);
+    }
+    const title = visibleText(attrOf(openingTag(chip), 'title') ?? '');
+    expectThat(title.includes(LOCK_WORDS), `the chip's tooltip does not say it: ${JSON.stringify(title)}`);
+    expectThat(!lockIn(tabChip(html, 't2')), 'a lock on a terminal that is not asking');
+    const row = terminalRow(html, 't1');
+    const rowTitle = visibleText(attrOf(openingTag(row), 'title') ?? '');
+    expectThat(rowTitle.includes(LOCK_WORDS), `the side bar row's tooltip does not say it: ${JSON.stringify(rowTitle)}`);
+    const rowLock = lockIn(row);
+    expectThat(rowLock?.label === LOCK_WORDS && rowLock.title === LOCK_WORDS, 'no lock, with its words, on the side bar row');
+    expectThat(!lockIn(terminalRow(html, 't2')), "a lock on the other terminal's row");
+    // The rows keep their fixed height, lock or not.
+    expectThat(classOf(openingTag(row)).split(/\s+/).includes('h-[38px]'), `the row is not 38px: ${openingTag(row)}`);
+    expectThat(
+      classOf(openingTag(terminalRow(html, 't2'))).split(/\s+/).includes('h-[38px]'),
+      'the locked row is drawn at another height than its neighbour'
+    );
+  }
+);
+
+scenario(
+  'RN-141',
+  'with the strip hidden, a password prompt alone marks the handle, and says so in its words',
+  () => arrangeHidden({ locked: ['t1'] }),
+  (html) => {
+    const pane = paneMarkup(html, 'pane-1');
+    const handle = handleOf(pane);
+    expectThat(/data-handle-mark="lock"/.test(handle ?? ''), `no lock mark on the handle: ${handle}`);
+    expectThat(!/data-handle-mark="unread"/.test(handle), 'an unread mark with nothing unread');
+    const words = attrOf(openingTag(handle), 'aria-label') ?? '';
+    expectThat(words.includes(LOCK_WORDS), `the handle's words do not say it: ${JSON.stringify(words)}`);
+    // The overlay strip's chip carries it too, for when the strip comes back.
+    expectThat(lockIn(tabChip(pane.slice(pane.indexOf('data-strip-overlay')), 't1')), "no lock on the overlay strip's chip");
+  }
+);
+
+scenario(
+  'RN-142',
+  'one-line side bar rows carry the lock too, at their one height',
+  () => {
+    reset();
+    for (const key of ['terminalsPanelBranch', 'terminalsPanelAgent', 'terminalsPanelLastNote']) {
+      useSettingsStore.getState().setSetting(key, false);
+    }
+    useTerminalStore.setState({ tabs: [tab('t1'), tab('t2')], groups: baseGroups(['t1', 't2']) });
+    lockSessions(['t2']);
+  },
+  (html) => {
+    const row = terminalRow(html, 't2');
+    expectThat(lockIn(row)?.label === LOCK_WORDS, `no lock on a one-line row: ${row}`);
+    expectThat(classOf(openingTag(row)).split(/\s+/).includes('h-[22px]'), `the row is not 22px: ${openingTag(row)}`);
+    expectThat(!lockIn(terminalRow(html, 't1')), 'a lock on the terminal that is not asking');
+  }
+);
+
+scenario(
+  'RN-143',
+  'nobody asking: no lock anywhere, and the handle marks nothing',
+  () => arrangeHidden({ locked: [] }),
+  (html) => {
+    expectThat(!/data-lock-mark=/.test(html), 'a lock drawn with no terminal asking');
+    expectThat(!/data-handle-mark=/.test(handleOf(paneMarkup(html, 'pane-1')) ?? ''), 'a mark on the handle with nothing to say');
+  }
+);
 
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');

@@ -4,7 +4,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { unreadBadge, unreadLabel } from '../../lib/attention.js';
 import { aggregateProgress } from '../../lib/terminalProgress.js';
-import { getTerminalThemeEntry } from '../../lib/terminalThemes.js';
+import { getTerminalThemeEntry, shownTerminalThemeId } from '../../lib/terminalThemes.js';
 import { cn } from '../../lib/utils.js';
 
 /**
@@ -82,10 +82,23 @@ export const PANE_FRAME_PX = 3;
  * The background a pane body paints its frame in: the terminal theme's own,
  * so that the margin round the terminal is the same colour as the terminal.
  * Undefined for the theme that follows the app's tokens, whose background is
- * the pane's already.
+ * the pane's already — and for an imported theme that names no background,
+ * which draws with that same token. Resolved by terminalThemes.js's
+ * `getTerminalThemeEntry`, as the terminals' own colours are, so the margin
+ * and the terminal it surrounds can never be in two different themes.
  */
-export function paneBodyBackground(themeId) {
-  return getTerminalThemeEntry(themeId)?.theme?.background ?? undefined;
+export function paneBodyBackground(themeId, customThemes) {
+  return getTerminalThemeEntry(themeId, customThemes)?.theme?.background ?? undefined;
+}
+
+/**
+ * `paneBodyBackground` for a settings-store selector: the theme on screen —
+ * the one the Settings window's gallery is previewing, else the chosen one —
+ * with the user's imported themes. A plain string, so a pane re-renders only
+ * when the colour itself changes.
+ */
+export function selectPaneBodyBackground(state) {
+  return paneBodyBackground(shownTerminalThemeId(state), state.terminalCustomThemes);
 }
 
 /**

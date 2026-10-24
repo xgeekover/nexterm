@@ -164,6 +164,26 @@ class BrowserMockBridge {
     };
   }
 
+  /**
+   * A terminal's typing hidden or not (spec P4), told the way the backend
+   * tells it (src-tauri/src/pty/echo_watch.rs): `pty-echo { session_id,
+   * secret }` only when it changes. The mock's own `sudo` and `read -s` go
+   * through here, and a test or a browser session can call it directly to
+   * put a terminal on a password prompt. Returns whether anything was said.
+   */
+  async setEcho(sessionId, secret) {
+    const session = this.ptySessions.get(sessionId);
+    if (!session || Boolean(session.secret) === Boolean(secret)) return false;
+    session.secret = Boolean(secret);
+    await this.emit('pty-echo', { session_id: sessionId, secret: session.secret });
+    return true;
+  }
+
+  /** The backend's last word for a session that ends secret: `secret: false`, before its `pty-exit`. */
+  async endEcho(sessionId) {
+    if (this.ptySessions.get(sessionId)?.secret) await this.setEcho(sessionId, false);
+  }
+
   async emit(event, payload) {
     const listeners = this.eventListeners.get(event);
     if (listeners) {
@@ -294,6 +314,16 @@ class BrowserMockBridge {
         if (!session) {
           throw new Error(`PTY session not found: ${session_id}`);
         }
+        // At a password prompt (`sudo`, `read -s` below) what is written is
+        // the password: nothing is echoed, and a line ends the prompt.
+        if (session.secret) {
+          if (/[\r\n]/.test(data || '')) {
+            await this.emit('pty-output', { session_id, data: '\r\n' });
+            await this.setEcho(session_id, false);
+            await this.emit('pty-command-done', { session_id, exit_code: 0 });
+          }
+          return null;
+        }
         const trimmed = (data || '').trim();
         if (!trimmed) return null;
 
@@ -385,10 +415,19 @@ class BrowserMockBridge {
             await this.emit('pty-command-done', { session_id, exit_code: 0 });
           } else if (cmd === 'npm' && (cmdArgs[0] === 'test' || cmdArgs[0] === 't')) {
             await this.runDynamicVirtualTests(session);
+          } else if (cmd === 'sudo' || (cmd === 'read' && cmdArgs.includes('-s'))) {
+            // A password prompt: echo off in canonical mode, as the real
+            // backend reads it. Still running until a line is written.
+            await this.emit('pty-output', {
+              session_id,
+              data: cmd === 'sudo' ? '[sudo] password for developer: ' : '',
+            });
+            await this.setEcho(session_id, true);
           } else if (cmd === 'exit' || cmd === 'logout') {
             // The one command that really does end the session.
             const code = Number(cmdArgs[0]) || 0;
             session.active = false;
+            await this.endEcho(session_id);
             await this.emit('pty-exit', { session_id, exit_code: code });
             this.ptySessions.delete(session_id);
           } else {
@@ -411,12 +450,24 @@ class BrowserMockBridge {
         return null;
       }
 
+      // Whether a terminal's typing is hidden right now (spec P4): the
+      // backend reads the line discipline there and then; the mock answers
+      // from what `setEcho` last said. An unknown session is an error there
+      // as here.
+      case 'pty_input_hidden': {
+        const { session_id } = args;
+        const session = this.ptySessions.get(session_id);
+        if (!session) throw new Error(`PTY session not found: ${session_id}`);
+        return Boolean(session.secret);
+      }
+
       // 4. pty_kill
       case 'pty_kill': {
         const { session_id } = args;
         const session = this.ptySessions.get(session_id);
         if (session) {
           session.active = false;
+          await this.endEcho(session_id);
           await this.emit('pty-exit', { session_id, exit_code: 130 });
           this.ptySessions.delete(session_id);
         }
@@ -434,6 +485,7 @@ class BrowserMockBridge {
           if (keep.has(id)) continue;
           const session = this.ptySessions.get(id);
           if (session) session.active = false;
+          await this.endEcho(id);
           this.ptySessions.delete(id);
           await this.emit('pty-exit', { session_id: id, exit_code: 130 });
           reaped += 1;

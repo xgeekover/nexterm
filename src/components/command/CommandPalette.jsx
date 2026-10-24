@@ -9,6 +9,11 @@ import {
   Maximize2,
   BellRing,
   CheckCheck,
+  Columns3,
+  ArrowLeftRight,
+  Pencil,
+  X,
+  PanelTop,
 } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
@@ -17,6 +22,7 @@ import { invoke, listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
 import { commandHistory } from '../../lib/commandIndex.js';
+import { notifyTerminal } from '../../lib/terminalNotice.js';
 import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
@@ -36,6 +42,11 @@ function iconFor(item) {
   if (item.command === 'toggle_pane_zoom') return <Maximize2 size={16} />;
   if (item.command === 'go_to_unread_notification') return <BellRing size={16} />;
   if (item.command === 'mark_notifications_read') return <CheckCheck size={16} />;
+  if (item.command === 'equalize_splits') return <Columns3 size={16} />;
+  if (item.command === 'swap_pane') return <ArrowLeftRight size={16} />;
+  if (item.command === 'rename_terminal') return <Pencil size={16} />;
+  if (item.command === 'close_terminal') return <X size={16} />;
+  if (item.type === 'pane') return <PanelTop size={16} />;
   return <Terminal size={16} />;
 }
 
@@ -97,6 +108,35 @@ function useFileListing(wanted, rootPath) {
   }, [wanted, rootPath]);
 
   return listing?.root === rootPath ? listing : null;
+}
+
+/**
+ * Swallow the repeats of `key`, still held from the press that chose a row,
+ * wherever the keyboard has gone since — until the key is let go, pressed
+ * afresh (a keydown that is not a repeat), or the window loses focus. In
+ * the capture phase, so a terminal never sees them.
+ */
+function swallowRepeatsOf(key) {
+  const stop = () => {
+    window.removeEventListener('keydown', onDown, true);
+    window.removeEventListener('keyup', onUp, true);
+    window.removeEventListener('blur', stop);
+  };
+  const onDown = (e) => {
+    if (e.key !== key) return;
+    if (!e.repeat) {
+      stop();
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const onUp = (e) => {
+    if (e.key === key) stop();
+  };
+  window.addEventListener('keydown', onDown, true);
+  window.addEventListener('keyup', onUp, true);
+  window.addEventListener('blur', stop);
 }
 
 /**
@@ -169,6 +209,11 @@ export function CommandPalette() {
   const goToLatestUnread = useTerminalStore((s) => s.goToLatestUnread);
   const markAllNotificationsRead = useTerminalStore((s) => s.markAllNotificationsRead);
   const writeRaw = useTerminalStore((s) => s.writeRaw);
+  const equalizeSplits = useTerminalStore((s) => s.equalizeSplits);
+  const swapActivePane = useTerminalStore((s) => s.swapActivePane);
+  const requestTabRename = useTerminalStore((s) => s.requestTabRename);
+  const closeTab = useTerminalStore((s) => s.closeTab);
+  const typingHiddenNow = useTerminalStore((s) => s.typingHiddenNow);
 
   const [query, setQuery] = useState('');
 
@@ -226,6 +271,38 @@ export function CommandPalette() {
     [isOpen, paletteMode]
   );
 
+  // "Swap Pane With…": the other panes of the group on screen, or why there
+  // are none (a zoomed group, a group of one pane). Read when the pick
+  // opens, as the history is, for the same reason — a list that moves under
+  // the selection is worse than one a moment old.
+  const swap = useMemo(
+    () =>
+      isOpen && paletteMode === 'swap-pane'
+        ? useTerminalStore.getState().swapTargets?.() ?? { panes: [], note: null }
+        : null,
+    [isOpen, paletteMode]
+  );
+
+  // Another mode while open — a row that opens a pick, a chord pressed over
+  // the palette — starts its list from the top with nothing typed: what was
+  // typed to find "Swap Pane With…" is not the name of a pane.
+  // (Opening is the effect above's: this only answers a change while open.)
+  const shownModeRef = useRef(null);
+  useEffect(() => {
+    if (!isOpen) {
+      shownModeRef.current = null;
+      return;
+    }
+    if (shownModeRef.current === null || shownModeRef.current === paletteMode) {
+      shownModeRef.current = paletteMode;
+      return;
+    }
+    shownModeRef.current = paletteMode;
+    setQuery('');
+    setSelectedIndex(0);
+    inputRef.current?.focus();
+  }, [isOpen, paletteMode]);
+
   // The result rows and the order the arrow keys walk them both come from
   // `buildPaletteGroups` (src/lib/paletteItems.js), so the selection can never
   // run past the last visible row onto an item the user cannot see. Worked
@@ -244,9 +321,11 @@ export function CommandPalette() {
             bindings,
             recentRoots,
             history,
+            panes: swap?.panes ?? [],
+            panesNote: swap?.note ?? null,
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -264,14 +343,28 @@ export function CommandPalette() {
       // user's to press.
       const tabId = useTerminalStore.getState().activeTabId;
       if (tabId) {
-        writeRaw(tabId, item.command);
         setActiveView('terminal');
+        // Never into a password prompt (spec P4): typed there, the command
+        // would be taken as the password, shown nowhere. Asked of the
+        // backend too, which reads the terminal now.
+        if (await typingHiddenNow?.(tabId)) {
+          notifyTerminal(tabId, 'Not typed — this terminal is asking for a password, and NexTerm types nothing into a password prompt. Answer the prompt first.');
+          return;
+        }
+        writeRaw(tabId, item.command);
       }
       return;
     }
     if (item.type === 'file') {
       await openFile(item.path);
       setActiveView('editor');
+      return;
+    }
+    if (item.type === 'pane') {
+      // The active pane's terminals trade places with this pane's; the
+      // keyboard follows the terminal it was in (see `swapPanes`).
+      swapActivePane?.(item.paneId);
+      setActiveView('terminal');
       return;
     }
     switch (item.command) {
@@ -295,6 +388,22 @@ export function CommandPalette() {
       case 'mark_notifications_read':
         markAllNotificationsRead?.();
         return;
+      case 'equalize_splits':
+        // The group on screen, nested splits included.
+        equalizeSplits?.();
+        setActiveView('terminal');
+        return;
+      case 'rename_terminal':
+        // The pane showing the active terminal opens its tab's editor — over
+        // the terminal, when that pane's strip is hidden (spec P1).
+        setActiveView('terminal');
+        requestTabRename?.();
+        return;
+      case 'close_terminal': {
+        const tabId = useTerminalStore.getState().activeTabId;
+        if (tabId) await closeTab(tabId);
+        return;
+      }
       case 'save_all':
         await saveAll();
         return;
@@ -305,6 +414,13 @@ export function CommandPalette() {
 
   const handleSelect = async (item) => {
     if (!item) return;
+    // A row that opens a pick ("Swap Pane With…") does not close the
+    // palette: it becomes the pick, and what had the keyboard when the
+    // palette opened still gets it back when the pick is done.
+    if (item.opens) {
+      setOpen(true, item.opens);
+      return;
+    }
     const handOff = focusAfterPalette(item);
     close(handOff);
     try {
@@ -341,7 +457,15 @@ export function CommandPalette() {
       setSelectedIndex((Math.max(current, 0) - 1 + allFiltered.length) % Math.max(1, allFiltered.length));
     } else if (e.key === 'Enter') {
       e.preventDefault();
+      // A key held a moment too long repeats, and each repeat used to act on
+      // whatever the palette showed next: "Swap Pane With…" swapped with the
+      // first pane before anyone chose one. A repeat chooses nothing.
+      if (e.repeat) return;
       if (allFiltered[current]) {
+        // And once a row has closed the palette, the rest of the held key's
+        // repeats would reach whatever has the keyboard then — the terminal,
+        // as Enters that ran its half-typed line after Close Terminal.
+        swallowRepeatsOf('Enter');
         handleSelect(allFiltered[current]);
       }
     } else if (e.key === 'Escape') {
@@ -374,7 +498,13 @@ export function CommandPalette() {
                 setSelectedIndex(0);
               }}
               onKeyDown={handleKeyDown}
-              placeholder={paletteMode === 'files' ? 'Search files by name…' : 'Type a command or search files…'}
+              placeholder={
+                paletteMode === 'files'
+                  ? 'Search files by name…'
+                  : paletteMode === 'swap-pane'
+                    ? 'Swap the active pane with…'
+                    : 'Type a command or search files…'
+              }
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-ui text-vsc-fg placeholder:text-vsc-placeholder"
             />
           </div>
@@ -405,6 +535,13 @@ export function CommandPalette() {
                 {group.more > 0 && (
                   <div data-palette-more className="px-2 h-[22px] flex items-center text-ui-sm text-vsc-muted italic">
                     {`${count(group.more)} more — keep typing to narrow the list`}
+                  </div>
+                )}
+                {/* Why a list has nothing to choose from — a zoomed group
+                    offers no pane to swap with — said where the rows would be. */}
+                {group.note && (
+                  <div data-palette-note className="px-2 py-1 text-ui-sm text-vsc-muted italic">
+                    {group.note}
                   </div>
                 )}
                 {group.truncated && (

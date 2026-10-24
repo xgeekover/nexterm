@@ -23,7 +23,12 @@ import '@xterm/xterm/css/xterm.css';
 import { listen, pathKinds } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
-import { TERMINAL_THEMES, DEFAULT_TERMINAL_THEME_ID } from '../../lib/terminalThemes.js';
+import {
+  APP_THEME_TOKENS,
+  getTerminalThemeEntry,
+  shownTerminalThemeId,
+  themeColorsOf,
+} from '../../lib/terminalThemes.js';
 import {
   activateGraphemeWidths,
   fitAndReport,
@@ -438,13 +443,24 @@ const LIVE_TERMINAL_SETTINGS_KEYS = [
   'terminalCursorStyle',
   'terminalCursorBlink',
   'terminalScrollback',
-  'terminalTheme',
 ];
+
+/**
+ * Keys that change which colours the terminals draw, and nothing else: the
+ * chosen theme, the one the gallery is previewing, and the imported themes
+ * either may name. Kept apart from the keys above because those refit every
+ * terminal and re-report its size to the shell — right for a font, and pure
+ * waste for a colour, which the gallery changes as fast as the pointer moves
+ * over its cards.
+ */
+const THEME_SETTINGS_KEYS = ['terminalTheme', 'terminalThemePreview', 'terminalCustomThemes'];
 
 /**
  * Reads the current ANSI/base palette from the design-token CSS variables so
  * xterm's theme always matches the active VS Code light/dark palette — never
- * hard-code a colour here, mirror src/styles/index.css instead.
+ * hard-code a colour here, mirror src/styles/index.css instead. Which token
+ * stands for which colour is terminalThemes.js's `APP_THEME_TOKENS`, the
+ * table the gallery's cards name too.
  */
 export function readTheme() {
   const cs = getComputedStyle(document.documentElement);
@@ -452,43 +468,35 @@ export function readTheme() {
     const val = cs.getPropertyValue(name).trim();
     return val || undefined;
   };
-  return {
-    background: v('--vsc-terminal-bg'),
-    foreground: v('--vsc-fg'),
-    cursor: v('--vsc-fg-bright') || v('--vsc-fg'),
-    cursorAccent: v('--vsc-terminal-bg'),
-    selectionBackground: v('--vsc-selection'),
-    black: v('--vsc-ansi-black'),
-    red: v('--vsc-ansi-red'),
-    green: v('--vsc-ansi-green'),
-    yellow: v('--vsc-ansi-yellow'),
-    blue: v('--vsc-ansi-blue'),
-    magenta: v('--vsc-ansi-magenta'),
-    cyan: v('--vsc-ansi-cyan'),
-    white: v('--vsc-ansi-white'),
-    brightBlack: v('--vsc-ansi-bright-black'),
-    brightRed: v('--vsc-ansi-bright-red'),
-    brightGreen: v('--vsc-ansi-bright-green'),
-    brightYellow: v('--vsc-ansi-bright-yellow'),
-    brightBlue: v('--vsc-ansi-bright-blue'),
-    brightMagenta: v('--vsc-ansi-bright-magenta'),
-    brightCyan: v('--vsc-ansi-bright-cyan'),
-    brightWhite: v('--vsc-ansi-bright-white'),
-  };
+  const theme = {};
+  for (const [key, token] of Object.entries(APP_THEME_TOKENS)) theme[key] = v(token);
+  theme.cursor ??= v('--vsc-fg');
+  return theme;
 }
 
 /**
- * Resolve the settings store's `terminalTheme` id into an actual xterm
- * `ITheme` — either a fixed published palette from terminalThemes.js, or (for
- * `followsAppTheme` entries, e.g. the default "Dark Modern") the live
- * `readTheme()` snapshot of the app's own --vsc-* tokens. Tolerant of the
- * setting being undefined (older persisted state, or this store key not
- * having loaded yet) by falling back to the default theme id.
+ * Resolve a theme id into an actual xterm `ITheme`, through the one resolver
+ * every place that draws a terminal uses (terminalThemes.js's
+ * `getTerminalThemeEntry`): a fixed published palette, the live `readTheme()`
+ * snapshot of the app's own tokens for `followsAppTheme` entries (the default
+ * "Dark Modern"), or an imported theme over those tokens for whatever colour
+ * it left out. An unknown id — an older or newer version's value, a deleted
+ * import, undefined before the store has loaded — is the default theme.
+ *
+ * `customThemes` defaults to the store's, so a caller with only an id still
+ * finds the user's imported themes.
  */
-export function resolveTerminalTheme(themeId) {
-  const id = themeId ?? DEFAULT_TERMINAL_THEME_ID;
-  const entry = TERMINAL_THEMES[id] || TERMINAL_THEMES[DEFAULT_TERMINAL_THEME_ID];
-  return entry.followsAppTheme ? readTheme() : entry.theme;
+export function resolveTerminalTheme(themeId, customThemes = useSettingsStore.getState().terminalCustomThemes) {
+  const entry = getTerminalThemeEntry(themeId, customThemes);
+  return themeColorsOf(entry, entry.followsAppTheme || entry.custom ? readTheme() : null);
+}
+
+/**
+ * The colours every terminal shows right now: the theme the Settings
+ * window's gallery is previewing, else the chosen one.
+ */
+export function shownTerminalTheme(state = useSettingsStore.getState()) {
+  return resolveTerminalTheme(shownTerminalThemeId(state), state.terminalCustomThemes);
 }
 
 export function readFontFamily() {
@@ -534,16 +542,48 @@ function ensureThemeObserverStarted() {
   const observer = new MutationObserver(() => {
     // A fixed (non-followsAppTheme) terminal theme deliberately ignores the
     // app's own light/dark flip — only re-read the live tokens when the
-    // selected theme is the one that is supposed to track them.
-    const themeId = useSettingsStore.getState().terminalTheme ?? DEFAULT_TERMINAL_THEME_ID;
-    const entryDef = TERMINAL_THEMES[themeId] || TERMINAL_THEMES[DEFAULT_TERMINAL_THEME_ID];
+    // theme on screen draws with them: the default, or an imported theme
+    // that left some colours to it.
+    const state = useSettingsStore.getState();
+    const entryDef = getTerminalThemeEntry(shownTerminalThemeId(state), state.terminalCustomThemes);
     const fontFamily = resolveTerminalFontFamily();
+    const theme = entryDef.followsAppTheme || entryDef.custom ? shownTerminalTheme(state) : null;
     for (const entry of instances.values()) {
-      if (entryDef.followsAppTheme) entry.term.options.theme = readTheme();
+      if (theme) entry.term.options.theme = theme;
       entry.term.options.fontFamily = fontFamily;
     }
   });
   observer.observe(rootEl, { attributes: true, attributeFilter: ['class'] });
+}
+
+/**
+ * Paint every terminal in the theme on screen (`shownTerminalTheme`) — and
+ * only that: no refit, no size report, since a colour moves nothing. One
+ * object for all of them, so a terminal can never be left in another theme.
+ */
+function applyShownTerminalTheme() {
+  const theme = shownTerminalTheme();
+  for (const entry of instances.values()) entry.term.options.theme = theme;
+}
+
+/**
+ * At most one repaint a frame. The gallery previews a theme as the pointer
+ * crosses each card and as an arrow key repeats, and every repaint rebuilds
+ * each terminal's glyph atlas; what matters is the theme on screen when the
+ * frame is drawn. Without a frame clock (tests) it repaints at once.
+ */
+let themeRepaintQueued = false;
+function scheduleThemeRepaint() {
+  if (typeof requestAnimationFrame !== 'function') {
+    applyShownTerminalTheme();
+    return;
+  }
+  if (themeRepaintQueued) return;
+  themeRepaintQueued = true;
+  requestAnimationFrame(() => {
+    themeRepaintQueued = false;
+    applyShownTerminalTheme();
+  });
 }
 
 /**
@@ -563,7 +603,6 @@ function ensureThemeObserverStarted() {
  */
 function applyLiveTerminalSettings(state) {
   const fontFamily = state.terminalFontFamily?.trim() ? state.terminalFontFamily.trim() : readFontFamily();
-  const theme = resolveTerminalTheme(state.terminalTheme);
   const resizePty = useTerminalStore.getState().resizePty;
   for (const [tabId, entry] of instances.entries()) {
     entry.term.options.fontFamily = fontFamily;
@@ -572,7 +611,6 @@ function applyLiveTerminalSettings(state) {
     entry.term.options.cursorStyle = state.terminalCursorStyle;
     entry.term.options.cursorBlink = state.terminalCursorBlink;
     entry.term.options.scrollback = state.terminalScrollback;
-    entry.term.options.theme = theme;
     fitAndReport({
       tabId,
       term: entry.term,
@@ -592,6 +630,7 @@ function ensureSettingsSubscriptionStarted() {
   useSettingsStore.subscribe((state, prevState) => {
     const changed = LIVE_TERMINAL_SETTINGS_KEYS.some((key) => state[key] !== prevState[key]);
     if (changed) applyLiveTerminalSettings(state);
+    if (THEME_SETTINGS_KEYS.some((key) => state[key] !== prevState[key])) scheduleThemeRepaint();
   });
 }
 
@@ -899,7 +938,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // the canonical one, the text stays readable.
     minimumContrastRatio: 4.5,
     allowProposedApi: true,
-    theme: resolveTerminalTheme(settingsState.terminalTheme),
+    theme: shownTerminalTheme(settingsState),
     // `{}` off Windows: xterm's own "not set". See terminalCompat.js.
     windowsPty: windowsPtyFor(useSystemStore.getState()) ?? {},
     // A program's OSC 8 hyperlinks open as the terminal's other links do.

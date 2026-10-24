@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { loadState, saveState } from '../lib/persistence.js';
 import { defaultRightClick } from '../lib/terminalRightClick.js';
+import { sanitizeCustomThemes } from '../lib/themeImport.js';
 
 /** Where the Settings window's values live between sessions. */
 export const SETTINGS_KEY = 'nexterm.settings';
@@ -25,6 +26,14 @@ export const SETTINGS_DEFAULTS = {
   terminalCursorBlink: true,
   terminalScrollback: 5000,
   terminalTheme: 'dark-modern',
+  /**
+   * Terminal themes the user imported in the gallery (spec P5): at most 20
+   * `{ id: 'custom:<slug>', label, theme }`, where `theme` holds only the
+   * colours the file gave — the rest are the default theme's, as drawn. The
+   * second object setting after `keybindings`, and checked as strictly on
+   * load: see `sanitizeCustomThemes` in src/lib/themeImport.js.
+   */
+  terminalCustomThemes: [],
   terminalSuggestions: true,
   /**
    * The bar naming the command you are scrolled into.
@@ -109,6 +118,23 @@ export const SETTINGS_DEFAULTS = {
    * like any other. See `splitStartFor` in src/lib/terminalCwd.js.
    */
   terminalSplitCwd: 'inherited',
+  /**
+   * A pane holding a single terminal draws no tab strip, and the terminal
+   * gets its height (spec P1). The strip comes back over the terminal's top
+   * edge when the pointer reaches it, during a drag (so a tab can still be
+   * dropped there), and while its menu or a rename is open — laid over the
+   * terminal, so it never resizes it. A second terminal in the pane brings
+   * the real strip back. Off by default: the strip is where people look for
+   * a terminal's name, and hiding it is a choice. See stripReveal.js.
+   */
+  terminalHideSingleTabStrip: false,
+  /**
+   * A new split gives every pane in its line the same share (spec P2) —
+   * three panes side by side a third each, rather than the split pane halved
+   * and the rest kept. Off by default, so sizes set by hand are kept; the
+   * "Equalize Splits" command does it once, on demand. See splitLayout.js.
+   */
+  terminalEqualizeOnSplit: false,
   /**
    * Tell me when a command finishes in a terminal I am not looking at, once it
    * has run at least this long. 0 turns it off.
@@ -244,6 +270,13 @@ function loadSettings() {
       if (saved[key] && typeof saved[key] === 'object' && !Array.isArray(saved[key])) {
         out[key] = saved[key];
       }
+      continue;
+    }
+    if (key === 'terminalCustomThemes') {
+      // Entry by entry: one theme a hand edit broke is dropped, the rest
+      // load. A list of anything else would reach the registry's resolver
+      // and the gallery as colours nobody checked.
+      if (key in saved) out[key] = sanitizeCustomThemes(saved[key]);
       continue;
     }
     if (key in saved && typeof saved[key] === typeof SETTINGS_DEFAULTS[key]) {
@@ -445,6 +478,19 @@ export const useSettingsStore = create((set, get) => ({
   setCommandPaletteOpen: (open, mode = 'all') =>
     set({ isCommandPaletteOpen: open, commandPaletteMode: open ? mode : 'all' }),
   setSettingsModalOpen: (open) => set({ isSettingsModalOpen: open }),
+
+  /**
+   * A terminal theme being tried in the Settings window's gallery, shown on
+   * every terminal until it is chosen or let go — or null. Not a setting: it
+   * is outside SETTINGS_DEFAULTS, so it is never saved, and a preview cannot
+   * outlive the window that made it. Read through terminalThemes.js's
+   * `shownTerminalThemeId`.
+   */
+  terminalThemePreview: null,
+  previewTerminalTheme: (themeId) => {
+    const next = themeId ?? null;
+    if (get().terminalThemePreview !== next) set({ terminalThemePreview: next });
+  },
 
   /** Defaults for every key the Settings window exposes. */
   settingsDefaults: SETTINGS_DEFAULTS,

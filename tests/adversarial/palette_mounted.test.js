@@ -19,7 +19,7 @@ import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
-import { onPage, letItRun } from './react_page.js';
+import { onPage, letItRun, dispatch } from './react_page.js';
 
 const h = React.createElement;
 
@@ -123,7 +123,12 @@ const STAND_INS = {
     export const Save = icon('Save');
     export const Maximize2 = icon('Maximize2');
     export const BellRing = icon('BellRing');
-    export const CheckCheck = icon('CheckCheck');`,
+    export const CheckCheck = icon('CheckCheck');
+    export const Columns3 = icon('Columns3');
+    export const ArrowLeftRight = icon('ArrowLeftRight');
+    export const Pencil = icon('Pencil');
+    export const X = icon('X');
+    export const PanelTop = icon('PanelTop');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */
@@ -553,6 +558,105 @@ describe('Command palette, mounted: the keyboard after it closes', () => {
       // The textarea xterm types through follows the cursor: brought into
       // view, it scrolled the terminal's box.
       assert.deepEqual(asked, [{ preventScroll: true }, { preventScroll: true }]);
+    });
+  });
+});
+
+/**
+ * Enter held a moment too long on a row (review, stage 3): the key repeats,
+ * and each repeat used to act on whatever the palette showed next — "Swap
+ * Pane With…" swapped with the first pane before anyone chose one, and after
+ * "Close Terminal" the repeats reached the terminal the keyboard went back
+ * to, as Enters that ran its half-typed line.
+ */
+describe('Command palette, mounted: Enter held down', () => {
+  beforeEach(fresh);
+
+  /** Rows in "all" with nothing typed: the commands, in the order they are declared. */
+  const rowOf = (command) => [
+    'new_terminal',
+    'clear_terminal',
+    'toggle_pane_zoom',
+    'equalize_splits',
+    'swap_pane',
+    'rename_terminal',
+    'close_terminal',
+  ].indexOf(command);
+
+  function terminalStand(p) {
+    ui.useTerminalStore.setState({
+      closeTab: async (tabId) => {
+        ui.calls.push(['closeTab', tabId]);
+      },
+      swapActivePane: (paneId) => {
+        ui.calls.push(['swapActivePane', paneId]);
+        return true;
+      },
+      swapTargets: () => ({
+        panes: [{ paneId: 'pane-2', title: 'two', place: 'right', index: 1, count: 2, terminals: 1 }],
+        note: null,
+      }),
+    });
+    return workspace(p);
+  }
+
+  test('PM-17: "Swap Pane With…" chosen with Enter held: the repeats choose nothing; a fresh Enter does', async () => {
+    await onPage(async (p) => {
+      const { terminal } = terminalStand(p);
+      terminal.focus();
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'all');
+      for (let i = 0; i < rowOf('swap_pane'); i += 1) p.keydown('ArrowDown');
+      p.keydown('Enter');
+      await letItRun();
+      assert.equal(ui.useSettingsStore.getState().commandPaletteMode, 'swap-pane', 'setup: the pick of panes is up');
+      p.keydown('Enter', { repeat: true });
+      p.keydown('Enter', { repeat: true });
+      await letItRun();
+      assert.deepEqual(called('swapActivePane'), [], 'a held Enter swapped panes nobody chose');
+      p.settled(() => dispatch(p.window, p.document.activeElement, { type: 'keyup', key: 'Enter' }));
+      p.keydown('Enter');
+      await letItRun();
+      assert.deepEqual(called('swapActivePane'), [['swapActivePane', 'pane-2']]);
+    });
+  });
+
+  test('PM-19: Enter already repeating as the palette opens (held from before) chooses nothing', async () => {
+    await onPage(async (p) => {
+      const { terminal } = terminalStand(p);
+      terminal.focus();
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'all');
+      for (let i = 0; i < rowOf('close_terminal'); i += 1) p.keydown('ArrowDown');
+      p.keydown('Enter', { repeat: true });
+      await letItRun();
+      assert.deepEqual(called('closeTab'), [], 'a repeating Enter closed a terminal nobody chose');
+      assert.equal(ui.useSettingsStore.getState().isCommandPaletteOpen, true, 'the palette closed on a repeat');
+    });
+  });
+
+  test('PM-18: "Close Terminal" chosen with Enter held: the repeats never reach the terminal the keyboard goes back to — until the key is let go', async () => {
+    await onPage(async (p) => {
+      const { terminal } = terminalStand(p);
+      terminal.focus();
+      p.render(h(ui.CommandPalette));
+      await openPalette(p, 'all');
+      for (let i = 0; i < rowOf('close_terminal'); i += 1) p.keydown('ArrowDown');
+      p.keydown('Enter');
+      await letItRun();
+      assert.deepEqual(called('closeTab'), [['closeTab', 't1']], 'setup: Close Terminal ran');
+      assert.equal(focusIs(p, { terminal }), 'terminal', 'setup: the keyboard went back to the terminal');
+      let reached = 0;
+      const count = () => (reached += 1);
+      terminal.addEventListener('keydown', count);
+      const repeats = [p.keydown('Enter', { repeat: true }), p.keydown('Enter', { repeat: true })];
+      assert.equal(reached, 0, 'a held Enter reached the terminal after the palette closed');
+      assert.ok(repeats.every((e) => e.defaultPrevented), 'the repeats were not cancelled');
+      // Let go: the next press is the terminal's again.
+      p.settled(() => dispatch(p.window, terminal, { type: 'keyup', key: 'Enter' }));
+      p.keydown('Enter');
+      assert.equal(reached, 1, 'after the key was let go, Enter no longer reached the terminal');
+      terminal.removeEventListener('keydown', count);
     });
   });
 });

@@ -715,6 +715,24 @@ fn kill_tree(child: &mut Child) {
 mod tests {
     use super::*;
 
+    /// Run a script this test has just written, again while Linux says it is
+    /// busy. Writing an executable and starting it at once races every other
+    /// test thread that forks a child in between: the child holds a copy of
+    /// the still-open write handle until it execs, and starting the script
+    /// in that window fails with ETXTBSY, "Text file busy" (seen on CI's
+    /// Ubuntu runner, rust-lang/rust#114554). The race belongs to the test
+    /// harness, not to the code under test, so only the tests wait it out.
+    #[cfg(unix)]
+    fn while_busy<T>(mut run: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+        for _ in 0..50 {
+            match run() {
+                Err(e) if e.contains("Text file busy") => std::thread::sleep(Duration::from_millis(20)),
+                other => return other,
+            }
+        }
+        run()
+    }
+
     /// What opencode 1.18.34 printed, measured in a sandbox (two of eleven).
     const LISTED: &str = r#"[
   {
@@ -855,7 +873,7 @@ mod tests {
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let got = opencode_sessions(&bin, None, &project).unwrap();
+        let got = while_busy(|| opencode_sessions(&bin, None, &project)).unwrap();
         assert_eq!(got, vec![AgentSession { id: "ses_ffffffffffff".into(), title: "Mine".into(), updated: 5, created: 4 }]);
         let log = std::fs::read_to_string(base.join("args.log")).unwrap();
         let mut lines = log.lines();
@@ -900,7 +918,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Long enough for the script to have started its child, however slowly
         // processes start here.
-        let err = run_list(&bin, None, &base, OptionalFlags::ALL, Duration::from_millis(1500)).unwrap_err();
+        let err = while_busy(|| run_list(&bin, None, &base, OptionalFlags::ALL, Duration::from_millis(1500))).unwrap_err();
         assert!(err.contains("gave up"), "{err}");
         let grandchild: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
         let started = Instant::now();
@@ -927,7 +945,7 @@ mod tests {
         let bin = base.join("opencode");
         std::fs::write(&bin, "#!/bin/sh\necho 'Error: database is locked' >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let err = opencode_sessions(&bin, None, &base).unwrap_err();
+        let err = while_busy(|| opencode_sessions(&bin, None, &base)).unwrap_err();
         assert!(err.contains("database is locked"), "{err}");
 
         let mut sleeper = Command::new("sleep");
@@ -1105,7 +1123,7 @@ Options:
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let canonical = |p: &str| dunce::canonicalize(p).ok();
 
-        let got = opencode_sessions(&bin, None, &project).unwrap();
+        let got = while_busy(|| opencode_sessions(&bin, None, &project)).unwrap();
         assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["ses_hhhhhhhhhhhh"]);
         let logged = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = logged.lines().collect();

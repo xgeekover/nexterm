@@ -545,8 +545,16 @@ export function TerminalView({ tabId, active = false }) {
   // focus fell to <body>: the agent had started and the keyboard reached
   // nothing until the terminal was clicked. WebKit never focuses the button,
   // which is why it only shows on Windows.
+  //
+  // Not when the keyboard came to the pane by landing on its hidden strip's
+  // handle (Tab, from the chrome round the terminal): making the pane active
+  // is what brought this on, and taking the keyboard from the handle would
+  // leave Enter nothing to open (stripReveal.js). A mouse press on the handle
+  // never focuses it, so a click still leaves the keyboard here.
   useEffect(() => {
-    if (active && !findOpen) termRef.current?.focus();
+    if (!active || findOpen) return;
+    if (document.activeElement?.matches?.('[data-strip-handle]')) return;
+    termRef.current?.focus();
   }, [active, tabId, findOpen, resumeOffered]);
 
   // A terminal this pane stops showing — another tab bound here, the pane

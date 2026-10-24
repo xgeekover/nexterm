@@ -144,6 +144,7 @@ fn main() {
             commands::pty::pty_kill,
             commands::pty::pty_retain_only,
             commands::pty::pty_list_sessions,
+            commands::pty::pty_input_hidden,
             commands::fs::fs_get_root,
             commands::fs::fs_dir_exists,
             commands::fs::fs_pick_root,
