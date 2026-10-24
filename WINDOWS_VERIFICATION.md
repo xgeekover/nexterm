@@ -1088,7 +1088,9 @@ why the fixes below say where ConPTY stops.
   outlive the shell.
 - **V35, V41: Git Bash under `%TEMP%` is in `/tmp/…`**, a mount only it knows:
   a split there opened at the workspace root and no branch was shown. Git
-  Bash now reports its directory as Windows spells it (`pwd -W`).
+  Bash now reports its directory as Windows spells it (`pwd -W`). CI's
+  runner then showed Git for Windows 2.56 (bash 5.3) calling itself
+  `cygwin`, not `msys`; it is `pwd -W` working that decides now.
 - **V22: a right-click paste of two lines opened WebView2's menu** over the
   question: on Windows the menu follows the release, which lands on the
   question that opened under the pointer.

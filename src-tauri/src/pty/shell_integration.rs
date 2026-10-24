@@ -442,8 +442,10 @@ __nexterm_precmd() {
 # or a git branch in a folder under %TEMP% found no folder at all (V35, V41).
 # There the directory goes out as Windows spells it — `pwd -W`, a builtin of
 # MSYS bash — worked out again only when it changes, since $(…) forks and a
-# fork costs on MSYS. Every other bash reports $PWD as it always has.
-if [[ "${OSTYPE-}" == msys* ]] && builtin pwd -W >/dev/null 2>&1; then
+# fork costs on MSYS. Git for Windows 2.56 (MSYS2's bash 5.3) calls itself
+# `cygwin`, not `msys`, so it is `pwd -W` that decides: Cygwin's own bash, and
+# every other, refuses the option and reports $PWD as it always has.
+if [[ "${OSTYPE-}" == msys* || "${OSTYPE-}" == cygwin* ]] && builtin pwd -W >/dev/null 2>&1; then
   __nexterm_cwd_of=
   __nexterm_cwd_win=
   __nexterm_report_cwd() {
@@ -1080,8 +1082,10 @@ mod tests {
         assert!(contents.contains("133;D;"));
         assert!(contents.contains("]7;file://"));
         assert!(contents.contains("PROMPT_COMMAND"));
-        // Git Bash reports Windows' spelling of its directory (see below).
+        // Git Bash reports Windows' spelling of its directory (see below) —
+        // as `cygwin` too, which Git for Windows 2.56 says it is.
         assert!(contents.contains("builtin pwd -W"));
+        assert!(contents.contains(r#""${OSTYPE-}" == cygwin*"#));
     }
 
     /// Git Bash in a folder under %TEMP% is in /tmp/…, a mount only it knows,
