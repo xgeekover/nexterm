@@ -3,8 +3,8 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch, reportFocusOut } from './terminalRegistry.js';
 import { TerminalFindBar } from './TerminalFindBar.jsx';
-import { fitAndReport, legacyAltArrowSequence } from '../../lib/terminalCompat.js';
-import { isMac } from '../../lib/platform.js';
+import { fitAndReport, isWindowCloseChord, legacyAltArrowSequence, showTerminalContainer } from '../../lib/terminalCompat.js';
+import { isMac, isWindows } from '../../lib/platform.js';
 import { suggest, recordCommand, forgetCommand } from '../../lib/commandIndex.js';
 import { locateSuggestion, locateCursorCell } from '../../lib/suggestGeometry.js';
 import {
@@ -145,7 +145,7 @@ export function TerminalView({ tabId, active = false }) {
     lineRef.current = NEW_LINE;
     setSuggestState(EMPTY_SUGGEST_STATE);
 
-    wrapper.replaceChildren(entry.container);
+    showTerminalContainer(wrapper, entry.container);
     const stopShowing = ensureGpuRenderer(entry);
 
     const doFit = () => {
@@ -421,6 +421,9 @@ export function TerminalView({ tabId, active = false }) {
     // ⌥ and an arrow, sent as xterm 5.5 sent them, and Shift/Ctrl+Enter to a
     // program that asked for modifyOtherKeys.
     const handleKeyEvent = (event) => {
+      // Alt+F4 is the window's: back to the webview untouched, so it closes
+      // the window as it does from anywhere else (V29).
+      if (isWindowCloseChord(event, { windows: isWindows })) return false;
       // Copy and paste first — Ctrl+V / Ctrl+C on Windows and the Linux chords
       // (src/lib/terminalClipboard.js). xterm would otherwise send ^V or ^C and
       // cancel the key, and WebView2 has no Edit menu to fall back on.

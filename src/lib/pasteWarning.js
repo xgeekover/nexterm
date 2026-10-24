@@ -48,6 +48,8 @@
  * Checked in tests/adversarial/paste_warning.test.js.
  */
 
+import { isWindows10Conpty } from './terminalCompat.js';
+
 /** The values the setting takes. Anything else acts as 'auto'. */
 export const PASTE_WARNING_MODES = Object.freeze(['auto', 'always', 'never']);
 
@@ -108,15 +110,36 @@ export function withoutPasteMarkers(text) {
  *             bracket cannot be trusted to hold — the default, and what any
  *             unknown value means
  *
- * `bracketed` is xterm's own `term.modes.bracketedPasteMode`.
+ * `bracketed` is whether a bracketed paste reaches the program as one: xterm's
+ * own `term.modes.bracketedPasteMode`, and the markers getting through
+ * (`pasteMarkersArrive`). `markersLost` says the program asked for it and the
+ * markers do not get through — asked about as if it had not, and said so.
  */
-export function pasteWarning(text, { mode = 'auto', bracketed = false } = {}) {
+export function pasteWarning(text, { mode = 'auto', bracketed = false, markersLost = false } = {}) {
   if (mode === 'never') return null;
   const { lines } = pastedLines(text);
   if (lines < 2) return null;
   const escape = text.includes('\x1b');
-  if (mode !== 'always' && bracketed && !escape) return null;
-  return { lines, bracketed: Boolean(bracketed), escape };
+  const trusted = Boolean(bracketed) && !markersLost;
+  if (mode !== 'always' && trusted && !escape) return null;
+  return { lines, bracketed: trusted, escape, markersLost: Boolean(markersLost) };
+}
+
+/**
+ * Whether bracketed paste's markers reach the program through this pty.
+ *
+ * On Windows they go through ConPTY's input, and Windows 10's console host
+ * does not pass them on: Git Bash (bash 5.2, bracketed paste on, and xterm's
+ * mode on with it) ran the first of two pasted lines the moment it arrived,
+ * under Auto, without a question — the very case the question is for (V38).
+ * So on Windows 10, and on Windows of a build not yet known, a program's
+ * asking for bracketed paste is not taken as a reason not to ask. Windows 11
+ * (build 22000 on) is left as it was: not measured either way.
+ * `windowsPty` is the terminal's own option (`windowsPtyFor`); off Windows it
+ * is unset, and the markers arrive.
+ */
+export function pasteMarkersArrive(windowsPty) {
+  return !isWindows10Conpty(windowsPty);
 }
 
 /**
@@ -133,7 +156,10 @@ export function pastePromptTitle(lines) {
 }
 
 /** The question's text, for a program that did or did not ask for bracketed paste. */
-export function pastePromptMessage({ bracketed = false, escape = false } = {}) {
+export function pastePromptMessage({ bracketed = false, escape = false, markersLost = false } = {}) {
+  if (markersLost) {
+    return 'The program in this terminal asked for bracketed paste, but this version of Windows does not pass it on to the program, so each line runs as a command as soon as it is pasted — the next one starting before you can see what the last one did.';
+  }
   if (bracketed && escape) {
     return 'The program in this terminal asked for bracketed paste, but these lines carry an escape sequence, which can end a bracketed paste early and run the lines after it as commands.';
   }
@@ -155,6 +181,16 @@ function refocus(element) {
 }
 
 const installed = new WeakMap();
+
+/**
+ * `{ bracketed, markersLost }` for `pasteWarning`, as `term` stands now: the
+ * program's bracketed paste, and whether its markers get through this pty.
+ */
+function bracketingOf(term) {
+  const asked = Boolean(term?.modes?.bracketedPasteMode);
+  const arrive = pasteMarkersArrive(term?.options?.windowsPty);
+  return { bracketed: asked && arrive, markersLost: asked && !arrive };
+}
 
 /** The binding, as an xterm addon so it is disposed with its terminal. */
 class PasteWarningAddon {
@@ -221,7 +257,7 @@ class PasteWarningAddon {
   hold(text, { returnFocusTo = null } = {}) {
     const term = this._term;
     if (this._disposed || !term || typeof this._ask !== 'function') return false;
-    const question = pasteWarning(text, { mode: this._mode(), bracketed: Boolean(term.modes?.bracketedPasteMode) });
+    const question = pasteWarning(text, { mode: this._mode(), ...bracketingOf(term) });
     if (!question) return false;
     let answer;
     try {
@@ -252,7 +288,7 @@ class PasteWarningAddon {
     // The program turned bracketed paste on or off while the question was
     // up: the answer was to another question. Asked again, or — when the
     // new state needs no question — pasted as answered.
-    if (Boolean(term.modes?.bracketedPasteMode) !== question.bracketed && this.hold(text, { returnFocusTo })) {
+    if (bracketingOf(term).bracketed !== question.bracketed && this.hold(text, { returnFocusTo })) {
       return 'asked again';
     }
     // Through xterm's own `paste`, as its paste listener would have sent it:
@@ -324,6 +360,7 @@ export default {
   pastedLines,
   withoutPasteMarkers,
   pasteWarning,
+  pasteMarkersArrive,
   asOneLine,
   pastePromptTitle,
   pastePromptMessage,

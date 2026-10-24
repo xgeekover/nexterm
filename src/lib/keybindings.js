@@ -290,6 +290,19 @@ export const COMMANDS = {
     enabled: (ctx) => Boolean(ctx.blockReload),
     run: () => {},
   },
+  'reload-guard-ctrl-r': {
+    title: 'Block reload (Ctrl+R)',
+    menuId: null,
+    // Ctrl+R, outside a terminal. In a terminal it is the shell's
+    // reverse-i-search: xterm turns it into ^R and the page never reloads, so
+    // it is neither claimed over one (not `overTerminal`) nor when the key
+    // comes from one. Everywhere else WebView2 155 reloaded the page on it —
+    // the editor focused, every shell reaped with the reload (V29); the 0.2.3
+    // measurement that WebView2 swallowed it on its own no longer holds.
+    configurable: false,
+    enabled: (ctx) => Boolean(ctx.blockReload) && !ctx.isInTerminal,
+    run: () => {},
+  },
   escape: {
     title: 'Dismiss',
     menuId: null,
@@ -367,6 +380,8 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'reload-guard', key: 'ctrl+shift+r' },
   { command: 'reload-guard', key: 'cmd+r' },
   { command: 'reload-guard', key: 'cmd+shift+r' },
+  // Plain Ctrl+R, refused only outside a terminal (see the command).
+  { command: 'reload-guard-ctrl-r', key: 'ctrl+r' },
   { command: 'escape', key: 'escape' },
 ];
 

@@ -319,6 +319,8 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'go-to-unread-notification',
       'mark-notifications-read',
       'reload-guard',
+      // Ctrl+R's half of the guard, outside a terminal only (KB-14).
+      'reload-guard-ctrl-r',
       'swap-pane',
     ]);
   });
@@ -477,15 +479,37 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       );
     }
 
-    // And the one that must NOT be refused, packaged or not: reverse-i-search.
-    const search = {
-      key: 'r', code: 'KeyR', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false,
-      preventDefault: () => assert.ok(false, 'Ctrl+R must reach the shell'),
-    };
+    // Plain Ctrl+R in a terminal must NOT be refused, packaged or not: it is
+    // reverse-i-search, and xterm sends it to the shell as ^R.
+    const ctrlR = { key: 'r', code: 'KeyR', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+    const search = { ...ctrlR, preventDefault: () => assert.ok(false, 'Ctrl+R must reach the shell') };
     assert.equal(
-      dispatchKeydown(search, ctxFor(search, 'windows', { blockReload: true })),
+      dispatchKeydown(search, ctxFor(search, 'windows', { blockReload: true, isInTerminal: true })),
       null,
-      'a plain Ctrl+R is reverse-i-search and does not reload — it must be left alone'
+      'a plain Ctrl+R in a terminal is reverse-i-search — it must be left alone'
+    );
+    assert.equal(
+      dispatchKeydownOverTerminal(search, ctxFor(search, 'windows', { blockReload: true, isInTerminal: true })),
+      null,
+      'nor claimed ahead of xterm'
+    );
+
+    // Anywhere else it is a reload. WebView2 155 reloaded the page on Ctrl+R
+    // with the editor focused, and every shell was reaped (V29): the 0.2.3
+    // measurement above, that WebView2 swallowed it, no longer holds.
+    let prevented = false;
+    const outside = { ...ctrlR, preventDefault: () => { prevented = true; } };
+    assert.equal(
+      dispatchKeydown(outside, ctxFor(outside, 'windows', { blockReload: true, isInTerminal: false })),
+      'reload-guard-ctrl-r',
+      'Ctrl+R outside a terminal is refused in a packaged build'
+    );
+    assert.ok(prevented, 'and swallowed, or the webview reloads');
+    const devCtrlR = { ...ctrlR, preventDefault: () => assert.ok(false, 'Ctrl+R must reload in dev') };
+    assert.equal(
+      dispatchKeydown(devCtrlR, ctxFor(devCtrlR, 'windows', { blockReload: false, isInTerminal: false })),
+      null,
+      'and still reloads in development'
     );
   });
 

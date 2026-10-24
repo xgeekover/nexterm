@@ -24,7 +24,7 @@ import {
   markRead,
 } from '../lib/attention.js';
 import { isWindows } from '../lib/platform.js';
-import { withoutVerbatimPrefix } from '../lib/terminalCompat.js';
+import { isWindows10Conpty, windowsPtyFor, withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir, splitStartFor, startableCwd } from '../lib/terminalCwd.js';
 import { createBatchJobReplies } from '../lib/batchJobReply.js';
 import { shellKindFor } from '../lib/dropPaths.js';
@@ -1523,6 +1523,8 @@ function runsCmd(tab) {
 const batchJobReplies = createBatchJobReplies({
   enabled: () => useSettingsStore.getState().terminalAutoReplyBatchJob !== false,
   isCmd: (tabId) => runsCmd(useTerminalStore.getState().tabs.find((t) => t.id === tabId)),
+  // Windows 10's ConPTY never shows the terminal a full-screen program (V36).
+  alternateUnseen: () => isWindows10Conpty(windowsPtyFor(useSystemStore.getState())),
   // Never into a password prompt (spec P4) — cmd's question is never one, and
   // Windows reports none, but an answer typed on the user's behalf is held
   // to the same rule as every other.

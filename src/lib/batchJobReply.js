@@ -217,6 +217,14 @@ function readScreen(tabId) {
  * `now()` is the clock and `screen(tabId)` reads the tab's screen as
  * `screenRow` does — all read as each event comes, so the setting or a
  * restarted shell takes effect at once.
+ *
+ * `alternateUnseen(tabId)` says the terminal cannot tell a full-screen
+ * program is up: on Windows 10 ConPTY never passes the switch to the
+ * alternate screen on (it repaints instead), so the buffer always reads
+ * normal. There the wait is the limit's from the start, as for a program
+ * seen on the alternate screen, and is never cut short by "leaving" it — a
+ * program winding down for longer than the window without a byte of output
+ * had its question left unanswered (V36).
  */
 export function createBatchJobReplies({
   isCmd = () => false,
@@ -226,12 +234,13 @@ export function createBatchJobReplies({
   screen = readScreen,
   windowMs = BATCH_REPLY_WINDOW_MS,
   limitMs = BATCH_REPLY_LIMIT_MS,
+  alternateUnseen = () => false,
 } = {}) {
   /**
-   * tabId → `{ until, limit, before, alternate, left }`: when the wait ends
-   * unless output extends it, the furthest output can extend it, the screen
-   * row at the Ctrl+C, whether a full-screen program is up, and whether it
-   * has been left since.
+   * tabId → `{ until, limit, before, alternate, unseen, left }`: when the
+   * wait ends unless output extends it, the furthest output can extend it,
+   * the screen row at the Ctrl+C, whether a full-screen program is up (or
+   * could be, unseen), and whether it has been left since.
    */
   const armed = new Map();
 
@@ -257,7 +266,8 @@ export function createBatchJobReplies({
         }
         const at = now();
         const before = check(() => screen(tabId), null);
-        const alternate = Boolean(before?.alternate);
+        const unseen = check(() => Boolean(alternateUnseen(tabId)), false);
+        const alternate = Boolean(before?.alternate) || unseen;
         armed.set(tabId, {
           // Up on a full-screen program, the question comes only once it has
           // gone: wait for that, up to the limit.
@@ -265,6 +275,7 @@ export function createBatchJobReplies({
           limit: at + limitMs,
           before: before && !before.alternate ? before : null,
           alternate,
+          unseen,
           left: false,
         });
         return true;
@@ -315,7 +326,7 @@ export function createBatchJobReplies({
         state.alternate = true;
         return false;
       }
-      if (state.alternate && !state.left) {
+      if (state.alternate && !state.left && !state.unseen) {
         state.alternate = false;
         state.left = true;
         const at = now();

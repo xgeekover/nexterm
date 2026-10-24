@@ -3,6 +3,7 @@ import { ChevronRight, ChevronDown } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { fileIconFor, folderIconFor } from './fileIcons.jsx';
 import { clickActivates } from '../../lib/explorerDrag.js';
+import { failureReason, failureText } from './treeRows.js';
 
 /** VS Code's own geometry: 22px rows, 8px per level, a 16px twisty gutter. */
 export const ROW_HEIGHT = 22;
@@ -42,12 +43,14 @@ export function NameInput({ initialValue = '', placeholder, onCommit, onCancel, 
       await onCommit(trimmed);
       onCancel();
     } catch (err) {
-      setError(err?.message || 'Failed');
+      // Tauri rejects with the backend's own string, which has no `message`:
+      // a refused rename used to say only "Failed" (V37).
+      setError(failureText(err) || 'Failed');
     }
   };
 
   return (
-    <div className="flex-1 min-w-0 flex items-center gap-1">
+    <div className="relative flex-1 min-w-0 flex items-center gap-1">
       <input
         ref={ref}
         type="text"
@@ -72,7 +75,19 @@ export function NameInput({ initialValue = '', placeholder, onCommit, onCancel, 
           error ? 'border-vsc-error' : 'border-vsc-focus'
         )}
       />
-      {error && <span className="text-ui-sm text-vsc-error truncate shrink-0 pr-1">{error}</span>}
+      {error && (
+        // Under the field, over the rows below it, as VS Code shows a name it
+        // refuses. Beside the field there is no room: the tree's rows grow to
+        // fit, so the reason sat past the side bar's edge, in the page but
+        // not on screen.
+        <span
+          role="alert"
+          title={error}
+          className="absolute left-0 right-0 top-full z-20 mt-px px-1 py-0.5 rounded-[2px] border border-vsc-error bg-vsc-input text-ui-sm text-vsc-error whitespace-normal break-words"
+        >
+          {failureReason(error)}
+        </span>
+      )}
     </div>
   );
 }
@@ -142,7 +157,18 @@ export function TreeRow({
       onClick={(e) => {
         if (clickActivates(e)) onActivate(row, e);
       }}
-      onContextMenu={(e) => onContextMenu(e, row)}
+      onContextMenu={(e) => {
+        // The row's menu, and only the row's. The tree around the rows has a
+        // menu of its own for its empty space, and an event let through to it
+        // replaced this row with the workspace root and cleared the selection:
+        // every row offered New File and New Folder and nothing else, from the
+        // tree's rebuild until the Windows run found it (V30, V37). The row
+        // is selected, as the press of any other button selects it.
+        e.preventDefault();
+        e.stopPropagation();
+        onSelect(row, e);
+        onContextMenu(e, row);
+      }}
       style={{ paddingLeft, height: ROW_HEIGHT }}
       className={cn(
         'relative flex items-center gap-1 pr-2 text-ui cursor-pointer whitespace-nowrap',

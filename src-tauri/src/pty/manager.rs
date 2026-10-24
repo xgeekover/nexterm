@@ -24,7 +24,10 @@ pub struct PtySession {
     pub id: String,
     pub shell: String,
     pub created_at: chrono::DateTime<Utc>,
-    pub master: Mutex<Box<dyn MasterPty + Send>>,
+    /// The pty itself. `None` once its console has been closed because the
+    /// shell exited (Windows, see `watch_for_exit`): it is only resized
+    /// through here, and a closed console has nothing left to resize.
+    pub master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     /// Bytes on their way to the shell.
     ///
     /// A tty input queue fills at about a kilobyte, and `write_all` then
@@ -38,6 +41,60 @@ pub struct PtySession {
     /// `None` once the session is killed; dropping the sender ends the thread.
     pub input: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     pub child: Mutex<Box<dyn Child + Send + Sync>>,
+}
+
+impl PtySession {
+    /// Let the pty go — on Windows that is `ClosePseudoConsole`, which ends
+    /// the console host and with it the output pipe the reader is reading.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn close_console(&self) {
+        let master = self.master.lock().take();
+        drop(master);
+    }
+}
+
+/// Windows: close the console once the shell in it has exited, so that the
+/// end is seen at all.
+///
+/// The end of a session is its output pipe ending: the reader thread then
+/// waits for the exit code and emits `pty-exit`. On Windows 10 the pipe does
+/// not end with the shell. The headless console host keeps it open until
+/// `ClosePseudoConsole` — and that is called when the pty is dropped, which
+/// happens when the session is, which happens after `pty-exit`. So a shell
+/// that exited was never reported: no exit code, no "Press Enter to start a
+/// new shell", the row still "Running", keys going nowhere — and the console
+/// host stayed alive, through the app's own exit too (V26).
+///
+/// The shell's process is waited for on a thread of its own, through a
+/// duplicate of its handle, so the child stays free for `kill` and for the
+/// reader's own `wait`. When it ends, the console is closed; the pipe then
+/// ends and the reader reports the exit as on every other platform. A newer
+/// console host that ends the pipe by itself only makes this a no-op.
+#[cfg(windows)]
+fn watch_for_exit(session: &Arc<PtySession>) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+
+    let process: OwnedHandle = {
+        let child = session.child.lock();
+        let raw = child
+            .as_raw_handle()
+            .ok_or_else(|| std::io::Error::other("the shell has no process handle"))?;
+        // SAFETY: `raw` is the child's process handle, open for as long as
+        // the child is — and the child is held, locked, while it is copied.
+        unsafe { BorrowedHandle::borrow_raw(raw) }.try_clone_to_owned()?
+    };
+    let watched = Arc::downgrade(session);
+    thread::Builder::new()
+        .name(format!("pty-exit-watch-{}", session.id))
+        .spawn(move || {
+            // SAFETY: a process handle this thread owns, open until it returns.
+            unsafe { WaitForSingleObject(process.as_raw_handle() as _, INFINITE) };
+            if let Some(session) = watched.upgrade() {
+                session.close_console();
+            }
+        })?;
+    Ok(())
 }
 
 /// Move a PTY's blocking writes onto their own thread.
@@ -339,7 +396,7 @@ impl PtyManager {
             id: session_id.clone(),
             shell: shell_path.clone(),
             created_at,
-            master: Mutex::new(pair.master),
+            master: Mutex::new(Some(pair.master)),
             input: Mutex::new(Some(input_tx)),
             child: Mutex::new(child),
         });
@@ -368,7 +425,7 @@ impl PtyManager {
                 move || {
                     let session = probed.upgrade()?;
                     let master = session.master.lock();
-                    super::echo_watch::input_hidden(master.as_ref())
+                    super::echo_watch::input_hidden(master.as_deref()?)
                 },
                 move |secret| {
                     let payload = crate::models::PtyEchoPayload { session_id: id.clone(), secret };
@@ -534,6 +591,13 @@ impl PtyManager {
             let _ = self.kill(&session_id);
             return Err(format!("Failed to spawn PTY reader thread: {e}"));
         }
+        // Windows: the shell's exit is seen only once its console is closed.
+        // The same as a failed reader: a shell whose end nobody will see.
+        #[cfg(windows)]
+        if let Err(e) = watch_for_exit(&session) {
+            let _ = self.kill(&session_id);
+            return Err(format!("Failed to watch the shell for its exit: {e}"));
+        }
 
         Ok(PtySessionInfo {
             id: session_id.clone(),
@@ -565,7 +629,7 @@ impl PtyManager {
                 if run >= CANON_LINE_LIMIT {
                     let canonical = {
                         let master = session.master.lock();
-                        is_canonical(master.as_ref())
+                        master.as_deref().and_then(is_canonical)
                     };
                     if canonical == Some(true) {
                         return Err(format!(
@@ -609,7 +673,7 @@ impl PtyManager {
         #[cfg(unix)]
         {
             let master = session.master.lock();
-            Ok(super::echo_watch::input_hidden(master.as_ref()))
+            Ok(master.as_deref().and_then(super::echo_watch::input_hidden))
         }
         #[cfg(not(unix))]
         {
@@ -628,6 +692,10 @@ impl PtyManager {
         };
 
         let master = session.master.lock();
+        // Closed because its shell exited: nothing left to resize.
+        let Some(master) = master.as_ref() else {
+            return Ok(());
+        };
         master
             .resize(PtySize {
                 rows: rows.clamp(2, 200),
@@ -840,7 +908,7 @@ mod tests {
                     id: id.to_string(),
                     shell: PtyManager::default_shell(),
                     created_at: Utc::now(),
-                    master: Mutex::new(pair.master),
+                    master: Mutex::new(Some(pair.master)),
                     // As in production: `kill` drops this, which is what ends
                     // the writer thread.
                     input: Mutex::new(Some(input_tx)),
@@ -871,6 +939,73 @@ mod tests {
         // And the empty list — what `bootstrap` sends — clears everything.
         assert_eq!(manager.retain_only(&[]), 1);
         assert!(manager.list_sessions().is_empty());
+    }
+
+    /// V26, Windows 10: a shell that exits ends its session. The console host
+    /// kept the output pipe open after its shell had gone, so the reader never
+    /// saw an end — no exit code, no restart, the row still "Running" — until
+    /// the console was closed, which waited for the end. `watch_for_exit`
+    /// closes it when the shell's process ends.
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_that_exits_ends_its_output_on_windows() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/d", "/c", "exit 7"]);
+        let child = pair.slave.spawn_command(cmd).expect("cmd starts");
+        drop(pair.slave);
+
+        // As the production reader: drain, and answer ConPTY's opening cursor
+        // query, which holds the shell back until it is answered.
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let writer = pair.master.take_writer().expect("writer");
+        let input_tx = spawn_writer_thread(writer, "exit-watch").expect("writer thread");
+        let answer_tx = input_tx.clone();
+        let (ended_tx, ended_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut startup_query = Some(StartupCursorQuery::default());
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Some(query) = startup_query.as_mut() {
+                            if let Some(answer) = query.feed(&buf[..n]).answer {
+                                let _ = answer_tx.send(answer.to_vec());
+                            }
+                            if query.is_done() {
+                                startup_query = None;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = ended_tx.send(());
+        });
+
+        let session = Arc::new(PtySession {
+            id: "exit-watch".into(),
+            shell: "cmd.exe".into(),
+            created_at: Utc::now(),
+            master: Mutex::new(Some(pair.master)),
+            input: Mutex::new(Some(input_tx)),
+            child: Mutex::new(child),
+        });
+        watch_for_exit(&session).expect("the exit watch starts");
+
+        assert!(
+            ended_rx.recv_timeout(Duration::from_secs(15)).is_ok(),
+            "the output ends once the shell has exited"
+        );
+        assert!(session.master.lock().is_none(), "the console was closed");
+        let status = session.child.lock().wait().expect("an exit status");
+        assert_eq!(status.exit_code(), 7, "and the shell's own code is there to report");
     }
 }
 
@@ -1300,7 +1435,7 @@ mod canonical_limit_tests {
                     id: id.into(),
                     shell: "/bin/sh".into(),
                     created_at: Utc::now(),
-                    master: Mutex::new(pair.master),
+                    master: Mutex::new(Some(pair.master)),
                     input: Mutex::new(Some(tx)),
                     child: Mutex::new(child),
                 }),
@@ -1319,12 +1454,12 @@ mod canonical_limit_tests {
             id: "guard".into(),
             shell: "/bin/sh".into(),
             created_at: Utc::now(),
-            master: Mutex::new(
+            master: Mutex::new(Some(
                 native_pty_system()
                     .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
                     .expect("openpty")
                     .master,
-            ),
+            )),
             input: Mutex::new(Some(cooked.tx.clone())),
             child: Mutex::new(spare_child()),
         });
@@ -1427,7 +1562,7 @@ mod kill_tests {
                 id: "slow".into(),
                 shell: "/bin/sh".into(),
                 created_at: Utc::now(),
-                master: Mutex::new(pair.master),
+                master: Mutex::new(Some(pair.master)),
                 input: Mutex::new(Some(spawn_writer_thread(writer, "slow").unwrap())),
                 child: Mutex::new(child),
             }),
