@@ -878,4 +878,46 @@ describe('Editor tab strip: the active tab is in view', () => {
     assert.equal(scrollLeftToShow(row, { left: 280, right: 300 }, 10), 0, 'never before the start');
     assert.equal(scrollLeftToShow(null, null, 33), 33);
   });
+
+  test('the active tab comes back into view when the strip is narrowed, with no tab changed', () => {
+    // Found on macOS: a split narrowed the group after its active tab had been
+    // shown, and the tab sat off the end — only a change of tab scrolled.
+    const revealActiveChip = (...a) => exported('EditorTabs.jsx', 'revealActiveChip')(...a);
+    const revealActiveChipOnResize = (...a) => exported('EditorTabs.jsx', 'revealActiveChipOnResize')(...a);
+    // Ten chips of 100 px from x = 300; the row's rect is what is on screen.
+    const makeRow = (left, right) => {
+      const row = { left, right, scrollLeft: 0 };
+      const chips = Array.from({ length: 10 }, (_, i) => ({
+        getAttribute: () => `t${i}`,
+        getBoundingClientRect: () => ({ left: 300 + i * 100 - row.scrollLeft, right: 400 + i * 100 - row.scrollLeft }),
+      }));
+      row.querySelectorAll = () => chips;
+      row.getBoundingClientRect = () => ({ left: row.left, right: row.right });
+      return row;
+    };
+
+    const row = makeRow(300, 1300);
+    assert.equal(revealActiveChip(row, 't9'), false, 'all ten fit: nothing to scroll');
+    let notify = null;
+    let disconnected = false;
+    let watched = null;
+    class Observer {
+      constructor(cb) { notify = cb; }
+      observe(el) { watched = el; }
+      disconnect() { disconnected = true; }
+    }
+    const stop = revealActiveChipOnResize(row, 't9', { Observer });
+    assert.equal(watched, row, 'the strip itself is watched');
+    row.right = 700; // narrowed to 400 px by a split
+    notify();
+    assert.equal(row.scrollLeft, 600, 'the active chip, the last, is brought back to the right edge');
+    const chip = row.querySelectorAll()[9].getBoundingClientRect();
+    assert.ok(chip.left >= row.left && chip.right <= row.right, `in view: ${JSON.stringify(chip)}`);
+    stop();
+    assert.equal(disconnected, true, 'and the watch ends with the strip or the active tab');
+
+    assert.equal(typeof revealActiveChipOnResize(row, 't1', { Observer: undefined }), 'function', 'no ResizeObserver: nothing to follow, still a cleanup');
+    assert.equal(revealActiveChip(row, 'gone'), false, 'a tab with no chip: nothing moves');
+    assert.equal(revealActiveChip(null, 't1'), false);
+  });
 });

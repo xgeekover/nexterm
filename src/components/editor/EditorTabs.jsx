@@ -118,6 +118,34 @@ export function scrollLeftToShow(row, chip, scrollLeft) {
 }
 
 /**
+ * Scroll `row`, a strip's scrolling row of chips, until `activeId`'s chip is
+ * in view (`scrollLeftToShow`). Returns whether it moved.
+ */
+export function revealActiveChip(row, activeId) {
+  if (!row || !activeId) return false;
+  const chip = [...row.querySelectorAll('[data-tab-chip]')].find((el) => el.getAttribute('data-tab-chip') === activeId);
+  if (!chip) return false;
+  const next = scrollLeftToShow(row.getBoundingClientRect(), chip.getBoundingClientRect(), row.scrollLeft);
+  if (next === row.scrollLeft) return false;
+  row.scrollLeft = next;
+  return true;
+}
+
+/**
+ * Keep the active chip in view while the strip itself is resized: a split,
+ * or a divider dragged, narrowed the group and left its active tab off the
+ * end — no tab had changed, so nothing showed it again (V39, found on
+ * macOS). The strip as VS Code keeps it. Returns the cleanup; without a
+ * `ResizeObserver` there is nothing to follow.
+ */
+export function revealActiveChipOnResize(row, activeId, { Observer = globalThis.ResizeObserver } = {}) {
+  if (!row || !activeId || typeof Observer !== 'function') return () => {};
+  const observer = new Observer(() => revealActiveChip(row, activeId));
+  observer.observe(row);
+  return () => observer.disconnect();
+}
+
+/**
  * Which gap of a strip holding `tabIds` to draw the drop marker in, or null
  * for none.
  *
@@ -179,15 +207,12 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
   const rowRef = useRef(null);
   const activeId = activeTab?.id ?? null;
-  // The active tab in view of a strip too narrow for its tabs (V39).
+  // The active tab in view of a strip too narrow for its tabs (V39) — when
+  // it changes, when tabs come and go, and when the strip is resized.
   useEffect(() => {
-    const row = rowRef.current;
-    if (!row || !activeId) return;
-    const chip = [...row.querySelectorAll('[data-tab-chip]')].find((el) => el.getAttribute('data-tab-chip') === activeId);
-    if (!chip) return;
-    const next = scrollLeftToShow(row.getBoundingClientRect(), chip.getBoundingClientRect(), row.scrollLeft);
-    if (next !== row.scrollLeft) row.scrollLeft = next;
+    revealActiveChip(rowRef.current, activeId);
   }, [activeId, paneTabs.length]);
+  useEffect(() => revealActiveChipOnResize(rowRef.current, activeId), [activeId]);
   // The gap a drop here would land in, while a drag is over this strip —
   // unless that drop would leave the tab where it is (see `markerSlot`).
   const dropIndex =
