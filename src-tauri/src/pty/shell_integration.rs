@@ -1116,7 +1116,13 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn Git Bash");
-        child.stdin.take().unwrap().write_all(b"cd 'sub dir'\nbuiltin pwd\nexit\n").unwrap();
+        // What decides the hook's branch, printed for a failure to show.
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"cd 'sub dir'\nbuiltin pwd\nbuiltin printf 'probe OSTYPE=%s MSYSTEM=%s BASH_VERSION=%s\\n' \"$OSTYPE\" \"$MSYSTEM\" \"$BASH_VERSION\"\nbuiltin pwd -W; builtin echo \"probe pwd-W status=$?\"\nexit\n")
+            .unwrap();
         let out = child.wait_with_output().expect("Git Bash output");
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let _ = fs::remove_dir_all(&dir);
@@ -1131,7 +1137,8 @@ mod tests {
         assert!(text.contains("/tmp/"), "precondition: Git Bash calls the folder /tmp/…: {text:?}");
         assert!(
             reported.iter().any(|p| p.ends_with("/sub dir") && p.as_bytes().get(2) == Some(&b':')),
-            "the directory after `cd` goes out as /C:/…/sub dir: {reported:?}"
+            "the directory after `cd` goes out as /C:/…/sub dir: {reported:?}\n{}",
+            text.lines().filter(|l| l.contains("probe") || l.contains(':')).collect::<Vec<_>>().join("\n")
         );
         assert!(!reported.iter().any(|p| p.starts_with("/tmp")), "never as /tmp/…: {reported:?}");
     }
