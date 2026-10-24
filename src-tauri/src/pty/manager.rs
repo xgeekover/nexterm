@@ -68,8 +68,13 @@ impl PtySession {
 /// The shell's process is waited for on a thread of its own, through a
 /// duplicate of its handle, so the child stays free for `kill` and for the
 /// reader's own `wait`. When it ends, the console is closed; the pipe then
-/// ends and the reader reports the exit as on every other platform. A newer
-/// console host that ends the pipe by itself only makes this a no-op.
+/// ends and the reader reports the exit as on every other platform. A console
+/// host that ends the pipe by itself only makes the close come second.
+///
+/// Closing the console also ends whatever is still attached to it: a server
+/// cmd started with `start /b`, a job Git Bash left running with `&`. Their
+/// output stops with the shell's, where on macOS and Linux the session lasts
+/// until they finish. Windows Terminal does the same when its shell exits.
 #[cfg(windows)]
 fn watch_for_exit(session: &Arc<PtySession>) -> std::io::Result<()> {
     use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
@@ -1003,7 +1008,17 @@ mod tests {
             ended_rx.recv_timeout(Duration::from_secs(15)).is_ok(),
             "the output ends once the shell has exited"
         );
-        assert!(session.master.lock().is_none(), "the console was closed");
+        // The watch closes the console when the shell's process ends; a
+        // console host that ends the pipe by itself can end it first, so the
+        // close is waited for rather than assumed to have come before.
+        let closed = (0..50).any(|_| {
+            if session.master.lock().is_none() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+            false
+        });
+        assert!(closed, "the console was closed");
         let status = session.child.lock().wait().expect("an exit status");
         assert_eq!(status.exit_code(), 7, "and the shell's own code is there to report");
     }

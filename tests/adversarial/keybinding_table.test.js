@@ -23,6 +23,7 @@ import {
   DEFAULT_RESOLVED,
   findBinding,
   dispatchKeydown,
+  dispatchKeydownCapture,
   dispatchKeydownOverTerminal,
   keysFor,
   menuIdOf,
@@ -84,6 +85,7 @@ const isModFor = (e, platform) => (platform === 'macos' ? e.metaKey : e.ctrlKey)
 
 const ctxFor = (e, platform, extra = {}) => ({
   isMod: isModFor(e, platform),
+  isWindows: platform === 'windows',
   isInMonacoEditor: false,
   isCommandPaletteOpen: false,
   ...extra,
@@ -511,6 +513,17 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       null,
       'and still reloads in development'
     );
+
+    // Off Windows Ctrl+R is no reload — WKWebView and WebKitGTK have none on
+    // it — so a packaged build leaves it to whatever has focus.
+    for (const extra of [{ isWindows: false }, { isWindows: undefined }]) {
+      const offWindows = { ...ctrlR, preventDefault: () => assert.ok(false, 'Ctrl+R is not a reload off Windows') };
+      assert.equal(
+        dispatchKeydown(offWindows, { ...ctxFor(offWindows, 'macos', { blockReload: true, isInTerminal: false }), ...extra }),
+        null,
+        `Ctrl+R off Windows (${JSON.stringify(extra)}) is not refused`
+      );
+    }
   });
 
   test('KB-15: Split Right is never advertised as Ctrl+D, and never as a key the machine lacks', () => {
@@ -611,5 +624,62 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
     const fired = dispatchKeydown(inEditor, ctxFor(inEditor, 'macos', { isInMonacoEditor: true }));
     assert.equal(fired, 'pass:toggle-pane-zoom', `it must pass through inside Monaco, got ${fired}`);
     assert.equal(prevented, false, 'and must not be swallowed there');
+  });
+
+  test('KB-17: a reload chord is refused before a field can keep it from the guards', () => {
+    // The Explorer's name and filter boxes, Search and the rename fields stop
+    // their keydowns from bubbling, so the bubble-phase guards never saw a
+    // Ctrl+R, F5 or Ctrl+Shift+R typed into one, and WebView2 reloaded the
+    // page — every shell reaped. The capture phase refuses it first: its
+    // default only, so the field and the bubble phase still get the key.
+    const press = (base) => {
+      const e = { ...base, prevented: false, stopped: false };
+      e.preventDefault = () => { e.prevented = true; };
+      e.stopPropagation = () => { e.stopped = true; };
+      return e;
+    };
+    const F5 = { key: 'F5', code: 'F5', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false };
+    const ctrlR = { key: 'r', code: 'KeyR', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+    const ctrlShiftR = { key: 'R', code: 'KeyR', ctrlKey: true, metaKey: false, shiftKey: true, altKey: false };
+    const cmdR = { key: 'r', code: 'KeyR', ctrlKey: false, metaKey: true, shiftKey: false, altKey: false };
+    const ctrlS = { key: 's', code: 'KeyS', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+
+    for (const [label, base] of [['Ctrl+R', ctrlR], ['F5', F5], ['Ctrl+Shift+R', ctrlShiftR]]) {
+      const inField = press(base);
+      assert.equal(dispatchKeydownCapture(inField, ctxFor(inField, 'windows', { blockReload: true })), 'guard', `${label} in a field`);
+      assert.ok(inField.prevented, `${label} in a field must lose its default, or WebView2 reloads`);
+      assert.equal(inField.stopped, false, `${label}: the field still gets the key`);
+
+      // The editor is the bubble phase's (KB-14, CK-30): Monaco runs first.
+      const inEditor = press(base);
+      assert.equal(dispatchKeydownCapture(inEditor, ctxFor(inEditor, 'windows', { blockReload: true, isInMonacoEditor: true })), null);
+      assert.equal(inEditor.prevented, false, `${label} in the editor is left to the bubble phase`);
+
+      const dev = press(base);
+      assert.equal(dispatchKeydownCapture(dev, ctxFor(dev, 'windows', { blockReload: false })), null);
+      assert.equal(dev.prevented, false, `${label} still reloads in development`);
+    }
+
+    // In a terminal it is what it was: Ctrl+R is reverse-i-search, untouched;
+    // Ctrl+Shift+R is claimed ahead of xterm.
+    const search = press(ctrlR);
+    assert.equal(dispatchKeydownCapture(search, ctxFor(search, 'windows', { blockReload: true, isInTerminal: true })), null);
+    assert.equal(search.prevented || search.stopped, false, 'Ctrl+R in a terminal reaches the shell');
+    const hard = press(ctrlShiftR);
+    assert.equal(dispatchKeydownCapture(hard, ctxFor(hard, 'windows', { blockReload: true, isInTerminal: true })), 'reload-guard');
+    assert.ok(hard.prevented && hard.stopped, 'Ctrl+Shift+R over a terminal is refused, and xterm never sees it');
+
+    // Nothing else is touched here: Ctrl+S in a field is the bubble phase's.
+    const save = press(ctrlS);
+    assert.equal(dispatchKeydownCapture(save, ctxFor(save, 'windows', { blockReload: true })), null);
+    assert.equal(save.prevented, false, 'a key that is no reload keeps its default');
+
+    // macOS: ⌘R is refused in a field; Ctrl+R is no reload there.
+    const mac = press(cmdR);
+    assert.equal(dispatchKeydownCapture(mac, ctxFor(mac, 'macos', { blockReload: true })), 'guard');
+    assert.ok(mac.prevented, '⌘R in a field must lose its default');
+    const macCtrlR = press(ctrlR);
+    assert.equal(dispatchKeydownCapture(macCtrlR, ctxFor(macCtrlR, 'macos', { blockReload: true })), null);
+    assert.equal(macCtrlR.prevented, false, 'Ctrl+R in a macOS field is left alone');
   });
 });

@@ -1,7 +1,7 @@
 import React, { useId, useMemo, useRef, useState } from 'react';
 import { RotateCcw, X, AlertTriangle } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { isMac } from '../../lib/platform.js';
+import { isMac, isWindows } from '../../lib/platform.js';
 import { displayChord } from '../../lib/chords.js';
 import {
   DEFAULT_RESOLVED,
@@ -208,7 +208,7 @@ export function KeybindingSettings({ query = '' }) {
   const setSetting = useSettingsStore((s) => s.setSetting);
 
   const { bindings } = useMemo(() => resolveKeybindings(overrides), [overrides]);
-  const conflicts = useMemo(() => findConflicts(bindings, { isMac }), [bindings]);
+  const conflicts = useMemo(() => findConflicts(bindings, { isMac, isWindows }), [bindings]);
 
   // Per command, per chord: the conflicts that chord is in. Both sides are
   // marked — the chord that never runs, and the one that runs in its place.

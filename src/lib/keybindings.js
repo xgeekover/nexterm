@@ -37,6 +37,10 @@ import { chordFromEvent, chordMatches, displayChord, parseChord, stringifyChord 
  *                  one chord may need to yield only one of them.
  * - `preventDefault: false` for commands that must not swallow the key.
  * - `configurable: false` for the two that are not shortcuts anyone chooses.
+ * - `guard`        a reload guard: swallows its chord and does nothing else
+ *                  (`reloadGuardMatches`, `dispatchKeydownCapture`).
+ * - `windowsOnly`  in force on Windows alone — off it, never run and never
+ *                  reported as taking a chord (`findConflicts`).
  */
 export const COMMANDS = {
   'quick-open': {
@@ -287,6 +291,7 @@ export const COMMANDS = {
     // development where reloading IS the point.
     configurable: false,
     overTerminal: true,
+    guard: true,
     enabled: (ctx) => Boolean(ctx.blockReload),
     run: () => {},
   },
@@ -299,8 +304,13 @@ export const COMMANDS = {
     // comes from one. Everywhere else WebView2 155 reloaded the page on it —
     // the editor focused, every shell reaped with the reload (V29); the 0.2.3
     // measurement that WebView2 swallowed it on its own no longer holds.
+    //
+    // Windows only: WKWebView and WebKitGTK never reload on Ctrl+R, and there
+    // the guard only took the chord from a user who had bound it to something.
     configurable: false,
-    enabled: (ctx) => Boolean(ctx.blockReload) && !ctx.isInTerminal,
+    guard: true,
+    windowsOnly: true,
+    enabled: (ctx) => Boolean(ctx.blockReload) && Boolean(ctx.isWindows) && !ctx.isInTerminal,
     run: () => {},
   },
   escape: {
@@ -572,12 +582,14 @@ function pressOf(chord, isMac) {
  * `{ winner, winnerKey }`, the one that runs instead, and `commands`, the
  * two of them with the winner first.
  */
-export function findConflicts(bindings, { isMac = false } = {}) {
+export function findConflicts(bindings, { isMac = false, isWindows = false } = {}) {
   const conflicts = [];
-  for (const binding of bindings) {
+  // A command in force on Windows alone takes no keypress anywhere else.
+  const inForce = isWindows ? bindings : bindings.filter((b) => !COMMANDS[b.command]?.windowsOnly);
+  for (const binding of inForce) {
     const press = pressOf(binding.chord, isMac);
     const isMod = isMac ? press.metaKey : press.ctrlKey;
-    const first = bindings.find((b) => chordMatches(b.chord, press, isMod));
+    const first = inForce.find((b) => chordMatches(b.chord, press, isMod));
     if (!first || first.command === binding.command) continue;
     conflicts.push({
       key: binding.key,
@@ -625,12 +637,19 @@ export function findBinding(e, ctx) {
   return null;
 }
 
-/** Whether the reload guard, enabled, would have claimed `e` (see `dispatchKeydown`). */
+/**
+ * Whether a reload guard, enabled, would have claimed `e` — either of them:
+ * Ctrl+R's too, or a command bound to Ctrl+R and let through in the editor
+ * still left WebView2 to reload (see `dispatchKeydown`).
+ */
 function reloadGuardMatches(e, ctx) {
-  const guard = COMMANDS['reload-guard'];
-  if (guard.enabled && !guard.enabled(ctx)) return false;
   const bindings = ctx?.bindings ?? DEFAULT_RESOLVED;
-  return bindings.some((b) => b.command === 'reload-guard' && chordMatches(b.chord, e, ctx?.isMod));
+  return bindings.some((b) => {
+    const spec = COMMANDS[b.command];
+    if (!spec?.guard) return false;
+    if (spec.enabled && !spec.enabled(ctx)) return false;
+    return chordMatches(b.chord, e, ctx?.isMod);
+  });
 }
 
 /**
@@ -652,6 +671,31 @@ export function dispatchKeydown(e, ctx) {
   if (spec.preventDefault !== false) e.preventDefault();
   spec.run(ctx);
   return binding.command;
+}
+
+/**
+ * What the capture-phase listener does with a keydown, before anything on the
+ * page sees it.
+ *
+ * In a terminal: the chords claimed ahead of xterm (`dispatchKeydownOverTerminal`).
+ *
+ * Anywhere else but the editor: a reload chord loses its default here, and
+ * nothing more — the field and the bubble-phase listener still get the key.
+ * Several fields stop their keydowns from bubbling (the Explorer's name and
+ * filter boxes, Search, the rename fields), so the guards in the bubble phase
+ * never saw a Ctrl+R, F5 or Ctrl+Shift+R typed into one, and WebView2
+ * reloaded the page — every shell reaped with it. The editor is left to the
+ * bubble phase, which it reaches having run its own bindings first
+ * (`dispatchKeydown`).
+ *
+ * Returns the command id when a terminal's chord ran, `guard` when only a
+ * reload was refused, and null otherwise.
+ */
+export function dispatchKeydownCapture(e, ctx) {
+  if (ctx?.isInTerminal) return dispatchKeydownOverTerminal(e, ctx);
+  if (ctx?.isInMonacoEditor || !reloadGuardMatches(e, ctx)) return null;
+  e.preventDefault();
+  return 'guard';
 }
 
 /**

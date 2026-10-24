@@ -692,6 +692,10 @@ Windows: checked with the suites and the browser mock.
 - Edit a file, then Ctrl+R or F5 with the editor focused: a "Leave site?"
   question (or nothing at all, if WebView2 already swallows the key — say
   which); the edit is still there afterwards.
+- With a shell running, press Ctrl+R, F5 and Ctrl+Shift+R in each field that
+  keeps its keys to itself: the Explorer's rename box (F2), its filter, the
+  Search box, and a terminal tab's rename field. Nothing reloads — the shell
+  is still there, same PID. Ctrl+R in the terminal is still reverse-i-search.
 - Known and not fixed: shutting down, signing out or a restart for an update
   with unsaved edits loses them without asking (tao ignores
   WM_QUERYENDSESSION).
@@ -1078,7 +1082,10 @@ why the fixes below say where ConPTY stops.
   keeps the output pipe open after its shell has gone, until
   `ClosePseudoConsole` — which ran only after the end it was waiting for. The
   console hosts outlived the app, too. The shell's process is now waited for
-  on Windows, and its console closed when it ends.
+  on Windows, and its console closed when it ends. That close also ends what
+  is still attached to the console — a `start /b` server, a Git Bash job left
+  running with `&` — as Windows Terminal's does; on macOS and Linux they
+  outlive the shell.
 - **V35, V41: Git Bash under `%TEMP%` is in `/tmp/…`**, a mount only it knows:
   a split there opened at the workspace root and no branch was shown. Git
   Bash now reports its directory as Windows spells it (`pwd -W`).
@@ -1088,6 +1095,11 @@ why the fixes below say where ConPTY stops.
 - **V29: Ctrl+R reloaded the page** outside a terminal (WebView2 155 no longer
   swallows it), and **Alt+F4 did nothing** with a terminal focused (xterm
   cancelled it). Both handled now; Ctrl+R in a terminal is still the shell's.
+  Review then found the fields that keep their keys to themselves (the
+  Explorer's name and filter boxes, Search, the rename fields) still reloaded
+  on Ctrl+R, F5 and Ctrl+Shift+R: the guards ran in the bubble phase, which
+  those keys never reach. They are refused in the capture phase now, and
+  Ctrl+R's guard is Windows-only — WKWebView and WebKitGTK never reload on it.
 - **V36, V38: two things ConPTY on Windows 10 does not pass on** — the switch
   to the alternate screen, and bracketed paste's markers. A Git Bash that had
   asked for bracketed paste ran the first of two pasted lines unasked; a
