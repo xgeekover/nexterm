@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { hasMod } from '../lib/platform.js';
-import { dispatchKeydown, dispatchKeydownOverTerminal } from '../lib/keybindings.js';
+import { hasMod, isWindows } from '../lib/platform.js';
+import { dispatchKeydown, dispatchKeydownCapture } from '../lib/keybindings.js';
 import { useShortcuts } from './useShortcuts.js';
 import { windowControls } from '../lib/menuActions.js';
 import { dialogOnScreen, menuOnScreen } from '../lib/workspaceFocus.js';
@@ -60,9 +60,11 @@ export function useKeybindings() {
       bindings,
       isMod: hasMod(e),
       isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
+      isInTerminal: Boolean(e.target?.closest?.('.xterm')),
       // Reloading is a development tool. In a packaged build it silently
       // destroys every running shell — see the `reload-guard` binding.
       blockReload: !import.meta.env.DEV,
+      isWindows,
       // Asked only by a command whose chord was pressed (`enabled`).
       isDialogOpen: () => dialogOnScreen(),
       isMenuOpen: () => menuOnScreen(),
@@ -98,15 +100,16 @@ export function useKeybindings() {
       dispatchKeydown(e, contextFor(e));
     };
 
-    // Capture phase, and only while a terminal has focus: runs BEFORE xterm's
-    // own textarea handler so the handful of bindings marked `overTerminal`
-    // can be claimed at all. Ctrl+B is the reason — the side bar toggle the
-    // menu advertises did nothing whenever a terminal was focused, because
-    // xterm turned it into ^B first. Everything not marked falls through here
-    // untouched and still reaches the shell.
+    // Capture phase: runs BEFORE xterm's own textarea handler, so the handful
+    // of bindings marked `overTerminal` can be claimed over a focused terminal
+    // at all. Ctrl+B is the reason — the side bar toggle the menu advertises
+    // did nothing whenever a terminal was focused, because xterm turned it
+    // into ^B first. Everything not marked falls through here untouched and
+    // still reaches the shell. Outside a terminal, only a reload chord is
+    // refused here, before a field that stops its keys from bubbling can
+    // keep it from the guards (`dispatchKeydownCapture`).
     const handleKeyDownCapture = (e) => {
-      if (!e.target?.closest?.('.xterm')) return;
-      dispatchKeydownOverTerminal(e, contextFor(e));
+      dispatchKeydownCapture(e, contextFor(e));
     };
 
     window.addEventListener('keydown', handleKeyDownCapture, true);

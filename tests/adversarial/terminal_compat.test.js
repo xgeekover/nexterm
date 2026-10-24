@@ -16,6 +16,8 @@ import {
   usablePtySize,
   withoutVerbatimPrefix,
   legacyAltArrowSequence,
+  isWindowCloseChord,
+  showTerminalContainer,
   wheelArrowCount,
   wheelScrollRows,
   installPagerWheel,
@@ -158,7 +160,7 @@ function scrollEach(term, deltas, over = {}) {
  * throws, so a change to what it depends on fails loudly instead of testing
  * a stale copy.
  */
-function terminalViewKeyHandler({ mac, suggestState }) {
+function terminalViewKeyHandler({ mac, suggestState, windows = false }) {
   const src = readFileSync(new URL('../../src/components/terminal/TerminalView.jsx', import.meta.url), 'utf8');
   const start = src.indexOf('const sendLegacyAltArrow = (event) => {');
   const end = src.indexOf('entry.term.attachCustomKeyEventHandler(handleKeyEvent);', start);
@@ -167,6 +169,8 @@ function terminalViewKeyHandler({ mac, suggestState }) {
   const EMPTY_SUGGEST_STATE = { visible: false, items: [] };
   const scope = {
     legacyAltArrowSequence,
+    isWindowCloseChord,
+    isWindows: windows,
     isMac: mac,
     entry: { term: { input: (data, wasUserInput) => calls.input.push([data, wasUserInput]), hasSelection: () => false } },
     handleClipboardKey,
@@ -553,5 +557,68 @@ describe('Terminal compatibility: the wheel over the scrollback, as far as xterm
     const open = create.indexOf('term.open(container);');
     assert.ok(open > 0 && create.indexOf('installPagerWheel(term);') > 0);
     assert.ok(create.indexOf('installScrollbackWheel(term);') > open, 'its listener needs `term.element`');
+  });
+});
+
+describe('Terminal compatibility: Alt+F4 is the window\'s', () => {
+  test('TC-40: on Windows, Alt+F4 — and nothing else held — goes back to the window; anywhere else it stays the terminal\'s', () => {
+    // V29: with a terminal focused, Alt+F4 did nothing. xterm turned it into
+    // F4's escape sequence and cancelled it, so it never reached the window.
+    const altF4 = (over = {}) => ({
+      type: 'keydown', key: 'F4', code: 'F4', keyCode: 115,
+      altKey: true, ctrlKey: false, metaKey: false, shiftKey: false, ...over,
+    });
+    const win = { windows: true };
+    assert.equal(isWindowCloseChord(altF4(), win), true);
+    assert.equal(isWindowCloseChord(altF4({ key: undefined, code: undefined }), win), true, 'by keyCode alone');
+    assert.equal(isWindowCloseChord(altF4({ altKey: false }), win), false, 'F4 alone is the program\'s');
+    assert.equal(isWindowCloseChord(altF4({ ctrlKey: true }), win), false, 'Ctrl+Alt+F4 is not the close chord');
+    assert.equal(isWindowCloseChord(altF4({ shiftKey: true }), win), false);
+    assert.equal(isWindowCloseChord(altF4({ key: 'F5', code: 'F5', keyCode: 116 }), win), false, 'Alt+F5 stays the terminal\'s');
+    assert.equal(isWindowCloseChord(altF4({ type: 'keyup' }), win), false);
+    assert.equal(isWindowCloseChord(altF4(), { windows: false }), false, 'off Windows it is nobody\'s in particular');
+    assert.equal(isWindowCloseChord(altF4()), false);
+  });
+
+  test('TC-41: the terminal\'s key handler hands it back untouched — not cancelled, nothing sent to the program', () => {
+    const altF4 = () => keydown('F4', { altKey: true, code: 'F4', keyCode: 115 });
+    // A suggestion popup up, so a key that reached the layer would show.
+    const popup = () => ({ visible: true, ...rankedSuggestions('gp', ['git push']), selectedIndex: 0, moved: true });
+    const onWindows = terminalViewKeyHandler({ mac: false, suggestState: popup(), windows: true });
+    const event = altF4();
+    assert.equal(onWindows.handleKeyEvent(event), false, 'xterm does not handle it');
+    assert.equal(event.defaultPrevented, false, 'and nothing cancels it, so it reaches the window');
+    assert.deepEqual(onWindows.calls.input, [], 'nothing typed into the program');
+    assert.deepEqual(onWindows.calls.suggestState, [], 'not even the suggestion popup heard it');
+
+    // Off Windows the key goes on to xterm as before.
+    const elsewhere = terminalViewKeyHandler({ mac: false, suggestState: popup(), windows: false });
+    assert.equal(elsewhere.handleKeyEvent(altF4()), true, 'xterm handles it, as it always did');
+  });
+});
+
+describe('Terminal compatibility: a new shell keeps the keyboard', () => {
+  test('TC-42: the container already in the pane is not moved — moving it took the keyboard from a restarted shell', () => {
+    // Found once V26 was fixed: Enter after an exit started a new shell, the
+    // view re-attached for the new session, and the focused textarea went out
+    // of the document and back — keys went nowhere until the pane was clicked.
+    const container = { name: 'container' };
+    const calls = [];
+    const wrapper = (children) => ({
+      childNodes: children,
+      get firstChild() {
+        return children[0] ?? null;
+      },
+      replaceChildren: (...nodes) => calls.push(nodes),
+    });
+    assert.equal(showTerminalContainer(wrapper([container]), container), false, 'already there: left alone');
+    assert.deepEqual(calls, []);
+    assert.equal(showTerminalContainer(wrapper([]), container), true, 'an empty pane gets it');
+    assert.equal(showTerminalContainer(wrapper([{ name: 'other' }]), container), true, 'another terminal\'s is replaced');
+    assert.equal(showTerminalContainer(wrapper([container, { name: 'stray' }]), container), true, 'and so is anything beside it');
+    assert.deepEqual(calls, [[container], [container], [container]]);
+    const view = readFileSync(new URL('../../src/components/terminal/TerminalView.jsx', import.meta.url), 'utf8');
+    assert.ok(view.includes('showTerminalContainer(wrapper, entry.container);'), 'and the view puts it there this way');
+    assert.ok(!view.includes('replaceChildren'), 'never by moving it unconditionally');
   });
 });

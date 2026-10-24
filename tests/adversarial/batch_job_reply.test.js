@@ -297,6 +297,54 @@ describe('cmd batch-job reply: what arms, what disarms, what is asked', () => {
     assert.equal(r.afterOutput('cmd', asked), true);
     assert.equal(replies, 2);
   });
+
+  test('BJ-04d: where the alternate screen cannot be seen (Windows 10), a silent wind-down is waited out to the limit', () => {
+    // V36: Windows 10's ConPTY never passed the switch to the alternate
+    // screen on, so the buffer read normal throughout. A program going quiet
+    // for 4 s on Ctrl+C before it left, cmd's question at +4.2 s: the 3 s
+    // window had closed, and the question stayed unanswered.
+    let now = 0;
+    let replies = 0;
+    const shown = screen(['FAKE-TUI']);
+    const asked = screen(['SLOWQUIT-DONE', '일괄 작업을 끝내시겠습니까 (Y/N)? ']);
+    const make = (unseen) =>
+      createBatchJobReplies({
+        isCmd: () => true,
+        reply: () => {
+          replies += 1;
+        },
+        now: () => now,
+        screen: () => screenRow(shown),
+        alternateUnseen: () => unseen,
+      });
+
+    // As measured: "quitting slowly…" at +8 ms, then nothing until +4.2 s.
+    let r = make(true);
+    r.noteInput('cmd', '\x03');
+    now = 8;
+    assert.equal(r.outputArrived('cmd'), true);
+    assert.equal(r.afterOutput('cmd', screen(['quitting slowly...'])), false, 'not a question');
+    now = 4200;
+    assert.equal(r.outputArrived('cmd'), true, 'still waiting');
+    assert.equal(r.afterOutput('cmd', asked), true, 'answered');
+    assert.equal(replies, 1);
+
+    // The limit still holds, and seen alternate screens behave as before.
+    now = 0;
+    r = make(true);
+    r.noteInput('cmd', '\x03');
+    now = 10500;
+    assert.equal(r.outputArrived('cmd'), false, 'never past the limit');
+    now = 0;
+    r = make(false);
+    r.noteInput('cmd', '\x03');
+    now = 8;
+    r.outputArrived('cmd');
+    r.afterOutput('cmd', screen(['quitting slowly...']));
+    now = 4200;
+    assert.equal(r.outputArrived('cmd'), false, 'where it can be seen, 3 s of nothing still closes the window');
+    assert.equal(replies, 1);
+  });
 });
 
 /** A screen of `rows`, the cursor on the last; `type` 'alternate' for a full-screen program's. */
@@ -329,10 +377,12 @@ function registryWriteOutput() {
  * xterm, attached to the output bus through the registry's `writeOutput`, and
  * every write to its shell recorded rather than run by the mock.
  */
-async function terminal({ shell = CMD, os = 'windows' } = {}) {
+// A Windows 11 build unless a case says otherwise: where the alternate
+// screen is seen, the window is the 3 s the cases below were written for.
+async function terminal({ shell = CMD, os = 'windows', osBuild = 22621 } = {}) {
   const system = useSystemStore.getState();
-  const before = { os: system.os, defaultShell: system.defaultShell };
-  useSystemStore.setState({ os, defaultShell: CMD });
+  const before = { os: system.os, osBuild: system.osBuild, defaultShell: system.defaultShell };
+  useSystemStore.setState({ os, osBuild, defaultShell: CMD });
   await T.getState().init();
   // The bus as the app runs it: one listener on the bridge. Another suite may
   // have left it listening to a stand-in.
@@ -560,6 +610,28 @@ describe('cmd batch-job reply: after review, through the store', () => {
       await t.type('\x03');
       now += 6000;
       await t.prints(`${ALT_OFF}^C${ENGLISH}`);
+      assert.deepEqual(t.typed, ['\x03', 'Y\r']);
+    } finally {
+      Date.now = realNow;
+      await t.close();
+    }
+  });
+
+  test('BJ-18: Windows 10 — no alternate screen ever reaches xterm, and a program quiet for 4 s still has cmd\'s question answered', async () => {
+    // V36, as measured on 19045: the full-screen program's switch never
+    // arrived (ConPTY repaints instead), "quitting slowly" at +8 ms, then
+    // nothing until cmd asked at +4.2 s — after the 3 s window.
+    const t = await terminal({ osBuild: 19045 });
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      await t.prints('FAKE-TUI on the alternate screen - press Ctrl+C');
+      await t.type('\x03');
+      now += 8;
+      await t.prints('\r\nquitting slowly...');
+      now += 4200;
+      await t.prints(`\r\nSLOWQUIT-DONE\r\n${KOREAN}`);
       assert.deepEqual(t.typed, ['\x03', 'Y\r']);
     } finally {
       Date.now = realNow;

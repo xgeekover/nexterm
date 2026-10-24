@@ -105,11 +105,11 @@ describe('Configurable keybindings', () => {
   });
 
   test('CK-06: the shipped defaults do not fight each other', () => {
-    for (const isMac of [true, false]) {
+    for (const [name, platform] of [['macOS', { isMac: true }], ['Windows', { isMac: false, isWindows: true }], ['Linux', { isMac: false }]]) {
       assert.deepEqual(
-        findConflicts(DEFAULT_RESOLVED, { isMac }),
+        findConflicts(DEFAULT_RESOLVED, platform),
         [],
-        `${isMac ? 'macOS' : 'Windows'}: two commands share a chord out of the box`
+        `${name}: two commands share a chord out of the box`
       );
     }
     for (const entry of DEFAULT_KEYBINDINGS) {
@@ -337,7 +337,8 @@ describe('Conflicts are found by the keys pressed, not by how a chord is spelled
   test('CK-28: whatever is rebound, a conflict is reported exactly when a binding\'s keypress runs another command', () => {
     // A seeded walk over rebinds, spelled the ways the recorder and a hand
     // edit spell them, checked against the window's own lookup. `blockReload`
-    // arms the reload guard, as in a packaged build, so every binding can run.
+    // arms the reload guards, as in a packaged build, so every binding in
+    // force on the platform can run.
     let seed = 20261007;
     const random = () => {
       seed = (seed * 1103515245 + 12345) % 2147483648;
@@ -357,10 +358,14 @@ describe('Conflicts are found by the keys pressed, not by how a chord is spelled
       }
       const { bindings } = resolveKeybindings(overrides);
       for (const platform of ['macos', 'windows']) {
-        const conflicts = findConflicts(bindings, { isMac: platform === 'macos' });
+        const isWindows = platform === 'windows';
+        const conflicts = findConflicts(bindings, { isMac: platform === 'macos', isWindows });
         for (const binding of bindings) {
+          // Ctrl+R's guard is no binding at all off Windows: it neither runs
+          // there nor takes a keypress from anything.
+          if (COMMANDS[binding.command].windowsOnly && !isWindows) continue;
           const e = pressOn(binding.key, platform);
-          const runs = findBinding(e, ctx(e, platform, { bindings, blockReload: true }))?.command;
+          const runs = findBinding(e, ctx(e, platform, { bindings, blockReload: true, isWindows }))?.command;
           const reported = conflicts.find((c) => c.command === binding.command && c.key === binding.key);
           const where = `${platform} ${JSON.stringify(overrides)} ${binding.command}:${binding.key}`;
           if (runs === binding.command) assert.equal(reported, undefined, `${where} runs, yet is reported`);
@@ -553,5 +558,45 @@ describe('Configurable keybindings: what the old recorder left behind', () => {
     const dev = press();
     dispatchKeydown(dev, ctx(dev, 'windows', { bindings, blockReload: false, isInMonacoEditor: true }));
     assert.equal(dev.defaultPrevented, false, 'in development reloading is the point');
+  });
+
+  test('CK-31: Ctrl+R given to a command is the command’s off Windows, and never reloads on it', () => {
+    // The Ctrl+R guard is Windows' alone: WKWebView and WebKitGTK never reload
+    // on it. Everywhere it took the chord first, so a user's Ctrl+R did
+    // nothing outside a terminal on macOS, where nothing needed guarding.
+    const { bindings } = resolveKeybindings({ 'swap-pane': 'ctrl+r' });
+    const press = () => ev({ key: 'r', code: 'KeyR', ctrlKey: true });
+    for (const isMac of [true, false]) {
+      assert.deepEqual(findConflicts(bindings, { isMac }), [], `off Windows (isMac ${isMac}) nothing takes Ctrl+R first`);
+    }
+    const mac = press();
+    mac.preventDefault = () => {};
+    assert.equal(
+      dispatchKeydown(mac, ctx(mac, 'macos', { bindings, blockReload: true, isWindows: false, isInTerminal: false })),
+      'swap-pane',
+      'macOS, packaged: the user’s Ctrl+R runs'
+    );
+
+    // On Windows the guard does take it outside a terminal, and Settings says so.
+    const conflicts = findConflicts(bindings, { isMac: false, isWindows: true });
+    assert.equal(conflicts.length, 1, JSON.stringify(conflicts));
+    assert.equal(conflicts[0].winner, 'reload-guard-ctrl-r');
+    assert.equal(conflicts[0].command, 'swap-pane');
+
+    // A command bound to Ctrl+R and let through in the editor still never
+    // reloads on Windows — CK-30's rule, for Ctrl+R's guard too.
+    const { bindings: passing } = resolveKeybindings({ 'close-pane': 'ctrl+r' });
+    const inEditor = (platform, isWindows) => {
+      const e = press();
+      e.defaultPrevented = false;
+      e.preventDefault = () => {
+        e.defaultPrevented = true;
+      };
+      const fired = dispatchKeydown(e, ctx(e, platform, { bindings: passing, blockReload: true, isWindows, isInMonacoEditor: true }));
+      assert.equal(fired, 'pass:close-pane');
+      return e.defaultPrevented;
+    };
+    assert.equal(inEditor('windows', true), true, 'Windows: the reload is still blocked');
+    assert.equal(inEditor('linux', false), false, 'elsewhere Ctrl+R is the editor’s, unprevented');
   });
 });

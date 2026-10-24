@@ -431,10 +431,35 @@ __nexterm_precmd() {
     __nexterm_exit_status=
   fi
   builtin printf '\e]133;D;%d\a' "$__nexterm_code"
-  builtin printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD"
+  __nexterm_report_cwd
   builtin printf '\e]133;A\a'
   __nexterm_pending_preexec=1
 }
+
+# Git Bash and MSYS2 spell the directory their own way: /c/Users for
+# C:\Users, but /tmp for %TEMP% and / for Git's own folder, through a mount
+# table only the shell knows. The app read /c/... and nothing else, so a split
+# or a git branch in a folder under %TEMP% found no folder at all (V35, V41).
+# There the directory goes out as Windows spells it — `pwd -W`, a builtin of
+# MSYS bash — worked out again only when it changes, since $(…) forks and a
+# fork costs on MSYS. Git for Windows 2.56 (MSYS2's bash 5.3) calls itself
+# `cygwin`, not `msys`, so it is `pwd -W` that decides: Cygwin's own bash, and
+# every other, refuses the option and reports $PWD as it always has.
+if [[ "${OSTYPE-}" == msys* || "${OSTYPE-}" == cygwin* ]] && builtin pwd -W >/dev/null 2>&1; then
+  __nexterm_cwd_of=
+  __nexterm_cwd_win=
+  __nexterm_report_cwd() {
+    if [[ "$PWD" != "$__nexterm_cwd_of" ]]; then
+      __nexterm_cwd_win=$(builtin pwd -W)
+      __nexterm_cwd_of=$PWD
+    fi
+    builtin printf '\e]7;file://%s/%s\a' "$HOSTNAME" "$__nexterm_cwd_win"
+  }
+else
+  __nexterm_report_cwd() {
+    builtin printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD"
+  }
+fi
 
 # First in PROMPT_COMMAND, as `__nexterm_prompt_begin "$_" && __nexterm_return
 # 0 "$_"`. Every call leaves $_ holding its last argument, so $_ is still what
@@ -1057,6 +1082,69 @@ mod tests {
         assert!(contents.contains("133;D;"));
         assert!(contents.contains("]7;file://"));
         assert!(contents.contains("PROMPT_COMMAND"));
+        // Git Bash reports Windows' spelling of its directory (see below) —
+        // as `cygwin` too, which Git for Windows 2.56 says it is.
+        assert!(contents.contains("builtin pwd -W"));
+        assert!(contents.contains(r#""${OSTYPE-}" == cygwin*"#));
+    }
+
+    /// Git Bash in a folder under %TEMP% is in /tmp/…, a mount only it knows,
+    /// and the app could not turn that back into a folder: a split there
+    /// opened at the workspace root and no git branch was shown (V35, V41).
+    /// It reports the directory as Windows spells it now. Run with the Git
+    /// for Windows the machine has; skipped without one.
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_reports_its_directory_as_windows_spells_it() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let bash = Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        if !bash.exists() {
+            return;
+        }
+        let integration = bash_integration(false);
+        // Under %TEMP%, so Git Bash starts in /tmp/…; a space in the name, as
+        // in "My Pics".
+        let dir = std::env::temp_dir().join(format!("nexterm-si-gitbash-{}", std::process::id()));
+        let home = dir.join("home");
+        fs::create_dir_all(dir.join("sub dir")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let mut child = Command::new(bash)
+            .args(&integration.args)
+            .current_dir(&dir)
+            .env("HOME", &home)
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn Git Bash");
+        // What decides the hook's branch, printed for a failure to show.
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"cd 'sub dir'\nbuiltin pwd\nbuiltin printf 'probe OSTYPE=%s MSYSTEM=%s BASH_VERSION=%s\\n' \"$OSTYPE\" \"$MSYSTEM\" \"$BASH_VERSION\"\nbuiltin pwd -W; builtin echo \"probe pwd-W status=$?\"\nexit\n")
+            .unwrap();
+        let out = child.wait_with_output().expect("Git Bash output");
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let _ = fs::remove_dir_all(&dir);
+
+        // Each OSC 7's path, after its host.
+        let reported: Vec<&str> = text
+            .split("\x1b]7;file://")
+            .skip(1)
+            .map(|rest| rest.split('\x07').next().unwrap_or(""))
+            .map(|uri| uri.find('/').map_or("", |at| &uri[at..]))
+            .collect();
+        assert!(text.contains("/tmp/"), "precondition: Git Bash calls the folder /tmp/…: {text:?}");
+        assert!(
+            reported.iter().any(|p| p.ends_with("/sub dir") && p.as_bytes().get(2) == Some(&b':')),
+            "the directory after `cd` goes out as /C:/…/sub dir: {reported:?}\n{}",
+            text.lines().filter(|l| l.contains("probe") || l.contains(':')).collect::<Vec<_>>().join("\n")
+        );
+        assert!(!reported.iter().any(|p| p.starts_with("/tmp")), "never as /tmp/…: {reported:?}");
     }
 
     /// What a real bash prints, stdout and stderr together, started the way

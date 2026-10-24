@@ -34,6 +34,34 @@ export function windowsPtyFor(system) {
 }
 
 /**
+ * Put a terminal's container in the pane's wrapper — unless it is already
+ * all the wrapper holds, as when only the shell behind it changed (Enter
+ * after an exit, a restore). Moved out and back in, the focused textarea lost
+ * the keyboard, and a restarted shell took no keys until the pane was clicked.
+ * Returns whether it moved anything.
+ */
+export function showTerminalContainer(wrapper, container) {
+  if (!wrapper || !container) return false;
+  if (wrapper.childNodes?.length === 1 && wrapper.firstChild === container) return false;
+  wrapper.replaceChildren(container);
+  return true;
+}
+
+/**
+ * Whether a terminal's pty is Windows 10's ConPTY — or Windows', of a build
+ * not yet known. Measured on 19045, it passes neither the switch to the
+ * alternate screen (V36) nor bracketed paste's markers (V38) on between the
+ * program and the terminal. Windows 11 (build 22000 on) was not measured, and
+ * is left as it was. `windowsPty` is as `windowsPtyFor` gives it.
+ */
+export const WINDOWS_11_BUILD = 22000;
+export function isWindows10Conpty(windowsPty) {
+  if (windowsPty?.backend !== 'conpty') return false;
+  const build = Number(windowsPty.buildNumber);
+  return !(Number.isInteger(build) && build >= WINDOWS_11_BUILD);
+}
+
+/**
  * The size to give a terminal and its pty for the size a pane could hold, or
  * null when the pane is too small to be a real terminal yet.
  *
@@ -137,6 +165,21 @@ export function legacyAltArrowSequence(event, { mac = false } = {}) {
   const arrow = ARROW_KEYS[event.key] ?? ARROW_KEY_CODES[event.keyCode];
   if (!arrow) return null;
   return (mac ? MAC_OPTION_ARROW[arrow] : CTRL_ARROW[arrow]) ?? null;
+}
+
+/**
+ * Whether a key is Windows' close chord, Alt+F4 and nothing else held — the
+ * window's, not the program's. Handed back untouched (the custom key handler
+ * returns false), it reaches the window, which closes as it does from the
+ * editor, asking about unsaved edits first. xterm turned it into F4's escape
+ * sequence and cancelled it, and Alt+F4 with a terminal focused — the app's
+ * resting state — did nothing at all (V29). Off Windows it is nobody's chord
+ * in particular and stays the terminal's.
+ */
+export function isWindowCloseChord(event, { windows = false } = {}) {
+  if (!windows || !event || event.type !== 'keydown') return false;
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+  return event.key === 'F4' || event.code === 'F4' || event.keyCode === 115;
 }
 
 const WHEEL_DELTA_LINE = 1;

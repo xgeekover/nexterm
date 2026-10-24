@@ -147,6 +147,12 @@ function consume(event) {
   event.stopImmediatePropagation?.();
 }
 
+/** Whether `node` is `container` or inside it, by its parents. */
+function contains(container, node) {
+  for (let n = node; n; n = n.parentNode) if (n === container) return true;
+  return false;
+}
+
 const installed = new WeakMap();
 
 /** The DOM side, as an xterm addon so it is disposed with its terminal. */
@@ -194,6 +200,16 @@ class TerminalRightClickAddon {
     on(container, 'mouseup', (e) => this._follow(e, 'release'));
     on(container, 'auxclick', (e) => this._follow(e, 'auxclick'));
     on(container, 'contextmenu', (e) => this._follow(e, 'menu'));
+    // The menu of a handled press can land outside the container. The paste
+    // question opens under the pointer between the press and the release, and
+    // on Windows the menu follows the release — to whatever is under the
+    // pointer by then, the question's overlay. Nothing there cancelled it, and
+    // the webview's own menu (Back / Reload / Save as / Print) opened over the
+    // question (V22). So it is followed from the window too: only its default
+    // is cancelled, and only for the press this binding claimed.
+    on(view, 'contextmenu', (e) => {
+      if (!contains(container, e.target)) this._followOutside(e);
+    });
   }
 
   /**
@@ -258,6 +274,19 @@ class TerminalRightClickAddon {
     if (part !== 'menu' && e.button !== 2) return;
     gesture[part] = false;
     consume(e);
+  }
+
+  /**
+   * The menu of a handled press, landed outside the terminal (on the paste
+   * question that opened under the pointer): the webview's menu is cancelled,
+   * and nothing else is done to the event — it is not the terminal's.
+   */
+  _followOutside(e) {
+    const gesture = this._gesture;
+    if (!gesture?.menu && !gesture?.menuDefault) return;
+    gesture.menu = false;
+    gesture.menuDefault = false;
+    e.preventDefault?.();
   }
 
   /**
