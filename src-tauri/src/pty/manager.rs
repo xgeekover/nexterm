@@ -102,6 +102,19 @@ fn watch_for_exit(session: &Arc<PtySession>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// One `pty-output` event — counted, and its emit timed, when the app is
+/// being measured (src/perf.rs).
+fn emit_output(app: &AppHandle, session_id: &str, data: String) {
+    let started = crate::perf::emit_started();
+    let bytes = data.len();
+    let payload = PtyOutputPayload {
+        session_id: session_id.to_string(),
+        data,
+    };
+    let _ = app.emit("pty-output", &payload);
+    crate::perf::note_emit(started, bytes);
+}
+
 /// Move a PTY's blocking writes onto their own thread.
 ///
 /// Returns the queue the caller hands bytes to. The thread ends when the
@@ -460,6 +473,7 @@ impl PtyManager {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            crate::perf::note_read(n);
                             let mut released = None;
                             if let Some((query, answer_tx)) = startup_query.as_mut() {
                                 let scan = query.feed(&buf[..n]);
@@ -483,11 +497,7 @@ impl PtyManager {
                             echo_watch.output();
                             let filtered = filter.feed(chunk);
                             if !filtered.output.is_empty() {
-                                let payload = PtyOutputPayload {
-                                    session_id: session_id_clone.clone(),
-                                    data: filtered.output,
-                                };
-                                let _ = app_handle_clone.emit("pty-output", &payload);
+                                emit_output(&app_handle_clone, &session_id_clone, filtered.output);
                             }
                             for marker in filtered.markers {
                                 match marker {
@@ -547,11 +557,7 @@ impl PtyManager {
                     if !held.is_empty() {
                         let filtered = filter.feed(&held);
                         if !filtered.output.is_empty() {
-                            let payload = PtyOutputPayload {
-                                session_id: session_id_clone.clone(),
-                                data: filtered.output,
-                            };
-                            let _ = app_handle_clone.emit("pty-output", &payload);
+                            emit_output(&app_handle_clone, &session_id_clone, filtered.output);
                         }
                     }
                 }
@@ -560,11 +566,7 @@ impl PtyManager {
                 // than holding them forever.
                 let tail = filter.take_utf8_tail();
                 if !tail.is_empty() {
-                    let payload = PtyOutputPayload {
-                        session_id: session_id_clone.clone(),
-                        data: String::from_utf8_lossy(&tail).to_string(),
-                    };
-                    let _ = app_handle_clone.emit("pty-output", &payload);
+                    emit_output(&app_handle_clone, &session_id_clone, String::from_utf8_lossy(&tail).to_string());
                 }
 
                 let exit_code = if let Some(session_arc) = session_weak.upgrade() {

@@ -13,6 +13,7 @@ pub mod commands;
 pub mod fs;
 pub mod menu;
 pub mod models;
+pub mod perf;
 pub mod pty;
 
 use std::sync::Arc;
@@ -175,6 +176,9 @@ fn main() {
             commands::app::app_close_ack,
             commands::app::app_close_window,
             commands::app::app_quit,
+            commands::perf::perf_info,
+            commands::perf::perf_counters,
+            commands::perf::perf_write,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nexterm application");

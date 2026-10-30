@@ -898,13 +898,36 @@ function bindSession(entry, sessionId) {
  */
 function writeOutput(entry, data) {
   const { tabId, term } = entry;
+  // Performance mode only (src/lib/perf/): what it may want told once xterm
+  // has read this chunk. Null otherwise, and then nothing below changes.
+  const read = writeObserver ? writeObserver(tabId, data) : null;
   if (!useTerminalStore.getState().batchJobOutputArrived?.(tabId)) {
-    term.write(data);
+    if (read) term.write(data, read);
+    else term.write(data);
     return;
   }
   term.write(data, () => {
+    read?.();
     if (!entry.disposed) useTerminalStore.getState().answerBatchJobPrompt?.(tabId, term);
   });
+}
+
+/**
+ * Performance mode's view of every chunk written into a terminal
+ * (src/lib/perf/perfProbe.js): `observer(tabId, data)` may return a function
+ * for xterm to call once it has read that chunk, which is how long a write
+ * waited behind the ones before it. Null when the app is not being measured.
+ */
+let writeObserver = null;
+
+export function setWriteObserver(observer) {
+  writeObserver = typeof observer === 'function' ? observer : null;
+}
+
+/** The xterm of `tabId` if it has one — never makes one. For performance mode's runner. */
+export function existingTerminal(tabId) {
+  const entry = instances.get(tabId);
+  return entry && !entry.disposed ? entry.term : null;
 }
 
 export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {

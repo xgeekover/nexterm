@@ -369,7 +369,9 @@ function registryWriteOutput() {
   const start = src.indexOf('function writeOutput(entry, data) {');
   const length = src.slice(start).search(/\r?\n\}\r?\n/);
   assert.ok(start > 0 && length > 0, 'terminalRegistry.js writes output through writeOutput');
-  return new Function('useTerminalStore', `${src.slice(start, start + length)}\n}\nreturn writeOutput;`)(T);
+  // `writeObserver` is performance mode's hook (src/lib/perf/), off as in
+  // every session that is not being measured.
+  return new Function('useTerminalStore', 'writeObserver', `${src.slice(start, start + length)}\n}\nreturn writeOutput;`)(T, null);
 }
 
 /**

@@ -72,16 +72,31 @@ function keep(sessionId, data, at) {
  */
 export function deliver(sessionId, data, at = Date.now()) {
   if (!sessionId || typeof data !== 'string' || data === '') return;
+  const observer = deliverObserver;
+  const startedAt = observer ? observer.clock() : 0;
   const sink = sinks.get(sessionId);
   if (!sink) {
     keep(sessionId, data, at);
-    return;
+  } else {
+    try {
+      sink(data);
+    } catch (err) {
+      console.warn('[Terminal] could not write output into its terminal:', err);
+    }
   }
-  try {
-    sink(data);
-  } catch (err) {
-    console.warn('[Terminal] could not write output into its terminal:', err);
-  }
+  if (observer) observer.delivered(sessionId, data, startedAt);
+}
+
+/**
+ * Performance mode's view of every chunk as it arrives
+ * (src/lib/perf/perfProbe.js): `{ clock(), delivered(sessionId, data,
+ * startedAt) }`, told after the chunk went into its terminal or was kept.
+ * Null when the app is not being measured.
+ */
+let deliverObserver = null;
+
+export function setDeliverObserver(observer) {
+  deliverObserver = observer && typeof observer.delivered === 'function' && typeof observer.clock === 'function' ? observer : null;
 }
 
 /**
