@@ -181,6 +181,72 @@ If a mutation survives, it means one of two things, and it is worth deciding
 which: the mutation changed no behaviour (fine — say so), or the behaviour is
 untested (not fine).
 
+## Performance mode — measuring the output path
+
+Several agents printing at once is a load no suite produces, and timings are
+not something a CI machine can be held to. So the app measures itself, on
+purpose and from the environment only (never a setting: left on, it would
+slow every later session without saying so):
+
+```sh
+NEXTERM_PERF=1 NEXTERM_PERF_SCENARIOS=S1,S2,S3,S4,S5 NEXTERM_PERF_REPEAT=3 \
+  NEXTERM_PERF_TOOLS=$PWD/tests/perf NEXTERM_PERF_OUT=/tmp/nexterm-perf \
+  path/to/NexTerm.app/Contents/MacOS/nexterm
+```
+
+```bat
+set NEXTERM_PERF=1& set NEXTERM_PERF_SCENARIOS=S1,S2,S3,S4,S5& set NEXTERM_PERF_TOOLS=%CD%\tests\perf& NexTerm.exe
+```
+
+Once its terminals are up the app runs each scenario in groups of its own,
+closes them, and writes `report-<stamp>.json` to `NEXTERM_PERF_OUT` (the
+temporary folder's `nexterm-perf` by default); the table,
+`report-<stamp>.md`, is printed in the *perf: cpu* group it leaves open.
+
+| | Load (`tests/perf/flood.js`) | What it is for |
+| --- | --- | --- |
+| S1 | one terminal, 50 MB at once | how long until it is all drawn |
+| S2 | four terminals flooding for 10 s | frames, CPU and memory under the heaviest load |
+| S3 | four full-screen programs redrawing at 60 fps (alternate screen, DEC 2026) | what four OpenCodes cost |
+| S4 | typing beside three flooding terminals | latency where the user is |
+| S5 | typing while a hidden group of four floods | what work nobody can see costs |
+
+What each figure means:
+
+- **Events/s, Chars/event, Reads/emit** — how finely the output reached the
+  page; every event is a script the page evaluates.
+- **Readers held s** — flow control holding PTY readers for a page behind
+  (summed over readers).
+- **Frame p50/p95/max** — time between animation frames while the scenario
+  ran; **Write lag** — how long a chunk waited between `term.write` and
+  xterm having read it (one sample per terminal per 50 ms).
+- **Typing** — from when a key was due to the frame after its echo was read;
+  a key with no echo in 3 s is *lost*.
+- **CPU app/webview** — `tests/perf/cpu.js`, from outside: the app's process,
+  and the web view's (macOS: the WebKit processes that started with it;
+  Windows: every `msedgewebview2.exe` under it). Shells and the load are not
+  counted.
+- **Lost lines** — every generated line is numbered; a number not following
+  the one before in what the terminal kept is a loss or a reordering.
+
+Rules that keep the numbers honest:
+
+- **Measure release builds**, built with their own identifier so a run
+  touches nothing of a real install:
+  `npx tauri build --bundles app --config '{"identifier":"com.nexterm.ide.qa-perf"}'`.
+  A dev build has no optimised Rust and goes through Vite's dev server.
+- **On macOS, switch App Nap off for that identifier**:
+  `defaults write com.nexterm.ide.qa-perf NSAppSleepDisabled -bool YES`
+  (`defaults delete …` afterwards). An app whose window is behind another
+  app's is napped — timers coalesced, priority lowered — and the same build
+  measured 2.9 s and then 7.6 s for S1 an hour apart. Measure the same build
+  twice before comparing two builds.
+- **Compare in one build.** `NEXTERM_PERF_FLOW_KB=0` (no flow control),
+  `NEXTERM_PERF_BATCH_MS=0` (an event per read) and `NEXTERM_PERF_PACE_MS=0`
+  (no pacing of terminals without focus) switch this branch's three changes
+  off, in a measuring run only — which is how Windows compares before and
+  after (WINDOWS_VERIFICATION.md V43).
+
 ## CI
 
 `.github/workflows/build.yml` runs all three suites on Ubuntu, Windows and
