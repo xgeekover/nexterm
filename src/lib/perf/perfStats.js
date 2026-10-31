@@ -123,6 +123,9 @@ export function counterDelta(before, after) {
     emitMs: round(d('emit_nanos') / 1e6),
     emitMaxMs: round((after.emit_max_nanos ?? 0) / 1e6, 2),
     bytesPerEmit: emits ? Math.round(d('emit_bytes') / emits) : null,
+    // Flow control (src-tauri/src/pty/flow_gate.rs): readers held for a page behind.
+    holds: d('holds'),
+    heldMs: round(d('held_nanos') / 1e6),
   };
 }
 

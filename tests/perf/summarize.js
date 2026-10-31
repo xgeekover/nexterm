@@ -56,6 +56,8 @@ export function scenarioRows(report, samples) {
       eventsPerSecond: m((r) => r.page?.eventsPerSecond),
       charsPerEvent: m((r) => r.page?.charsPerEvent),
       readsPerEmit: m((r) => (r.backend?.emits ? r.backend.reads / r.backend.emits : null)),
+      // Summed over the scenario's readers, so four held at once count four times.
+      heldSeconds: m((r) => (r.backend?.heldMs ?? null) === null ? null : r.backend.heldMs / 1000),
       frameP50: m((r) => r.page?.frames?.p50),
       frameP95: m((r) => r.page?.frames?.p95),
       frameMax: m((r) => r.page?.frames?.max),
@@ -89,12 +91,12 @@ export function toMarkdown(report, rows) {
     report.error ? `- **The run did not start:** ${report.error}` : null,
     report.cpuError ? `- **No CPU figures:** ${report.cpuError}` : null,
     '',
-    '| | Runs | Time s | Events/s | Chars/event | Reads/emit | Frame p50/p95/max ms | Frames >50/>100 ms | Write lag p95/max ms | Typing p50/p95/max ms (lost) | Drain s | Generator MB/s | CPU app/webview % | Peak RSS MB | Lost lines |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| | Runs | Time s | Events/s | Chars/event | Reads/emit | Readers held s | Frame p50/p95/max ms | Frames >50/>100 ms | Write lag p95/max ms | Typing p50/p95/max ms (lost) | Drain s | Generator MB/s | CPU app/webview % | Peak RSS MB | Lost lines |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ].filter((line) => line !== null);
   for (const r of rows) {
     lines.push(
-      `| **${r.scenario}** ${r.title} | ${r.runs}${r.timedOut ? ` (${r.timedOut} timed out)` : ''} | ${fmt(r.seconds, 1)} | ${fmt(r.eventsPerSecond)} | ${fmt(r.charsPerEvent)} | ${fmt(r.readsPerEmit, 2)} | ${fmt(r.frameP50, 1)} / ${fmt(r.frameP95, 1)} / ${fmt(r.frameMax)} | ${fmt(r.over50)} / ${fmt(r.over100)} | ${fmt(r.writeLagP95)} / ${fmt(r.writeLagMax)} | ${fmt(r.typingP50)} / ${fmt(r.typingP95)} / ${fmt(r.typingMax)} (${fmt(r.typingLost)}) | ${fmt(r.drainSeconds, 1)} | ${fmt(r.generatorMBps, 1)} | ${fmt(r.appCpu)} / ${fmt(r.webviewCpu)} | ${fmt(r.peakRssMB)} | ${r.lostLines} |`
+      `| **${r.scenario}** ${r.title} | ${r.runs}${r.timedOut ? ` (${r.timedOut} timed out)` : ''} | ${fmt(r.seconds, 1)} | ${fmt(r.eventsPerSecond)} | ${fmt(r.charsPerEvent)} | ${fmt(r.readsPerEmit, 2)} | ${fmt(r.heldSeconds, 1)} | ${fmt(r.frameP50, 1)} / ${fmt(r.frameP95, 1)} / ${fmt(r.frameMax)} | ${fmt(r.over50)} / ${fmt(r.over100)} | ${fmt(r.writeLagP95)} / ${fmt(r.writeLagMax)} | ${fmt(r.typingP50)} / ${fmt(r.typingP95)} / ${fmt(r.typingMax)} (${fmt(r.typingLost)}) | ${fmt(r.drainSeconds, 1)} | ${fmt(r.generatorMBps, 1)} | ${fmt(r.appCpu)} / ${fmt(r.webviewCpu)} | ${fmt(r.peakRssMB)} | ${r.lostLines} |`
     );
   }
   const errors = rows.flatMap((r) => r.errors.map((e) => `- ${r.scenario}: ${e}`));

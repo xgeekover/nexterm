@@ -11,6 +11,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use tauri::{AppHandle, Emitter};
 
 use super::osc::{Marker, OscFilter};
+use super::flow_gate::FlowGate;
+use super::output_batch::{self, Batcher, Outgoing};
 use super::shell_integration;
 use super::startup_query::StartupCursorQuery;
 use crate::models::PtyCommandDonePayload;
@@ -41,6 +43,9 @@ pub struct PtySession {
     /// `None` once the session is killed; dropping the sender ends the thread.
     pub input: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     pub child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// How far behind the page is with this session's output, and the hold
+    /// on its reader when it is too far (flow_gate.rs).
+    pub flow: Arc<FlowGate>,
 }
 
 impl PtySession {
@@ -109,10 +114,40 @@ fn emit_output(app: &AppHandle, session_id: &str, data: String) {
     let bytes = data.len();
     let payload = PtyOutputPayload {
         session_id: session_id.to_string(),
+        bytes: bytes as u64,
         data,
     };
     let _ = app.emit("pty-output", &payload);
     crate::perf::note_emit(started, bytes);
+}
+
+/// A marker the OSC filter found, as the event the frontend listens for.
+fn emit_marker(app: &AppHandle, session_id: &str, marker: Marker) {
+    let session_id = session_id.to_string();
+    match marker {
+        Marker::CommandFinished(exit_code) => {
+            let _ = app.emit("pty-command-done", &PtyCommandDonePayload { session_id, exit_code });
+        }
+        Marker::WorkingDirectory(cwd) => {
+            let _ = app.emit("pty-cwd", &PtyCwdPayload { session_id, cwd });
+        }
+        // OSC 133 "C": output is about to begin, so something is running
+        // now. The parser has always recognised this marker and the backend
+        // always dropped it, which left the frontend able to say what a
+        // command finished WITH but never that one was still going.
+        Marker::CommandExecuted => {
+            let _ = app.emit("pty-command-started", &PtyCommandStartedPayload { session_id });
+        }
+        // A window title, which the output before it still carries to xterm:
+        // reported for the agent terminals, whose conversation opencode names
+        // there (src/lib/agents.js).
+        Marker::Title(title) => {
+            let _ = app.emit("pty-title", &PtyTitlePayload { session_id, title });
+        }
+        // A is the prompt drawing and B is where the user's typing begins;
+        // neither says anything about work being done.
+        Marker::PromptStart | Marker::CommandStart => {}
+    }
 }
 
 /// Move a PTY's blocking writes onto their own thread.
@@ -417,6 +452,7 @@ impl PtyManager {
             master: Mutex::new(Some(pair.master)),
             input: Mutex::new(Some(input_tx)),
             child: Mutex::new(child),
+            flow: Arc::new(crate::perf::flow_gate()),
         });
 
         self.sessions
@@ -462,6 +498,39 @@ impl PtyManager {
             }
         };
 
+        // The output goes to the page from a thread of its own, batched while
+        // it flows (output_batch.rs): one event per read was one script for
+        // the page per kilobyte.
+        let (outgoing, outgoing_rx) = std::sync::mpsc::channel::<Outgoing>();
+        let emitter = {
+            let app = app_handle.clone();
+            let id = session_id.clone();
+            let flow = session.flow.clone();
+            thread::Builder::new()
+                .name(format!("pty-emit-{session_id}"))
+                .spawn(move || {
+                    let batcher = Batcher::new(crate::perf::batch_window(), output_batch::DEFAULT_MAX);
+                    output_batch::run_emitter(outgoing_rx, batcher, |item| match item {
+                        Outgoing::Output(data) => {
+                            // Counted before it goes: the page's acknowledgement
+                            // must never arrive ahead of the count it takes from.
+                            flow.sent(data.len() as u64);
+                            emit_output(&app, &id, data);
+                        }
+                        Outgoing::Marker(marker) => emit_marker(&app, &id, marker),
+                    });
+                })
+                .map_err(|e| format!("Failed to spawn PTY output thread: {e}"))
+        };
+        let emitter = match emitter {
+            Ok(emitter) => emitter,
+            Err(e) => {
+                let _ = self.kill(&session_id);
+                return Err(e);
+            }
+        };
+
+        let reader_flow = session.flow.clone();
         let reader_thread = thread::Builder::new()
             .name(format!("pty-reader-{session_id}"))
             .spawn(move || {
@@ -470,6 +539,12 @@ impl PtyManager {
                 // when a command finished (see osc.rs / shell_integration.rs).
                 let mut filter = OscFilter::new();
                 loop {
+                    // The page too far behind: read nothing until it catches
+                    // up, and let the program wait in its write (flow_gate.rs).
+                    let hold = crate::perf::emit_started();
+                    if reader_flow.wait_for_room() {
+                        crate::perf::note_hold(hold);
+                    }
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
@@ -497,53 +572,12 @@ impl PtyManager {
                             echo_watch.output();
                             let filtered = filter.feed(chunk);
                             if !filtered.output.is_empty() {
-                                emit_output(&app_handle_clone, &session_id_clone, filtered.output);
+                                let _ = outgoing.send(Outgoing::Output(filtered.output));
                             }
+                            // After the output they came with, in the same queue:
+                            // the sender keeps them in order (output_batch.rs).
                             for marker in filtered.markers {
-                                match marker {
-                                    Marker::CommandFinished(exit_code) => {
-                                        let payload = PtyCommandDonePayload {
-                                            session_id: session_id_clone.clone(),
-                                            exit_code,
-                                        };
-                                        let _ = app_handle_clone.emit("pty-command-done", &payload);
-                                    }
-                                    Marker::WorkingDirectory(cwd) => {
-                                        let payload = PtyCwdPayload {
-                                            session_id: session_id_clone.clone(),
-                                            cwd,
-                                        };
-                                        let _ = app_handle_clone.emit("pty-cwd", &payload);
-                                    }
-                                    // OSC 133 "C": output is about to begin, so
-                                    // something is running now. The parser has
-                                    // always recognised this marker and the
-                                    // backend always dropped it, which left the
-                                    // frontend able to say what a command
-                                    // finished WITH but never that one was still
-                                    // going.
-                                    Marker::CommandExecuted => {
-                                        let payload = PtyCommandStartedPayload {
-                                            session_id: session_id_clone.clone(),
-                                        };
-                                        let _ = app_handle_clone.emit("pty-command-started", &payload);
-                                    }
-                                    // A window title, which the output above
-                                    // still carries to xterm: reported for the
-                                    // agent terminals, whose conversation opencode
-                                    // names there (src/lib/agents.js).
-                                    Marker::Title(title) => {
-                                        let payload = PtyTitlePayload {
-                                            session_id: session_id_clone.clone(),
-                                            title,
-                                        };
-                                        let _ = app_handle_clone.emit("pty-title", &payload);
-                                    }
-                                    // A is the prompt drawing and B is where the
-                                    // user's typing begins; neither says anything
-                                    // about work being done.
-                                    Marker::PromptStart | Marker::CommandStart => {}
-                                }
+                                let _ = outgoing.send(Outgoing::Marker(marker));
                             }
                         }
                         Err(_) => break,
@@ -557,7 +591,7 @@ impl PtyManager {
                     if !held.is_empty() {
                         let filtered = filter.feed(&held);
                         if !filtered.output.is_empty() {
-                            emit_output(&app_handle_clone, &session_id_clone, filtered.output);
+                            let _ = outgoing.send(Outgoing::Output(filtered.output));
                         }
                     }
                 }
@@ -566,8 +600,13 @@ impl PtyManager {
                 // than holding them forever.
                 let tail = filter.take_utf8_tail();
                 if !tail.is_empty() {
-                    emit_output(&app_handle_clone, &session_id_clone, String::from_utf8_lossy(&tail).to_string());
+                    let _ = outgoing.send(Outgoing::Output(String::from_utf8_lossy(&tail).to_string()));
                 }
+
+                // Everything read is with the sender: let it send what it
+                // still holds, and only then say the shell is gone.
+                drop(outgoing);
+                let _ = emitter.join();
 
                 let exit_code = if let Some(session_arc) = session_weak.upgrade() {
                     let mut child = session_arc.child.lock();
@@ -715,12 +754,32 @@ impl PtyManager {
         Ok(())
     }
 
+    /// The page has read `bytes` more of `session_id`'s output (flow_gate.rs).
+    /// A session already gone is nothing to tell.
+    pub fn ack(&self, session_id: &str, bytes: u64) {
+        let session = self.sessions.lock().get(session_id).cloned();
+        if let Some(session) = session {
+            session.flow.acked(bytes);
+        }
+    }
+
+    /// A new page: every session starts counting afresh, what the old page
+    /// was sent and never read with it.
+    pub fn flow_reset(&self) {
+        let sessions: Vec<_> = self.sessions.lock().values().cloned().collect();
+        for session in sessions {
+            session.flow.reset();
+        }
+    }
+
     pub fn kill(&self, session_id: &str) -> Result<(), String> {
         let session = self.sessions.lock().remove(session_id);
         if let Some(session) = session {
             // Close the input queue first so the writer thread is not left
             // blocked on a write to a shell that is about to die.
             *session.input.lock() = None;
+            // A reader held for a page that is behind has nothing to wait for.
+            session.flow.close();
             let _ = session.child.lock().kill();
             #[cfg(unix)]
             reap(session);
@@ -920,6 +979,7 @@ mod tests {
                     // the writer thread.
                     input: Mutex::new(Some(input_tx)),
                     child: Mutex::new(child),
+                    flow: Arc::new(FlowGate::default()),
                 }),
             );
             id.to_string()
@@ -1003,6 +1063,7 @@ mod tests {
             master: Mutex::new(Some(pair.master)),
             input: Mutex::new(Some(input_tx)),
             child: Mutex::new(child),
+            flow: Arc::new(FlowGate::default()),
         });
         watch_for_exit(&session).expect("the exit watch starts");
 
@@ -1455,6 +1516,7 @@ mod canonical_limit_tests {
                     master: Mutex::new(Some(pair.master)),
                     input: Mutex::new(Some(tx)),
                     child: Mutex::new(child),
+                    flow: Arc::new(FlowGate::default()),
                 }),
             );
             std::thread::sleep(Duration::from_millis(400)); // let `stty` take effect
@@ -1479,6 +1541,7 @@ mod canonical_limit_tests {
             )),
             input: Mutex::new(Some(cooked.tx.clone())),
             child: Mutex::new(spare_child()),
+            flow: Arc::new(FlowGate::default()),
         });
         mgr.sessions.lock().insert("guard".into(), session);
 
@@ -1582,6 +1645,7 @@ mod kill_tests {
                 master: Mutex::new(Some(pair.master)),
                 input: Mutex::new(Some(spawn_writer_thread(writer, "slow").unwrap())),
                 child: Mutex::new(child),
+                flow: Arc::new(FlowGate::default()),
             }),
         );
 

@@ -43,6 +43,19 @@ pub fn pty_write(
     state.pty_manager.write(&session_id, &data)
 }
 
+/// The page has read `bytes` more of the session's output (src/pty/flow_gate.rs).
+/// Synchronous: a lock and a notify.
+#[tauri::command(rename_all = "snake_case")]
+pub fn pty_ack(state: State<AppState>, session_id: String, bytes: u64) {
+    state.pty_manager.ack(&session_id, bytes);
+}
+
+/// A page starting: nothing the one before it was sent is waited for.
+#[tauri::command(rename_all = "snake_case")]
+pub fn pty_flow_reset(state: State<AppState>) {
+    state.pty_manager.flow_reset();
+}
+
 /// Reap sessions the frontend does not claim — see `PtyManager::retain_only`.
 /// Async because killing a shell waits for the child in 50ms steps and a
 /// reload can leave several behind.

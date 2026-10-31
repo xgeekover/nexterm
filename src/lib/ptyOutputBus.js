@@ -26,10 +26,57 @@
  * may land inside an escape sequence; the first chunk kept then starts with a
  * few stray characters, which is the price of a bounded buffer.
  */
-import { listen } from './ipc.js';
+import { invoke, listen } from './ipc.js';
 
 /** Characters of output kept per session while it has no terminal: the newest ones. */
 export const BACKLOG_LIMIT = 1_000_000;
+
+/**
+ * Flow control (src-tauri/src/pty/flow_gate.rs): the backend stops reading a
+ * shell that is more than about a megabyte ahead of what this page has read,
+ * so each chunk is acknowledged — its `bytes`, the backend's own count — once
+ * it has been read: by xterm, when its write callback runs, or at once when
+ * it is kept for a terminal that does not exist yet (nothing will read it
+ * later that the backend should wait for). Acknowledgements are gathered per
+ * session and sent every ACK_EVERY bytes, or ACK_DELAY_MS after the first one
+ * waiting: one `pty_ack` per chunk would be another IPC call per event.
+ */
+export const ACK_EVERY = 128 * 1024;
+export const ACK_DELAY_MS = 20;
+
+/** sessionId → bytes read and not yet acknowledged. */
+const unacknowledged = new Map();
+let ackTimer = null;
+let acknowledge = (sessionId, bytes) => invoke('pty_ack', { session_id: sessionId, bytes });
+
+function sendAck(sessionId, bytes) {
+  Promise.resolve()
+    .then(() => acknowledge(sessionId, bytes))
+    .catch(() => {
+      // A session already gone, or a backend without flow control: either
+      // way there is nobody waiting for this.
+    });
+}
+
+function flushAcks() {
+  ackTimer = null;
+  const due = [...unacknowledged];
+  unacknowledged.clear();
+  for (const [sessionId, bytes] of due) sendAck(sessionId, bytes);
+}
+
+/** `bytes` of `sessionId`'s output have been read. */
+function consumed(sessionId, bytes) {
+  if (!(bytes > 0)) return;
+  const total = (unacknowledged.get(sessionId) ?? 0) + bytes;
+  if (total >= ACK_EVERY) {
+    unacknowledged.delete(sessionId);
+    sendAck(sessionId, total);
+    return;
+  }
+  unacknowledged.set(sessionId, total);
+  if (ackTimer === null) ackTimer = setTimeout(flushAcks, ACK_DELAY_MS);
+}
 
 /** sessionId → the function writing into that session's terminal. */
 const sinks = new Map();
@@ -66,22 +113,35 @@ function keep(sessionId, data, at) {
 
 /**
  * One chunk of one session's output: into its terminal, or kept until there
- * is one, with the time it arrived (`at`, now unless a suite says otherwise).
+ * is one, with the time it arrived (`at`, now unless a suite says otherwise)
+ * and its size as the backend counted it (`bytes`, for flow control).
  * Never throws — a sink that does is reported, and the chunk is lost rather
  * than the listener.
+ *
+ * A sink is handed `read` as its fourth argument, to call once the chunk has
+ * been read (once; later calls do nothing). One that throws has it called
+ * for it: a chunk that will never be read must not hold its shell.
  */
-export function deliver(sessionId, data, at = Date.now()) {
+export function deliver(sessionId, data, at = Date.now(), bytes = 0) {
   if (!sessionId || typeof data !== 'string' || data === '') return;
   const observer = deliverObserver;
   const startedAt = observer ? observer.clock() : 0;
   const sink = sinks.get(sessionId);
   if (!sink) {
     keep(sessionId, data, at);
+    consumed(sessionId, bytes);
   } else {
+    let done = false;
+    const read = () => {
+      if (done) return;
+      done = true;
+      consumed(sessionId, bytes);
+    };
     try {
-      sink(data);
+      sink(data, false, at, read);
     } catch (err) {
       console.warn('[Terminal] could not write output into its terminal:', err);
+      read();
     }
   }
   if (observer) observer.delivered(sessionId, data, startedAt);
@@ -184,6 +244,7 @@ export function forgetOutput(sessionId) {
   if (!sessionId) return;
   sinks.delete(sessionId);
   backlogs.delete(sessionId);
+  unacknowledged.delete(sessionId);
 }
 
 /** How many characters are waiting for `sessionId`'s terminal (0 when none). */
@@ -197,17 +258,27 @@ export function backlogSize(sessionId) {
  * without the store's bootstrap — a test, the browser build — still gets its
  * output). `on` is for the suites.
  */
-export function startPtyOutputBus({ listen: on = listen } = {}) {
+export function startPtyOutputBus({ listen: on = listen, invoke: call = invoke } = {}) {
   if (!listening) {
+    acknowledge = (sessionId, bytes) => call('pty_ack', { session_id: sessionId, bytes });
     listening = Promise.resolve(
       on('pty-output', (payload) => {
-        deliver(payload?.session_id, payload?.data);
+        deliver(payload?.session_id, payload?.data, Date.now(), payload?.bytes);
       })
-    ).catch((err) => {
-      listening = null;
-      console.warn('[Terminal] could not listen for shell output:', err);
-      return () => {};
-    });
+    )
+      .then((unlisten) => {
+        // A page starting — a reload — owes nothing for what the page before
+        // it was sent: no shell is held for it.
+        Promise.resolve()
+          .then(() => call('pty_flow_reset'))
+          .catch(() => {});
+        return unlisten;
+      })
+      .catch((err) => {
+        listening = null;
+        console.warn('[Terminal] could not listen for shell output:', err);
+        return () => {};
+      });
   }
   return listening;
 }
@@ -223,4 +294,8 @@ export async function resetPtyOutputBus() {
   listening = null;
   sinks.clear();
   backlogs.clear();
+  unacknowledged.clear();
+  clearTimeout(ackTimer);
+  ackTimer = null;
+  acknowledge = (sessionId, bytes) => invoke('pty_ack', { session_id: sessionId, bytes });
 }

@@ -853,10 +853,10 @@ function bindSession(entry, sessionId) {
     // reports and the bells it rings are over by now, and a message in it is
     // filed under when it arrived. Ended whatever the write does — left up,
     // every bell and bar of the terminal's life would be taken for history.
-    ptyUnlisten = attachOutput(sessionId, (data, kept, at) => {
+    ptyUnlisten = attachOutput(sessionId, (data, kept, at, read) => {
       if (kept) entry.history.before(at);
       try {
-        writeOutput(entry, data);
+        writeOutput(entry, data, read);
       } finally {
         if (kept) entry.history.after(entry.term);
       }
@@ -893,22 +893,29 @@ function bindSession(entry, sessionId) {
  * arrived — whether the wait is still open is judged then, not when xterm
  * gets round to parsing it — and is asked to look at the screen once xterm
  * has written the chunk, its write callback: the question is matched on the
- * row the cursor is on, not in the raw output, which ConPTY reorders. Any
- * other time the chunk is only written.
+ * row the cursor is on, not in the raw output, which ConPTY reorders.
+ *
+ * `read`, when the output bus hands one over, is called from the same
+ * callback: flow control waits for xterm to have read a chunk, not for it to
+ * have been queued (src-tauri/src/pty/flow_gate.rs). Kept output, already
+ * acknowledged when it was kept, comes without one.
  */
-function writeOutput(entry, data) {
+function writeOutput(entry, data, read = null) {
   const { tabId, term } = entry;
   // Performance mode only (src/lib/perf/): what it may want told once xterm
-  // has read this chunk. Null otherwise, and then nothing below changes.
-  const read = writeObserver ? writeObserver(tabId, data) : null;
-  if (!useTerminalStore.getState().batchJobOutputArrived?.(tabId)) {
-    if (read) term.write(data, read);
-    else term.write(data);
+  // has read this chunk. Null otherwise.
+  const timed = writeObserver ? writeObserver(tabId, data) : null;
+  const waiting = useTerminalStore.getState().batchJobOutputArrived?.(tabId);
+  if (!waiting && !read && !timed) {
+    term.write(data);
     return;
   }
+  // `read` is the output bus's: the chunk acknowledged to the backend's flow
+  // control (ptyOutputBus.js) once xterm has read it, and not before.
   term.write(data, () => {
     read?.();
-    if (!entry.disposed) useTerminalStore.getState().answerBatchJobPrompt?.(tabId, term);
+    timed?.();
+    if (waiting && !entry.disposed) useTerminalStore.getState().answerBatchJobPrompt?.(tabId, term);
   });
 }
 

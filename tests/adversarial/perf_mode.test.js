@@ -94,7 +94,7 @@ describe('Performance mode: the hooks on the output path', () => {
 
   test('PF-04: the registry writes with no callback of its own unless the observer asks for one', () => {
     const src = read('../../src/components/terminal/terminalRegistry.js');
-    const start = src.indexOf('function writeOutput(entry, data) {');
+    const start = src.indexOf('function writeOutput(entry, data, read = null) {');
     const length = src.slice(start).search(/\n\}\n/);
     assert.ok(start > 0 && length > 0, 'terminalRegistry.js writes output through writeOutput');
     const make = (observer, store) =>
@@ -104,9 +104,12 @@ describe('Performance mode: the hooks on the output path', () => {
     const term = { write: (...args) => calls.push(args) };
     make(null, quiet)({ tabId: 't', term }, 'plain');
     assert.deepEqual(calls[0], ['plain'], 'off: one argument, as before performance mode existed');
-    const read2 = () => {};
-    make(() => read2, quiet)({ tabId: 't', term }, 'timed');
-    assert.equal(calls[1][1], read2, 'asked for: the observer is called back once xterm has read the chunk');
+    let timedRead = 0;
+    make(() => () => (timedRead += 1), quiet)({ tabId: 't', term }, 'timed');
+    assert.equal(typeof calls[1][1], 'function', 'asked for: a callback for xterm');
+    assert.equal(timedRead, 0, 'not called before xterm has read the chunk');
+    calls[1][1]();
+    assert.equal(timedRead, 1, 'and called once it has');
     // With cmd's batch-job question waiting, both run, the observer first.
     const order = [];
     const waiting = { getState: () => ({ batchJobOutputArrived: () => true, answerBatchJobPrompt: () => order.push('answer') }) };
@@ -234,7 +237,10 @@ describe('Performance mode: the arithmetic', () => {
       { reads: 10, read_bytes: 100, emits: 5, emit_bytes: 90, emit_nanos: 1e6, emit_max_nanos: 0 },
       { reads: 30, read_bytes: 2100, emits: 15, emit_bytes: 2090, emit_nanos: 4e6, emit_max_nanos: 2.5e6 }
     );
-    assert.deepEqual(d, { reads: 20, readBytes: 2000, emits: 10, emitBytes: 2000, emitMs: 3, emitMaxMs: 2.5, bytesPerEmit: 200 });
+    assert.deepEqual(d, { reads: 20, readBytes: 2000, emits: 10, emitBytes: 2000, emitMs: 3, emitMaxMs: 2.5, bytesPerEmit: 200, holds: 0, heldMs: 0 });
+    const held = counterDelta({ holds: 1, held_nanos: 0 }, { holds: 4, held_nanos: 2.5e8 });
+    assert.equal(held.holds, 3);
+    assert.equal(held.heldMs, 250);
     assert.equal(counterDelta(null, {}), null);
     assert.equal(counterDelta({ reads: 9 }, { reads: 3 }).reads, 0);
   });

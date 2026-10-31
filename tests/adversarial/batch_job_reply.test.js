@@ -366,7 +366,7 @@ function screen(rows, type = 'normal') {
 /** The registry's own `writeOutput`, cut from terminalRegistry.js and run with the store it reads. */
 function registryWriteOutput() {
   const src = read('../../src/components/terminal/terminalRegistry.js');
-  const start = src.indexOf('function writeOutput(entry, data) {');
+  const start = src.indexOf('function writeOutput(entry, data, read = null) {');
   const length = src.slice(start).search(/\r?\n\}\r?\n/);
   assert.ok(start > 0 && length > 0, 'terminalRegistry.js writes output through writeOutput');
   // `writeObserver` is performance mode's hook (src/lib/perf/), off as in
@@ -540,8 +540,8 @@ describe('cmd batch-job reply: through the store, the bus and real xterm', () =>
     const registry = read('../../src/components/terminal/terminalRegistry.js');
     // Every chunk, kept or live: kept ones are only marked as history around
     // the same write (TP-43).
-    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at\) => \{[^}]*writeOutput\(entry, data\);/);
-    assert.match(registry, /if \(!useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\)\) \{/, 'judged as each chunk arrives');
+    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at, read\) => \{[^}]*writeOutput\(entry, data, read\);/);
+    assert.match(registry, /const waiting = useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\);/, 'judged as each chunk arrives');
     assert.match(registry, /setBatchJobScreenReader\(\(tabId\) => \{\s*const entry = instances\.get\(tabId\);\s*return entry && !entry\.disposed \? screenRow\(entry\.term\) : null;/);
     const store = read('../../src/stores/terminalStore.js');
     const writeRaw = store.slice(store.indexOf('writeRaw: async (tabId, data) => {'));

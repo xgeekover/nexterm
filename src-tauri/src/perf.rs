@@ -30,6 +30,43 @@ pub fn enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag(std::env::var("NEXTERM_PERF").ok().as_deref()))
 }
 
+/// How long a session's output may be held while it flows
+/// (pty/output_batch.rs). A measuring run may set it with
+/// `NEXTERM_PERF_BATCH_MS` — `0` sends every read as it comes, as before
+/// batching — to compare the two in one build; nothing else can.
+pub fn batch_window() -> std::time::Duration {
+    static WINDOW: OnceLock<std::time::Duration> = OnceLock::new();
+    *WINDOW.get_or_init(|| {
+        let asked = enabled()
+            .then(|| std::env::var("NEXTERM_PERF_BATCH_MS").ok())
+            .flatten()
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        match asked {
+            Some(ms) => std::time::Duration::from_millis(ms.min(100)),
+            None => crate::pty::output_batch::DEFAULT_WINDOW,
+        }
+    })
+}
+
+/// A session's flow control (pty/flow_gate.rs). A measuring run may set the
+/// high-water mark with `NEXTERM_PERF_FLOW_KB` — `0` turns the hold off, as
+/// before flow control — to compare the two in one build; nothing else can.
+pub fn flow_gate() -> crate::pty::flow_gate::FlowGate {
+    use crate::pty::flow_gate::{FlowGate, HIGH_WATER, LOW_WATER, STALL};
+    static HIGH: OnceLock<Option<u64>> = OnceLock::new();
+    let high = *HIGH.get_or_init(|| {
+        enabled()
+            .then(|| std::env::var("NEXTERM_PERF_FLOW_KB").ok())
+            .flatten()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|kb| if kb == 0 { u64::MAX } else { kb.saturating_mul(1024) })
+    });
+    match high {
+        Some(high) => FlowGate::new(high, high / 2, STALL),
+        None => FlowGate::new(HIGH_WATER, LOW_WATER, STALL),
+    }
+}
+
 /// Since the app started, across every session.
 struct Counters {
     reads: AtomicU64,
@@ -38,6 +75,8 @@ struct Counters {
     emit_bytes: AtomicU64,
     emit_nanos: AtomicU64,
     emit_max_nanos: AtomicU64,
+    holds: AtomicU64,
+    held_nanos: AtomicU64,
 }
 
 static COUNTERS: Counters = Counters {
@@ -47,6 +86,8 @@ static COUNTERS: Counters = Counters {
     emit_bytes: AtomicU64::new(0),
     emit_nanos: AtomicU64::new(0),
     emit_max_nanos: AtomicU64::new(0),
+    holds: AtomicU64::new(0),
+    held_nanos: AtomicU64::new(0),
 };
 
 /// A PTY reader got `bytes` from one `read`.
@@ -58,10 +99,18 @@ pub fn note_read(bytes: usize) {
     }
 }
 
-/// Just before a `pty-output` emit: when it started, if anyone is measuring.
+/// Now, if anyone is measuring: the start of an emit or of a hold.
 #[inline]
 pub fn emit_started() -> Option<Instant> {
     enabled().then(Instant::now)
+}
+
+/// A reader held by flow control (pty/flow_gate.rs) from `started` until now.
+#[inline]
+pub fn note_hold(started: Option<Instant>) {
+    let Some(started) = started else { return };
+    COUNTERS.holds.fetch_add(1, Ordering::Relaxed);
+    COUNTERS.held_nanos.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
 }
 
 /// A `pty-output` emit of `bytes` (UTF-8) that began at `started`.
@@ -85,6 +134,8 @@ pub struct PerfCounters {
     pub emit_bytes: u64,
     pub emit_nanos: u64,
     pub emit_max_nanos: u64,
+    pub holds: u64,
+    pub held_nanos: u64,
 }
 
 pub fn counters() -> PerfCounters {
@@ -95,6 +146,8 @@ pub fn counters() -> PerfCounters {
         emit_bytes: COUNTERS.emit_bytes.load(Ordering::Relaxed),
         emit_nanos: COUNTERS.emit_nanos.load(Ordering::Relaxed),
         emit_max_nanos: COUNTERS.emit_max_nanos.swap(0, Ordering::Relaxed),
+        holds: COUNTERS.holds.load(Ordering::Relaxed),
+        held_nanos: COUNTERS.held_nanos.load(Ordering::Relaxed),
     }
 }
 

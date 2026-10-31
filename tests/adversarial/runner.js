@@ -108,6 +108,7 @@ import './secret_input.test.js';
 import './split_lock_headless.test.js';
 import './strip_overlay_mounted.test.js';
 import './perf_mode.test.js';
+import './flow_control.test.js';
 
 async function run() {
   console.log('====================================================');

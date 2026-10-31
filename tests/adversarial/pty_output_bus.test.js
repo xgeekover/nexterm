@@ -153,12 +153,12 @@ describe('Output a tab printed before its terminal existed', () => {
     // history ends whatever the write does.
     assert.match(
       registry,
-      /ptyUnlisten = attachOutput\(sessionId, \(data, kept, at\) => \{\s*if \(kept\) entry\.history\.before\(at\);\s*try \{\s*writeOutput\(entry, data\);\s*\} finally \{\s*if \(kept\) entry\.history\.after\(entry\.term\);\s*\}\s*\}\);/
+      /ptyUnlisten = attachOutput\(sessionId, \(data, kept, at, read\) => \{\s*if \(kept\) entry\.history\.before\(at\);\s*try \{\s*writeOutput\(entry, data, read\);\s*\} finally \{\s*if \(kept\) entry\.history\.after\(entry\.term\);\s*\}\s*\}\);/
     );
     // Which writes every chunk into the terminal, whatever else it looks for
     // in it (cmd's batch-job question, src/lib/batchJobReply.js).
-    const writer = registry.slice(registry.indexOf('function writeOutput(entry, data) {'));
-    assert.match(writer, /^function writeOutput\(entry, data\) \{[\s\S]*?term\.write\(data\);[\s\S]*?term\.write\(data, \(\) => \{/);
+    const writer = registry.slice(registry.indexOf('function writeOutput(entry, data, read = null) {'));
+    assert.match(writer, /^function writeOutput\(entry, data, read = null\) \{[\s\S]*?term\.write\(data\);[\s\S]*?term\.write\(data, \(\) => \{/);
     assert.doesNotMatch(registry, /listen\('pty-output'/, 'no listener of its own left to race the bus');
     assert.match(registry, /forgetOutput\(entry\.sessionId\)/, 'a rebound instance drops the old shell');
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8');
