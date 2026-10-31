@@ -301,6 +301,7 @@ describe('Performance mode: the CPU sampler', () => {
     assert.deepEqual(g.app.pids, [10]);
     assert.deepEqual(g.webview.pids, [11, 12]);
     assert.equal(g.webview.cpu, 23);
+    assert.deepEqual(g.webview.each.map((p) => p.name), ['msedgewebview2.exe', 'msedgewebview2.exe'], 'each process by name, to tell which grows');
   });
 });
 
@@ -348,7 +349,9 @@ describe('Performance mode: what is typed, and the table', () => {
     assert.equal(s2.lostLines, 3, 'lost and reordered lines are summed, never medianed away');
     const s4 = rows.find((r) => r.scenario === 'S4');
     assert.equal(s4.runs, '0/1');
-    const md = toMarkdown(report, rows);
+    const withEach = [{ t: 0, app: { each: [{ pid: 1, name: 'nexterm', rss: 50 * 1048576 }] }, webview: { each: [{ pid: 2, name: 'com.apple.WebKit.WebContent', rss: 900 * 1048576 }, { pid: 3, name: 'com.apple.WebKit.GPU', rss: 300 * 1048576 }] } }];
+    const md = toMarkdown(report, rows, withEach);
+    assert.match(md, /Most memory held, by process: webview: com\.apple\.WebKit\.WebContent 900 MB · webview: com\.apple\.WebKit\.GPU 300 MB · app: nexterm 50 MB/);
     assert.match(md, /\| \*\*S2\*\* S2 title \| 3\/3 \|/);
     assert.match(md, /S4: the typing terminal never showed its prompt/);
   });

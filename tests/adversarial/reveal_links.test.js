@@ -874,7 +874,11 @@ describe('Reveal links: wired into every terminal', () => {
     assert.match(register, /notice: \(message\) => writeNotice\(tabId, message\)/);
     assert.match(register, /const commandMarks = \(\) => instances\.get\(tabId\)\?\.commandMarks\?\.marks \?\? \[\];/, 'the shell\'s command marks');
     assert.match(register, /const dirs = trackDirectories\(term, \{ initial: startedIn, current: liveCwd, marks: commandMarks \}\);/, 'the directories, kept on this terminal, by command');
-    assert.match(register, /if \(cwd && cwd !== tabOf\(prev\)\?\.cwd\) dirs\.note\(cwd\);/, 'each change of the tab\'s directory');
+    assert.match(
+      register,
+      /if \(!cwd \|\| cwd === tabOf\(prev\)\?\.cwd\) return;[\s\S]*?flushPacedOutput\(tabId\);\s*dirs\.note\(cwd\);/,
+      'each change of the tab\'s directory — after what was printed in the old one, held or not'
+    );
     assert.match(register, /cwdAt: \(line\) => dirs\.at\(line\) \|\| liveCwd\(\)/, 'the directory the row was printed in');
     assert.match(register, /marks: commandMarks,/, 'and the provider reads the same marks');
     assert.match(register, /msys: kind === 'msys' \|\| kind === 'cygwin'/, '/c/x read as C:\\x only in Git Bash or Cygwin');

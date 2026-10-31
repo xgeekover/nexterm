@@ -81,7 +81,21 @@ export function scenarioRows(report, samples) {
   return rows;
 }
 
-export function toMarkdown(report, rows) {
+/** The most memory each process held over the whole run, by name: which one grows. */
+export function peakByProcess(samples) {
+  const peaks = new Map();
+  for (const sample of samples) {
+    for (const group of ['app', 'webview']) {
+      for (const p of sample[group]?.each ?? []) {
+        const key = `${group}: ${p.name || p.pid}`;
+        peaks.set(key, Math.max(peaks.get(key) ?? 0, p.rss));
+      }
+    }
+  }
+  return [...peaks].map(([name, rss]) => ({ name, rss })).sort((a, b) => b.rss - a.rss);
+}
+
+export function toMarkdown(report, rows, samples = []) {
   const env = report.environment ?? {};
   const lines = [
     `# NexTerm performance run — ${report.startedAt ?? ''}`,
@@ -99,6 +113,8 @@ export function toMarkdown(report, rows) {
       `| **${r.scenario}** ${r.title} | ${r.runs}${r.timedOut ? ` (${r.timedOut} timed out)` : ''} | ${fmt(r.seconds, 1)} | ${fmt(r.eventsPerSecond)} | ${fmt(r.charsPerEvent)} | ${fmt(r.readsPerEmit, 2)} | ${fmt(r.heldSeconds, 1)} | ${fmt(r.frameP50, 1)} / ${fmt(r.frameP95, 1)} / ${fmt(r.frameMax)} | ${fmt(r.over50)} / ${fmt(r.over100)} | ${fmt(r.writeLagP95)} / ${fmt(r.writeLagMax)} | ${fmt(r.typingP50)} / ${fmt(r.typingP95)} / ${fmt(r.typingMax)} (${fmt(r.typingLost)}) | ${fmt(r.drainSeconds, 1)} | ${fmt(r.generatorMBps, 1)} | ${fmt(r.appCpu)} / ${fmt(r.webviewCpu)} | ${fmt(r.peakRssMB)} | ${r.lostLines} |`
     );
   }
+  const peaks = peakByProcess(samples);
+  if (peaks.length) lines.push('', `Most memory held, by process: ${peaks.map((p) => `${p.name} ${fmt(mb(p.rss))} MB`).join(' · ')}`);
   const errors = rows.flatMap((r) => r.errors.map((e) => `- ${r.scenario}: ${e}`));
   if (errors.length) lines.push('', '**Runs that failed**', '', ...errors);
   return `${lines.join('\n')}\n`;
@@ -111,7 +127,8 @@ function main() {
     process.exit(2);
   }
   const report = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const markdown = toMarkdown(report, scenarioRows(report, readSamples(report.cpuFile)));
+  const samples = readSamples(report.cpuFile);
+  const markdown = toMarkdown(report, scenarioRows(report, samples), samples);
   const out = file.replace(/\.json$/i, '') + '.md';
   fs.writeFileSync(out, markdown);
   process.stdout.write(`${markdown}\nwritten to ${out}\n`);

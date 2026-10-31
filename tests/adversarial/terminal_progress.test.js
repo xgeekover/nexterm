@@ -1159,13 +1159,16 @@ describe('Terminal progress: wired', () => {
       ['gone', { disposed: true, term: { write: () => assert.fail('a disposed terminal is not written to') } }],
       ['full', { term: { write: () => { throw new Error('write buffer full'); } } }],
     ]);
-    new Function('setTerminalOutputBarrier', 'instances', src.slice(start, end))((b) => { barrier = b; }, instances);
+    // `flushPaced`: output held for a terminal without focus is written
+    // before the empty write, so the barrier waits for it too.
+    new Function('setTerminalOutputBarrier', 'instances', 'flushPaced', src.slice(start, end))((b) => { barrier = b; }, instances, (entry) => writes.push(['flushed', entry]));
     const ran = [];
     barrier('live', () => ran.push('live'));
     assert.deepEqual(ran, [], 'waits');
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0][0], '', 'an empty write, whose callback xterm runs once everything before it is read');
-    writes[0][1]();
+    assert.equal(writes.length, 2);
+    assert.equal(writes[0][0], 'flushed', 'what is held is written first');
+    assert.equal(writes[1][0], '', 'an empty write, whose callback xterm runs once everything before it is read');
+    writes[1][1]();
     assert.deepEqual(ran, ['live']);
     barrier('gone', () => ran.push('gone'));
     barrier('never-shown', () => ran.push('never-shown'));
@@ -1179,7 +1182,7 @@ describe('Terminal progress: wired', () => {
     const end = src.indexOf('\n}\n', start) + 3;
     assert.ok(start > 0 && end > start);
     const bindSession = new Function(
-      'startPtyOutputBus', 'attachOutput', 'writeOutput', 'listen', 'forgetOutput', 'freshScreen', 'exitNotice',
+      'startPtyOutputBus', 'attachOutput', 'writeOutput', 'listen', 'forgetOutput', 'freshScreen', 'exitNotice', 'deliverLive', 'flushPaced',
       `${src.slice(start, end)}\nreturn bindSession;`
     );
     const order = [];
@@ -1197,7 +1200,10 @@ describe('Terminal progress: wired', () => {
       () => Promise.resolve(() => {}),
       () => {},
       () => '',
-      () => ''
+      () => '',
+      // Live output goes through the pacer (output_pacing.test.js).
+      (_entry, data) => order.push(`live ${data}`),
+      () => {}
     );
     const term = { write: () => {} };
     const entry = {
@@ -1208,7 +1214,7 @@ describe('Terminal progress: wired', () => {
     bind(entry, 'sess-1');
     sink('old', true, 1_000);
     sink('new');
-    assert.deepEqual(order, ['before 1000', 'write old', 'after', 'write new'], 'with the time the kept chunk was printed');
+    assert.deepEqual(order, ['before 1000', 'write old', 'after', 'live new'], 'with the time the kept chunk was printed');
     // A write that throws still ends the history it began: left up, every
     // live bell and bar of the terminal's life would be taken for history.
     order.length = 0;

@@ -14,7 +14,8 @@
 import { invoke, isTauri } from '../ipc.js';
 import { setDeliverObserver } from '../ptyOutputBus.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { setWriteObserver } from '../../components/terminal/terminalRegistry.js';
+import { setOutputPacing, setWriteObserver } from '../../components/terminal/terminalRegistry.js';
+import { PACE_MS } from '../outputPacing.js';
 
 let started = null;
 
@@ -47,6 +48,8 @@ async function start() {
   const { createProbe } = await import('./perfProbe.js');
   const probe = createProbe({ setDeliverObserver, setWriteObserver });
   probe.install();
+  // A run comparing pacings sets it from the environment (NEXTERM_PERF_PACE_*).
+  if (info.pace_ms != null || info.pace_kb != null) setOutputPacing({ ms: info.pace_ms ?? PACE_MS, kb: info.pace_kb ?? 0 });
   window.__nextermPerf = { probe, info };
   console.info('[perf] performance mode is on', info);
   if (info.scenarios?.length) {

@@ -153,7 +153,7 @@ describe('Output a tab printed before its terminal existed', () => {
     // history ends whatever the write does.
     assert.match(
       registry,
-      /ptyUnlisten = attachOutput\(sessionId, \(data, kept, at, read\) => \{\s*if \(kept\) entry\.history\.before\(at\);\s*try \{\s*writeOutput\(entry, data, read\);\s*\} finally \{\s*if \(kept\) entry\.history\.after\(entry\.term\);\s*\}\s*\}\);/
+      /ptyUnlisten = attachOutput\(sessionId, \(data, kept, at, read\) => \{\s*if \(!kept\) \{\s*deliverLive\(entry, data, read\);\s*return;\s*\}\s*entry\.history\.before\(at\);\s*try \{\s*writeOutput\(entry, data, read\);\s*\} finally \{\s*entry\.history\.after\(entry\.term\);\s*\}\s*\}\);/
     );
     // Which writes every chunk into the terminal, whatever else it looks for
     // in it (cmd's batch-job question, src/lib/batchJobReply.js).

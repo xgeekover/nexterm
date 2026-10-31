@@ -103,11 +103,18 @@ export function groupUnix(rows, appPid, platform) {
   return { app: [app], webview };
 }
 
+/** The last part of a process's path or name: `com.apple.WebKit.GPU`, `msedgewebview2.exe`. */
+export function shortName(comm = '') {
+  return String(comm).split(/[\\/]/).pop();
+}
+
 function sum(rows) {
   return {
     cpu: Number(rows.reduce((total, r) => total + r.cpu, 0).toFixed(3)),
     rss: rows.reduce((total, r) => total + r.rss, 0),
     pids: rows.map((r) => r.pid),
+    // Each one too, to tell which holds the memory: WebKit's page, its GPU process.
+    each: rows.map((r) => ({ pid: r.pid, name: shortName(r.comm ?? r.name), cpu: r.cpu, rss: r.rss })),
   };
 }
 
@@ -146,8 +153,9 @@ export function groupWindows(cpuRows, tree, appPid) {
   const below = descendantsOf(appPid, new Map([...tree].map(([pid, row]) => [pid, row.ppid])));
   const app = cpuRows.filter((r) => r.pid === appPid);
   if (app.length === 0) return null;
+  const named = (r) => ({ ...r, name: tree.get(r.pid)?.name ?? '' });
   const webview = cpuRows.filter((r) => below.has(r.pid) && /^msedgewebview2(\.exe)?$/i.test(tree.get(r.pid)?.name ?? ''));
-  return { app: sum(app), webview: sum(webview) };
+  return { app: sum(app.map(named)), webview: sum(webview.map(named)) };
 }
 
 function sampleWindows(appPid, interval, onSample) {

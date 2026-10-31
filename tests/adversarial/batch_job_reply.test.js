@@ -540,7 +540,11 @@ describe('cmd batch-job reply: through the store, the bus and real xterm', () =>
     const registry = read('../../src/components/terminal/terminalRegistry.js');
     // Every chunk, kept or live: kept ones are only marked as history around
     // the same write (TP-43).
-    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at, read\) => \{[^}]*writeOutput\(entry, data, read\);/);
+    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at, read\) => \{\s*if \(!kept\) \{\s*deliverLive\(entry, data, read\);[\s\S]*?writeOutput\(entry, data, read\);/);
+    // Live chunks go through the pacer, which writes through `writeOutput`
+    // and never paces a terminal whose cmd waits (output_pacing.test.js, OP-08).
+    assert.match(registry, /const pacer = createOutputPacer\(\{\s*write: \(entry, data, read\) => writeOutput\(entry, data, read\),/);
+    assert.match(registry, /!store\.batchJobWaiting\?\.\(entry\.tabId\)/);
     assert.match(registry, /const waiting = useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\);/, 'judged as each chunk arrives');
     assert.match(registry, /setBatchJobScreenReader\(\(tabId\) => \{\s*const entry = instances\.get\(tabId\);\s*return entry && !entry\.disposed \? screenRow\(entry\.term\) : null;/);
     const store = read('../../src/stores/terminalStore.js');

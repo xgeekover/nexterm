@@ -166,6 +166,11 @@ pub struct PerfInfo {
     /// `NEXTERM_PERF_TOOLS`: the folder holding tests/perf's scripts. Unset,
     /// the frontend looks in the open folder's `tests/perf`.
     pub tools_dir: Option<String>,
+    /// `NEXTERM_PERF_PACE_MS` and `NEXTERM_PERF_PACE_KB`: how output for a
+    /// terminal without focus is paced (terminalRegistry.js), to compare in
+    /// one build. Unset, the app's own.
+    pub pace_ms: Option<u32>,
+    pub pace_kb: Option<u32>,
 }
 
 /// Scenario names: short, letters and digits, upper-cased; anything else dropped.
@@ -201,7 +206,13 @@ pub fn info() -> PerfInfo {
         repeat: parse_repeat(std::env::var("NEXTERM_PERF_REPEAT").ok().as_deref()),
         out_dir: out_dir().to_string_lossy().into_owned(),
         tools_dir: std::env::var("NEXTERM_PERF_TOOLS").ok().filter(|v| !v.trim().is_empty()),
+        pace_ms: env_number("NEXTERM_PERF_PACE_MS"),
+        pace_kb: env_number("NEXTERM_PERF_PACE_KB"),
     }
+}
+
+fn env_number(name: &str) -> Option<u32> {
+    std::env::var(name).ok().and_then(|v| v.trim().parse::<u32>().ok())
 }
 
 /// Whether `name` may be a report's file name: one plain name, no folder.

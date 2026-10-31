@@ -106,9 +106,11 @@ import './theme_gallery.test.js';
 import './split_polish.test.js';
 import './secret_input.test.js';
 import './split_lock_headless.test.js';
+import './output_path_headless.test.js';
 import './strip_overlay_mounted.test.js';
 import './perf_mode.test.js';
 import './flow_control.test.js';
+import './output_pacing.test.js';
 
 async function run() {
   console.log('====================================================');
