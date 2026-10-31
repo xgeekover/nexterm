@@ -150,6 +150,118 @@ fn emit_marker(app: &AppHandle, session_id: &str, marker: Marker) {
     }
 }
 
+/// The reader's loop, from the PTY to the sender's queue (`outgoing`), up to
+/// the end of the stream — apart from `spawn` so the suites can drive it with
+/// a real PTY and no page.
+///
+/// Per read, in this order: wait while the page is too far behind
+/// (flow_gate.rs); on Windows, hold the opening cursor query and answer it
+/// (startup_query.rs); tell the password watch output came (`read_seen`);
+/// strip OSC 133/7 into markers, holding a split escape or UTF-8 character
+/// (osc.rs); queue the output, then that read's markers after it. At the end
+/// of the stream, what was held back as a possible query is output like any
+/// other, and a character cut in half is sent as it is rather than held for
+/// ever.
+///
+/// Output is counted against flow control as it is queued, not as it is
+/// sent: what waits between this thread and the sender's is as unread by the
+/// page as what waits in the page, and counted later it let the reader run
+/// ahead of a sender stuck emitting with nothing to stop it (found in
+/// review). Counted before the page can possibly have it, so an
+/// acknowledgement never arrives ahead of its count; the sender's batches
+/// are the same bytes joined, so the page acknowledges exactly this.
+///
+/// Returns how many times flow control held the reader.
+fn pump_output(
+    reader: &mut dyn Read,
+    flow: &FlowGate,
+    startup_query: &mut Option<(StartupCursorQuery, std::sync::mpsc::Sender<Vec<u8>>)>,
+    mut read_seen: impl FnMut(),
+    outgoing: &std::sync::mpsc::Sender<Outgoing>,
+) -> usize {
+    let queue = |text: String| {
+        flow.sent(text.len() as u64);
+        // No sender any more (its thread gone): nothing this session queued
+        // will ever be acknowledged — what was waiting in it included — so
+        // flow control has nothing left to wait for. Closed, it never holds
+        // this reader again, and the shell runs on to its exit (review: an
+        // acknowledgement back cleared the stall and stranded the rest).
+        if outgoing.send(Outgoing::Output(text)).is_err() {
+            flow.close();
+        }
+    };
+    let mut held = 0;
+    let mut buf = [0u8; 4096];
+    // Strips OSC 133 markers (everything else is forwarded verbatim) and tells us
+    // when a command finished (see osc.rs / shell_integration.rs).
+    let mut filter = OscFilter::new();
+    loop {
+        // The page too far behind: read nothing until it catches
+        // up, and let the program wait in its write (flow_gate.rs).
+        let hold = crate::perf::emit_started();
+        if flow.wait_for_room() {
+            held += 1;
+            crate::perf::note_hold(hold);
+        }
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                crate::perf::note_read(n);
+                let mut released = None;
+                if let Some((query, answer_tx)) = startup_query.as_mut() {
+                    let scan = query.feed(&buf[..n]);
+                    if let Some(answer) = scan.answer {
+                        let _ = answer_tx.send(answer.to_vec());
+                    }
+                    released = Some((scan.forward, query.is_done()));
+                }
+                if matches!(released, Some((_, true))) {
+                    *startup_query = None;
+                }
+                let chunk: &[u8] = match &released {
+                    Some((forward, _)) => forward,
+                    None => &buf[..n],
+                };
+                if chunk.is_empty() {
+                    continue;
+                }
+                // One flag per chunk; the watch does the rest.
+                read_seen();
+                let filtered = filter.feed(chunk);
+                if !filtered.output.is_empty() {
+                    queue(filtered.output);
+                }
+                // After the output they came with, in the same queue:
+                // the sender keeps them in order (output_batch.rs).
+                for marker in filtered.markers {
+                    let _ = outgoing.send(Outgoing::Marker(marker));
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // The stream ended while bytes were held back as a possible
+    // cursor query: they are output like any other.
+    if let Some((mut query, _)) = startup_query.take() {
+        let held = query.take_held();
+        if !held.is_empty() {
+            let filtered = filter.feed(&held);
+            if !filtered.output.is_empty() {
+                queue(filtered.output);
+            }
+        }
+    }
+
+    // The shell died mid-character: emit the bytes verbatim rather
+    // than holding them forever.
+    let tail = filter.take_utf8_tail();
+    if !tail.is_empty() {
+        queue(String::from_utf8_lossy(&tail).to_string());
+    }
+    held
+}
+
 /// Move a PTY's blocking writes onto their own thread.
 ///
 /// Returns the queue the caller hands bytes to. The thread ends when the
@@ -274,6 +386,9 @@ fn set_session_env(cmd: &mut CommandBuilder) {
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<String, Arc<PtySession>>>>,
     counter: AtomicU64,
+    /// Every window minimised: flow control lets the page fall much further
+    /// behind (flow_gate.rs, AWAY_HIGH_WATER). Kept by main.rs.
+    away: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for PtyManager {
@@ -287,7 +402,13 @@ impl PtyManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(1),
+            away: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Whether every window is minimised (main.rs watches).
+    pub fn set_away(&self, away: bool) {
+        self.away.store(away, Ordering::Relaxed);
     }
 
     pub fn default_shell() -> String {
@@ -452,7 +573,7 @@ impl PtyManager {
             master: Mutex::new(Some(pair.master)),
             input: Mutex::new(Some(input_tx)),
             child: Mutex::new(child),
-            flow: Arc::new(crate::perf::flow_gate()),
+            flow: Arc::new(crate::perf::flow_gate().with_away(self.away.clone(), super::flow_gate::AWAY_HIGH_WATER)),
         });
 
         self.sessions
@@ -505,18 +626,14 @@ impl PtyManager {
         let emitter = {
             let app = app_handle.clone();
             let id = session_id.clone();
-            let flow = session.flow.clone();
             thread::Builder::new()
                 .name(format!("pty-emit-{session_id}"))
                 .spawn(move || {
                     let batcher = Batcher::new(crate::perf::batch_window(), output_batch::DEFAULT_MAX);
+                    // Already counted by the reader, when it queued it
+                    // (`pump_output`).
                     output_batch::run_emitter(outgoing_rx, batcher, |item| match item {
-                        Outgoing::Output(data) => {
-                            // Counted before it goes: the page's acknowledgement
-                            // must never arrive ahead of the count it takes from.
-                            flow.sent(data.len() as u64);
-                            emit_output(&app, &id, data);
-                        }
+                        Outgoing::Output(data) => emit_output(&app, &id, data),
                         Outgoing::Marker(marker) => emit_marker(&app, &id, marker),
                     });
                 })
@@ -534,74 +651,11 @@ impl PtyManager {
         let reader_thread = thread::Builder::new()
             .name(format!("pty-reader-{session_id}"))
             .spawn(move || {
-                let mut buf = [0u8; 4096];
-                // Strips OSC 133 markers (everything else is forwarded verbatim) and tells us
-                // when a command finished (see osc.rs / shell_integration.rs).
-                let mut filter = OscFilter::new();
-                loop {
-                    // The page too far behind: read nothing until it catches
-                    // up, and let the program wait in its write (flow_gate.rs).
-                    let hold = crate::perf::emit_started();
-                    if reader_flow.wait_for_room() {
-                        crate::perf::note_hold(hold);
-                    }
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            crate::perf::note_read(n);
-                            let mut released = None;
-                            if let Some((query, answer_tx)) = startup_query.as_mut() {
-                                let scan = query.feed(&buf[..n]);
-                                if let Some(answer) = scan.answer {
-                                    let _ = answer_tx.send(answer.to_vec());
-                                }
-                                released = Some((scan.forward, query.is_done()));
-                            }
-                            if matches!(released, Some((_, true))) {
-                                startup_query = None;
-                            }
-                            let chunk: &[u8] = match &released {
-                                Some((forward, _)) => forward,
-                                None => &buf[..n],
-                            };
-                            if chunk.is_empty() {
-                                continue;
-                            }
-                            // One flag per chunk; the watch does the rest.
-                            #[cfg(unix)]
-                            echo_watch.output();
-                            let filtered = filter.feed(chunk);
-                            if !filtered.output.is_empty() {
-                                let _ = outgoing.send(Outgoing::Output(filtered.output));
-                            }
-                            // After the output they came with, in the same queue:
-                            // the sender keeps them in order (output_batch.rs).
-                            for marker in filtered.markers {
-                                let _ = outgoing.send(Outgoing::Marker(marker));
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                // The stream ended while bytes were held back as a possible
-                // cursor query: they are output like any other.
-                if let Some((mut query, _)) = startup_query.take() {
-                    let held = query.take_held();
-                    if !held.is_empty() {
-                        let filtered = filter.feed(&held);
-                        if !filtered.output.is_empty() {
-                            let _ = outgoing.send(Outgoing::Output(filtered.output));
-                        }
-                    }
-                }
-
-                // The shell died mid-character: emit the bytes verbatim rather
-                // than holding them forever.
-                let tail = filter.take_utf8_tail();
-                if !tail.is_empty() {
-                    let _ = outgoing.send(Outgoing::Output(String::from_utf8_lossy(&tail).to_string()));
-                }
+                #[cfg(unix)]
+                let read_seen = || echo_watch.output();
+                #[cfg(not(unix))]
+                let read_seen = || {};
+                let _ = pump_output(&mut *reader, &reader_flow, &mut startup_query, read_seen, &outgoing);
 
                 // Everything read is with the sender: let it send what it
                 // still holds, and only then say the shell is gone.
@@ -1881,5 +1935,232 @@ mod locale_tests {
         );
         assert!(lang.is_some(), "the shell was given no LANG — {report}");
         assert_eq!(answer("lang="), lang, "the shell's LANG is not the one it was given — {report}");
+    }
+}
+
+/// Stage 4's promise about the output path: whatever the batching and the
+/// flow control do, what the page gets is exactly what the program printed —
+/// nothing lost, nothing twice, nothing out of order — and a marker never
+/// overtakes the output it came after.
+#[cfg(all(test, unix))]
+mod output_path_tests {
+    use super::*;
+    use super::super::startup_query;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// FNV-1a, so a failure says "differs" without printing megabytes.
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100_0000_01b3))
+    }
+
+    /// About `size` bytes of what terminals are shown: numbered lines, Korean,
+    /// emoji (one with a ZWJ, a flag), colours, a window title, a program's
+    /// own cursor query, and the shell hooks' OSC 133 / OSC 7. Returns what
+    /// is printed, what the page should get (the markers removed), and each
+    /// marker with how much of that output comes before it.
+    fn generate(size: usize) -> (Vec<u8>, String, Vec<(Marker, usize)>) {
+        let mut printed = String::new();
+        let mut expected = String::new();
+        let mut markers = Vec::new();
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut line = 0u64;
+        while printed.len() < size {
+            line += 1;
+            let mut text = format!("{line:08} ");
+            for _ in 0..(next() % 12) {
+                text.push_str(match next() % 7 {
+                    0 => "한글 출력 ",
+                    1 => "😀 ",
+                    2 => "👩\u{200d}💻 ",
+                    3 => "🇰🇷 ",
+                    4 => "\x1b[38;5;208mcolour\x1b[0m ",
+                    5 => "plain words go here ",
+                    _ => "가나다라마바사 ",
+                });
+            }
+            text.push('\n');
+            printed.push_str(&text);
+            expected.push_str(&text);
+            match next() % 40 {
+                0 => {
+                    let title = format!("title {line}");
+                    let seq = format!("\x1b]0;{title}\x07");
+                    printed.push_str(&seq);
+                    expected.push_str(&seq);
+                    markers.push((Marker::Title(title), expected.len()));
+                }
+                1 => {
+                    printed.push_str("\x1b]133;C\x07");
+                    markers.push((Marker::CommandExecuted, expected.len()));
+                }
+                2 => {
+                    let code = (line % 3) as i32;
+                    printed.push_str(&format!("\x1b]133;D;{code}\x07"));
+                    markers.push((Marker::CommandFinished(Some(code)), expected.len()));
+                }
+                3 => {
+                    printed.push_str(&format!("\x1b]7;file://host/tmp/dir%20{line}\x07"));
+                    markers.push((Marker::WorkingDirectory(format!("/tmp/dir {line}")), expected.len()));
+                }
+                4 => {
+                    // A program asking where the cursor is, long after the
+                    // start: xterm's to answer, so it passes through.
+                    printed.push_str("\x1b[6n");
+                    expected.push_str("\x1b[6n");
+                }
+                _ => {}
+            }
+        }
+        (printed.into_bytes(), expected, markers)
+    }
+
+    #[test]
+    fn what_waits_for_the_sender_counts_against_the_page() {
+        // Found in review: counted only as the sender sent it, output piled
+        // up between the reader and a sender stuck emitting, with nothing to
+        // stop the reader. Here the sender never takes anything.
+        const HIGH: u64 = 64 * 1024;
+        let flow = Arc::new(FlowGate::new(HIGH, HIGH / 2, Duration::from_secs(30)));
+        let (outgoing, queued) = mpsc::channel::<Outgoing>();
+        let reader = {
+            let flow = flow.clone();
+            thread::spawn(move || {
+                let mut source = std::io::Cursor::new(vec![b'x'; 4 * 1024 * 1024]);
+                pump_output(&mut source, &flow, &mut None, || {}, &outgoing)
+            })
+        };
+        thread::sleep(Duration::from_millis(300));
+        let waiting: usize = queued
+            .try_iter()
+            .map(|item| match item {
+                Outgoing::Output(text) => text.len(),
+                Outgoing::Marker(_) => 0,
+            })
+            .sum();
+        assert!(waiting as u64 <= HIGH + 4096, "{waiting} B queued for a sender that took none");
+        flow.close();
+        assert!(reader.join().expect("reader") >= 1, "the reader was held");
+    }
+
+    #[test]
+    fn a_sender_gone_never_holds_the_reader_again() {
+        // Found in review: counted as queued, output stranded with a sender
+        // that died — and every read after it — held the reader for good
+        // (or a read every stall).
+        let flow = Arc::new(FlowGate::new(4096, 2048, Duration::from_millis(100)));
+        flow.sent(4096 + 4096); // stranded in the dead sender's queue
+        let (outgoing, queued) = mpsc::channel::<Outgoing>();
+        drop(queued);
+        let mut source = std::io::Cursor::new(vec![b'x'; 1024 * 1024]);
+        let started = std::time::Instant::now();
+        let held = pump_output(&mut source, &flow, &mut None, || {}, &outgoing);
+        assert!(started.elapsed() < Duration::from_secs(2), "drained in {:?}", started.elapsed());
+        assert!(held <= 1, "held {held} times: once at most, before it knew");
+    }
+
+    #[test]
+    fn megabytes_of_mixed_output_arrive_whole_and_in_order() {
+        const HIGH: u64 = 256 * 1024;
+        let (body, expected, expected_markers) = generate(4 * 1024 * 1024);
+        // The stream opens with the cursor query ConPTY sends first: taken
+        // out and answered, as on Windows (the reader holds it on unix only
+        // here, to drive that path too).
+        let mut printed = startup_query::QUERY.to_vec();
+        printed.extend_from_slice(&body);
+        // And it ends mid-character, as a shell that dies while printing
+        // does: the half goes out as it is, never held for ever.
+        printed.extend_from_slice(&"한".as_bytes()[..2]);
+        let expected = format!("{expected}\u{FFFD}");
+        let dir = std::env::temp_dir().join(format!("nexterm-output-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("printed.bin");
+        std::fs::write(&file, &printed).expect("write the output");
+
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        // No output processing (no CR added to LF): what arrives is what was printed.
+        cmd.args(["-c", &format!("stty -opost; cat '{}'", file.display())]);
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+
+        let flow = Arc::new(FlowGate::new(HIGH, HIGH / 2, Duration::from_secs(30)));
+        let (answer_tx, answer_rx) = mpsc::channel::<Vec<u8>>();
+        let mut startup = Some((startup_query::StartupCursorQuery::default(), answer_tx));
+        let (outgoing, outgoing_rx) = mpsc::channel::<Outgoing>();
+        let (page_tx, page_rx) = mpsc::channel::<Outgoing>();
+
+        // The sender, as `spawn` runs it (the reader has counted what it queued).
+        let emitter = {
+            thread::spawn(move || {
+                let batcher = Batcher::new(Duration::from_millis(8), output_batch::DEFAULT_MAX);
+                output_batch::run_emitter(outgoing_rx, batcher, |item| {
+                    let _ = page_tx.send(item);
+                });
+            })
+        };
+        // A page that reads slowly, so flow control has to hold the reader.
+        let page = {
+            let flow = flow.clone();
+            thread::spawn(move || {
+                let mut output = String::new();
+                let mut markers = Vec::new();
+                let mut since_pause = 0;
+                for item in page_rx {
+                    match item {
+                        Outgoing::Output(data) => {
+                            output.push_str(&data);
+                            since_pause += data.len();
+                            if since_pause > 64 * 1024 {
+                                since_pause = 0;
+                                thread::sleep(Duration::from_millis(2));
+                            }
+                            flow.acked(data.len() as u64);
+                        }
+                        Outgoing::Marker(marker) => markers.push((marker, output.len())),
+                    }
+                }
+                (output, markers)
+            })
+        };
+
+        let held = pump_output(&mut *reader, &flow, &mut startup, || {}, &outgoing);
+        drop(outgoing);
+        emitter.join().expect("sender");
+        let (output, markers) = page.join().expect("page");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(answer_rx.try_recv().ok().as_deref(), Some(startup_query::ANSWER), "the opening query is answered");
+        assert!(answer_rx.try_recv().is_err(), "and only that one");
+        assert!(held > 0, "the reader was never held — flow control was not exercised");
+        if output != expected {
+            let at = output.bytes().zip(expected.bytes()).position(|(a, b)| a != b).unwrap_or(output.len().min(expected.len()));
+            panic!(
+                "output differs: {} B (hash {:x}) vs {} B printed (hash {:x}), first difference at byte {at}",
+                output.len(),
+                fnv(output.as_bytes()),
+                expected.len(),
+                fnv(expected.as_bytes()),
+            );
+        }
+        assert_eq!(markers.len(), expected_markers.len(), "every marker, once");
+        for (i, ((got, at), (want, due))) in markers.iter().zip(&expected_markers).enumerate() {
+            assert_eq!(got, want, "marker {i} out of order");
+            // Never ahead of the output it came after, and no later than the
+            // read it arrived in (a read and what the filter held before it).
+            assert!(*at >= *due, "marker {i} ({got:?}) overtook output: at {at}, after {due}");
+            assert!(*at <= *due + 2 * 4096 + 16, "marker {i} ({got:?}) held back: at {at}, after {due}");
+        }
     }
 }

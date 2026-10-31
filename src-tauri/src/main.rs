@@ -20,6 +20,9 @@ use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_window_state::StateFlags;
 
+/// Whether a window of the app has focus (the window-away watch in `main`).
+static WINDOW_FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct AppState {
     pub pty_manager: Arc<pty::PtyManager>,
     pub fs_watcher: Arc<fs::FsWatcherManager>,
@@ -121,6 +124,36 @@ fn main() {
                 });
             }
 
+            // A minimised window is given its output two or three events a
+            // second (measured on macOS): flow control would hand that pace
+            // to every program in it. While every window is minimised the
+            // page may fall much further behind (pty/flow_gate.rs). Tauri
+            // says nothing when a window is minimised, so it is asked every
+            // 300 ms while no window has focus, and every 3 s while one has
+            // (each question is a round trip through the main thread). Not
+            // never: on Windows the focus Tauri reports is the web view's
+            // keyboard focus, which need not be lost when the window is
+            // minimised (review) — trusted alone, it would keep `away` off.
+            {
+                let handle = app.handle().clone();
+                let manager = app_state.pty_manager.clone();
+                std::thread::Builder::new()
+                    .name("window-away".into())
+                    .spawn(move || {
+                        let mut ticks: u32 = 0;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            ticks = ticks.wrapping_add(1);
+                            if WINDOW_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) && ticks % 10 != 0 {
+                                continue;
+                            }
+                            let windows = handle.webview_windows();
+                            let away = !windows.is_empty() && windows.values().all(|w| w.is_minimized().unwrap_or(false));
+                            manager.set_away(away);
+                        }
+                    })?;
+            }
+
             // ⌘Q, the Dock's Quit and logging out end a macOS app without
             // closing its window, so the guard on the window's close below
             // never hears of them. See commands/app.rs.
@@ -132,6 +165,10 @@ fn main() {
         // whether it goes ahead — never the page, which may have crashed or
         // hung. See commands/app.rs.
         .on_window_event(|window, event| {
+            // For the window-away watch above.
+            if let tauri::WindowEvent::Focused(focused) = event {
+                WINDOW_FOCUSED.store(*focused, std::sync::atomic::Ordering::Relaxed);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if commands::app::hold_close(window) {
                     api.prevent_close();

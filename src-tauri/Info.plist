@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged by Tauri into the app's own Info.plist (macOS).
+
+  LSAppNapIsDisabled: a terminal's programs are read no faster than the page
+  takes their output (src-tauri/src/pty/flow_gate.rs), and a napped app takes
+  it slowly — measured on the stage 4 branch, one terminal's 50 MB took
+  7.6–12.8 s instead of 2.9 s while another app was in front, and under
+  flow control the program waits on the page. Agents and builds keep
+  running while NexTerm is behind another window; so does NexTerm.
+-->
+<plist version="1.0">
+<dict>
+  <key>LSAppNapIsDisabled</key>
+  <true/>
+</dict>
+</plist>

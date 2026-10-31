@@ -157,6 +157,16 @@ describe('Flow control: the page says what it has read', () => {
     assert.match(src, /attachOutput\(sessionId, \(data, kept, at, read\) => \{[\s\S]*?writeOutput\(entry, data, read\)/);
   });
 
+  test('FC-10: a window out of sight does not slow its programs — macOS neither naps the app nor suspends its page', () => {
+    // Under flow control a program waits on the page; a napped app or a
+    // suspended page would make every build and agent in it crawl while
+    // NexTerm is behind another app or minimised (review round 1).
+    const plist = readFileSync(new URL('../../src-tauri/Info.plist', import.meta.url), 'utf8');
+    assert.match(plist, /<key>LSAppNapIsDisabled<\/key>\s*<true\/>/);
+    const config = JSON.parse(readFileSync(new URL('../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+    assert.equal(config.app.windows[0].backgroundThrottling, 'disabled');
+  });
+
   test('FC-09: through a real xterm: every byte sent is acknowledged once xterm has read it all, and the text is all there', async () => {
     const b = await bus();
     const term = new HeadlessTerminal({ cols: 80, rows: 24, scrollback: 10_000, allowProposedApi: true });
