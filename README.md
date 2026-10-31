@@ -79,6 +79,11 @@ that layout the next time you open it.
   xterm's WebGL renderer, so block and box-drawing characters — TUI logos,
   borders — fill their cells at any line height, and fall back to the DOM
   renderer where WebGL is unavailable.
+- **Several agents at full speed.** Four terminals flooding at once no
+  longer freeze the window or lose output: a terminal is read no faster than
+  it can be drawn, its output reaches the page in batches, and terminals you
+  are not typing in are drawn about 30 times a second. On a Mac, typing
+  beside three floods echoes within 0.2 s (p95) instead of 10 s.
 - **Built for Windows' ConPTY.** The backend answers ConPTY's start-up cursor
   query (without it `cmd.exe` shows no prompt), and tells xterm.js the Windows
   build so a pane that is resized — a split, a maximised window — is not
@@ -592,6 +597,34 @@ Settings ▸ Terminal has *Show Folder*, *Show Git Branch*, *Show Agent and
 Status* and *Show Last Notification*. With the last three off, rows are one
 line again.
 
+### Many terminals printing at once
+
+Nothing to set up; what you notice is what does *not* happen any more.
+
+- **No lost output, no frozen window.** When a program prints faster than
+  its terminal can draw — a build log, `yes`, an agent dumping a file — NexTerm
+  stops reading from it until the screen catches up, about a megabyte later.
+  The program simply waits in its own write, as it would on any terminal that
+  cannot keep up. Ctrl+C, typing and pasting are never held: they go straight
+  to the program, and its answer shows once what was printed before it has
+  been drawn.
+- **The terminal you type in comes first.** Every other terminal — a pane
+  beside it, another tab, a group you are not looking at — is written about
+  30 times a second (cmux draws unfocused panes the same way): what arrives
+  in between is drawn in one go. Click a pane or switch to it and everything
+  held for it is drawn at once. Notifications, the bell and progress bars
+  from those terminals arrive at most a frame or two later.
+- **Out of sight is not slowed down.** A build or an agent keeps its pace
+  while NexTerm is minimised or behind another app: a hidden or minimised
+  window takes output as fast as it comes — up to 32 MB a terminal — and
+  draws it when you come back, and on macOS the app is never napped.
+- **The order is always the order printed.** A command's mark, the folder and
+  branch in the side bar, the window title an agent sets and cmd's *Terminate
+  batch job (Y/N)?* answer still match the output around them.
+
+To measure it yourself, see *Performance mode* in
+[TEST_INFRA.md](TEST_INFRA.md).
+
 ### Keyboard shortcuts
 
 | Shortcut | Action |
@@ -778,14 +811,18 @@ into a vacuous one:
 
 ```
 src-tauri/src
-  pty/            PTY manager, ConPTY start-up query, OSC 133/7 filter, shell integration
+  pty/            PTY manager, ConPTY start-up query, OSC 133/7 filter, shell integration,
+                  flow control (flow_gate.rs) and output batching (output_batch.rs)
+  perf.rs         performance mode: counters and knobs read only when NEXTERM_PERF is set
   fs/             folder-confined file commands + watcher
   menu.rs         native menu described as data, so it is testable off-thread
   commands/       the #[tauri::command] surface
 src
   stores/         zustand stores (terminal tree, editor, settings, system info)
   components/     layout, terminal, editor, explorer, command palette
-  lib/            persistence, paths, terminal compatibility rules, themes, IPC wrapper
+  lib/            persistence, paths, terminal compatibility rules, themes, IPC wrapper,
+                  the output bus (ptyOutputBus.js) and pacing (outputPacing.js); perf/ for measuring
+tests/perf/       load generator, CPU sampler and report table for performance mode
 ```
 
 The terminal layout is a tree: every leaf is a *group* holding an ordered list of

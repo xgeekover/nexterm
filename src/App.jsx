@@ -18,6 +18,7 @@ import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
 import { useSettingsStore } from './stores/settingsStore.js';
 import { mockBridge } from './lib/ipc.js';
+import { startPerfMode } from './lib/perf/perfMode.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
@@ -52,6 +53,9 @@ export default function App() {
     // Proactively initialize all IDE subsystems
     initTerminal();
     initEditor();
+    // Only when the app was started to be measured (NEXTERM_PERF): one
+    // question to the backend otherwise. See src/lib/perf/perfMode.js.
+    startPerfMode();
     // Detach event listeners on unmount / HMR so they never stack up;
     // the bootstrap state (PTY sessions, agents) is kept.
     return () => {

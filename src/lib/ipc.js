@@ -454,6 +454,11 @@ class BrowserMockBridge {
       // backend reads the line discipline there and then; the mock answers
       // from what `setEcho` last said. An unknown session is an error there
       // as here.
+      // Flow control (src-tauri/src/pty/flow_gate.rs): the mock's shells
+      // print a line at a time and never wait for the page.
+      case 'pty_ack':
+      case 'pty_flow_reset':
+        return null;
       case 'pty_input_hidden': {
         const { session_id } = args;
         const session = this.ptySessions.get(session_id);

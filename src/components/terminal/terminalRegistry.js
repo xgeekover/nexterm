@@ -69,6 +69,7 @@ import { usePastePromptStore } from '../../stores/pastePromptStore.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { attachOutput, createHistoryMark, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
+import { createOutputPacer } from '../../lib/outputPacing.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
 import { installTerminalProgress } from '../../lib/terminalProgress.js';
 import { exitNotice, freshScreen } from '../../lib/shellExit.js';
@@ -739,7 +740,11 @@ function registerRevealLinks(term, tabId, container) {
   const dirs = trackDirectories(term, { initial: startedIn, current: liveCwd, marks: commandMarks });
   const stopTrail = useTerminalStore.subscribe((state, prev) => {
     const cwd = tabOf(state)?.cwd;
-    if (cwd && cwd !== tabOf(prev)?.cwd) dirs.note(cwd);
+    if (!cwd || cwd === tabOf(prev)?.cwd) return;
+    // The folder's mark goes after what the shell printed in the old one,
+    // held or not (`note` waits for xterm to have read what it was given).
+    flushPacedOutput(tabId);
+    dirs.note(cwd);
   });
   const links = installRevealLinks(term, container, {
     modifier: revealModifier,
@@ -826,6 +831,9 @@ function hyperlinkHandler(container) {
  * change is what keeps the instance and its shell together.
  */
 function bindSession(entry, sessionId) {
+  // What the shell before printed and is still held goes on screen before
+  // anything of the next one.
+  flushPaced(entry);
   entry.stopPtyListener?.();
   if (entry.sessionId && entry.sessionId !== sessionId) {
     // A shell this instance no longer shows is gone (a restore respawned it,
@@ -853,12 +861,16 @@ function bindSession(entry, sessionId) {
     // reports and the bells it rings are over by now, and a message in it is
     // filed under when it arrived. Ended whatever the write does — left up,
     // every bell and bar of the terminal's life would be taken for history.
-    ptyUnlisten = attachOutput(sessionId, (data, kept, at) => {
-      if (kept) entry.history.before(at);
+    ptyUnlisten = attachOutput(sessionId, (data, kept, at, read) => {
+      if (!kept) {
+        deliverLive(entry, data, read);
+        return;
+      }
+      entry.history.before(at);
       try {
-        writeOutput(entry, data);
+        writeOutput(entry, data, read);
       } finally {
-        if (kept) entry.history.after(entry.term);
+        entry.history.after(entry.term);
       }
     });
 
@@ -871,6 +883,7 @@ function bindSession(entry, sessionId) {
       const { session_id, exit_code } = payload || {};
       if (session_id !== sessionId || entry.exited) return;
       entry.exited = true;
+      flushPaced(entry);
       entry.term.write(exitNotice(typeof exit_code === 'number' ? exit_code : null));
     }).then((off) => {
       if (cancelled) off();
@@ -893,17 +906,174 @@ function bindSession(entry, sessionId) {
  * arrived — whether the wait is still open is judged then, not when xterm
  * gets round to parsing it — and is asked to look at the screen once xterm
  * has written the chunk, its write callback: the question is matched on the
- * row the cursor is on, not in the raw output, which ConPTY reorders. Any
- * other time the chunk is only written.
+ * row the cursor is on, not in the raw output, which ConPTY reorders.
+ *
+ * `read`, when the output bus hands one over, is called from the same
+ * callback: flow control waits for xterm to have read a chunk, not for it to
+ * have been queued (src-tauri/src/pty/flow_gate.rs). Kept output, already
+ * acknowledged when it was kept, comes without one.
  */
-function writeOutput(entry, data) {
+function writeOutput(entry, data, read = null) {
   const { tabId, term } = entry;
-  if (!useTerminalStore.getState().batchJobOutputArrived?.(tabId)) {
+  // Performance mode only (src/lib/perf/): what it may want told once xterm
+  // has read this chunk. Null otherwise.
+  const timed = writeObserver ? writeObserver(tabId, data) : null;
+  const waiting = useTerminalStore.getState().batchJobOutputArrived?.(tabId);
+  if (!waiting && !read && !timed) {
     term.write(data);
     return;
   }
+  // `read` is the output bus's: the chunk acknowledged to the backend's flow
+  // control (ptyOutputBus.js) once xterm has read it, and not before.
   term.write(data, () => {
-    if (!entry.disposed) useTerminalStore.getState().answerBatchJobPrompt?.(tabId, term);
+    entry.unparsed -= data.length;
+    read?.();
+    timed?.();
+    if (waiting && !entry.disposed) {
+      // In xterm's write loop: a throw would stop the terminal parsing.
+      try {
+        useTerminalStore.getState().answerBatchJobPrompt?.(tabId, term);
+      } catch (err) {
+        console.warn('[Terminal] could not answer cmd\'s question:', err);
+      }
+    }
+  });
+  // Characters handed to xterm and not parsed yet, of the chunks flow control
+  // counts (they all come with a `read`): how far a hidden page may run ahead
+  // of it (`deliverLive`). Counted once xterm took the write — one it threw
+  // away (past its 50 M) will never be parsed, and never counted down.
+  entry.unparsed = (entry.unparsed ?? 0) + data.length;
+}
+
+/**
+ * Performance mode's view of every chunk written into a terminal
+ * (src/lib/perf/perfProbe.js): `observer(tabId, data)` may return a function
+ * for xterm to call once it has read that chunk, which is how long a write
+ * waited behind the ones before it. Null when the app is not being measured.
+ */
+let writeObserver = null;
+
+export function setWriteObserver(observer) {
+  writeObserver = typeof observer === 'function' ? observer : null;
+}
+
+/** The xterm of `tabId` if it has one — never makes one. For performance mode's runner. */
+export function existingTerminal(tabId) {
+  const entry = instances.get(tabId);
+  return entry && !entry.disposed ? entry.term : null;
+}
+
+// ---- Output pacing (stage 4) ---------------------------------------------------
+/**
+ * A terminal the user is not typing in gets its output at a pace
+ * (src/lib/outputPacing.js): at most every PACE_MS, and — held output being
+ * unacknowledged to the backend's flow control until xterm reads it — a
+ * background terminal that floods slows its own program rather than the
+ * terminal in front. The one typed in, and one whose cmd waits to be
+ * answered (batchJobReply.js judges each chunk as it arrives), are written
+ * at once.
+ *
+ * Whatever reads the screen as the shell left it writes what is held first:
+ * the exit notice, a NexTerm notice, the output barrier the progress bar
+ * waits on, a clear, a command's mark (TerminalView), another shell bound to
+ * the same instance, and the terminal becoming the one typed in.
+ */
+const pacer = createOutputPacer({
+  write: (entry, data, read) => writeOutput(entry, data, read),
+  paced: (entry) => {
+    // Nothing is drawn while the page is hidden; held, it would only wait on
+    // timers a hidden page runs late (deliverLive).
+    if (entry.disposed || pageHidden()) return false;
+    const store = useTerminalStore.getState();
+    return store.activeTabId !== entry.tabId && !store.batchJobWaiting?.(entry.tabId);
+  },
+  now: clock,
+});
+
+/** How output for terminals without focus is paced: `ms` 0 writes all at once; `kb` 0 is no limit per write. */
+export function setOutputPacing(options) {
+  pacer.configure(options);
+}
+
+/**
+ * A hidden page — minimised, or covered on a platform that throttles it —
+ * runs its timers late or not at all, and xterm parses on timers: a chunk
+ * acknowledged only once parsed would hold the program behind it (flow
+ * control) for as long as the window is out of sight, which v0.21.0 never
+ * did (found in review: a build left running while NexTerm is minimised
+ * would crawl, an agent would stall in its own write). So while the page is
+ * hidden a chunk is acknowledged as it is handed to xterm — up to
+ * HIDDEN_AHEAD characters waiting in that terminal, far below the 50 M at
+ * which xterm throws a write away; past that, it waits to be parsed again.
+ */
+export const HIDDEN_AHEAD = 8_000_000;
+let hiddenAhead = HIDDEN_AHEAD;
+
+/** For the suites: how far a hidden page may run ahead of xterm. */
+export function setHiddenAhead(chars) {
+  hiddenAhead = Number.isFinite(chars) && chars >= 0 ? chars : HIDDEN_AHEAD;
+}
+
+function pageHidden() {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+function deliverLive(entry, data, read) {
+  if (read && pageHidden() && (entry.unparsed ?? 0) < hiddenAhead) {
+    read();
+    // Still counted as waiting in xterm until it is parsed: that is the limit.
+    read = () => {};
+  }
+  pacer.deliver(entry, data, read);
+}
+
+/**
+ * `fn` once xterm has read everything this terminal has been given so far —
+ * held output first. A write is parsed later than it is made, so whatever
+ * acts on the screen as it stands (a command's mark, a clear) waits for it
+ * (found in review: a mark made right after a flush landed on the row the
+ * held output had not reached yet).
+ */
+function afterOutputSoFar(entry, fn) {
+  if (!entry || entry.disposed) return false;
+  flushPaced(entry);
+  entry.term.write('', () => {
+    if (entry.disposed) return;
+    // Inside xterm's write loop: a throw here would stop that terminal
+    // parsing anything ever again (found in review).
+    try {
+      fn(entry);
+    } catch (err) {
+      console.warn('[Terminal] could not act on the terminal after its output:', err);
+    }
+  });
+  return true;
+}
+
+/** `fn(entry)` once `tabId`'s terminal has read all it was given so far (TerminalView's command marks). */
+export function afterTerminalOutput(tabId, fn) {
+  return afterOutputSoFar(instances.get(tabId), fn);
+}
+
+function flushPaced(entry) {
+  if (entry) pacer.flush(entry);
+}
+
+/** Write what is held for `tabId` now — before something reads its screen. */
+export function flushPacedOutput(tabId) {
+  flushPaced(instances.get(tabId));
+}
+
+let focusSubscription = null;
+
+/** The terminal typed in is never behind: what was held for it goes the moment it gets focus. */
+function ensureFocusSubscriptionStarted() {
+  if (focusSubscription) return;
+  let focused = useTerminalStore.getState().activeTabId;
+  focusSubscription = useTerminalStore.subscribe((state) => {
+    if (state.activeTabId === focused) return;
+    focused = state.activeTabId;
+    flushPaced(instances.get(focused));
   });
 }
 
@@ -1085,11 +1255,14 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // listener.
   ensureThemeObserverStarted();
   ensureSettingsSubscriptionStarted();
+  ensureFocusSubscriptionStarted();
 
   entry = {
     // Whose output `writeOutput` is writing, for what the store looks for in it.
     tabId,
     term,
+    // Characters written to xterm it has not parsed yet (`writeOutput`).
+    unparsed: 0,
     fitAddon,
     linkProvider,
     revealLinks,
@@ -1208,6 +1381,7 @@ export function clearTerminalSearch(tabId) {
 export function writeNotice(tabId, message) {
   const entry = instances.get(tabId);
   if (!entry || !message) return false;
+  flushPaced(entry);
   entry.term.write(`\r\n\x1b[33m[NexTerm] ${message}\x1b[0m\r\n`);
   return true;
 }
@@ -1227,10 +1401,20 @@ setTerminalOutputBarrier((tabId, fn) => {
     fn();
     return;
   }
+  // Inside xterm's write loop a throw would stop the terminal parsing for
+  // good (review): whatever `fn` does, the loop goes on.
+  const guarded = () => {
+    try {
+      fn();
+    } catch (err) {
+      console.warn('[Terminal] the output barrier\'s callback failed:', err);
+    }
+  };
   try {
-    entry.term.write('', fn);
+    flushPaced(entry);
+    entry.term.write('', guarded);
   } catch {
-    fn();
+    guarded();
   }
 });
 
@@ -1268,10 +1452,8 @@ export function reportFocusOut(tabId) {
  * there was a terminal to clear.
  */
 export function clearTerminal(tabId) {
-  const entry = instances.get(tabId);
-  if (!entry || entry.disposed) return false;
-  entry.term.clear();
-  return true;
+  // What arrived before the clear is cleared with it: written, and read.
+  return afterOutputSoFar(instances.get(tabId), (entry) => entry.term.clear());
 }
 
 /**
@@ -1325,6 +1507,9 @@ export function disposeTerminal(tabId) {
   // browser's 16 until it is collected, evicting terminals that are open.
   entry.disposed = true;
   entry.attachCount = 0;
+  // Held output will never be written: acknowledged, so flow control does
+  // not wait for it.
+  pacer.drop(entry);
   releaseGpu(entry);
   entry.renderDisposable?.dispose();
   entry.stopPtyListener();

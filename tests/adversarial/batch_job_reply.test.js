@@ -366,10 +366,12 @@ function screen(rows, type = 'normal') {
 /** The registry's own `writeOutput`, cut from terminalRegistry.js and run with the store it reads. */
 function registryWriteOutput() {
   const src = read('../../src/components/terminal/terminalRegistry.js');
-  const start = src.indexOf('function writeOutput(entry, data) {');
+  const start = src.indexOf('function writeOutput(entry, data, read = null) {');
   const length = src.slice(start).search(/\r?\n\}\r?\n/);
   assert.ok(start > 0 && length > 0, 'terminalRegistry.js writes output through writeOutput');
-  return new Function('useTerminalStore', `${src.slice(start, start + length)}\n}\nreturn writeOutput;`)(T);
+  // `writeObserver` is performance mode's hook (src/lib/perf/), off as in
+  // every session that is not being measured.
+  return new Function('useTerminalStore', 'writeObserver', `${src.slice(start, start + length)}\n}\nreturn writeOutput;`)(T, null);
 }
 
 /**
@@ -538,8 +540,12 @@ describe('cmd batch-job reply: through the store, the bus and real xterm', () =>
     const registry = read('../../src/components/terminal/terminalRegistry.js');
     // Every chunk, kept or live: kept ones are only marked as history around
     // the same write (TP-43).
-    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at\) => \{[^}]*writeOutput\(entry, data\);/);
-    assert.match(registry, /if \(!useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\)\) \{/, 'judged as each chunk arrives');
+    assert.match(registry, /attachOutput\(sessionId, \(data, kept, at, read\) => \{\s*if \(!kept\) \{\s*deliverLive\(entry, data, read\);[\s\S]*?writeOutput\(entry, data, read\);/);
+    // Live chunks go through the pacer, which writes through `writeOutput`
+    // and never paces a terminal whose cmd waits (output_pacing.test.js, OP-08).
+    assert.match(registry, /const pacer = createOutputPacer\(\{\s*write: \(entry, data, read\) => writeOutput\(entry, data, read\),/);
+    assert.match(registry, /!store\.batchJobWaiting\?\.\(entry\.tabId\)/);
+    assert.match(registry, /const waiting = useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\);/, 'judged as each chunk arrives');
     assert.match(registry, /setBatchJobScreenReader\(\(tabId\) => \{\s*const entry = instances\.get\(tabId\);\s*return entry && !entry\.disposed \? screenRow\(entry\.term\) : null;/);
     const store = read('../../src/stores/terminalStore.js');
     const writeRaw = store.slice(store.indexOf('writeRaw: async (tabId, data) => {'));

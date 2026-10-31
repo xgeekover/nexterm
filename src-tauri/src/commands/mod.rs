@@ -3,6 +3,7 @@ pub mod app;
 pub mod clipboard;
 pub mod fs;
 pub mod notification;
+pub mod perf;
 pub mod pty;
 pub mod system;
 pub mod taskbar;

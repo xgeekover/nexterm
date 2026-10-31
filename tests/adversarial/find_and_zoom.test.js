@@ -281,7 +281,11 @@ describe('Clear Terminal', () => {
     assert.match(store, /clearTerminal: async \(tabId = null\) => \{\s*const targetId = tabId \|\| get\(\)\.activeTabId;\s*return targetId \? clearTerminalView\(targetId\) : false;/);
     assert.match(store, /const \{ clearTerminal \} = await import\('\.\.\/components\/terminal\/terminalRegistry\.js'\);\s*return clearTerminal\(tabId\);/);
     const registry = read('../../src/components/terminal/terminalRegistry.js');
-    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*const entry = instances\.get\(tabId\);\s*if \(!entry \|\| entry\.disposed\) return false;\s*entry\.term\.clear\(\);/);
+    // Once xterm has read what it was given — output held for a terminal
+    // without focus (outputPacing.js) included — so what came before the
+    // clear is cleared with it; no terminal, or a closed one, clears nothing.
+    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => entry\.term\.clear\(\)\);/);
+    assert.match(registry, /function afterOutputSoFar\(entry, fn\) \{\s*if \(!entry \|\| entry\.disposed\) return false;/);
     assert.match(read('../../src-tauri/src/menu.rs'), /terminal_safe\("clear-terminal", "Clear Terminal", "CmdOrCtrl\+L"\)/);
     assert.match(read('../../src/components/command/CommandPalette.jsx'), /case 'clear_terminal':\s*clearTerminal\(\);/);
   });

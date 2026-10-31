@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 pub struct PtyOutputPayload {
     pub session_id: String,
     pub data: String,
+    /// `data`'s length in UTF-8 — what the page acknowledges once it has
+    /// read it (`pty_ack`, src/pty/flow_gate.rs).
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -126,10 +129,13 @@ mod tests {
         let out = PtyOutputPayload {
             session_id: "pty-1".to_string(),
             data: "hello\r\n".to_string(),
+            bytes: 7,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"session_id\":\"pty-1\""));
         assert!(json.contains("\"data\":\"hello\\r\\n\""));
+        // The page acknowledges by this name (src/lib/ptyOutputBus.js).
+        assert!(json.contains("\"bytes\":7"));
 
         let exit = PtyExitPayload {
             session_id: "pty-1".to_string(),
