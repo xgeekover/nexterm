@@ -1016,6 +1016,96 @@ Only the browser mock and the macOS build were tested.
   scheme such as *One Half Light* is refused with its reason. Delete it →
   Dark Modern, with an undo.
 
+### V43 — four terminals flooding: no freeze, no loss, typing still answers
+
+Measured on macOS only (release build, App Nap off, medians of 3 —
+TEST_INFRA.md *Performance mode*). On Windows **ConPTY sits in between**: it
+parses what a program prints and sends its own redraw of the screen, so a
+flood may already arrive coalesced and slower, and the gains may be smaller
+or larger than on the Mac. That is what this check is for — numbers, not an
+impression. It runs on its own from start to end; set aside about an hour.
+
+Before you start: a clone of the repository at the PR's commit (the load
+generator is `tests\perf\flood.js`), Node on `PATH`, the PR's portable build
+and the v0.21.0 portable build, AC power, nothing heavy running, the window
+the same size for every run and **not covered or minimised** (WebView2 slows a
+hidden page). Write down Windows' build, WebView2's version, the CPU, the
+window size and the terminal font size.
+
+1. **Measured runs, one build, before and after.** From `cmd.exe` in the
+   clone, with the PR's build. Each run opens its own groups, types the load
+   into them, closes them, and leaves a *perf: cpu* group with the table;
+   both files land in `%TEMP%\nexterm-perf` (`report-<stamp>.json` and `.md`).
+
+   ```bat
+   rem After: the build as it ships.
+   set NEXTERM_PERF=1& set NEXTERM_PERF_SCENARIOS=S1,S2,S3,S4,S5& set NEXTERM_PERF_REPEAT=3& set NEXTERM_PERF_TOOLS=%CD%\tests\perf& "<PR build>\NexTerm.exe"
+   rem Before: the same build with this stage's three changes switched off (= v0.21.0's output path).
+   set NEXTERM_PERF=1& set NEXTERM_PERF_SCENARIOS=S1,S2,S3,S4,S5& set NEXTERM_PERF_REPEAT=3& set NEXTERM_PERF_TOOLS=%CD%\tests\perf& set NEXTERM_PERF_FLOW_KB=0& set NEXTERM_PERF_BATCH_MS=0& set NEXTERM_PERF_PACE_MS=0& "<PR build>\NexTerm.exe"
+   ```
+
+   Do both with the default shell set to **cmd**, then both again with
+   **PowerShell** (Settings ▸ Terminal ▸ Default Shell): four runs. Run *after*
+   first, and run it twice if its two halves disagree — measure one build
+   twice before comparing two. Close the app between runs. A run that has not
+   written its table after 30 minutes has hung: say so, with the last
+   scenario its groups showed.
+   - **Pass:** *after* has `0` in *Lost lines* in every row; S2 and S4
+     finish (a time in *Time s*, not a timeout); S4's typing p95 is well below
+     *before*'s; the window never stops answering during S2 (drag it while the
+     floods run). Report every row of all four tables, not only the ones that
+     improved.
+   - **Fail, and the most important one to report:** *after* loses lines
+     where *before* does not. Flow control holds the reader, which leaves
+     ConPTY's pipe full; on a unix PTY that makes the program wait, but if
+     conhost keeps drawing and drops what scrolls past between frames, flow
+     control would be creating the loss it is meant to prevent on Windows.
+   - A *before* that loses lines or never finishes S2/S4 is the expected
+     v0.21.0 behaviour on the Mac, not a failure of this check.
+2. **v0.21.0 itself, by hand** (it has no performance mode). Start the
+   v0.21.0 portable build, open four terminals in one group (two splits each
+   way) and in each run `node tests\perf\flood.js flood --seconds 20`; in a
+   fifth terminal start
+   `node tests\perf\cpu.js --pid <NexTerm.exe's pid> --out %TEMP%\nexterm-qa\v0210-cpu.jsonl`
+   before them and stop it with Ctrl+C after. Do the same with the PR's build
+   (no environment variables). Note for each: did the window freeze (how long,
+   roughly), did typing in a sixth terminal echo, did each flood's last line
+   `[nexterm-perf] mode=flood …` appear, and the CPU file's size — attach both
+   `.jsonl` files.
+3. **Four OpenCodes.** With the PR's build, four terminals each running
+   OpenCode, give all four a task that prints a lot at once (for example
+   "read every file under src/lib and summarise each"). While they print:
+   type in one, switch between them with clicks and with the keyboard, paste
+   a line. **Pass:** typing echoes without a noticeable wait, a terminal you
+   switch to is up to date at once, the paste warning still shows for a
+   multi-line paste, and an OpenCode you are not looking at still raises its
+   ring and count when it finishes. Write down how it felt beside v0.21.0 if
+   you can run the same in it.
+4. **Minimised.** With the PR's build, in one terminal run
+   `node tests\perf\flood.js bulk --mb 50` and note the `seconds=` in its
+   last line, with the window in front. Run it again and minimise NexTerm at
+   once; restore it after a minute and read `seconds=` again. **Pass:** the
+   minimised run took about as long as the one in front (WebView2 slows a
+   minimised page's timers; NexTerm must not let that slow the program), and
+   the output is all there (its last line follows the one before it). Do the
+   same with v0.21.0 for comparison if you can.
+5. **Ctrl+C and a resize in a flood.** With the PR's build (no environment
+   variables), four PowerShell terminals in one group each running
+   `node tests\perf\flood.js flood --seconds 60`. After five seconds drag a
+   pane divider back and forth, then click one terminal and press Ctrl+C.
+   **Pass:** the window keeps answering while you drag (a resize is a
+   synchronous call to ConPTY, made while its pipe is full), and that flood
+   stops within a second or two and its prompt comes back — write down
+   roughly how long. Then the same in cmd terminals, once more running the
+   flood through a script
+   (`echo node tests\perf\flood.js flood --seconds 60 > %TEMP%\nexterm-qa\f.cmd`,
+   then `%TEMP%\nexterm-qa\f.cmd`) so Ctrl+C asks *Terminate batch job
+   (Y/N)?* → it is answered as before (V36), with the flood still printing
+   behind it.
+
+Put the four `.md` tables, the notes from 2–5 and the machine details into
+`%TEMP%\nexterm-qa\report.md`.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

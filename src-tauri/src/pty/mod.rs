@@ -6,7 +6,9 @@ mod locale;
 #[cfg(unix)]
 mod echo_watch;
 pub mod manager;
+pub mod flow_gate;
 pub mod osc;
+pub mod output_batch;
 pub mod shell_integration;
 pub mod shells;
 pub mod startup_query;

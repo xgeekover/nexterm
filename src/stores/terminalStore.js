@@ -3303,6 +3303,9 @@ export const useTerminalStore = create((set, get, api) => {
      */
     batchJobOutputArrived: (tabId) => batchJobReplies.outputArrived(tabId),
 
+    /** Whether `tabId` waits for cmd's question after a Ctrl+C — asked without judging, so its output is not paced (terminalRegistry.js). */
+    batchJobWaiting: (tabId) => batchJobReplies.isArmed(tabId),
+
     /** A chunk of `tabId`'s output is on `term`'s screen: answer cmd's question if that is what it shows. Returns whether it did. */
     answerBatchJobPrompt: (tabId, term) => batchJobReplies.afterOutput(tabId, term),
 

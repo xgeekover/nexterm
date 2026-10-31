@@ -1,7 +1,7 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch, reportFocusOut } from './terminalRegistry.js';
+import { ensureGpuRenderer, getOrCreateTerminal, isFittable, clearTerminalSearch, reportFocusOut, afterTerminalOutput } from './terminalRegistry.js';
 import { TerminalFindBar } from './TerminalFindBar.jsx';
 import { fitAndReport, isWindowCloseChord, legacyAltArrowSequence, showTerminalContainer } from '../../lib/terminalCompat.js';
 import { isMac, isWindows } from '../../lib/platform.js';
@@ -486,7 +486,15 @@ export function TerminalView({ tabId, active = false }) {
     let startedCancelled = false;
     listen('pty-command-started', (payload) => {
       if (payload?.session_id !== sessionId) return;
-      entry.commandMarks.mark(lastSubmittedRef.current);
+      // The mark goes on the row the output starts on: once xterm has read
+      // everything before it, held output included (terminalRegistry.js's
+      // pacing) — a write is parsed later than it is made. (The backend sends
+      // a read's markers after that read's output, so when C and the first of
+      // the output share one read, the mark lands below that much of it.)
+      // The command is the one submitted now; a "D" may clear the ref before
+      // then.
+      const command = lastSubmittedRef.current;
+      afterTerminalOutput(tabId, (current) => current.commandMarks.mark(command));
     }).then((off) => {
       if (startedCancelled) off();
       else startedUnlisten = off;

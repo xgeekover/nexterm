@@ -427,7 +427,10 @@ describe('Sticky command header: against xterm', () => {
 
   test('SK-28: wired — the view marks through the terminal’s tracker, which the registry makes and disposes', () => {
     const view = readFileSync(new URL('../../src/components/terminal/TerminalView.jsx', import.meta.url), 'utf8');
-    assert.match(view, /entry\.commandMarks\.mark\(lastSubmittedRef\.current\)/);
+    // Marked once xterm has read what came before the command started
+    // (terminalRegistry.js's afterTerminalOutput), with the command as
+    // submitted at that moment.
+    assert.match(view, /const command = lastSubmittedRef\.current;\s*afterTerminalOutput\(tabId, \(current\) => current\.commandMarks\.mark\(command\)\);/);
     assert.match(view, /entry\.commandMarks\.current\(\)/);
     assert.doesNotMatch(view, /options\.scrollback|oldestLine/, 'no row bound of its own, worked out from the scrollback');
     assert.doesNotMatch(view, /commandMarksRef/, 'the marks are the terminal’s, not the view’s');

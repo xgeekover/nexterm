@@ -1,0 +1,409 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/output_path_headless.test.js.
+
+  REAL `@xterm/xterm` 6 terminals made by the app's own `getOrCreateTerminal`
+  (src/components/terminal/terminalRegistry.js), fed through the app's own
+  output bus (src/lib/ptyOutputBus.js `deliver`, what the one `pty-output`
+  listener calls) with output shaped as the backend sends it: whole
+  characters, cut anywhere else (in the middle of a colour escape too), each
+  chunk with its UTF-8 size for flow control. `pty_ack` is recorded instead
+  of sent. Everything between — the pacing of terminals without focus
+  (src/lib/outputPacing.js), the backlog of a session whose terminal does not
+  exist yet, xterm's own parser — is the app's.
+
+    front   the terminal in front at the start
+    back    behind; brought to the front a third of the way through
+    late    output arrives before its terminal exists; made a quarter of the
+            way through; brought to the front two thirds of the way through
+    gone    behind, closed with output held
+
+  `run()` does it all and checks in the page (megabytes never cross CDP):
+  every line of every terminal's buffer against what was printed, colours
+  removed, and every byte acknowledged once.
+
+  Not part of the app's own routes; loaded only by that test, over the vite
+  dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; background: #111; }
+      .pane { position: fixed; width: 900px; height: 160px; overflow: hidden; }
+      #front { left: 0; top: 0; }
+      #back { left: 0; top: 170px; }
+      #late { left: 0; top: 340px; }
+      #gone { left: 0; top: 510px; }
+    </style>
+  </head>
+  <body>
+    <div id="front" class="pane"></div>
+    <div id="back" class="pane"></div>
+    <div id="late" class="pane"></div>
+    <div id="gone" class="pane"></div>
+    <script type="module">
+      import '@xterm/xterm/css/xterm.css';
+      import { useSettingsStore } from '../../../src/stores/settingsStore.js';
+      import { useTerminalStore, setTerminalOutputBarrier } from '../../../src/stores/terminalStore.js';
+      import {
+        getOrCreateTerminal,
+        disposeTerminal,
+        setWriteObserver,
+        afterTerminalOutput,
+        clearTerminal,
+        setHiddenAhead,
+      } from '../../../src/components/terminal/terminalRegistry.js';
+      import { startPtyOutputBus, deliver } from '../../../src/lib/ptyOutputBus.js';
+
+      // Wide enough that no line wraps: a buffer row is a printed line.
+      const COLS = 180;
+      const ROWS = 8;
+      // Room for every line printed, so "nothing lost" is checked from the first.
+      const SCROLLBACK = 40000;
+
+      useSettingsStore.setState({
+        terminalFontFamily: 'monospace',
+        terminalFontSize: 12,
+        terminalLineHeight: 1,
+        terminalScrollback: SCROLLBACK,
+      });
+
+      // The flow-control acknowledgements, as the backend would count them.
+      const acked = new Map();
+      await startPtyOutputBus({
+        listen: async () => () => {},
+        invoke: async (command, args) => {
+          if (command === 'pty_ack') acked.set(args.session_id, (acked.get(args.session_id) ?? 0) + args.bytes);
+        },
+      });
+
+      // Writes into xterm per tab, and whether the tab was in front then.
+      const writes = { all: new Map(), behind: new Map() };
+      const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+      setWriteObserver((tabId) => {
+        bump(writes.all, tabId);
+        if (useTerminalStore.getState().activeTabId !== tabId) bump(writes.behind, tabId);
+        return null;
+      });
+
+      /** xorshift: the same output every run. */
+      function rng(seed) {
+        let s = seed >>> 0 || 1;
+        return () => {
+          s ^= s << 13;
+          s >>>= 0;
+          s ^= s >>> 17;
+          s ^= s << 5;
+          s >>>= 0;
+          return s;
+        };
+      }
+
+      const SEGMENTS = [
+        '한글 출력 ',
+        '😀 ',
+        '👩\u{200d}💻 ',
+        '🇰🇷 ',
+        '\x1b[38;5;208mcolour\x1b[0m ',
+        '\x1b[1;32mbold green\x1b[22;39m ',
+        'plain words go here ',
+        '가나다라마바사 ',
+      ];
+      const SGR = /\x1b\[[0-9;]*m/g;
+
+      /** About `size` characters of numbered lines: what is printed, and each line as the screen should show it. */
+      function generate(seed, size) {
+        const next = rng(seed);
+        let printed = '';
+        const lines = [];
+        for (let n = 1; printed.length < size; n += 1) {
+          let text = `${String(n).padStart(7, '0')} `;
+          const count = next() % 7;
+          for (let i = 0; i < count; i += 1) text += SEGMENTS[next() % SEGMENTS.length];
+          printed += `${text}\r\n`;
+          // xterm keeps a space that was written; only cells never written are trimmed.
+          lines.push(text.replace(SGR, ''));
+        }
+        return { printed, lines };
+      }
+
+      /** Cut `text` anywhere but inside a character (the backend sends whole ones). */
+      function cut(text, seed) {
+        const next = rng(seed);
+        const chunks = [];
+        let at = 0;
+        while (at < text.length) {
+          let end = Math.min(text.length, at + 1 + (next() % 24000));
+          const code = text.charCodeAt(end - 1);
+          if (end < text.length && code >= 0xd800 && code <= 0xdbff) end += 1;
+          chunks.push(text.slice(at, end));
+          at = end;
+        }
+        return chunks;
+      }
+
+      const utf8 = new TextEncoder();
+      const SESSIONS = {
+        front: { tab: 'op-front', session: 'op-s-front', seed: 11, size: 900_000 },
+        back: { tab: 'op-back', session: 'op-s-back', seed: 23, size: 900_000 },
+        late: { tab: 'op-late', session: 'op-s-late', seed: 37, size: 600_000 },
+        gone: { tab: 'op-gone', session: 'op-s-gone', seed: 41, size: 60_000 },
+      };
+      for (const s of Object.values(SESSIONS)) {
+        Object.assign(s, generate(s.seed, s.size));
+        s.chunks = cut(s.printed, s.seed * 7);
+        s.sent = 0;
+        s.delivered = 0;
+        s.behind = 0;
+      }
+
+      function make(name) {
+        const s = SESSIONS[name];
+        const entry = getOrCreateTerminal(s.tab, { sessionId: s.session });
+        document.getElementById(name).replaceChildren(entry.container);
+        entry.term.resize(COLS, ROWS);
+        s.entry = entry;
+        return entry;
+      }
+
+      function send(name) {
+        const s = SESSIONS[name];
+        const chunk = s.chunks[s.delivered];
+        if (chunk === undefined) return false;
+        s.delivered += 1;
+        const bytes = utf8.encode(chunk).length;
+        s.sent += bytes;
+        if (s.entry && useTerminalStore.getState().activeTabId !== s.tab) s.behind += 1;
+        deliver(s.session, chunk, Date.now(), bytes);
+        return true;
+      }
+
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+      const front = (name) => useTerminalStore.setState({ activeTabId: SESSIONS[name].tab });
+
+      /** The buffer of `name`'s terminal against what was printed: the first difference, or null. */
+      function compare(name) {
+        const s = SESSIONS[name];
+        const buffer = s.entry.term.buffer.active;
+        const shown = [];
+        for (let y = 0; y < buffer.length; y += 1) shown.push(buffer.getLine(y)?.translateToString(true) ?? '');
+        while (shown.length && shown[shown.length - 1] === '') shown.pop();
+        const length = Math.max(shown.length, s.lines.length);
+        for (let i = 0; i < length; i += 1) {
+          if (shown[i] !== s.lines[i]) {
+            return { line: i, shown: shown[i]?.slice(0, 80) ?? null, printed: s.lines[i]?.slice(0, 80) ?? null, shownLines: shown.length, printedLines: s.lines.length };
+          }
+        }
+        return null;
+      }
+
+      async function settled(names, ms = 30000) {
+        const until = performance.now() + ms;
+        while (performance.now() < until) {
+          if (names.every((n) => (acked.get(SESSIONS[n].session) ?? 0) === SESSIONS[n].sent)) return true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return false;
+      }
+
+      async function run() {
+        const report = { checks: { focus: {} } };
+        make('front');
+        make('back');
+        make('gone');
+        front('front');
+
+        // The front terminal is written as each chunk arrives.
+        const frontBefore = writes.all.get('op-front') ?? 0;
+        send('front');
+        send('front');
+        report.checks.frontFirstTwoWritten = (writes.all.get('op-front') ?? 0) - frontBefore;
+
+        // Closed with output held: acknowledged, never written.
+        send('gone');
+        send('gone');
+        send('gone');
+        report.checks.goneWrittenBeforeClose = writes.all.get('op-gone') ?? 0;
+        disposeTerminal('op-gone');
+
+        const rounds = Math.max(...['front', 'back', 'late'].map((n) => SESSIONS[n].chunks.length));
+        for (let round = 0; round < rounds; round += 1) {
+          if (round === Math.floor(rounds / 4)) make('late');
+          if (round === Math.floor(rounds / 3)) {
+            // Held output for the terminal brought to the front goes at once.
+            send('back');
+            const before = writes.all.get('op-back') ?? 0;
+            front('back');
+            report.checks.focus.back = (writes.all.get('op-back') ?? 0) - before;
+          }
+          if (round === Math.floor((2 * rounds) / 3)) {
+            send('late');
+            const before = writes.all.get('op-late') ?? 0;
+            front('late');
+            report.checks.focus.late = (writes.all.get('op-late') ?? 0) - before;
+          }
+          send('front');
+          send('back');
+          send('late');
+          if (round % 6 === 5) await tick();
+        }
+
+        report.checks.settled = await settled(['front', 'back', 'late', 'gone']);
+        for (const name of Object.keys(SESSIONS)) {
+          const s = SESSIONS[name];
+          report[name] = {
+            sent: s.sent,
+            acked: acked.get(s.session) ?? 0,
+            chunks: s.chunks.length,
+            delivered: s.delivered,
+            deliveredBehind: s.behind,
+            writes: writes.all.get(s.tab) ?? 0,
+            writesBehind: writes.behind.get(s.tab) ?? 0,
+            difference: name === 'gone' ? null : compare(name),
+          };
+        }
+        return report;
+      }
+
+      /** A terminal of its own for one review case, not the one in front. */
+      function lone(id) {
+        const sessionId = `op-s-${id}`;
+        const entry = getOrCreateTerminal(`op-${id}`, { sessionId });
+        const pane = document.createElement('div');
+        pane.className = 'pane';
+        pane.style.top = '700px';
+        document.body.append(pane);
+        pane.replaceChildren(entry.container);
+        entry.term.resize(COLS, ROWS);
+        let sent = 0;
+        return {
+          entry,
+          sessionId,
+          send(text) {
+            const bytes = utf8.encode(text).length;
+            sent += bytes;
+            deliver(sessionId, text, Date.now(), bytes);
+          },
+          sent: () => sent,
+          acked: () => acked.get(sessionId) ?? 0,
+          rowOf(text) {
+            const buffer = entry.term.buffer.active;
+            for (let y = 0; y < buffer.length; y += 1) if (buffer.getLine(y)?.translateToString(true) === text) return y;
+            return -1;
+          },
+        };
+      }
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      /** Review round 1: a mark and a clear wait for held output to be READ, and a hidden page does not hold the program. */
+      async function review() {
+        const out = {};
+        useTerminalStore.setState({ activeTabId: 'op-front' });
+
+        // A command mark made the way TerminalView makes it, with output held.
+        const mk = lone('mark');
+        mk.send('prompt$ ls\r\n');
+        await wait(80);
+        mk.send('line-held-1\r\nline-held-2\r\n');
+        afterTerminalOutput('op-mark', (current) => current.commandMarks.mark('ls'));
+        mk.send('OUTPUT-STARTS-HERE\r\n');
+        await wait(150);
+        const mark = mk.entry.commandMarks.marks.at(-1);
+        out.mark = { row: mark?.marker?.line ?? null, expected: mk.rowOf('OUTPUT-STARTS-HERE'), command: mark?.command ?? null };
+
+        // Clear Terminal with output held that arrived before it.
+        const cl = lone('clear');
+        cl.send('old\r\n');
+        await wait(80);
+        cl.send('ARRIVED-BEFORE-CLEAR\r\n');
+        out.clearReturned = clearTerminal('op-clear');
+        await wait(150);
+        out.clear = { stillShown: cl.rowOf('ARRIVED-BEFORE-CLEAR') !== -1 };
+
+        // Something acting on the screen throws, inside xterm's write loop:
+        // the terminal goes on parsing what comes after.
+        const th = lone('throw');
+        th.send('before\r\n');
+        await wait(80);
+        const warn = console.warn;
+        console.warn = () => {};
+        afterTerminalOutput('op-throw', () => {
+          throw new Error('a mark that fails');
+        });
+        th.send('AFTER-THROW\r\n');
+        await wait(150);
+        // The output barrier the progress bar waits on, the same.
+        const barrier = setTerminalOutputBarrier(null);
+        setTerminalOutputBarrier(barrier);
+        barrier('op-throw', () => {
+          throw new Error('a barrier that fails');
+        });
+        th.send('AFTER-BARRIER\r\n');
+        await wait(150);
+        // And cmd's answer, judged in the write callback.
+        const actions = useTerminalStore.getState();
+        useTerminalStore.setState({
+          batchJobOutputArrived: () => true,
+          answerBatchJobPrompt: () => {
+            throw new Error('an answer that fails');
+          },
+        });
+        th.send('ANSWERED\r\n');
+        await wait(80);
+        useTerminalStore.setState({ batchJobOutputArrived: actions.batchJobOutputArrived, answerBatchJobPrompt: actions.answerBatchJobPrompt });
+        th.send('AFTER-ANSWER\r\n');
+        await wait(150);
+        console.warn = warn;
+        out.afterThrow = {
+          shown: th.rowOf('AFTER-THROW') !== -1,
+          afterBarrier: th.rowOf('AFTER-BARRIER') !== -1,
+          afterAnswer: th.rowOf('AFTER-ANSWER') !== -1,
+        };
+
+        // A hidden page whose xterm does not get to parse (its timers run late):
+        // writes are parked, as a throttled page leaves them.
+        const hd = lone('hidden');
+        await wait(80);
+        const realWrite = hd.entry.term.write.bind(hd.entry.term);
+        const parked = [];
+        hd.entry.term.write = (data, cb) => parked.push([data, cb]);
+        setHiddenAhead(1000);
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        const ackedBefore = hd.acked();
+        hd.send('A'.repeat(5000)); // nothing waits in xterm yet: acknowledged as taken
+        const writtenAtOnce = parked.length; // not held by pacing while hidden
+        hd.send('B'.repeat(5000)); // 5000 already waiting, past the limit: waits to be parsed
+        await wait(80);
+        out.hidden = { writtenAtOnce, ackedWhileParked: hd.acked() - ackedBefore, firstBytes: 5000 };
+        delete document.visibilityState;
+        hd.send('C'.repeat(10)); // visible again: paced and acknowledged once read, as before
+        const parkedWhileVisible = parked.length;
+        await wait(80);
+        out.hidden.parkedBeforeRelease = parked.length;
+        out.hidden.pacedWhenVisible = parkedWhileVisible === 2;
+        hd.entry.term.write = realWrite;
+        for (const [data, cb] of parked.splice(0)) realWrite(data, cb);
+        await wait(150);
+        out.hidden.ackedInTheEnd = hd.acked() - ackedBefore;
+        out.hidden.sent = hd.sent();
+        // Hidden again once xterm has caught up: nothing waits in it any more,
+        // so a chunk is acknowledged as taken again.
+        hd.entry.term.write = (data, cb) => parked.push([data, cb]);
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        const ackedCaughtUp = hd.acked();
+        hd.send('D'.repeat(100));
+        await wait(80);
+        out.hidden.ackedAgain = hd.acked() - ackedCaughtUp;
+        delete document.visibilityState;
+        hd.entry.term.write = realWrite;
+        for (const [data, cb] of parked.splice(0)) realWrite(data, cb);
+        await wait(80);
+        setHiddenAhead(null); // back to the app's own
+        return out;
+      }
+
+      window.__op = { run, review, ready: true };
+    </script>
+  </body>
+</html>
