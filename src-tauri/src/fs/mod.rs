@@ -317,6 +317,12 @@ pub fn read_small_file(path: &Path, follow: bool, max: u64) -> Result<Vec<u8>, S
         // its metadata says so below.)
         #[cfg(unix)]
         Err(err) if !follow && err.raw_os_error() == Some(libc::ELOOP) => return Err(SmallFileError::NotAFile),
+        // Windows will not open a folder as a file at all (no
+        // FILE_FLAG_BACKUP_SEMANTICS): the open fails with "access denied",
+        // which is the folder's kind, not a permission — asked only after the
+        // open failed, so nothing is read through what is asked.
+        #[cfg(windows)]
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) => return Err(SmallFileError::NotAFile),
         Err(err) => return Err(SmallFileError::Io(err)),
     };
     let meta = file.metadata().map_err(SmallFileError::Io)?;
