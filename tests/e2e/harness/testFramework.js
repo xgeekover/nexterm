@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { writeSync } from 'node:fs';
 
 class TestSuite {
   constructor(name) {
@@ -99,7 +100,9 @@ class TestRunnerContext {
         // part-way — a child that hangs and is killed, a native crash — leaves
         // no trace of where it was. NEXTERM_TEST_TRACE=1 names each case as
         // it starts (CI sets it on Windows, where the real-shell cases run).
-        if (process.env.NEXTERM_TEST_TRACE) console.log(`… ${suite.name} › ${t.name}`);
+        // Written straight to the descriptor: a console on Windows is written
+        // to asynchronously, and what was still queued is lost when the process dies.
+        if (process.env.NEXTERM_TEST_TRACE) writeSync(1, `… ${suite.name} › ${t.name}\n`);
         const testStartTime = Date.now();
         let status = 'passed';
         let error = null;
