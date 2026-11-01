@@ -1106,6 +1106,82 @@ window size and the terminal font size.
 Put the four `.md` tables, the notes from 2–5 and the machine details into
 `%TEMP%\nexterm-qa\report.md`.
 
+### V44 — a folder's own commands, quoted for cmd and PowerShell
+
+Checked on macOS and in the browser mock. On Windows only CI has run the
+quoting: the PC-28–PC-30 suites hand every value of a table through
+`cmd /d /s /c` and through Windows PowerShell 5.1 and PowerShell 7
+(`-EncodedCommand`) and compare what arrives — not at a prompt typed into by
+a person, which is what this check is for.
+
+Set up a scratch folder `%TEMP%\nexterm-qa\pc` with `.nexterm\commands.json`:
+
+```json
+{
+  "version": 1,
+  "commands": [
+    { "name": "Show a value", "command": "node -e \"console.log(JSON.stringify(process.argv.slice(1)))\" {{v}}" },
+    { "name": "Pick a mode", "command": "echo {{mode}}", "placeholders": { "mode": { "choices": ["debug", "release"] } } }
+  ]
+}
+```
+
+1. Open the folder → nothing runs and nothing is asked. ⌘⇧P / `Ctrl+Shift+P`
+   → *Review This Folder's Commands…* lists both lines in full. *Cancel* →
+   still not trusted; open it again → *Trust* → the two commands are in the
+   palette, marked *Project*. Hold Enter on *Trust*, and double-click it → it
+   trusts once, nothing else happens.
+2. From a **cmd** terminal, *Show a value* into a *New split* with each of
+   these, *Run* → node
+   prints a list of exactly one item equal to what was typed: `two words`,
+   `한글 경로`, `C:\my dir\`, `a&b|c<d>`, `(x)`, `it's`, `^`. Each of `%PATH%`,
+   `100%`, `say "hi"`, `hi!`, `x y₩` is refused under the field with the
+   reason, and *Run* is unavailable. An empty value → node prints `[]`.
+   *This terminal* → only *Type Only*: the line waits at its prompt, nothing
+   runs until you press Enter.
+3. The same in **Windows PowerShell** (and PowerShell 7 if installed):
+   `it's`, `it’s`, `$env:PATH` (printed as written, not expanded), `a,b`,
+   `--%`, `-x`, `1e3`, `한글 경로` arrive as typed; `say "hi"`, `x y₩` and
+   `C:\my dir\` are refused with the reason. With the Korean IME, type a
+   value in Hangul and press Enter while the last syllable is still being
+   composed → the syllable is committed and nothing runs; a second Enter runs
+   it, with the whole word in the line.
+   In a **Git Bash** terminal `/api/v1` is refused (Git Bash would rewrite it
+   into a Windows path); in a **WSL** terminal `C:\dir\` and `it's` are
+   refused, and `two words` arrives as typed.
+   Type `echo half` at a prompt without Enter, then pick *Show a value* →
+   *This terminal* is not offered (something is typed there). Run `timeout 3`
+   and type `echo late` while it waits, then pick *Show a value* → *This
+   terminal* types the line after `echo late` and does not press Enter, so
+   both show at the prompt and nothing runs.
+4. Start OpenCode in a terminal and pick *Show a value* there → *This
+   terminal* cannot be chosen and says why; *New split* opens a split and types
+   the line into its shell once the prompt is up — quoted for that split's
+   shell (pick it in a cmd group and in a PowerShell group). Type keys while
+   the split starts → they stay in the terminal you were in; the keyboard moves
+   to the split only after the line is typed.
+5. Change one character of `commands.json` in another editor → the palette
+   says the commands changed since they were trusted, and lists them again
+   only after a new *Trust*. *Stop Trusting This Folder's Commands* → back to
+   the review row.
+6. Replace `.nexterm` with a junction to another folder
+   (`mklink /J .nexterm %TEMP%\nexterm-qa\elsewhere`, with a
+   `commands.json` there) → not read; the palette says it is a link. If a
+   mapped network drive is at hand, open a folder on it with a
+   `.nexterm\commands.json` → not read, and it says why (no credential prompt,
+   no delay).
+   If OneDrive is set up, copy the scratch folder into it: with
+   `commands.json` downloaded, its commands load as before; with it made
+   online-only (right-click → *Free up space*), the palette says it is
+   online-only and asks to open it once — and nothing is downloaded behind
+   your back.
+7. Settings ▸ Terminal ▸ *User Commands*: paste the JSON above with `"version": 2`
+   → the field says why; fix it → the commands are in the palette marked
+   *User*, in any folder.
+
+Note in `%TEMP%\nexterm-qa\report.md` what each value printed, and anything
+refused that should not have been.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro
