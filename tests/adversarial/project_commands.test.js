@@ -306,7 +306,7 @@ describe('Project commands: quoting a value for each shell', () => {
     assert.equal(q('$env:PATH', 'powershell'), "'$env:PATH'", '…a variable…');
     assert.equal(q('@args', 'powershell'), "'@args'", '…a splat…');
     assert.equal(q('a,b', 'powershell'), "'a,b'", '…and an array');
-    assert.equal(q('--%', 'powershell'), "'--%'", 'never the bare stop-parsing token');
+    assert.match(quoteValue('--%', 'powershell').reason, /stop parsing/, 'quoted or not, PowerShell stops parsing at --% (measured on Windows CI)');
     assert.equal(q("it's", 'powershell'), "'it''s'");
     assert.equal(q('it\u{2019}s', 'powershell'), "'it\u{2019}\u{2019}s'", 'a typographic single quote is a quote to PowerShell');
     for (const value of ['say "hi"', 'say \u{201C}hi\u{201D}', '\u{201E}x']) {
@@ -372,7 +372,7 @@ const REFUSED_BY = {
   posix: [],
   fish: [],
   cmd: ['--%', 'quote\'s "mixed"', '%PATH%', '100%', 'hi!', 'x y\u{20A9}', '\u{FF02}q'],
-  powershell: ['C:\\my dir\\', 'quote\'s "mixed"', 'x y\u{20A9}', '\u{FF02}q'],
+  powershell: ['C:\\my dir\\', '--%', 'quote\'s "mixed"', 'x y\u{20A9}', '\u{FF02}q'],
   msys: ['/api/v1'],
 };
 
@@ -434,6 +434,18 @@ function found(name) {
   const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { encoding: 'utf8' });
   return which.status === 0 ? which.stdout.split(/\r?\n/u)[0].trim() : null;
 }
+
+/**
+ * Runs the lines through `shell <args>` with the script on its input — for
+ * Git Bash: an MSYS program started by a Windows one parses its own command
+ * line again (its quotes and backslashes), so a script handed as `-c <script>`
+ * did not arrive as written. Typed into the terminal it is read as input,
+ * which is what this does.
+ */
+const stdinRunner = (shell, args) => (lines, env) => {
+  const r = spawnSync(shell, args, { env, input: `${lines.join('\n')}\n`, encoding: 'utf8', timeout: 30000, windowsHide: true });
+  return `${r.stderr ?? ''}${r.error ?? ''}`;
+};
 
 /** Runs the lines with `shell <args> <script>`; the script is the lines, one per line. */
 const posixRunner = (shell, args) => (lines, env) => {
@@ -616,7 +628,7 @@ describe('Project commands: Git Bash on Windows', () => {
     const candidates = ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe'];
     const bash = candidates.find((path) => existsSync(path));
     if (!bash) skip('Git for Windows is not installed here');
-    const wrong = roundTrip('msys', '', posixRunner(bash, ['--norc', '--noprofile', '-c']));
+    const wrong = roundTrip('msys', '', stdinRunner(bash, ['--norc', '--noprofile', '-s']));
     assert.deepEqual(wrong, [], wrong.join('\n'));
   });
 });

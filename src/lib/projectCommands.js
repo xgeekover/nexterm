@@ -585,6 +585,10 @@ export function quoteValue(value, kind) {
       if (/\s/u.test(value) && value.endsWith('\\')) {
         return refusal('it has a space and ends in \\ — Windows PowerShell quotes it and the \\ escapes the closing quote');
       }
+      // Measured on Windows CI: quoted or not, both Windows PowerShell 5.1
+      // and PowerShell 7 take a --% argument as "stop parsing" and the
+      // program never receives it.
+      if (value === '--%') return refusal('PowerShell reads --% as "stop parsing" even in quotes, and the program would not get it');
       if (POWERSHELL_BARE.test(value)) return { ok: true, text: value };
       return { ok: true, text: `'${value.replace(POWERSHELL_SINGLE, '$&$&')}'` };
     }
