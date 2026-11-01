@@ -112,7 +112,21 @@ class TestRunnerContext {
             await hook();
           }
 
-          await t.fn();
+          // A case that never settles fails, rather than holding the run for
+          // ever (or until the process dies with nothing said): 120 s, or
+          // NEXTERM_TEST_TIMEOUT_MS.
+          const limit = Number(process.env.NEXTERM_TEST_TIMEOUT_MS) || 120000;
+          let timer = null;
+          try {
+            await Promise.race([
+              t.fn(),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`timed out after ${limit} ms`)), limit);
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
 
           for (const hook of suite.afterEachHooks) {
             await hook();
