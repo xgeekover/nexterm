@@ -111,11 +111,25 @@ jobs:
         run: node tests/e2e/runner.js
 
       - name: Adversarial tests
-        run: node tests/adversarial/runner.js
-        # Names each case as it starts on Windows, where the quoting round
-        # trips run cmd, PowerShell and Git Bash: a hang there must say where.
+        shell: bash
+        # Into a file as well as the log, kept as an artifact: on Windows the
+        # step's log has stopped mid-run with the process still going (the
+        # step ended with the suite's own exit code), and the file is what
+        # says what happened after. NEXTERM_TEST_TRACE names each case as it
+        # starts there.
+        run: |
+          set -o pipefail
+          node tests/adversarial/runner.js 2>&1 | tee adversarial-output.txt
         env:
           NEXTERM_TEST_TRACE: ${{ matrix.platform == 'windows-latest' && '1' || '' }}
+
+      - name: Keep the adversarial output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adversarial-output-${{ matrix.platform }}
+          path: adversarial-output.txt
+          retention-days: 7
 
       # The only suite that mounts a component. The other three run against a
       # mock backend and never draw anything, so this is what stands between a
