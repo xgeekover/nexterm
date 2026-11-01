@@ -57,6 +57,12 @@ that layout the next time you open it.
 - **Layout templates.** Give each terminal of a saved group a startup command
   and opening it starts everything at once — the dev server, the test watcher,
   the agent — each typed as soon as its shell is ready, tmuxinator-style.
+- **A folder's own commands.** A repository lists the commands people run
+  in it — build, test one file, deploy to a stage — in
+  `.nexterm/commands.json`, with blanks to fill in. The command palette lists
+  them once you have read and trusted them; picking one asks for its blanks,
+  quotes each value for the terminal's shell, and shows the exact line before
+  anything is typed. Your own commands for every folder live in Settings.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
 - **Editor tabs come back too.** Each folder remembers its open files — the
@@ -367,6 +373,90 @@ characters are stripped. Saved workspaces work the same way (the workspace bar
 → *Edit Startup Commands of a Saved Workspace…*), and restoring one starts
 every group's commands. Restoring the session at launch never runs anything: it
 brings the shells back, as it offers an agent back rather than starting it.
+
+**Run a folder's own commands.** Put the commands a project is worked with in
+`.nexterm/commands.json` at the top of the folder:
+
+```json
+{
+  "version": 1,
+  "commands": [
+    { "name": "Run the tests", "command": "npm test" },
+    {
+      "name": "Run one test file",
+      "description": "The file is asked for, with this one filled in",
+      "command": "npm test -- {{file}} --reporter {{reporter}}",
+      "placeholders": {
+        "file": { "label": "Test file", "default": "src/app.test.js" },
+        "reporter": { "choices": ["dot", "spec"], "default": "spec" }
+      }
+    }
+  ]
+}
+```
+
+*Open Project Commands File* in the command palette opens it, and writes this
+example first when the folder has none. Each command has a `name` (one per
+file), an optional `description` and a `command` — **one line**: join several
+with `&&` or `;`, or put them in a script, because a second line typed into a
+shell goes to whatever the first one started. `{{name}}` is a blank (letters,
+digits, `_` and `-`); anything else in double braces, `{{.Names}}` or
+`{{ x }}`, is text, so Docker and Go templates pass through. A blank may be
+declared under `placeholders` with a `label`, a `description`, a `default` and
+`choices`; one that is not declared is a plain field. A blank stands where a
+word starts, because NexTerm quotes the value itself: not inside quotes
+(`"note: {{m}}"` — the value's quotes would be literal there, or close the
+command's), not right after `\`, `^`, `` ` `` or `$`, not after PowerShell's
+`--%`, and not touching another blank. An empty value types nothing, so a
+blank can stand for an optional argument. A `!` followed by text (`!!`,
+`!$`, `!word`) outside single quotes is refused, and so is a line starting
+with `^`: at an interactive bash or zsh prompt those are replaced by earlier
+commands before the line runs.
+
+**Nothing in that file runs until you have read it.** A folder's commands
+are somebody else's text that ends up in your shell, so the palette first
+offers *Review This Folder's Commands…*: every command's full line, and every
+entry NexTerm refused with the reason — a key it does not know (a typo such as
+`comand` is never ignored), a second line, a control character, a space that is not a
+plain space, or a bidi or invisible character that would make the line read
+as something it does not run. Lines are shown in the order they are typed,
+right-to-left letters included. *Trust* remembers that content in that folder; change one byte — a
+`git pull` — and it is asked again. *Stop Trusting This Folder's Commands*
+forgets it. A `.nexterm` or `commands.json` that is a link is not followed,
+and a folder on another computer or a network drive is not read at all.
+
+**Picking a command never runs it straight away.** It opens its blanks, the
+terminal it goes to — the one you are in, or a new split — and the exact line
+that will be typed, quoted for that terminal's shell and named (cmd,
+PowerShell, zsh): `"…"` for cmd, `'…'` for PowerShell and the POSIX shells,
+bare when nothing needs quoting. A value that shell cannot be given safely is
+refused with the reason instead of typed: in cmd a `"` (it cannot be written
+inside quotes), a `%` (cmd expands `%…%` even inside quotes) or a `!`; in
+PowerShell a `"`, which Windows PowerShell hands to programs unescaped, and
+`--%`, which it takes as "stop parsing" even in quotes; in
+both, a character Windows turns into `"` or `\` for programs that read their
+command line in the system code page (`₩`, `¥`, the fullwidth quote and
+backslash). In a WSL terminal a `\` or `'` is refused, since NexTerm cannot
+see whether the distribution starts bash or fish; in Git Bash a value that
+starts with `/`, which it rewrites into a Windows path. *Run*
+types the line and Enter into a **new split** — a fresh shell, where nothing
+is typed yet; the keyboard moves there once the line is in. Into the terminal
+you are in, the line is only typed (*Type Only*) and left for you to press
+Enter: from outside a shell NexTerm cannot be sure its prompt is empty — keys
+typed while a command ran, the rest of a paste, an open quote — and whatever
+is there then shows in front of the line instead of running with it. That
+terminal is not offered at all while something runs in it (an agent, a
+server), while NexTerm knows text is typed at its prompt or that the shell is
+still waiting for the rest of a line, or when its shell does not report its
+prompt (fish, sh, a WSL terminal). The terminal is the one the dialog was
+opened for: while it is open, NexTerm's shortcuts and menu do nothing, and if
+that terminal closes, the dialog says so rather than picking another. A
+terminal asking for a password is never typed into.
+
+**Your own commands, everywhere.** Settings ▸ Terminal ▸ *User Commands* takes
+the same JSON and lists them in the palette in every folder, marked *User*
+(a project's are marked *Project*). What is wrong with them is said under the
+field as you type.
 
 **Pick an agent conversation back up.** Quit NexTerm while OpenCode or Claude
 Code runs in a terminal, and that terminal comes back offering the
@@ -814,7 +904,8 @@ src-tauri/src
   pty/            PTY manager, ConPTY start-up query, OSC 133/7 filter, shell integration,
                   flow control (flow_gate.rs) and output batching (output_batch.rs)
   perf.rs         performance mode: counters and knobs read only when NEXTERM_PERF is set
-  fs/             folder-confined file commands + watcher
+  fs/             folder-confined file commands + watcher; project_commands.rs reads
+                  .nexterm/commands.json without following links or leaving the machine
   menu.rs         native menu described as data, so it is testable off-thread
   commands/       the #[tauri::command] surface
 src
@@ -822,6 +913,7 @@ src
   components/     layout, terminal, editor, explorer, command palette
   lib/            persistence, paths, terminal compatibility rules, themes, IPC wrapper,
                   the output bus (ptyOutputBus.js) and pacing (outputPacing.js); perf/ for measuring
+                  project commands: the file's rules, blanks and quoting per shell (projectCommands.js)
 tests/perf/       load generator, CPU sampler and report table for performance mode
 ```
 

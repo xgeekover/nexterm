@@ -3,6 +3,21 @@
  */
 
 import { runnerContext } from '../e2e/harness/testFramework.js';
+import { writeSync } from 'node:fs';
+
+// A run that dies says how, synchronously: on Windows the console is written
+// to asynchronously, and the message of an uncaught error was lost with it.
+process.on('uncaughtException', (err) => {
+  writeSync(2, `\nUncaught exception: ${err?.stack ?? err}\n`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  writeSync(2, `\nUnhandled rejection: ${err?.stack ?? err}\n`);
+  process.exit(1);
+});
+process.on('exit', (code) => {
+  if (process.env.NEXTERM_TEST_TRACE) writeSync(1, `\n(runner exiting with code ${code})\n`);
+});
 import './stress_agent_chat_palette.test.js';
 import './shell_integration.test.js';
 import './terminal_groups.test.js';
@@ -111,6 +126,12 @@ import './strip_overlay_mounted.test.js';
 import './perf_mode.test.js';
 import './flow_control.test.js';
 import './output_pacing.test.js';
+import './project_commands_backend_mock.test.js';
+import './project_commands.test.js';
+import './project_commands_store.test.js';
+import './project_commands_palette.test.js';
+import './project_commands_run.test.js';
+import './project_commands_dialog_mounted.test.js';
 
 async function run() {
   console.log('====================================================');

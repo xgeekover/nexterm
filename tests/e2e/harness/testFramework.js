@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { writeSync } from 'node:fs';
 
 class TestSuite {
   constructor(name) {
@@ -95,6 +96,13 @@ class TestRunnerContext {
         }
 
         stats.totalTests++;
+        // The runners print every result at the end, so a process that dies
+        // part-way — a child that hangs and is killed, a native crash — leaves
+        // no trace of where it was. NEXTERM_TEST_TRACE=1 names each case as
+        // it starts (CI sets it on Windows, where the real-shell cases run).
+        // Written straight to the descriptor: a console on Windows is written
+        // to asynchronously, and what was still queued is lost when the process dies.
+        if (process.env.NEXTERM_TEST_TRACE) writeSync(1, `… ${suite.name} › ${t.name}\n`);
         const testStartTime = Date.now();
         let status = 'passed';
         let error = null;
@@ -104,7 +112,21 @@ class TestRunnerContext {
             await hook();
           }
 
-          await t.fn();
+          // A case that never settles fails, rather than holding the run for
+          // ever (or until the process dies with nothing said): 120 s, or
+          // NEXTERM_TEST_TIMEOUT_MS.
+          const limit = Number(process.env.NEXTERM_TEST_TIMEOUT_MS) || 120000;
+          let timer = null;
+          try {
+            await Promise.race([
+              t.fn(),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`timed out after ${limit} ms`)), limit);
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
 
           for (const hook of suite.afterEachHooks) {
             await hook();

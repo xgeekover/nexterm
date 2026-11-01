@@ -3,6 +3,21 @@ import { listen } from '../lib/ipc.js';
 import { runMenuAction } from '../lib/menuActions.js';
 import { syncNativeMenu } from '../lib/nativeMenu.js';
 import { useShortcuts } from './useShortcuts.js';
+import { modalHeld } from '../lib/modalLock.js';
+
+/**
+ * What an item of the native menu does when it arrives (`menu` event): its
+ * action — or nothing while a dialog that keeps the app still is open
+ * (src/lib/modalLock.js). Behind the run dialog of a project command, Close
+ * Pane and New Terminal put a new terminal where the line was going. The
+ * Edit menu's Copy, Paste, Undo and Select All are the OS's own items, not
+ * these, and keep working in the dialog's fields.
+ */
+export function onMenuEvent(id, { run = runMenuAction, modalOpen = modalHeld } = {}) {
+  if (modalOpen()) return false;
+  run(id);
+  return true;
+}
 
 /**
  * Both directions of the native menu.
@@ -23,7 +38,7 @@ export function useMenuEvents() {
     let unlisten = null;
     let cancelled = false;
 
-    listen('menu', (id) => runMenuAction(id)).then((off) => {
+    listen('menu', (id) => onMenuEvent(id)).then((off) => {
       if (cancelled) off?.();
       else unlisten = off;
     });

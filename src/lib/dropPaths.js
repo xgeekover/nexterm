@@ -115,7 +115,7 @@ const IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
  * prompt. Quotes do not stop that expansion, but they keep what it expands to
  * one word: `C:\x\%ProgramFiles%.txt` bare is two arguments.
  */
-const CMD_NEEDS_QUOTES = /[\s&()[\]{}^=;!'+,`~<>|%]/u;
+export const CMD_NEEDS_QUOTES = /[\s&()[\]{}^=;!'+,`~<>|%]/u;
 
 /**
  * A word PowerShell passes on as it is in argument mode: letters, digits,

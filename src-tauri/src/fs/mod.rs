@@ -1,5 +1,6 @@
 pub mod drive;
 pub mod git;
+pub mod project_commands;
 pub mod watcher;
 pub mod search;
 pub mod reveal;
@@ -259,6 +260,84 @@ fn too_large_to_open(path_str: &str, size: u64) -> String {
 
 fn not_text(path_str: &str) -> String {
     format!("File is not UTF-8 text: {path_str}")
+}
+
+/// Why `read_small_file` handed back no bytes.
+#[derive(Debug)]
+pub enum SmallFileError {
+    /// Nothing is there — or, followed, a link that leads nowhere.
+    NotFound,
+    /// What was opened is no regular file: a folder, a FIFO, a device, a
+    /// socket — or, not following, a link.
+    NotAFile,
+    /// More than the cap, by the open file's size or by what was read.
+    TooLarge,
+    /// The open, the size or the read failed some other way.
+    Io(std::io::Error),
+}
+
+/// The bytes of `path` when it is a regular file of at most `max` bytes.
+/// With `follow` false, a link is not opened through — it is not a regular
+/// file — so a file swapped for a link after it was looked at is not read
+/// either.
+///
+/// For small files somebody else wrote, read without anybody asking: a
+/// repository's `HEAD` (`git::branch_of`) and the open folder's
+/// `.nexterm/commands.json` (`project_commands`). Unlike `read_file`, which
+/// opens what the user picked, these must not wait and must not be made to
+/// read much.
+///
+/// So it is asked of the open file, not of the path before opening it: a file
+/// that is a FIFO would hold the open until something wrote to it, and one
+/// swapped between a check and the open would get past the check. The open
+/// does not wait (`O_NONBLOCK`, which changes nothing for a regular file), and
+/// what was opened is what is asked whether it is a file. The read is capped
+/// too, not only the size asked: a file that grows while it is read is read
+/// no further than one byte past `max`, which is enough to say it is too
+/// large.
+pub fn read_small_file(path: &Path, follow: bool, max: u64) -> Result<Vec<u8>, SmallFileError> {
+    use std::io::Read;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW });
+    }
+    #[cfg(windows)]
+    if !follow {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(SmallFileError::NotFound),
+        // `O_NOFOLLOW` refuses a link by failing the open with ELOOP: the
+        // link is there, and is no file. (Windows opens the link itself, and
+        // its metadata says so below.)
+        #[cfg(unix)]
+        Err(err) if !follow && err.raw_os_error() == Some(libc::ELOOP) => return Err(SmallFileError::NotAFile),
+        // Windows will not open a folder as a file at all (no
+        // FILE_FLAG_BACKUP_SEMANTICS): the open fails with "access denied",
+        // which is the folder's kind, not a permission — asked only after the
+        // open failed, so nothing is read through what is asked.
+        #[cfg(windows)]
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) => return Err(SmallFileError::NotAFile),
+        Err(err) => return Err(SmallFileError::Io(err)),
+    };
+    let meta = file.metadata().map_err(SmallFileError::Io)?;
+    if !meta.is_file() {
+        return Err(SmallFileError::NotAFile);
+    }
+    if meta.len() > max {
+        return Err(SmallFileError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1).read_to_end(&mut bytes).map_err(SmallFileError::Io)?;
+    if bytes.len() as u64 > max {
+        return Err(SmallFileError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
@@ -1014,6 +1093,20 @@ fn without_verbatim_prefix(path: &str) -> Cow<'_, str> {
         [drive, b':', ..] if drive.is_ascii_alphabetic() => Cow::Borrowed(rest),
         _ => Cow::Borrowed(path),
     }
+}
+
+/// Whether `path` is not to be looked at: by its spelling — empty, too long,
+/// not absolute, another machine, a device (`reveal::refusal`, the rules for
+/// a name in a terminal's output) — on a mapped network drive
+/// (`network_drive`, `on_a_network_drive` in the app), or through a link
+/// that leads to another machine or onto such a drive. Every path
+/// `git::branch_of` opens is asked first, and so is the open folder before
+/// `project_commands` looks at anything in it.
+pub fn refused(path: &Path, network_drive: &dyn Fn(&str) -> bool) -> bool {
+    let spelled = path.to_string_lossy();
+    reveal::refusal(&spelled, cfg!(windows)).is_some()
+        || network_drive(&spelled)
+        || link_leads_off_machine_by(path, network_drive)
 }
 
 /// Whether confining `asked`, spelled out in full as `spelled`, would have to
@@ -2480,5 +2573,73 @@ mod rooted_target_tests {
         assert!(link_leads_off_machine(&dir.join("raw").join("inner")));
         assert!(!link_leads_off_machine(&dir.join("ordinary")), "an ordinary relative target stays here");
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// `read_small_file`, which reads the files nobody asked to be opened — a
+/// repository's `HEAD`, the open folder's `.nexterm/commands.json` — and says
+/// why it read nothing.
+#[cfg(test)]
+mod small_file_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nexterm-smallfile-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dunce::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn at_most_max_bytes_of_a_regular_file() {
+        let dir = scratch("cap");
+        let file = dir.join("f");
+        fs::write(&file, b"0123456789").unwrap();
+        assert_eq!(read_small_file(&file, false, 10).unwrap(), b"0123456789", "exactly the cap");
+        assert!(matches!(read_small_file(&file, false, 9), Err(SmallFileError::TooLarge)), "one byte over");
+        fs::write(&file, b"").unwrap();
+        assert_eq!(read_small_file(&file, false, 0).unwrap(), b"", "an empty file is a file");
+        assert!(matches!(read_small_file(&dir.join("missing"), false, 10), Err(SmallFileError::NotFound)));
+        assert!(matches!(read_small_file(&dir, false, 10), Err(SmallFileError::NotAFile)), "a folder");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Not following, a link is no file, wherever it leads; followed, it is
+    /// what it leads to.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_read_through_only_when_followed() {
+        let dir = scratch("link");
+        fs::write(dir.join("real"), b"x").unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join("dangling")).unwrap();
+        assert!(matches!(read_small_file(&dir.join("link"), false, 10), Err(SmallFileError::NotAFile)));
+        assert_eq!(read_small_file(&dir.join("link"), true, 10).unwrap(), b"x");
+        assert!(matches!(read_small_file(&dir.join("dangling"), false, 10), Err(SmallFileError::NotAFile)));
+        assert!(matches!(read_small_file(&dir.join("dangling"), true, 10), Err(SmallFileError::NotFound)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A FIFO would hold an ordinary open until something wrote to it. The
+    /// reads run on a thread with a deadline, so a wait fails here.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_no_file_and_does_not_hold_the_open() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = scratch("fifo");
+        let fifo = dir.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "premise: a FIFO");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let not_following = matches!(read_small_file(&path, false, 10), Err(SmallFileError::NotAFile));
+            let following = matches!(read_small_file(&path, true, 10), Err(SmallFileError::NotAFile));
+            let _ = tx.send((not_following, following));
+        });
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(5));
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(answer.expect("the open is still waiting on the FIFO"), (true, true));
     }
 }
