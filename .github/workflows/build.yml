@@ -69,6 +69,14 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # The project commands suite hands quoted values through every shell it
+      # finds and compares what arrives (tests/adversarial/project_commands.test.js);
+      # without these two the zsh and fish cases skip here, and fish is
+      # checked nowhere.
+      - name: Install zsh and fish for the quoting round trips
+        if: matrix.platform == 'ubuntu-latest'
+        run: sudo apt-get install -y zsh fish
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20

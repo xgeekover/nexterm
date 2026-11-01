@@ -48,6 +48,9 @@ const SETTINGS_KEYS = [
   'terminalRightClick',
   'terminalMultiLinePasteWarning',
   'terminalAutoReplyBatchJob',
+  // Edited by a multi-line field of its own (a 'textarea' control): the
+  // JSON of the user's own commands (stage 5, spec D8).
+  'terminalUserCommands',
   'terminalDefaultShell',
   'terminalDefaultCwd',
   'terminalDefaultCwdPath',
@@ -132,6 +135,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalRightClick: S.getState().settingsDefaults.terminalRightClick === 'copyPaste' ? 'default' : 'copyPaste',
       terminalMultiLinePasteWarning: 'never',
       terminalAutoReplyBatchJob: false,
+      terminalUserCommands: '{ "version": 1, "commands": [] }',
       filesEnableTrash: false,
       editorFontSize: 16,
       editorTabSize: 4,

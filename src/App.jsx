@@ -7,6 +7,8 @@ import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
+import { ProjectCommandDialog } from './components/command/ProjectCommandDialog.jsx';
+import { ProjectCommandsTrustDialog } from './components/command/ProjectCommandsTrustDialog.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
 import { useMenuEvents } from './hooks/useMenuEvents.js';
 import { useUnsavedGuard } from './hooks/useUnsavedGuard.js';
@@ -17,13 +19,14 @@ import { useTerminalStore } from './stores/terminalStore.js';
 import { loadCommandHistory } from './lib/commandIndex.js';
 import { useEditorStore } from './stores/editorStore.js';
 import { useSettingsStore } from './stores/settingsStore.js';
+import { useProjectCommandsStore } from './stores/projectCommandsStore.js';
 import { mockBridge } from './lib/ipc.js';
 import { startPerfMode } from './lib/perf/perfMode.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
 if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debug')) {
-  window.__nexterm = { useTerminalStore, useEditorStore, useSettingsStore, mockBridge };
+  window.__nexterm = { useTerminalStore, useEditorStore, useSettingsStore, useProjectCommandsStore, mockBridge };
 }
 
 export default function App() {
@@ -64,6 +67,11 @@ export default function App() {
     };
   }, [initTerminal, initEditor]);
 
+  // The open folder's `.nexterm/commands.json`, read when the folder changes
+  // and when something under `.nexterm` does, and the user's own commands
+  // from Settings. Reading is all it does: nothing is ever run on its own.
+  useEffect(() => useProjectCommandsStore.getState().start(), []);
+
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-vsc-editor text-vsc-fg font-ui">
       {/* Draggable TitleBar */}
@@ -94,6 +102,11 @@ export default function App() {
 
       {/* "Paste N lines?" before a multi-line paste a program would run line by line */}
       <PasteWarningDialog />
+
+      {/* A folder's commands, reviewed before they are trusted, and the exact
+          line of one, shown before it is typed */}
+      <ProjectCommandsTrustDialog />
+      <ProjectCommandDialog />
     </div>
   );
 }

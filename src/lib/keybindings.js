@@ -150,6 +150,35 @@ export const COMMANDS = {
     // A pick of the other panes, in the palette: which one is the question.
     run: (ctx) => ctx.setCommandPaletteOpen?.(true, 'swap-pane'),
   },
+  // Project commands (stage 5, spec D10). Palette commands with no chord of
+  // their own and no place in the native menu, so nothing is taken from a
+  // shell as shipped. Not claimed ahead of a focused terminal
+  // (`overTerminal`) either: a chord a user gives one works wherever keys
+  // reach the window, and over a terminal where xterm lets the key through.
+  // Claiming them there would put them on KB-11's list, which is a product
+  // decision of its own.
+  'run-project-command': {
+    title: 'Run Project Command…',
+    menuId: null,
+    // A pick of the folder's and the user's commands, in the palette.
+    run: (ctx) => ctx.setCommandPaletteOpen?.(true, 'project-commands'),
+  },
+  'open-project-commands-file': {
+    title: 'Open Project Commands File',
+    menuId: null,
+    run: (ctx) => {
+      if (ctx.isCommandPaletteOpen) ctx.setCommandPaletteOpen?.(false);
+      ctx.openProjectCommandsFile?.();
+    },
+  },
+  'stop-trusting-project-commands': {
+    title: "Stop Trusting This Folder's Commands",
+    menuId: null,
+    run: (ctx) => {
+      if (ctx.isCommandPaletteOpen) ctx.setCommandPaletteOpen?.(false);
+      ctx.stopTrustingProjectCommands?.();
+    },
+  },
   'new-terminal': {
     title: 'New Terminal',
     run: (ctx) => ctx.createTerminalTab?.(),
@@ -624,13 +653,24 @@ export function describeConflict(conflict, { isMac = false } = {}) {
 /** The bindings in force when nobody has overridden anything. */
 export const DEFAULT_RESOLVED = resolveKeybindings({}).bindings;
 
-/** The binding `e` presses, or null. Runs nothing. */
+/**
+ * The binding `e` presses, or null. Runs nothing.
+ *
+ * While a dialog that keeps the app still is open (`ctx.modalOpen()` — the
+ * run dialog of a project command, the review that trusts a folder's
+ * commands; src/lib/modalLock.js), no command of the app's answers a key:
+ * behind the run dialog a chord moved the active pane, closed the terminal
+ * the line was for, or opened the palette under it. The reload guards are
+ * the exception — a reload under a dialog still reaps every shell.
+ */
 export function findBinding(e, ctx) {
   const bindings = ctx?.bindings ?? DEFAULT_RESOLVED;
+  const modal = typeof ctx?.modalOpen === 'function' ? ctx.modalOpen() : Boolean(ctx?.modalOpen);
   for (const binding of bindings) {
     if (!chordMatches(binding.chord, e, ctx?.isMod)) continue;
     const spec = COMMANDS[binding.command];
     if (!spec) continue;
+    if (modal && !spec.guard) continue;
     if (spec.enabled && !spec.enabled(ctx)) continue;
     return { ...binding, spec, id: binding.command };
   }

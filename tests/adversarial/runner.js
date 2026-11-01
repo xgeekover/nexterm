@@ -111,6 +111,12 @@ import './strip_overlay_mounted.test.js';
 import './perf_mode.test.js';
 import './flow_control.test.js';
 import './output_pacing.test.js';
+import './project_commands_backend_mock.test.js';
+import './project_commands.test.js';
+import './project_commands_store.test.js';
+import './project_commands_palette.test.js';
+import './project_commands_run.test.js';
+import './project_commands_dialog_mounted.test.js';
 
 async function run() {
   console.log('====================================================');

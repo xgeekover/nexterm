@@ -96,6 +96,16 @@ export const SETTINGS_DEFAULTS = {
    * src/lib/batchJobReply.js.
    */
   terminalAutoReplyBatchJob: true,
+  /**
+   * The user's own commands for every folder (spec D8): the JSON of a
+   * folder's `.nexterm/commands.json` — `{ "version": 1, "commands": [ … ] }`
+   * — kept as the text typed, at most LIMITS.userText characters, and read
+   * by the same strict validator. Offered in the command palette with the
+   * hint User, trusted (the user wrote them), and like a folder's shown in
+   * full before anything is typed. '' for none. See src/lib/
+   * projectCommands.js and src/stores/projectCommandsStore.js.
+   */
+  terminalUserCommands: '',
   terminalDefaultShell: 'default',
   /**
    * Where a NEW terminal starts, when nothing has asked for a directory.

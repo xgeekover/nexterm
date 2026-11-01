@@ -50,8 +50,13 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'Go to Latest Unread Notification',
         'Mark All Notifications Read',
         'Save All Files',
+        // Stage 5: the project commands' own three. The commands themselves
+        // are listed in a group of their own, never among these.
+        'Run Project Command…',
+        'Open Project Commands File',
+        "Stop Trusting This Folder's Commands",
       ],
-      'The palette offers exactly the ten commands the app implements'
+      'The palette offers exactly the thirteen commands the app implements'
     );
   });
 
