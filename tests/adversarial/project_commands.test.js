@@ -437,7 +437,7 @@ function found(name) {
 
 /** Runs the lines with `shell <args> <script>`; the script is the lines, one per line. */
 const posixRunner = (shell, args) => (lines, env) => {
-  const r = spawnSync(shell, [...args, lines.join('\n')], { env, encoding: 'utf8', timeout: 60000 });
+  const r = spawnSync(shell, [...args, lines.join('\n')], { env, encoding: 'utf8', timeout: 30000, windowsHide: true });
   return `${r.stderr ?? ''}${r.error ?? ''}`;
 };
 
@@ -474,7 +474,7 @@ describe('Project commands: a quoted value through the real shell arrives as typ
       let said = '';
       for (let i = 0; i < lines.length; i += 10) {
         const line = lines.slice(i, i + 10).join(' & ');
-        const r = spawnSync('cmd.exe', ['/d', '/s', '/c', `"${line}"`], { env, encoding: 'utf8', windowsVerbatimArguments: true, timeout: 60000 });
+        const r = spawnSync('cmd.exe', ['/d', '/s', '/c', `"${line}"`], { env, encoding: 'utf8', windowsVerbatimArguments: true, timeout: 30000, windowsHide: true });
         said += `${r.stderr ?? ''}${r.error ?? ''}`;
       }
       return said;
@@ -497,7 +497,7 @@ describe('Project commands: a quoted value through the real shell arrives as typ
         for (let i = 0; i < lines.length; i += 15) {
           const script = lines.slice(i, i + 15).join('\n');
           const encoded = Buffer.from(script, 'utf16le').toString('base64');
-          const r = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env, encoding: 'utf8', timeout: 120000 });
+          const r = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { env, encoding: 'utf8', timeout: 60000, windowsHide: true });
           said += `${r.stderr ?? ''}${r.error ?? ''}`;
         }
         return said;

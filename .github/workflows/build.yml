@@ -112,6 +112,10 @@ jobs:
 
       - name: Adversarial tests
         run: node tests/adversarial/runner.js
+        # Names each case as it starts on Windows, where the quoting round
+        # trips run cmd, PowerShell and Git Bash: a hang there must say where.
+        env:
+          NEXTERM_TEST_TRACE: ${{ matrix.platform == 'windows-latest' && '1' || '' }}
 
       # The only suite that mounts a component. The other three run against a
       # mock backend and never draw anything, so this is what stands between a

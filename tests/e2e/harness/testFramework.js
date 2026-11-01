@@ -95,6 +95,11 @@ class TestRunnerContext {
         }
 
         stats.totalTests++;
+        // The runners print every result at the end, so a process that dies
+        // part-way — a child that hangs and is killed, a native crash — leaves
+        // no trace of where it was. NEXTERM_TEST_TRACE=1 names each case as
+        // it starts (CI sets it on Windows, where the real-shell cases run).
+        if (process.env.NEXTERM_TEST_TRACE) console.log(`… ${suite.name} › ${t.name}`);
         const testStartTime = Date.now();
         let status = 'passed';
         let error = null;
