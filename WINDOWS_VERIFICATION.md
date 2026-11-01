@@ -1141,7 +1141,7 @@ Set up a scratch folder `%TEMP%\nexterm-qa\pc` with `.nexterm\commands.json`:
    runs until you press Enter.
 3. The same in **Windows PowerShell** (and PowerShell 7 if installed):
    `it's`, `it’s`, `$env:PATH` (printed as written, not expanded), `a,b`,
-   `--%`, `-x`, `1e3`, `한글 경로` arrive as typed; `say "hi"`, `x y₩` and
+   `-x`, `1e3`, `한글 경로` arrive as typed; `--%`, `say "hi"`, `x y₩` and
    `C:\my dir\` are refused with the reason. With the Korean IME, type a
    value in Hangul and press Enter while the last syllable is still being
    composed → the syllable is committed and nothing runs; a second Enter runs

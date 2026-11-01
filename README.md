@@ -432,7 +432,8 @@ PowerShell, zsh): `"…"` for cmd, `'…'` for PowerShell and the POSIX shells,
 bare when nothing needs quoting. A value that shell cannot be given safely is
 refused with the reason instead of typed: in cmd a `"` (it cannot be written
 inside quotes), a `%` (cmd expands `%…%` even inside quotes) or a `!`; in
-PowerShell a `"`, which Windows PowerShell hands to programs unescaped; in
+PowerShell a `"`, which Windows PowerShell hands to programs unescaped, and
+`--%`, which it takes as "stop parsing" even in quotes; in
 both, a character Windows turns into `"` or `\` for programs that read their
 command line in the system code page (`₩`, `¥`, the fullwidth quote and
 backslash). In a WSL terminal a `\` or `'` is refused, since NexTerm cannot
