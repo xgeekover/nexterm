@@ -320,9 +320,14 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'focus-previous-pane',
       'go-to-unread-notification',
       'mark-notifications-read',
+      // The project commands (stage 5): palette commands, as the split
+      // polish pair are; menu.rs has no entry for them.
+      'open-project-commands-file',
       'reload-guard',
       // Ctrl+R's half of the guard, outside a terminal only (KB-14).
       'reload-guard-ctrl-r',
+      'run-project-command',
+      'stop-trusting-project-commands',
       'swap-pane',
     ]);
   });

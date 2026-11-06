@@ -1045,8 +1045,59 @@ describe('ConfirmDialog: the press that opened it', () => {
     assert.equal(backdropCancels(null, 5000), false, 'not open yet');
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('../../src/components/common/ConfirmDialog.jsx', import.meta.url), 'utf8');
-    assert.match(src, /if \(e\.target === e\.currentTarget && backdropCancels\(openedAtRef\.current, Date\.now\(\)\)\) onCancel\?\.\(\);/);
+    // Only a press on the dim area itself, never the second press of a
+    // double-click, and only after the grace — and it keeps the keyboard
+    // where it is either way (review M2, stage 5).
+    assert.match(
+      src,
+      /if \(e\.target !== e\.currentTarget\) return;[\s\S]{0,400}?e\.preventDefault\(\);[\s\S]{0,300}?if \(e\.detail > 1\) return;\s*if \(backdropCancels\(openedAtRef\.current, Date\.now\(\)\)\) onCancel\?\.\(\);/
+    );
     assert.match(src, /openDialogs\.push\(self\);\s*openedAtRef\.current = Date\.now\(\);/);
+  });
+});
+
+describe('ConfirmDialog: the double-click that opened it, and a confirm that is off (stage 5, review M2 and L7)', () => {
+  beforeEach(loadUi);
+
+  test('CD-36: the second press of the double-click that opened it keeps the keyboard on Cancel — on the dim area or on its words — and cancels nothing; Trust off does nothing', async () => {
+    const { ConfirmDialog, BACKDROP_GRACE_MS } = ui;
+    const realNow = Date.now;
+    let now = 2_000_000;
+    Date.now = () => now;
+    try {
+      await onPage(async (page) => {
+        const log = [];
+        page.terminal.focus();
+        page.render(h(ConfirmDialog, deleteFolder(log, 'trust', { initialFocus: 'cancel', confirmLabel: 'Trust' })));
+        assert.equal(page.focus(), 'Cancel');
+        const box = page.document.querySelectorAll('div').find((d) => d.getAttribute('role') === 'alertdialog');
+        const backdrop = box.parentNode;
+        const words = page.document.querySelectorAll('div').find((d) => d.hasAttribute('data-confirm-message'));
+        let e = dispatch(page.window, words, { type: 'mousedown', detail: 2 });
+        assert.equal(e.defaultPrevented, true, 'the press on its words would take the keyboard from Cancel');
+        e = dispatch(page.window, backdrop, { type: 'mousedown', detail: 2 });
+        assert.equal(e.defaultPrevented, true, 'the press on the dim area would take the keyboard to the page');
+        assert.deepEqual(log, [], 'a press within the grace cancelled');
+        now += BACKDROP_GRACE_MS;
+        e = dispatch(page.window, words, { type: 'mousedown', detail: 1 });
+        assert.equal(e.defaultPrevented, false, 'later, its words are the user\'s to select');
+        dispatch(page.window, backdrop, { type: 'mousedown', detail: 2 });
+        assert.deepEqual(log, [], 'the second press of a double-click is not a press on the dim area');
+        dispatch(page.window, backdrop, { type: 'mousedown', detail: 1 });
+        assert.deepEqual(log, ['trust:cancel'], 'one press on the dim area, after the grace, cancels');
+      });
+      await onPage(async (page) => {
+        const log = [];
+        page.render(h(ConfirmDialog, deleteFolder(log, 'off', { confirmLabel: 'Trust', confirmDisabled: true, confirmDisabledReason: 'The file has changed since this opened' })));
+        const trust = page.document.querySelectorAll('button').find((b) => b.textContent === 'Trust');
+        assert.ok(trust.hasAttribute('disabled'));
+        assert.equal(trust.getAttribute('title'), 'The file has changed since this opened');
+        dispatch(page.window, trust, { type: 'click', detail: 0 });
+        assert.deepEqual(log, [], 'trusted while off');
+      });
+    } finally {
+      Date.now = realNow;
+    }
   });
 });
 

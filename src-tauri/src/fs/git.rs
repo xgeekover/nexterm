@@ -29,6 +29,10 @@ use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 
+// Whether a path may be looked at at all: shared with `fs::project_commands`,
+// which judges the open folder by the same rules.
+use crate::fs::refused;
+
 /// A repository with this many changes is one you are not reading file by
 /// file; past here the Explorer's colours are noise and the list is weight.
 const MAX_FILES: usize = 2000;
@@ -540,37 +544,10 @@ fn branch_name(name: &str) -> Option<String> {
 /// The contents of `path` when it is a regular file of at most HEAD_BYTES_MAX
 /// bytes of UTF-8, else `None`. With `follow` false, a link is not opened
 /// through — it is not a regular file — so a `HEAD` swapped for a link after
-/// it was looked at is not read either.
-///
-/// Asked of the open file, not of the path before opening it: a `HEAD` that is
-/// a FIFO would hold the open until something wrote to it, and one swapped
-/// between a check and the open would get past the check. So the open does not
-/// wait (`O_NONBLOCK`, which changes nothing for a regular file), and what was
-/// opened is what is asked whether it is a file.
-fn read_small_file(path: &Path, follow: bool) -> Option<String> {
-    use std::io::Read;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW });
-    }
-    #[cfg(windows)]
-    if !follow {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = options.open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() > HEAD_BYTES_MAX {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(HEAD_BYTES_MAX + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > HEAD_BYTES_MAX {
-        return None;
-    }
+/// it was looked at is not read either. `fs::read_small_file` says why a
+/// `HEAD` that is a FIFO does not hold the lookup.
+fn small_text(path: &Path, follow: bool) -> Option<String> {
+    let bytes = crate::fs::read_small_file(path, follow, HEAD_BYTES_MAX).ok()?;
     String::from_utf8(bytes).ok()
 }
 
@@ -588,20 +565,7 @@ fn read_head(head: &Path) -> Head {
             Err(_) => Head::Unknown,
         };
     }
-    read_small_file(head, false).map_or(Head::Unknown, |text| parse_head(&text))
-}
-
-/// Whether `path` is not to be looked at: by its spelling — empty, too long,
-/// not absolute, another machine, a device (`fs::reveal::refusal`, the rules
-/// for a name in a terminal's output) — on a mapped network drive
-/// (`network_drive`, `fs::on_a_network_drive` in the app), or through a link
-/// that leads to another machine or onto such a drive. Every path
-/// `branch_of` opens is asked first.
-fn refused(path: &Path, network_drive: &dyn Fn(&str) -> bool) -> bool {
-    let spelled = path.to_string_lossy();
-    crate::fs::reveal::refusal(&spelled, cfg!(windows)).is_some()
-        || network_drive(&spelled)
-        || crate::fs::link_leads_off_machine_by(path, network_drive)
+    small_text(head, false).map_or(Head::Unknown, |text| parse_head(&text))
 }
 
 /// The nearest folder at or above `start`, at most BRANCH_WALK_MAX of them,
@@ -642,7 +606,7 @@ fn git_dir_of(root: &Path, dot_git: &Path, network_drive: &dyn Fn(&str) -> bool)
     let target = if meta.is_dir() {
         dot_git.to_path_buf()
     } else {
-        let text = read_small_file(dot_git, true)?;
+        let text = small_text(dot_git, true)?;
         let named = text.strip_prefix("gitdir: ")?.trim_end_matches(['\n', '\r']);
         if named.is_empty() || named.contains(['\n', '\r', '\0']) {
             return None;

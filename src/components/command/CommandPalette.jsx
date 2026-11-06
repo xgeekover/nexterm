@@ -14,16 +14,32 @@ import {
   Pencil,
   X,
   PanelTop,
+  Play,
+  ShieldAlert,
+  ShieldOff,
+  FileWarning,
+  FilePen,
 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
+import { useProjectCommandsStore } from '../../stores/projectCommandsStore.js';
 import { invoke, listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
 import { commandHistory } from '../../lib/commandIndex.js';
 import { notifyTerminal } from '../../lib/terminalNotice.js';
 import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { swallowRepeatsOf } from '../../lib/heldKeys.js';
+import { handDialogReturn } from '../../lib/dialogReturn.js';
+
+/**
+ * A command line shown as a row's subtitle, in the order it is typed: a
+ * right-to-left word in it (`cp א ב`) must not reorder what is read from
+ * what runs.
+ */
+const LINE_ORDER = { direction: 'ltr', unicodeBidi: 'bidi-override' };
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 /** How many files Go to File asks the backend for — its own default, said out loud. */
@@ -35,6 +51,12 @@ const RELIST_DELAY_MS = 300;
 const count = (n) => n.toLocaleString('en-US');
 
 function iconFor(item) {
+  if (item.type === 'project-command') return <Play size={16} />;
+  if (item.type === 'project-review') return <ShieldAlert size={16} />;
+  if (item.type === 'project-problem') return <FileWarning size={16} />;
+  if (item.command === 'run_project_command') return <Play size={16} />;
+  if (item.command === 'open_project_commands_file') return <FilePen size={16} />;
+  if (item.command === 'stop_trusting_project_commands') return <ShieldOff size={16} />;
   if (item.type === 'recent') return <FolderOpen size={16} />;
   if (item.type === 'history') return <History size={16} />;
   if (item.type === 'file') return <FileCode size={16} />;
@@ -111,35 +133,6 @@ function useFileListing(wanted, rootPath) {
 }
 
 /**
- * Swallow the repeats of `key`, still held from the press that chose a row,
- * wherever the keyboard has gone since — until the key is let go, pressed
- * afresh (a keydown that is not a repeat), or the window loses focus. In
- * the capture phase, so a terminal never sees them.
- */
-function swallowRepeatsOf(key) {
-  const stop = () => {
-    window.removeEventListener('keydown', onDown, true);
-    window.removeEventListener('keyup', onUp, true);
-    window.removeEventListener('blur', stop);
-  };
-  const onDown = (e) => {
-    if (e.key !== key) return;
-    if (!e.repeat) {
-      stop();
-      return;
-    }
-    e.preventDefault();
-    e.stopPropagation();
-  };
-  const onUp = (e) => {
-    if (e.key === key) stop();
-  };
-  window.addEventListener('keydown', onDown, true);
-  window.addEventListener('keyup', onUp, true);
-  window.addEventListener('blur', stop);
-}
-
-/**
  * Give the keyboard back to `opener`, what had it when the palette opened —
  * or, when that cannot have it (`canHaveFocusBack`), to the terminal on
  * screen, or the open file when there is no terminal.
@@ -176,6 +169,7 @@ const PaletteRow = memo(function PaletteRow({ item, index, selected, onPick, onH
             'truncate text-ui-sm flex-shrink',
             selected ? 'text-vsc-selection-fg' : 'text-vsc-muted'
           )}
+          style={item.subtitleIsLine ? LINE_ORDER : undefined}
         >
           {item.subtitle}
         </span>
@@ -215,6 +209,13 @@ export function CommandPalette() {
   const closeTab = useTerminalStore((s) => s.closeTab);
   const typingHiddenNow = useTerminalStore((s) => s.typingHiddenNow);
 
+  // The folder's commands and the user's (spec D10). Each of these changes
+  // only when a read finds other bytes, trust is given or taken, or the
+  // User Commands setting is left — never while the pointer is on a row.
+  const projectCommands = useProjectCommandsStore(
+    useShallow((s) => ({ status: s.status, reason: s.reason, trust: s.trust, project: s.project, user: s.user }))
+  );
+
   const [query, setQuery] = useState('');
 
   const paletteMode = useSettingsStore((st) => st.commandPaletteMode);
@@ -241,6 +242,9 @@ export function CommandPalette() {
     closedItselfRef.current = false;
     setQuery('');
     setSelectedIndex(0);
+    // The folder's commands file read again (spec D6): a read that finds the
+    // same bytes changes nothing, so the rows drawn now stay where they are.
+    useProjectCommandsStore.getState().refresh?.();
     const focusInput = setTimeout(() => inputRef.current?.focus(), 50);
     return () => {
       clearTimeout(focusInput);
@@ -260,7 +264,16 @@ export function CommandPalette() {
   const close = (handOff = 'opener') => {
     closedItselfRef.current = true;
     if (handOff === 'opener') giveFocusBack(openerRef.current);
+    // Not given back here: the dialog that opens next takes it, and gives it
+    // back to the opener when it closes.
+    else if (handOff === 'dialog') handDialogReturn(openerRef.current);
     setOpen(false);
+  };
+
+  /** What a dialog that did not open after all leaves to be given the keyboard. */
+  const takeOpener = () => {
+    handDialogReturn(null);
+    return openerRef.current;
   };
 
   // Read when the palette opens, not subscribed to: history changes on every
@@ -323,9 +336,10 @@ export function CommandPalette() {
             history,
             panes: swap?.panes ?? [],
             panesNote: swap?.note ?? null,
+            projectCommands,
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -367,6 +381,17 @@ export function CommandPalette() {
       setActiveView('terminal');
       return;
     }
+    // A project or user command opens its run dialog, which shows the exact
+    // line before anything is typed (spec D7); the review opens the trust
+    // dialog (D5). Neither types anything.
+    if (item.type === 'project-command') {
+      if (!useProjectCommandsStore.getState().openRun(item.commandKey)) giveFocusBack(takeOpener());
+      return;
+    }
+    if (item.type === 'project-review') {
+      if (!useProjectCommandsStore.getState().openReview()) giveFocusBack(takeOpener());
+      return;
+    }
     switch (item.command) {
       case 'new_terminal':
         await createTerminalTab();
@@ -406,6 +431,13 @@ export function CommandPalette() {
       }
       case 'save_all':
         await saveAll();
+        return;
+      case 'open_project_commands_file':
+        // Also the row of a file that is not a commands file: opened to fix.
+        await useProjectCommandsStore.getState().openCommandsFile();
+        return;
+      case 'stop_trusting_project_commands':
+        useProjectCommandsStore.getState().distrustCurrent();
         return;
       default:
         return;
@@ -478,7 +510,21 @@ export function CommandPalette() {
 
   return (
     <div
-      onClick={() => close()}
+      // A press on the dim area keeps the keyboard where it is — in the
+      // search box — whether or not its click then closes the palette:
+      // left to the browser, it took the keyboard to the page, and a palette
+      // that stayed open took no keys.
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) e.preventDefault();
+      }}
+      onClick={(e) => {
+        // The second click of a double-click is not a click outside: the
+        // palette was not there for the first one. Trust in the review
+        // dialog opens the palette under the pointer, and a double-click on
+        // it closed the list it had just opened.
+        if (e.detail > 1) return;
+        close();
+      }}
       className="fixed inset-0 z-50 select-none"
     >
       <div
@@ -503,7 +549,9 @@ export function CommandPalette() {
                   ? 'Search files by name…'
                   : paletteMode === 'swap-pane'
                     ? 'Swap the active pane with…'
-                    : 'Type a command or search files…'
+                    : paletteMode === 'project-commands'
+                      ? 'Run a project or user command…'
+                      : 'Type a command or search files…'
               }
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-ui text-vsc-fg placeholder:text-vsc-placeholder"
             />

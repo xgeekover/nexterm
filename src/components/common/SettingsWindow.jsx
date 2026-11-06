@@ -23,6 +23,8 @@ import { expandHome } from '../../lib/paths.js';
 import { isNetworkPath } from '../../lib/terminalLinks.js';
 import { NETWORK_START_DIR } from '../../lib/terminalCwd.js';
 import { invoke } from '../../lib/ipc.js';
+import { userCommandsCheck } from '../../stores/projectCommandsStore.js';
+import { COMMANDS_FILE } from '../../lib/projectCommands.js';
 
 /**
  * VS Code's Settings editor reads the live `--font-mono` token so the text
@@ -537,6 +539,17 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         'Lets a full-screen program such as vim, htop or tmux use the mouse. A program in the scrollback, like Claude Code, never gets it, so a drag there always selects text. Inside a full-screen program, hold Shift while dragging to select (on macOS ⌥ works too).',
       control: 'checkbox',
     },
+    {
+      id: 'terminalUserCommands',
+      section: 'terminal',
+      key: 'terminalUserCommands',
+      settingKey: 'terminal.userCommands',
+      title: 'User Commands',
+      description: `Your own commands, for every folder, in the format of a folder's ${COMMANDS_FILE}: { "version": 1, "commands": [ { "name": …, "command": …, "description": …, "placeholders": { … } } ] }. A {{name}} in a command is a blank you fill in when you run it, its value quoted for the shell of the terminal it goes to. They are listed in the command palette (Run Project Command…) with the hint User, and each shows its exact line before anything is typed. Checked as you type; kept when you leave the field.`,
+      control: 'textarea',
+      placeholder: '{ "version": 1, "commands": [ { "name": "Deploy", "command": "npm run deploy -- {{stage}}" } ] }',
+      check: userCommandsCheck,
+    },
     // ---- Workbench ----
     {
       id: 'reducedMotion',
@@ -613,6 +626,62 @@ function TextLikeControl({ item, value, onCommit }) {
   );
 }
 
+const textareaClass =
+  'w-full h-[180px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui font-mono px-2 py-1 resize-y';
+
+/**
+ * A multi-line field (User Commands): kept as typed, committed when focus
+ * leaves it — as a text field is (`TextLikeControl`) — and checked as it is
+ * typed (`item.check`), what the check says drawn under it. Enter is a new
+ * line here, not a commit. Spelling is not checked: it is code.
+ */
+function TextAreaControl({ item, value, onCommit }) {
+  const [text, setText] = useState(String(value ?? ''));
+  const checkId = useId();
+
+  useEffect(() => {
+    setText(String(value ?? ''));
+  }, [value]);
+
+  const check = useMemo(() => item.check?.(text) ?? null, [item, text]);
+
+  return (
+    <div>
+      <textarea
+        value={text}
+        placeholder={item.placeholder}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        autoComplete="off"
+        aria-describedby={check ? checkId : undefined}
+        aria-invalid={check?.tone === 'error' ? 'true' : undefined}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          if (text !== value) onCommit(text);
+        }}
+        className={textareaClass}
+      />
+      {check ? (
+        <div
+          id={checkId}
+          data-setting-check={item.id}
+          className={cn(
+            'mt-1 text-ui-sm break-words',
+            check.tone === 'error' ? 'text-vsc-error' : check.tone === 'ok' ? 'text-vsc-fg' : 'text-vsc-muted'
+          )}
+        >
+          {check.lines.map((line, i) => (
+            <p key={i} className="m-0">
+              {line}
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SettingRow({ item, value, isDefault, onChange, onReset, note }) {
   return (
     <div className="py-3 px-1 border-b border-vsc-border last:border-b-0 group">
@@ -667,6 +736,8 @@ function SettingRow({ item, value, isDefault, onChange, onReset, note }) {
           <TextLikeControl item={item} value={value} onCommit={onChange} />
         )}
 
+        {item.control === 'textarea' && <TextAreaControl item={item} value={value} onCommit={onChange} />}
+
         {item.control === 'themeGallery' && <ThemeGallery />}
 
         {/* What the backend said about this value — a path that is not there,
@@ -699,6 +770,7 @@ export function SettingsWindow() {
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
   const terminalMultiLinePasteWarning = useSettingsStore((s) => s.terminalMultiLinePasteWarning);
   const terminalAutoReplyBatchJob = useSettingsStore((s) => s.terminalAutoReplyBatchJob);
+  const terminalUserCommands = useSettingsStore((s) => s.terminalUserCommands);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
@@ -738,6 +810,7 @@ export function SettingsWindow() {
     terminalRightClick,
     terminalMultiLinePasteWarning,
     terminalAutoReplyBatchJob,
+    terminalUserCommands,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
     terminalProgramNotifications,

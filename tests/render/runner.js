@@ -85,10 +85,12 @@ const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
 const { useBranchStore } = await import('../../src/stores/branchStore.js');
+const { useProjectCommandsStore } = await import('../../src/stores/projectCommandsStore.js');
+const { useSystemStore } = await import('../../src/stores/systemStore.js');
 const { default: App } = await import('../../src/App.jsx');
 const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -3653,6 +3655,355 @@ scenario(
   }
 );
 
+// ---- Project commands (stage 5) ---------------------------------------------
+
+const { parseCommandsFile: parseProjectCommands } = await import('../../src/lib/projectCommands.js');
+
+const PROJECT_FILE = parseProjectCommands(
+  JSON.stringify({
+    version: 1,
+    commands: [
+      { name: 'Run the tests', description: 'Every suite, once', command: 'npm test' },
+      {
+        name: 'Deploy',
+        description: 'Ship it to a stage',
+        command: 'npm run deploy -- --stage {{stage}} --note {{note}}',
+        placeholders: {
+          stage: { label: 'Stage', choices: ['dev', 'prod'], default: 'dev' },
+          note: { label: 'Release note', description: 'Said in the changelog', default: '50% off' },
+        },
+      },
+      { name: 'Quoted', command: 'echo "{{x}}"' },
+    ],
+  })
+);
+const USER_FILE = parseProjectCommands(JSON.stringify({ version: 1, commands: [{ name: 'Deploy', command: 'make deploy' }] }), { source: 'user' });
+const SHA = 'a'.repeat(64);
+
+/** The palette's result rows, each as `{ title, subtitle, hint, tag }`, in order. */
+function paletteRows(html) {
+  return [...html.matchAll(/<div\b[^>]*\sdata-palette-row="\d+"[^>]*>([\s\S]*?)<\/kbd><\/div>|<div\b[^>]*\sdata-palette-row="\d+"[^>]*>([\s\S]*?)<\/div>/g)].map((m) => {
+    const tag = /^<div\b[^>]*>/.exec(m[0])[0];
+    const spans = [...m[0].matchAll(/<span\b[^>]*class="(truncate[^"]*)"[^>]*>([\s\S]*?)<\/span>/g)].map((x) => visibleText(x[2]));
+    return { title: spans[0] ?? '', subtitle: spans[1] ?? '', hint: visibleText(/<kbd\b[^>]*>([\s\S]*?)<\/kbd>/.exec(m[0])?.[1] ?? ''), tag };
+  });
+}
+
+/** The markup of the group headed `label` in the palette, up to the next heading. */
+function paletteGroup(html, label) {
+  const at = html.indexOf(`>${label}</div>`);
+  if (at === -1) return null;
+  return html.slice(at);
+}
+
+scenario(
+  'RN-170',
+  "the palette with a folder's file not trusted: one Review row, hint Project, after NexTerm's commands — none of the file's commands",
+  () => {
+    reset();
+    useProjectCommandsStore.setState({ root: '/workspace', status: 'ok', sha256: SHA, project: PROJECT_FILE, trust: 'untrusted' });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'all' });
+  },
+  (html) => {
+    const group = paletteGroup(html, 'project commands');
+    expectThat(group, 'no project commands group');
+    expectThat(html.indexOf('>commands</div>') < html.indexOf('>project commands</div>'), 'the group is not after the commands');
+    const rows = paletteRows(group);
+    expectThat(rows.length === 1, `rows: ${JSON.stringify(rows.map((r) => r.title))}`);
+    expectThat(rows[0].title === "Review This Folder's Commands…", rows[0].title);
+    expectThat(rows[0].subtitle === '2 commands (1 refused) in .nexterm/commands.json — not trusted yet', rows[0].subtitle);
+    expectThat(rows[0].hint === 'Project', rows[0].hint);
+    expectThat(!visibleText(html).includes('Every suite, once'), "an untrusted command's description is on screen");
+  }
+);
+
+scenario(
+  'RN-171',
+  'trusted, with a user command of the same name: a row each, one line high, hint Project or User',
+  () => {
+    reset();
+    useProjectCommandsStore.setState({ root: '/workspace', status: 'ok', sha256: SHA, project: PROJECT_FILE, trust: 'trusted', user: USER_FILE });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'project-commands' });
+  },
+  (html) => {
+    const rows = paletteRows(html);
+    expectThat(
+      JSON.stringify(rows.map((r) => [r.title, r.hint])) === JSON.stringify([['Run the tests', 'Project'], ['Deploy', 'Project'], ['Deploy', 'User']]),
+      JSON.stringify(rows.map((r) => [r.title, r.hint]))
+    );
+    expectThat(rows[2].subtitle === 'make deploy', `a command with no description is shown by its line: ${rows[2].subtitle}`);
+    for (const row of rows) expectThat(classOf(row.tag).split(/\s+/).includes('h-[22px]'), `a row is not one line high: ${row.tag}`);
+    expectThat(/placeholder="Run a project or user command…"/.test(html), 'the pick does not say what it is for');
+    expectText(html, "1 of .nexterm/commands.json's commands was refused — Open Project Commands File to see why.");
+  }
+);
+
+scenario(
+  'RN-172',
+  'Run Project Command… with none: a note says how to add some',
+  () => {
+    reset();
+    useProjectCommandsStore.setState({ root: '/workspace', status: 'none' });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'project-commands' });
+  },
+  (html) => {
+    expectThat(paletteRows(html).length === 0, 'a row with nothing to run');
+    expectText(html, 'No commands yet. Put a folder\'s in .nexterm/commands.json (Open Project Commands File makes one with an example)');
+    expectThat(/data-palette-note=/.test(html), 'not drawn as a note');
+  }
+);
+
+scenario(
+  'RN-173',
+  'the review: every command with its whole line in monospace, every refused one with its reason, Trust and Cancel',
+  () => {
+    reset();
+    useProjectCommandsStore.setState({
+      root: '/workspace',
+      status: 'ok',
+      sha256: SHA,
+      project: PROJECT_FILE,
+      trust: 'changed',
+      reviewing: { id: 1, root: '/workspace', sha256: SHA, project: PROJECT_FILE, trust: 'changed' },
+    });
+  },
+  (html) => {
+    expectThat(/\srole="alertdialog"/.test(html), 'not drawn as a dialog');
+    expectText(html, "This Folder's Commands Have Changed");
+    expectText(html, 'The file has changed since you trusted its commands.');
+    const lines = [...html.matchAll(/<pre\b[^>]*class="([^"]*)"[^>]*>([\s\S]*?)<\/pre>/g)];
+    const shown = lines.map((m) => visibleText(m[2]));
+    expectThat(
+      JSON.stringify(shown) === JSON.stringify(['npm test', 'npm run deploy -- --stage {{stage}} --note {{note}}']),
+      `the lines shown: ${JSON.stringify(shown)}`
+    );
+    for (const [, cls] of lines) {
+      expectThat(cls.includes('font-mono') && cls.includes('whitespace-pre-wrap'), `a line not in monospace, wrapped: ${cls}`);
+    }
+    for (const words of ['Run the tests', 'Every suite, once', 'Deploy', 'Ship it to a stage']) expectText(html, words);
+    expectText(html, 'Refused, and not offered (1):');
+    expectText(html, 'Command 3 (Quoted): {{x}} has a quote right beside it');
+    const buttons = buttonsIn(html).map((b) => b.text);
+    expectThat(buttons.includes('Trust') && buttons.includes('Cancel'), JSON.stringify(buttons));
+  }
+);
+
+/** The words of inline markup, run together as they are drawn (`visibleText` breaks a line at each tag). */
+const inlineText = (html) => visibleText(String(html ?? '').replace(/<[^>]*>/g, ''));
+
+/** The run dialog's markup. */
+const runDialog = (html) => /<div\b[^>]*\sdata-project-run-dialog=""[\s\S]*$/.exec(html)?.[0] ?? null;
+
+scenario(
+  'RN-174',
+  'the run dialog in cmd: a field per blank (a select for choices, defaults filled), a value cmd cannot take refused under its field, the line typed into cmd',
+  () => {
+    reset();
+    useSystemStore.setState({ os: 'windows', defaultShell: 'C:\\Windows\\System32\\cmd.exe' });
+    useTerminalStore.setState({ tabs: [tab('t1', { title: 'api', shell: 'C:\\Windows\\System32\\cmd.exe' })] });
+    useProjectCommandsStore.setState({
+      root: '/workspace',
+      status: 'ok',
+      sha256: SHA,
+      project: PROJECT_FILE,
+      trust: 'trusted',
+      running: { id: 7, command: PROJECT_FILE.commands[1], root: '/workspace', sha256: SHA },
+    });
+  },
+  (html) => {
+    const dialog = runDialog(html);
+    expectThat(dialog, 'no run dialog');
+    expectThat(/\srole="dialog"/.test(dialog) && /\saria-modal="true"/.test(dialog), 'not a modal dialog');
+    expectText(dialog, 'Deploy');
+    expectText(dialog, 'From .nexterm/commands.json in this folder');
+    expectThat(attrOrder(dialog, 'data-blank-field').join() === 'stage,note', `fields: ${attrOrder(dialog, 'data-blank-field')}`);
+    expectThat(/<select\b[^>]*id="project-blank-stage"/.test(dialog), 'a blank with choices is not a select');
+    expectThat(/<option[^>]*value="dev"[^>]*selected=""/.test(dialog), 'the default choice is not selected');
+    expectThat(/<input\b[^>]*id="project-blank-note"[^>]*value="50% off"/.test(dialog), 'the default is not filled in');
+    expectText(dialog, 'Said in the changelog');
+    const reason = /<p\b[^>]*data-blank-error="note"[^>]*>([\s\S]*?)<\/p>/.exec(dialog)?.[1] ?? '';
+    expectThat(inlineText(reason) === 'It holds % — cmd expands %…% even inside quotes', `the reason under the field: ${inlineText(reason)}`);
+    expectThat(/<input\b[^>]*id="project-blank-note"[^>]*aria-invalid="true"/.test(dialog), 'the field is not marked invalid');
+    expectThat(/<p\b[^>]*data-blank-error="stage"[^>]*><\/p>/.test(dialog), 'the line under a good field is not kept, empty');
+    expectText(dialog, 'Typed into cmd');
+    const preview = /<pre\b[^>]*data-run-preview=""[^>]*>([\s\S]*?)<\/pre>/.exec(dialog)?.[1] ?? '';
+    expectThat(inlineText(preview) === 'npm run deploy -- --stage dev --note {{note}}', inlineText(preview));
+    expectThat(/data-blank="stage"[^>]*class="[^"]*text-vsc-link/.test(preview), 'a value is not set apart from the command');
+    expectThat(/data-blank="note"[^>]*class="text-vsc-error"/.test(preview), 'the refused blank is not marked');
+    const buttons = buttonsIn(dialog);
+    for (const name of ['Run', 'Type Only']) {
+      const b = buttons.find((x) => x.text === name);
+      expectThat(b?.disabled, `${name} is not disabled with a value that cannot be typed`);
+      expectThat(b?.title === 'A value above cannot be typed for cmd.', `${name} does not say why: ${b?.title}`);
+    }
+    expectThat(!buttons.find((x) => x.text === 'Cancel').disabled, 'Cancel is disabled');
+    expectThat(/data-run-target="this"[\s\S]*?This terminal \(api\)/.test(dialog), 'this terminal is not named');
+    // No shell prompt reported yet (no OSC 133 here): it cannot tell what
+    // runs in it, so the new split is chosen (review M1).
+    expectThat(inlineText(/<label\b[^>]*data-run-target="this"[\s\S]*?<\/label>/.exec(dialog)?.[0]).includes('not offered: NexTerm cannot tell what runs in this terminal'), 'a terminal that never said where its prompt is was offered');
+    expectThat(/data-run-target="split"/.test(dialog), 'no new split');
+  }
+);
+
+scenario(
+  'RN-175',
+  'the run dialog over a terminal running something: this terminal not offered, saying why — the new split chosen — and a command with no blanks shows its line',
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [tab('t1', { title: 'claude', shell: '/bin/zsh', running: true })] });
+    useProjectCommandsStore.setState({ running: { id: 8, command: USER_FILE.commands[0] } });
+  },
+  (html) => {
+    const dialog = runDialog(html);
+    expectText(dialog, 'From your User Commands');
+    const self = /<label\b[^>]*data-run-target="this"[\s\S]*?<\/label>/.exec(dialog)?.[0] ?? '';
+    expectThat(/<input\b[^>]*disabled=""/.test(self), `this terminal can be chosen: ${self}`);
+    expectThat(inlineText(self).includes('This terminal (claude) — not offered: something is running in it'), inlineText(self));
+    expectThat(/\stitle="Something is running in this terminal — an agent, a server\. Typed there, the line would be that program&#x27;s input, not a command\."/.test(self), `the tooltip does not say why in full: ${self}`);
+    const split = /<label\b[^>]*data-run-target="split"[\s\S]*?<\/label>/.exec(dialog)?.[0] ?? '';
+    expectThat(/<input\b[^>]*checked=""/.test(split), 'the new split is not the choice');
+    expectThat(attrOrder(dialog, 'data-blank-field').length === 0, 'fields for a command with no blanks');
+    expectText(dialog, 'Typed into zsh');
+    expectThat(inlineText(/<pre\b[^>]*data-run-preview=""[^>]*>([\s\S]*?)<\/pre>/.exec(dialog)?.[1] ?? '') === 'make deploy', 'the line is not shown');
+    expectThat(!buttonsIn(dialog).find((b) => b.text === 'Run').disabled, 'Run is disabled');
+  }
+);
+
+scenario(
+  'RN-176',
+  'Settings ▸ Terminal ▸ User Commands: a monospace multi-line field, spelling off, and what the validator says under it',
+  () => {
+    reset();
+    useSettingsStore.getState().setSetting(
+      'terminalUserCommands',
+      JSON.stringify({ version: 1, commands: [{ name: 'Deploy', command: 'make deploy' }, { name: 'Oops', comand: 'x' }] })
+    );
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const at = html.indexOf('terminal.userCommands');
+    expectThat(at !== -1, 'no User Commands row');
+    const rest = html.slice(at);
+    const area = /<textarea\b[^>]*>/.exec(rest)?.[0] ?? '';
+    expectThat(area, 'no multi-line field');
+    expectThat(/spellcheck="false"/.test(area), `spelling is checked: ${area}`);
+    expectThat(classOf(area).includes('font-mono'), 'not monospace');
+    const check = /<div\b[^>]*data-setting-check="terminalUserCommands"[^>]*>([\s\S]*?)<\/div>/.exec(rest);
+    expectThat(check, 'nothing said under it');
+    expectThat(classOf(check[0]).includes('text-vsc-error'), 'a refused command is not said as an error');
+    expectThat(visibleText(check[1]).includes('1 command; 1 refused, and not offered:'), visibleText(check[1]));
+    expectThat(visibleText(check[1]).includes('Command 2 (Oops): A key NexTerm does not know: "comand".'), visibleText(check[1]));
+  }
+);
+
+
+scenario(
+  'RN-177',
+  'command lines are drawn in the order they are typed — the preview, the review, a palette row shown by its line (review M5)',
+  () => {
+    reset();
+    const rtl = parseProjectCommands(JSON.stringify({ version: 1, commands: [{ name: 'Copy', command: 'cp \u{5D0} \u{5D1}' }] }));
+    useProjectCommandsStore.setState({
+      root: '/workspace',
+      status: 'ok',
+      sha256: SHA,
+      project: rtl,
+      trust: 'trusted',
+      reviewing: { id: 3, root: '/workspace', sha256: SHA, project: rtl, trust: 'untrusted' },
+      running: { id: 9, command: rtl.commands[0], root: '/workspace', sha256: SHA },
+    });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'project-commands' });
+  },
+  (html) => {
+    const LTR = /style="direction:ltr;unicode-bidi:bidi-override"/;
+    const preview = /<pre\b[^>]*data-run-preview=""[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(LTR.test(preview), `the preview may be reordered: ${preview}`);
+    const review = /<li\b[^>]*data-trust-command="project:0"[\s\S]*?<pre\b[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(LTR.test(review), `the review's line may be reordered: ${review}`);
+    const row = /<div\b[^>]*data-palette-row="0"[\s\S]*?<\/div>/.exec(html)?.[0] ?? '';
+    expectThat(LTR.test(row), `the palette row's line may be reordered: ${row}`);
+  }
+);
+
+scenario(
+  'RN-178',
+  "a run dialog whose file changed under it: Run off, and why in words under the buttons — not only in a tooltip (review S2, L9)",
+  () => {
+    reset();
+    useTerminalStore.setState({ tabs: [tab('t1', { title: 'api', shell: '/bin/zsh' })], projectCommandBlock: () => null });
+    useProjectCommandsStore.setState({
+      root: '/workspace',
+      status: 'ok',
+      sha256: 'b'.repeat(64),
+      project: PROJECT_FILE,
+      trust: 'trusted',
+      running: { id: 10, command: PROJECT_FILE.commands[0], root: '/workspace', sha256: SHA },
+    });
+  },
+  (html) => {
+    const dialog = runDialog(html);
+    const why = /<p\b[^>]*data-run-why=""[^>]*>([\s\S]*?)<\/p>/.exec(dialog)?.[1] ?? '';
+    expectThat(inlineText(why) === "This folder's commands file has changed since this opened — review it again.", `why: ${inlineText(why)}`);
+    const run = buttonsIn(dialog).find((b) => b.text === 'Run');
+    expectThat(run?.disabled, 'Run is on for a file that changed');
+    expectThat(/<button\b[^>]*aria-describedby="project-run-why-10"[^>]*data-run-run=""/.test(dialog) || /data-run-run=""[^>]*aria-describedby="project-run-why-10"/.test(dialog) || /aria-describedby="project-run-why-10"/.test(dialog), 'Run does not point at its reason');
+    expectThat(/<pre\b[^>]*aria-labelledby="project-run-heading-10"/.test(dialog), 'the preview has no name');
+    // The terminal is idle, at an empty prompt: offered — but a new split is
+    // the choice, a fresh shell where the line can be run (review round 3).
+    const self = /<label\b[^>]*data-run-target="this"[\s\S]*?<\/label>/.exec(dialog)?.[0] ?? '';
+    const split = /<label\b[^>]*data-run-target="split"[\s\S]*?<\/label>/.exec(dialog)?.[0] ?? '';
+    expectThat(!/disabled=""/.test(self) && !/checked=""/.test(self), `this terminal is not offered, or is the choice: ${self}`);
+    expectThat(/checked=""/.test(split), 'a new split is not the choice');
+  }
+);
+
+scenario(
+  'RN-179',
+  'text typed at the prompt of this terminal: not offered, saying so — the new split chosen (review H1)',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [tab('t1', { title: 'api', shell: '/bin/zsh' })],
+      projectCommandBlock: () => 'something is typed at its prompt — clear it, or use New split',
+    });
+    useProjectCommandsStore.setState({ running: { id: 11, command: USER_FILE.commands[0] } });
+  },
+  (html) => {
+    const dialog = runDialog(html);
+    const self = /<label\b[^>]*data-run-target="this"[\s\S]*?<\/label>/.exec(dialog)?.[0] ?? '';
+    expectThat(inlineText(self).includes('This terminal (api) — not offered: something is typed at its prompt'), inlineText(self));
+    expectThat(/\stitle="Not offered: something is typed at its prompt — clear it, or use New split\."/.test(self), `the whole reason is not in the tooltip: ${self}`);
+    expectThat(/<input\b[^>]*disabled=""/.test(self), 'it can be chosen');
+    expectThat(/<label\b[^>]*data-run-target="split"[\s\S]*?checked=""/.test(dialog), 'the new split is not chosen');
+  }
+);
+
+scenario(
+  'RN-180',
+  'the review: as tall as the window allows, its words scrolling, the buttons outside them (review M1) — and Trust off with a notice when the file changed while it was open (L7)',
+  () => {
+    reset();
+    useProjectCommandsStore.setState({
+      root: '/workspace',
+      status: 'ok',
+      sha256: 'c'.repeat(64),
+      project: PROJECT_FILE,
+      trust: 'untrusted',
+      reviewing: { id: 4, root: '/workspace', sha256: SHA, project: PROJECT_FILE, trust: 'untrusted' },
+    });
+  },
+  (html) => {
+    const box = /<div\b[^>]*role="alertdialog"[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(/max-h-\[80vh\]/.test(classOf(box)) && /\bflex-col\b/.test(classOf(box)), `not held within the window: ${box}`);
+    const message = /<div\b[^>]*data-confirm-message=""[^>]*>/.exec(html)?.[0] ?? '';
+    expectThat(/overflow-y-auto/.test(classOf(message)), 'the words do not scroll');
+    expectThat(html.indexOf('data-confirm-message') < html.indexOf('>Trust</button>'), 'the buttons are inside what scrolls');
+    expectText(html, 'The file has changed since this opened. Trust is off until you have seen the new version.');
+    const trust = buttonsIn(html).find((b) => b.text === 'Trust');
+    expectThat(trust?.disabled, 'Trust is on for a file that changed while the review was open');
+    expectThat(buttonsIn(html).some((b) => b.text === 'Show the New Version'), 'no way to see the new version');
+  }
+);
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

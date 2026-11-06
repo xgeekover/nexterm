@@ -62,6 +62,32 @@ pub async fn git_branch(dir: String) -> Result<Option<fs::git::BranchInfo>, Stri
         .map_err(|e| format!("Looking up the branch stopped unexpectedly: {e}"))
 }
 
+/// The open folder's `.nexterm/commands.json`, for the command palette:
+/// `{ status: "none", root? }` (no folder, or no file in it),
+/// `{ status: "refused", root, reason }` (the folder is on another machine or
+/// a network drive, or `.nexterm` or the file is a link),
+/// `{ status: "error", root, reason }` (not a regular file, over 256 KB, not
+/// UTF-8, unreadable) or `{ status: "ok", root, text, sha256 }`. `root` is the
+/// folder that was read, as `fs_get_root` spells it — absent only with no
+/// folder open — so the webview can drop an answer about a folder it has
+/// since left. See `fs::project_commands`, which reads it the way a `HEAD` is
+/// read.
+///
+/// No arguments: the webview cannot point it at any other file. Nothing in
+/// the file is run or checked here; the webview asks before anything runs.
+///
+/// On the blocking pool, like `git_branch`: it runs on its own — when the
+/// folder opens, when something under `.nexterm` changes, when the palette
+/// opens — and a folder on a slow drive must not hold one of the async
+/// runtime's worker threads.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn project_commands_read(state: State<'_, AppState>) -> Result<fs::project_commands::ProjectCommandsFile, String> {
+    let root = state.workspace.root();
+    tauri::async_runtime::spawn_blocking(move || fs::project_commands::read(root.as_deref()))
+        .await
+        .map_err(|e| format!("Reading the folder's commands stopped unexpectedly: {e}"))
+}
+
 /// Search the open folder's files.
 ///
 /// Confined by construction: the walk starts at the workspace root, so there
@@ -438,6 +464,7 @@ mod dispatch_tests {
     const MUST_BE_ASYNC: &[&str] = &[
         "git_status",
         "git_branch",
+        "project_commands_read",
         "fs_search",
         "fs_list_files",
         "fs_read_dir",
@@ -538,11 +565,12 @@ mod dispatch_tests {
     /// turning either into an attribute-`async` command would quietly undo
     /// that. The same for the two the pointer reaches in a terminal's output,
     /// `fs_path_kinds` and `fs_reveal_path`: a name on a slow drive waits —
-    /// and for `git_branch`, asked about every terminal's folder.
+    /// and for `git_branch`, asked about every terminal's folder, and
+    /// `project_commands_read`, asked on every change under `.nexterm`.
     #[test]
     fn the_copy_and_the_listing_run_on_the_blocking_pool() {
         let src = source();
-        for name in ["fs_copy_path", "fs_list_files", "fs_path_kinds", "fs_reveal_path", "git_branch"] {
+        for name in ["fs_copy_path", "fs_list_files", "fs_path_kinds", "fs_reveal_path", "git_branch", "project_commands_read"] {
             // By line, so a checkout with CRLF endings reads the same, and
             // from a line that starts with the signature, so this test's own
             // text is never taken for it.

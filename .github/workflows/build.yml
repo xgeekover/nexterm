@@ -69,6 +69,14 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # The project commands suite hands quoted values through every shell it
+      # finds and compares what arrives (tests/adversarial/project_commands.test.js);
+      # without these two the zsh and fish cases skip here, and fish is
+      # checked nowhere.
+      - name: Install zsh and fish for the quoting round trips
+        if: matrix.platform == 'ubuntu-latest'
+        run: sudo apt-get install -y zsh fish
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
@@ -103,7 +111,25 @@ jobs:
         run: node tests/e2e/runner.js
 
       - name: Adversarial tests
-        run: node tests/adversarial/runner.js
+        shell: bash
+        # Into a file as well as the log, kept as an artifact: on Windows the
+        # step's log has stopped mid-run with the process still going (the
+        # step ended with the suite's own exit code), and the file is what
+        # says what happened after. NEXTERM_TEST_TRACE names each case as it
+        # starts there.
+        run: |
+          set -o pipefail
+          node tests/adversarial/runner.js 2>&1 | tee adversarial-output.txt
+        env:
+          NEXTERM_TEST_TRACE: ${{ matrix.platform == 'windows-latest' && '1' || '' }}
+
+      - name: Keep the adversarial output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adversarial-output-${{ matrix.platform }}
+          path: adversarial-output.txt
+          retention-days: 7
 
       # The only suite that mounts a component. The other three run against a
       # mock backend and never draw anything, so this is what stands between a

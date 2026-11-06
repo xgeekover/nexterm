@@ -166,6 +166,24 @@ The suites share one process and one set of module singletons, so:
   module instance from the one the app is using, with an empty state, and the
   test then measures nothing.
 
+### Quoting checked through real shells
+
+`project_commands.test.js` does not take its own word for how a value is
+quoted for a project command (README *Run a folder's own commands*). PC-24 to
+PC-30 and PC-40 hand every value of a table — spaces, quotes, `$`, `%`, `!`,
+backslashes, Hangul, emoji — through each shell found on the machine, as
+`node -e … <index> <quoted value>`, and compare what node received with what
+was typed: sh, bash and zsh here and on macOS CI, fish and zsh on Ubuntu CI
+(installed by the workflow for this), cmd (`cmd /d /s /c`), Windows PowerShell
+5.1 and PowerShell 7 (`-EncodedCommand`) and Git Bash on Windows CI. node
+writes what it got to a file rather than to its output, because Windows
+PowerShell re-encodes a program's output in the console code page. Which
+values each shell refuses is a fixed list per shell, so a quoting that refused
+everything cannot pass. These run a shell with `-c`, where history expansion
+is off: what only an interactive prompt does (`!!`, `!"`, `^a^b`) is checked
+by reading the command line instead (PC-38), and was measured once through a
+pty.
+
 ## Adding a test
 
 Write the test first and **watch it fail**. A test added after the fix, that

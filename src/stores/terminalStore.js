@@ -29,6 +29,18 @@ import { resolveStartDir, splitStartFor, startableCwd } from '../lib/terminalCwd
 import { createBatchJobReplies } from '../lib/batchJobReply.js';
 import { shellKindFor } from '../lib/dropPaths.js';
 import { shellPathOf } from '../lib/terminalFileDrop.js';
+import { lineProblem, shellLabel } from '../lib/projectCommands.js';
+import {
+  BUSY_REASON,
+  EXITED_REASON,
+  GONE_REASON,
+  PENDING_REASON,
+  RESTARTED_REASON,
+  TYPED_REASON,
+  UNKNOWN_LINE_REASON,
+  UNTOLD_REASON,
+  resolvedShellPath,
+} from '../lib/projectCommandRun.js';
 import {
   agentFromCommandLine,
   agentLabel,
@@ -47,6 +59,7 @@ import {
 import { stripTrailingSep, toPosix } from '../lib/paths.js';
 import { equalizeAll, equalizeLineOf, swapChoices } from '../components/terminal/splitLayout.js';
 import { typingHidden, withoutSecret } from '../lib/secretInput.js';
+import { LOST_LINE } from '../lib/suggestionLayer.js';
 import { isNetworkPath } from '../lib/terminalLinks.js';
 import {
   followCommandLine,
@@ -1170,6 +1183,86 @@ function programSignalled(tabId) {
 const typedLines = new Map();
 
 /**
+ * tab id -> the line at its prompt as project commands see it (spec D7):
+ * the same following as `typedLines` (`followCommandLine`), kept apart so
+ * that nothing here changes what `typedLines` yields — a tab's
+ * `commandLine`, and the agents typed by hand that it records — and fed
+ * only keys: what xterm writes in reply to a program's question (device
+ * attributes, XTVERSION, DECRQSS, the cursor's position), focus and mouse
+ * reports are not text at the prompt (`withoutReplies`). Read by
+ * `projectCommandBlock`, which refuses a terminal with text it knows is
+ * typed there, or a line it cannot follow.
+ *
+ * What it cannot know — keys a shell holds from while a command ran, a
+ * second integration in the user's rc — it does not try to: a project
+ * command is never typed into a terminal already open with an Enter (review
+ * round 3), so whatever the shell holds is on screen with it, and the user
+ * presses Enter.
+ */
+const promptLines = new Map();
+
+/**
+ * Tabs that had text typed into them before their shell drew its first
+ * prompt (one that says where its prompt is, OSC 133). A shell keeps such
+ * typeahead and shows it at that prompt, while the first prompt's "D" would
+ * have the line followed afresh, as empty — and a project command typed
+ * into a new split after the user typed `ls` there went onto the end of it.
+ * That first prompt's line is taken as not known instead (`promptLines`).
+ */
+const typedBeforePrompt = new Set();
+
+/**
+ * Tabs that submitted a line the shell has not answered yet: no command
+ * started (OSC 133 "C") and no new prompt ("D"). A line left open — `echo
+ * "abc` and Enter — has the shell waiting at its continuation prompt
+ * (`dquote>`) for the rest of it, and that is where a project command would
+ * go. Every shell NexTerm's integration hooks draws a "D" with every prompt,
+ * an empty Enter's included (zsh's precmd, bash's PROMPT_COMMAND,
+ * PowerShell's prompt function, cmd's PROMPT), so one Enter at a prompt
+ * settles it.
+ */
+const awaitingShell = new Set();
+
+/** Tabs NexTerm is typing its own line into, this moment (`typeWhenSafe`): not the user's typeahead. */
+const typingOwnLine = new Set();
+
+/**
+ * What xterm sends on its own, in reply to a program or to report focus and
+ * the mouse — never keys at a prompt: focus in and out, the cursor's
+ * position, device attributes, DECRPM, DCS answers (XTVERSION — Claude Code
+ * asks for it — and DECRQSS), OSC answers (colours), SGR and X10 mouse
+ * reports. Keys that only move (arrows, Home) are not among them: at a
+ * prompt they recall history and edit the line.
+ */
+const TERMINAL_REPLIES = new RegExp(
+  [
+    /\x1b\[[IO]/.source,
+    /\x1b\[\??\d+;\d+R/.source,
+    /\x1b\[[?>=][\d;]*c/.source,
+    /\x1b\[\??[\d;]*\$y/.source,
+    /\x1bP[^\x1b]*\x1b\\/.source,
+    /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/.source,
+    /\x1b\[<\d+;\d+;\d+[Mm]/.source,
+    /\x1b\[M[\s\S]{3}/.source,
+  ].join('|'),
+  'g'
+);
+
+/** `data` without what xterm sent in reply (`TERMINAL_REPLIES`): the keys in it, if any. */
+export function withoutReplies(data) {
+  return typeof data === 'string' ? data.replace(TERMINAL_REPLIES, '') : '';
+}
+
+/** Whether keys hold text a user typed — not only keys' escape sequences. Replies are taken out first (`withoutReplies`). */
+function holdsTypedText(keys) {
+  if (typeof keys !== 'string' || keys === '') return false;
+  const text = keys
+    .replace(/\x1b\[[0-9;?<>=:]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[O]?./g, '');
+  return /[^\x00-\x1f\x7f]/.test(text);
+}
+
+/**
  * tab id -> the conversation title its opencode shows now (`OC | <title>`),
  * as shown — cut to 37 characters past 40. What `resolveAgentSession` looks
  * up; kept out of the store because only the lookup reads it.
@@ -1499,17 +1592,35 @@ async function clearTerminalView(tabId) {
 }
 
 /**
- * Whether a tab's shell is cmd: the shell it reported, else the one it would
- * have been given (`shellPathOf`), named as the platform names it.
+ * The kind of a tab's shell (`shellKindFor`): the shell it reported, else the
+ * one it would have been given (`shellPathOf`), named as the platform names
+ * it. Also the path, for naming it (`shellLabel`).
  */
-function runsCmd(tab) {
-  if (!tab) return false;
+function shellOfTab(tab) {
   const system = useSystemStore.getState();
-  const shell = shellPathOf(tab, {
+  const shellPath = shellPathOf(tab, {
     defaultShell: useSettingsStore.getState().terminalDefaultShell,
     systemShell: system.defaultShell,
   });
-  return shellKindFor(shell, system.os) === 'cmd';
+  return { shellPath, kind: shellKindFor(shellPath, system.os) };
+}
+
+/** Whether a tab's shell is cmd (`shellOfTab`). */
+function runsCmd(tab) {
+  if (!tab) return false;
+  return shellOfTab(tab).kind === 'cmd';
+}
+
+/**
+ * Why `line` cannot be typed as a project command, or null — the same
+ * characters the file's commands and their values are refused for
+ * (`lineProblem` in projectCommands.js). `renderCommand` already makes such
+ * a line impossible; this is asked again right before typing, whoever built
+ * the line, because a line break typed into a shell runs what comes before
+ * it on its own.
+ */
+export function untypableLine(line) {
+  return lineProblem(line);
 }
 
 /**
@@ -2057,6 +2168,52 @@ export const useTerminalStore = create((set, get, api) => {
   };
 
   /**
+   * Type `data` into `tabId` on the user's behalf, once that is safe — the
+   * one way a startup command and a project command are typed:
+   *
+   *   - wait for the shell (`untilTypingSafe`): its first prompt, or the
+   *     prompt wait; typed earlier it would be typeahead, echoed twice;
+   *   - a terminal that went away meanwhile: nothing, said nowhere — there
+   *     is nowhere left to say it;
+   *   - a terminal asking for a password: nothing — the text would be taken
+   *     as the password, shown nowhere — and the terminal says why (`hidden`);
+   *   - a terminal running something by then: nothing — the text would be
+   *     that program's input — and the terminal says why (`busy`);
+   *   - whatever else the caller asks last (`check`, a refusal in words or
+   *     null): nothing when it refuses, and the terminal says so;
+   *   - else `writeRaw`, exactly what pressing the keys would send.
+   *
+   * Resolves with whether it was typed.
+   */
+  const typeWhenSafe = async (tabId, data, { hidden, busy, check = null }) => {
+    const readiness = await untilTypingSafe(tabId);
+    if (readiness === 'gone') return false;
+    if (readiness === 'hidden') {
+      notifyTerminal(tabId, hidden);
+      return false;
+    }
+    if (get().tabs.find((t) => t.id === tabId)?.running) {
+      notifyTerminal(tabId, busy);
+      return false;
+    }
+    const refused = check?.() ?? null;
+    if (refused) {
+      notifyTerminal(tabId, refused);
+      return false;
+    }
+    // NexTerm's own line, not the user's typeahead: typed into a shell that
+    // has not said where its first prompt is yet (an rc slower than the
+    // wait), it must not make that prompt's line unknown
+    // (`typedBeforePrompt`). `writeRaw` follows what it writes before its
+    // first await, so the mark is up for exactly this write.
+    typingOwnLine.add(tabId);
+    const written = get().writeRaw(tabId, data);
+    typingOwnLine.delete(tabId);
+    await written;
+    return true;
+  };
+
+  /**
    * Remember that `agent` is being typed into `tabId`, right before it is.
    *
    * With `atPrompt` — the shell has drawn a prompt, so the line runs as soon
@@ -2095,6 +2252,7 @@ export const useTerminalStore = create((set, get, api) => {
    * store, and only when it changes something: this runs for every key.
    */
   const followTyping = (tab, data) => {
+    followPrompt(tab, data);
     const { line, submitted } = followCommandLine(typedLines.get(tab.id), data, {
       running: Boolean(tab.running),
     });
@@ -2105,6 +2263,23 @@ export const useTerminalStore = create((set, get, api) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tab.id ? { ...t, commandLine: submitted } : t)),
     }));
+  };
+
+  /**
+   * The line at `tab`'s prompt as project commands see it (`promptLines`),
+   * from one write — its keys only, xterm's own replies taken out — and
+   * whether the shell has a submitted line still to answer
+   * (`awaitingShell`), or text typed before its first prompt
+   * (`typedBeforePrompt`). Nothing else reads these.
+   */
+  const followPrompt = (tab, data) => {
+    const keys = withoutReplies(data);
+    if (!keys) return;
+    if (endsOf(tab.sessionId) === 0 && holdsTypedText(keys) && !typingOwnLine.has(tab.id)) typedBeforePrompt.add(tab.id);
+    // A line submitted at the prompt: what the shell does with it is not
+    // known until it answers. Not a bracketed paste, which submits nothing.
+    if (!tab.running && /[\r\n]/.test(keys) && !keys.includes('\x1b')) awaitingShell.add(tab.id);
+    promptLines.set(tab.id, followCommandLine(promptLines.get(tab.id), keys, { running: Boolean(tab.running) }).line);
   };
 
   /**
@@ -2608,6 +2783,9 @@ export const useTerminalStore = create((set, get, api) => {
       }
       await disposeTerminalView(tabId);
       typedLines.delete(tabId);
+      promptLines.delete(tabId);
+      typedBeforePrompt.delete(tabId);
+      awaitingShell.delete(tabId);
       forgetTerminal(tabId);
       batchJobReplies.forget(tabId);
       // Whatever its shell printed that no terminal ever showed goes with it, as
@@ -4381,6 +4559,8 @@ export const useTerminalStore = create((set, get, api) => {
       unlisteners.push(await listen('pty-command-started', (payload) => {
         const { session_id } = payload || {};
         if (!session_id) return;
+        // The shell took the line it was given (`awaitingShell`).
+        for (const t of get().tabs) if (t.sessionId === session_id) awaitingShell.delete(t.id);
         set((state) => {
           let changed = false;
           const tabs = state.tabs.map((tab) => {
@@ -4405,7 +4585,17 @@ export const useTerminalStore = create((set, get, api) => {
         commandEndsBySession.set(session_id, endsOf(session_id) + 1);
         // A new prompt: whatever was being typed is gone with the old one,
         // and the next line is followed from its first key.
-        for (const t of get().tabs) if (t.sessionId === session_id) typedLines.delete(t.id);
+        for (const t of get().tabs) {
+          if (t.sessionId !== session_id) continue;
+          typedLines.delete(t.id);
+          // The shell has answered the line it was given (`awaitingShell`).
+          // Project commands' own line starts afresh too — unless text was
+          // typed before the shell's first prompt, which the shell shows
+          // there, so what that line holds is not known (`typedBeforePrompt`).
+          awaitingShell.delete(t.id);
+          if (typedBeforePrompt.delete(t.id)) promptLines.set(t.id, LOST_LINE);
+          else promptLines.delete(t.id);
+        }
         // The command's progress bar goes with the command (below): a program
         // that ended — or was killed — without taking its bar down must not
         // leave it standing over the prompt.
@@ -4891,6 +5081,9 @@ export const useTerminalStore = create((set, get, api) => {
         }
         await disposeTerminalView(tabId);
         typedLines.delete(tabId);
+        promptLines.delete(tabId);
+        typedBeforePrompt.delete(tabId);
+        awaitingShell.delete(tabId);
         forgetTerminal(tabId);
         batchJobReplies.forget(tabId);
         // Whatever its shell printed that no terminal ever showed goes with it.
@@ -5163,18 +5356,178 @@ export const useTerminalStore = create((set, get, api) => {
         tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, startupCommand: line } : t)),
       }));
 
-      const readiness = await untilTypingSafe(tabId);
-      if (readiness === 'gone') return false;
-      if (readiness === 'hidden') {
-        notifyTerminal(tabId, `startup command not typed — this terminal is asking for a password, and typing is hidden: ${line}`);
+      return typeWhenSafe(tabId, `${line}\r`, {
+        hidden: `startup command not typed — this terminal is asking for a password, and typing is hidden: ${line}`,
+        busy: `startup command not typed — something is already running here: ${line}`,
+      });
+    },
+
+    /**
+     * Type a project command's line (spec D7) into `tabId` — with the Enter
+     * that runs it (`\r`), or, `enter: false`, without: Type Only leaves it
+     * on the prompt for the user to edit or run.
+     *
+     * The line is the run dialog's, exactly as it showed it: quoted already
+     * for this terminal's shell, never cleaned or rewritten here — a line
+     * that is not what the dialog showed is not typed at all. It is asked
+     * once more to be one line of text (`untypableLine`), then typed as a
+     * startup command is (`typeWhenSafe`): once the shell is ready, never
+     * into a password prompt or a running program — the terminal says why.
+     * Resolves with whether it was typed.
+     */
+    typeProjectCommand: async (tabId, line, { enter = true, fresh = false, check = null } = {}) => {
+      if (!get().tabs.some((t) => t.id === tabId)) return false;
+      const problem = untypableLine(line);
+      if (problem) {
+        notifyTerminal(tabId, `project command not typed — ${problem}`);
         return false;
       }
-      if (get().tabs.find((t) => t.id === tabId)?.running) {
-        notifyTerminal(tabId, `startup command not typed — something is already running here: ${line}`);
+      return typeWhenSafe(tabId, enter ? `${line}\r` : line, {
+        hidden: `project command not typed — this terminal is asking for a password, and typing is hidden: ${line}`,
+        busy: `project command not typed — something is already running here: ${line}`,
+        // Asked last, right before the write: text typed at the prompt
+        // meanwhile — in a new split while its shell started, too — and
+        // whatever the caller asks (the folder's commands still trusted).
+        check: () => {
+          const why = get().projectCommandBlock(tabId, { fresh }) ?? check?.() ?? null;
+          return why ? `project command not typed — ${why}: ${line}` : null;
+        },
+      });
+    },
+
+    /**
+     * Why a project command may not be typed into `tabId` now, or null —
+     * what the run dialog says beside "This terminal", and what is asked
+     * again right before the line is typed (spec D7, review H1):
+     *
+     *   - gone, exited or running something;
+     *   - a shell that has never said where its prompt is (no OSC 133 "D":
+     *     fish, sh, WSL, an unknown one) — nothing tells whether it is busy
+     *     or what is at its prompt. Not asked of a terminal NexTerm has just
+     *     started for the line (`fresh`: a new split, a new terminal);
+     *   - text at the prompt — the line would be typed onto its end and run
+     *     with it (`git push --force ` and then `echo hi`) — or a line edited
+     *     with keys NexTerm cannot follow (arrows, Tab, history), whose text
+     *     is not known. Followed from every key written to the terminal
+     *     (`typedLines`), the way its submitted command lines are.
+     *
+     * Not stored: read when asked.
+     */
+    projectCommandBlock: (tabId, { fresh = false } = {}) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) return GONE_REASON;
+      if (tab.exited) return EXITED_REASON;
+      if (tab.running) return BUSY_REASON;
+      if (!fresh && endsOf(tab.sessionId) === 0) return UNTOLD_REASON;
+      if (awaitingShell.has(tabId)) return PENDING_REASON;
+      const line = promptLines.get(tabId);
+      if (line && !line.tracked) return UNKNOWN_LINE_REASON;
+      if (line && typeof line.buffer === 'string' && line.buffer.trim() !== '') return TYPED_REASON;
+      return null;
+    },
+
+    /**
+     * Where the run dialog's Run (or Type Only) goes: `target` 'this' — the
+     * terminal `tabId` it was opened over, as long as it still runs the shell
+     * session `sessionId` it had then — 'split', a new split beside that
+     * terminal, or 'new-tab', a new terminal (the dialog offers that only
+     * with none open). Never another terminal: one that went away, or whose
+     * shell was restarted, takes nothing and nothing else is chosen in its
+     * place. A new terminal is typed into once its shell is ready, which
+     * `typeProjectCommand`'s wait sees to. `check` is asked right before
+     * typing, as the store's own checks are (`typeProjectCommand`).
+     *
+     * `kind` is the shell the dialog quoted the line for (`label` its name), and `quoted`
+     * whether the line holds any value it quoted. A line with values goes
+     * only to a terminal running that kind of shell: the new split's shell
+     * is the one `splitStartFor` gave the dialog, but the backend has the
+     * last word on which shell starts, and a value quoted for zsh is not
+     * one word of cmd. The terminal says so rather than taking another line
+     * than the one shown. Resolves with whether it was typed.
+     */
+    runProjectCommand: async ({
+      target,
+      tabId = null,
+      sessionId = null,
+      line,
+      enter = true,
+      kind = null,
+      label = null,
+      quoted = false,
+      check = null,
+    } = {}) => {
+      const say = (message) => {
+        const at = tabId ?? get().activeTabId;
+        if (!notifyTerminal(at, message)) console.warn(`[TerminalStore] ${message}`);
+      };
+      const problem = untypableLine(line);
+      if (problem) {
+        say(`project command not typed — ${problem}`);
         return false;
       }
-      await get().writeRaw(tabId, `${line}\r`);
-      return true;
+      const pinned = tabId ? get().tabs.find((t) => t.id === tabId) ?? null : null;
+      const samePinned = pinned && (sessionId == null || pinned.sessionId === sessionId);
+      let into = null;
+      // Into a terminal already open the line is typed and left at its prompt,
+      // never run (review round 3): what its shell still holds — keys typed
+      // while a command ran, the rest of a line it waits for — cannot be
+      // known from outside it, and is on screen beside the line for the user
+      // to see before they press Enter.
+      const withEnter = target === 'this' ? false : enter;
+      // A new split is made the active pane — and given the keyboard — only
+      // once its line is typed, or refused: until then the keyboard stays
+      // where it was, so nothing the user types goes into the new shell as it
+      // starts. Not when the user has gone elsewhere meanwhile.
+      let activateLater = null;
+      if (target === 'this') {
+        if (!samePinned) {
+          say(`project command not typed — ${pinned ? RESTARTED_REASON : GONE_REASON}: ${line}`);
+          return false;
+        }
+        into = pinned;
+      } else if (target === 'split') {
+        // Beside the terminal the dialog was opened over, in its group —
+        // not beside whichever pane is active by now.
+        const group = pinned ? groupOfTab(get(), pinned.id) : null;
+        const leaf = group ? leafHoldingTab(group.tree, pinned.id) : null;
+        if (!leaf) {
+          say(`project command not typed — the terminal it would split beside has closed: ${line}`);
+          return false;
+        }
+        const fromPane = get().getActivePaneId();
+        const paneId = await get().splitPane(leaf.id, 'horizontal', group.id);
+        if (!paneId) return false;
+        activateLater = () => {
+          if (get().getActivePaneId() === fromPane) get().setActivePane(paneId);
+        };
+        const made = get()
+          .groups.flatMap((g) => collectLeaves(g.tree))
+          .find((l) => l.id === paneId);
+        into = get().tabs.find((t) => t.id === made?.activeTabId) ?? null;
+      } else if (target === 'new-tab') {
+        into = await get().createTab();
+      }
+      if (!into) {
+        activateLater?.();
+        return false;
+      }
+      try {
+        if (quoted && kind) {
+          const system = useSystemStore.getState();
+          const shellPath = resolvedShellPath(shellOfTab(into).shellPath, system.defaultShell);
+          const runs = shellKindFor(shellPath, system.os);
+          if (runs !== kind) {
+            notifyTerminal(
+              into.id,
+              `project command not typed — its values were quoted for ${label ?? kind}, and this terminal runs ${shellLabel(runs, shellPath ?? '')}: ${line}`
+            );
+            return false;
+          }
+        }
+        return await get().typeProjectCommand(into.id, line, { enter: withEnter, fresh: target !== 'this', check });
+      } finally {
+        activateLater?.();
+      }
     },
 
     /** Leave the terminal as a plain shell, and stop offering. */
@@ -5286,6 +5639,9 @@ export const useTerminalStore = create((set, get, api) => {
           return false;
         }
         typedLines.delete(tabId);
+        promptLines.delete(tabId);
+        typedBeforePrompt.delete(tabId);
+        awaitingShell.delete(tabId);
         forgetAgentTitle(tabId);
         // A bar from the shell that exited describes nothing in the new one.
         cancelProgress(tabId);

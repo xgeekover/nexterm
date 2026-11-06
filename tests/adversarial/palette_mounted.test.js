@@ -104,6 +104,37 @@ const STAND_INS = {
     export function emit(event, payload) {
       for (const callback of [...(bridge.listeners.get(event) ?? [])]) callback(payload);
     }`,
+  // What the folder's commands file says, as the palette reads it: nothing
+  // here, so it adds no row; what it was asked to do is counted.
+  projectCommandsStore: `
+    import { create } from 'zustand';
+    import { calls } from 'stand-in:calls';
+    export const useProjectCommandsStore = create(() => ({
+      status: 'idle',
+      reason: null,
+      trust: 'untrusted',
+      project: null,
+      user: null,
+      refresh: async () => {
+        calls.push(['refreshProjectCommands']);
+      },
+      openRun: (key) => {
+        calls.push(['openRun', key]);
+        return true;
+      },
+      openReview: () => {
+        calls.push(['openReview']);
+        return true;
+      },
+      openCommandsFile: async () => {
+        calls.push(['openCommandsFile']);
+        return true;
+      },
+      distrustCurrent: () => {
+        calls.push(['distrustCurrent']);
+        return true;
+      },
+    }));`,
   commandIndex: `
     export const historyEntries = [];
     export function commandHistory() {
@@ -128,14 +159,19 @@ const STAND_INS = {
     export const ArrowLeftRight = icon('ArrowLeftRight');
     export const Pencil = icon('Pencil');
     export const X = icon('X');
-    export const PanelTop = icon('PanelTop');`,
+    export const PanelTop = icon('PanelTop');
+    export const Play = icon('Play');
+    export const ShieldAlert = icon('ShieldAlert');
+    export const ShieldOff = icon('ShieldOff');
+    export const FileWarning = icon('FileWarning');
+    export const FilePen = icon('FilePen');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */
 function standInFor(path) {
   if (path === 'stand-in:calls') return 'calls';
   if (path === 'lucide-react') return 'lucide';
-  const store = /\/stores\/(settings|editor|terminal)Store\.js$/.exec(path);
+  const store = /\/stores\/(settings|editor|terminal|projectCommands)Store\.js$/.exec(path);
   if (store) return `${store[1]}Store`;
   if (/\/lib\/ipc\.js$/.test(path)) return 'ipc';
   if (/\/lib\/commandIndex\.js$/.test(path)) return 'commandIndex';

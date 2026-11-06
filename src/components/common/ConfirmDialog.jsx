@@ -162,6 +162,11 @@ export function ConfirmDialog({
   // another — the Explorer's "Delete Permanently?" after a move to the Trash
   // failed. An Enter pressed twice out of habit then does nothing.
   initialFocus = 'confirm',
+  // The confirm button off, and why (its tooltip; the message says it in
+  // words): the review of a folder's commands while the file has changed
+  // under it.
+  confirmDisabled = false,
+  confirmDisabledReason = null,
 }) {
   const dialogRef = useRef(null);
   const confirmRef = useRef(null);
@@ -215,6 +220,15 @@ export function ConfirmDialog({
     window.addEventListener('keydown', onKey, true);
     return () => {
       window.removeEventListener('keydown', onKey, true);
+      // Still on the page: not closed — React's StrictMode runs a new
+      // dialog's effects twice in development. It leaves the stack (the next
+      // run puts it back) and the keyboard stays where it is: given back in
+      // between, a terminal behind was sent "focus in" and "focus out".
+      if (box?.isConnected) {
+        const at = openDialogs.indexOf(self);
+        if (at !== -1) openDialogs.splice(at, 1);
+        return;
+      }
       const next = focusOnClose(openDialogs, self, {
         focused: document.activeElement,
         body: document.body,
@@ -231,7 +245,14 @@ export function ConfirmDialog({
     <div
       className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 pt-[18vh]"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && backdropCancels(openedAtRef.current, Date.now())) onCancel?.();
+        if (e.target !== e.currentTarget) return;
+        // The keyboard stays on the dialog's button whatever the press does:
+        // left to the browser, it went to the page, and Enter reached nothing.
+        e.preventDefault();
+        // The second press of a double-click — the one that opened this, on
+        // what was under the pointer — is not a press on the dim area.
+        if (e.detail > 1) return;
+        if (backdropCancels(openedAtRef.current, Date.now())) onCancel?.();
       }}
     >
       <div
@@ -239,9 +260,21 @@ export function ConfirmDialog({
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="w-[440px] max-w-[92vw] bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-vsc-fg"
+        // A click on its words keeps the keyboard in the dialog (the box takes
+        // it) rather than dropping it to the page — and, moments after the
+        // dialog opened, leaves it on the button it was given: that click is
+        // the second of the double-click that asked the question.
+        tabIndex={-1}
+        onMouseDown={(e) => {
+          if (backdropCancels(openedAtRef.current, Date.now())) return;
+          if (!e.target.closest?.('button, input, select, textarea, a, label')) e.preventDefault();
+        }}
+        // As tall as the window allows below where it opens, the message
+        // scrolling and the buttons always on screen: a long list of commands
+        // to review pushed Trust and Cancel off the bottom.
+        className="w-[440px] max-w-[92vw] max-h-[80vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-vsc-fg outline-none"
       >
-        <div className="h-[35px] px-3 flex items-center justify-between border-b border-vsc-border">
+        <div className="h-[35px] shrink-0 px-3 flex items-center justify-between border-b border-vsc-border">
           <h2 id="confirm-dialog-title" className="text-ui font-semibold m-0">
             {title}
           </h2>
@@ -254,8 +287,10 @@ export function ConfirmDialog({
             <X size={14} />
           </button>
         </div>
-        <div className="px-3 py-3 text-ui text-vsc-fg">{message}</div>
-        <div className="px-3 pb-3 flex items-center justify-end gap-2">
+        <div data-confirm-message="" className="min-h-0 flex-1 overflow-y-auto px-3 py-3 text-ui text-vsc-fg">
+          {message}
+        </div>
+        <div className="shrink-0 px-3 pb-3 flex items-center justify-end gap-2">
           {altLabel && (
             <button
               type="button"
@@ -281,7 +316,10 @@ export function ConfirmDialog({
           <button
             ref={confirmRef}
             type="button"
+            disabled={confirmDisabled}
+            title={confirmDisabled && confirmDisabledReason ? confirmDisabledReason : undefined}
             onClick={(e) => {
+              if (confirmDisabled) return;
               const counts = confirmClickCounts({
                 guarded: initialFocus === 'cancel',
                 openedAt: openedAtRef.current,
@@ -290,8 +328,11 @@ export function ConfirmDialog({
               });
               if (counts) onConfirm?.(e);
             }}
+            // The ring shows which button has the keyboard: on the accent
+            // colour the browser's own was drawn in the button's colour.
             className={cn(
-              'h-[26px] px-3 text-ui rounded-[3px] text-vsc-accent-fg',
+              'h-[26px] px-3 text-ui rounded-[3px] text-vsc-accent-fg disabled:opacity-50 disabled:cursor-default',
+              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-vsc-focus',
               danger ? 'bg-vsc-error hover:opacity-90' : 'bg-vsc-accent hover:bg-vsc-accent-hover'
             )}
           >

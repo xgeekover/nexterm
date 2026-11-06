@@ -24,6 +24,9 @@ walkdir = "2.5.0"
 regex = "1"
 # canonicalize without the \\?\ prefix Windows adds — see `Canonical` in src/fs/mod.rs.
 dunce = "1.0.5"
+# The SHA-256 a folder's `.nexterm/commands.json` is trusted by (src/fs/project_commands.rs).
+# Already in Cargo.lock through Tauri (tauri-codegen; wry on Linux), so no new crate comes in.
+sha2 = "0.10"
 tauri-plugin-dialog = "2"
 # Hands a URL to the system browser for the links in terminal output. Scoped to
 # http/https in capabilities/default.json — see src/lib/openExternal.js for why

@@ -7,6 +7,8 @@ import { dialogOnScreen, menuOnScreen } from '../lib/workspaceFocus.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
+import { useProjectCommandsStore } from '../stores/projectCommandsStore.js';
+import { modalHeld } from '../lib/modalLock.js';
 
 /**
  * Wire the keyboard to the resolved keybindings.
@@ -65,6 +67,9 @@ export function useKeybindings() {
       // destroys every running shell — see the `reload-guard` binding.
       blockReload: !import.meta.env.DEV,
       isWindows,
+      // A dialog that keeps the app still: no chord of the app's answers
+      // (`findBinding`), the reload guards aside.
+      modalOpen: () => modalHeld(),
       // Asked only by a command whose chord was pressed (`enabled`).
       isDialogOpen: () => dialogOnScreen(),
       isMenuOpen: () => menuOnScreen(),
@@ -91,6 +96,9 @@ export function useKeybindings() {
       zoomFont,
       resetZoom,
       closeWindow: windowControls.close,
+      // Read when the chord is pressed, not subscribed to: neither changes.
+      openProjectCommandsFile: () => useProjectCommandsStore.getState().openCommandsFile(),
+      stopTrustingProjectCommands: () => useProjectCommandsStore.getState().distrustCurrent(),
     });
 
     // Bubble phase, as before: xterm has already swallowed anything it turns
