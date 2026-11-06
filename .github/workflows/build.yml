@@ -276,9 +276,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # Only the build jobs' bundles. The test jobs keep artifacts too (the
+      # adversarial suite's output), and without a pattern v0.23.0 published
+      # one of them as a release asset.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
+          pattern: nexterm-*
 
       - name: Gather assets
         shell: bash
@@ -320,6 +324,16 @@ jobs:
           while IFS= read -r f; do
             [ -s "$f" ] || { echo "::error::empty asset: $f"; exit 1; }
           done < <(find installers -type f)
+
+          # And nothing but installers: whatever lands here is published.
+          extra=0
+          while IFS= read -r f; do
+            case "$(basename "$f")" in
+              *.dmg|*.app.tar.gz|*-setup.exe|*.msi|NexTerm-windows-x64-portable.zip|*.AppImage|*.deb|*.rpm) ;;
+              *) echo "::error::not an installer, refusing to publish it: $f"; extra=1 ;;
+            esac
+          done < <(find installers -type f)
+          [ "$extra" -eq 0 ] || exit 1
 
       # Draft first: the release exists but nobody sees it until the assets
       # have been uploaded AND read back, so a half-uploaded release is never
