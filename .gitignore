@@ -3,6 +3,10 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/schemas/
+# nexterm-cli's own build, and the copy staged for bundle.externalBin
+# (nexterm-cli-<target triple>) by `npm run build:cli` — src-tauri/cli/stage.mjs.
+src-tauri/cli/target/
+src-tauri/binaries/
 
 # OS / editor
 .DS_Store

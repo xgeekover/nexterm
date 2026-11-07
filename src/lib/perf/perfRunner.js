@@ -15,6 +15,8 @@
  *   S6  typing while four terminals of 5000 lines  what saving their scrollback costs
  *       save their scrollback                      (stage 6): each save's serialize, the
  *                                                  restore of all four, and typing beside them
+ *   S7  `nexterm-cli set-status` from a terminal,  the control API's round trip as a hook
+ *       200 times                                  pays it (stage 7, spec D9): p50/p95/max
  *
  * Each runs in groups of its own that are closed afterwards; the group that
  * was on screen comes back. The load is tests/perf/flood.js, typed into the
@@ -35,7 +37,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { existingTerminal, focusTerminalView, getGpuStats } from '../../components/terminal/terminalRegistry.js';
-import { checkSequence, counterDelta, parseGeneratorSummary, summarizeTimes } from './perfStats.js';
+import { checkSequence, counterDelta, parseControlSummary, parseGeneratorSummary, summarizeTimes } from './perfStats.js';
 import { Terminal } from '@xterm/xterm';
 import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
 import { activateGraphemeWidths } from '../terminalCompat.js';
@@ -54,6 +56,15 @@ export const SAVE_SECONDS = 30;
 /** 5000 lines at once, then a log of 200 lines a second: a full scrollback that keeps printing. */
 const FILLED_LOG = `rate --lines 200 --seconds ${SAVE_SECONDS} --fill 5000`;
 
+/**
+ * S7: how many `nexterm-cli set-status` calls, and how far apart. 60 ms keeps
+ * one token under the backend's 20 requests a second (spec D6), so what is
+ * measured is the round trip and never the rate limit; 200 of them is a
+ * busy agent's minute of tool use in 12 s.
+ */
+export const CONTROL_CALLS = 200;
+export const CONTROL_INTERVAL_MS = 60;
+
 export const SCENARIOS = {
   S1: { title: 'One terminal takes 50 MB at once', loads: ['bulk --mb 50'], timeoutMs: 180_000 },
   S2: { title: 'Four terminals flood for 10 s', loads: [FLOOD, FLOOD, FLOOD, FLOOD] },
@@ -66,6 +77,11 @@ export const SCENARIOS = {
     typing: 'beside',
     scrollback: true,
     timeoutMs: SAVE_SECONDS * 1000 + 60_000,
+  },
+  S7: {
+    title: 'nexterm-cli set-status from a terminal, 200 times',
+    control: { count: CONTROL_CALLS, interval: CONTROL_INTERVAL_MS },
+    timeoutMs: 120_000,
   },
 };
 
@@ -284,10 +300,66 @@ async function counters() {
   }
 }
 
+/**
+ * S7 (stage 7, spec D9): tests/perf/control.js typed into a terminal of its
+ * own, calling `nexterm-cli set-status` CONTROL_CALLS times — `$NEXTERM_CLI`,
+ * the path every shell NexTerm starts is given — each timed by the script
+ * from before the CLI starts to after it exits. What comes back is its
+ * summary (`parseControlSummary`): p50/p95/p99/max, and the first failure
+ * if any call failed. Frames are timed meanwhile: a status set ten times a
+ * second must not cost the page a stutter.
+ */
+async function runControl(id, scenario, { tools, probe, platform }) {
+  const run = { scenario: id, title: scenario.title, terminals: [] };
+  const opened = [];
+  try {
+    if (useSettingsStore.getState().terminalControl === false) {
+      throw new Error('Settings ▸ Terminal ▸ Control is off: nothing would answer nexterm-cli');
+    }
+    const group = await openGroup(`perf ${id}`, 1);
+    opened.push(group.groupId);
+    const tabId = group.tabIds[0];
+    if (!(await ready(tabId))) throw new Error('the terminal never showed its prompt');
+    const script = joinPath(tools, 'control.js', platform);
+    const line = nodeCommand(
+      script,
+      `--count ${scenario.control.count} --interval ${scenario.control.interval}`,
+      shellKindFor(tabOf(tabId)?.shell, platform)
+    );
+    if (!line) throw new Error(`cannot quote ${script} for this shell`);
+    const before = await counters();
+    probe.reset();
+    probe.startFrames();
+    run.startedAtEpoch = Date.now();
+    const startedAt = now();
+    if (!(await typeLine(tabId, line))) throw new Error('the command was not typed');
+    const read = () => parseControlSummary(tailText(existingTerminal(tabId), 12));
+    const summary = await until(read, scenario.timeoutMs ?? 120_000, 200);
+    // The first failure's line comes right after the summary.
+    if (summary?.failed > 0) await until(() => read()?.firstError, 2000, 100);
+    probe.stopFrames();
+    run.endedAtEpoch = Date.now();
+    run.durationMs = Math.round(now() - startedAt);
+    run.page = probe.snapshot();
+    run.backend = counterDelta(before, await counters());
+    run.timedOut = !summary;
+    run.control = summary ? read() : null;
+  } catch (err) {
+    probe.stopFrames();
+    run.error = String(err?.message || err);
+  } finally {
+    for (const groupId of opened.reverse()) {
+      await useTerminalStore.getState().closeGroup(groupId);
+    }
+  }
+  return run;
+}
+
 /** One run of `scenario`: what it measured, or why it could not. */
 export async function runScenario(id, { tools, probe, platform }) {
   const scenario = SCENARIOS[id];
   if (!scenario) return { scenario: id, error: 'no such scenario' };
+  if (scenario.control) return runControl(id, scenario, { tools, probe, platform });
   const store = useTerminalStore.getState();
   const opened = [];
   const run = { scenario: id, title: scenario.title };

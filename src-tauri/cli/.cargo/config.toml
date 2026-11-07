@@ -1,0 +1,9 @@
+# The C runtime linked into nexterm-cli.exe, not loaded from VCRUNTIME140.dll:
+# the app beside it is built the same way (the Tauri CLI sets STATIC_VCRUNTIME),
+# so neither needs the Visual C++ redistributable on the user's PC.
+#
+# Cargo reads this file only when it runs from this folder (it looks up
+# .cargo/config.toml from the working directory, not from --manifest-path):
+# stage.mjs and CI's test step both run cargo here.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

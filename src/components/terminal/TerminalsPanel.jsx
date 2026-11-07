@@ -23,7 +23,7 @@ import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
 import { UnreadPill } from './AttentionIndicators.jsx';
-import { GroupSummary, TerminalStatusLine } from './StatusBoard.jsx';
+import { GroupSummary, ProgramStatus, TerminalStatusLine } from './StatusBoard.jsx';
 import { TabMarks } from './HiddenStrip.jsx';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import {
@@ -840,6 +840,8 @@ export function TerminalsPanel() {
                 <ActivityDot tab={tab} />
                 <span className="truncate">{tab.title}</span>
                 <TabMarks tabId={tab.id} unread={unread} />
+                {/* With no second line, a program's status still shows. */}
+                <ProgramStatus tabId={tab.id} active={isActive} />
                 {folder}
               </>
             )}

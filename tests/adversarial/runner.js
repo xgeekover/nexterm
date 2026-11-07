@@ -138,6 +138,10 @@ import './scrollback_saver.test.js';
 import './scrollback_restore.test.js';
 import './scrollback_exit.test.js';
 import './scrollback_store.test.js';
+import './control_backend_mock.test.js';
+import './control_keys.test.js';
+import './control_scope.test.js';
+import './control_dispatcher.test.js';
 
 async function run() {
   console.log('====================================================');

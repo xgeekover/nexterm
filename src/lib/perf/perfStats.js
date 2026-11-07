@@ -110,6 +110,34 @@ export function parseGeneratorSummary(text) {
   };
 }
 
+const CONTROL_SUMMARY = /\[nexterm-perf-control\] calls=(\d+) failed=(\d+) p50=([\d.]+|-) p95=([\d.]+|-) p99=([\d.]+|-) max=([\d.]+|-) mean=([\d.]+|-)/;
+const CONTROL_ERROR = /\[nexterm-perf-control\] first-error exit=(\S+) ([^\n]*)/;
+
+/**
+ * tests/perf/control.js's summary (scenario S7, stage 7), read back from
+ * `text`: how many `nexterm-cli set-status` calls, how many failed, and their
+ * round trips in ms — null where nothing was measured — and what the first
+ * failure said. Null when there is no summary in `text`.
+ */
+export function parseControlSummary(text) {
+  const source = typeof text === 'string' ? text : '';
+  const match = CONTROL_SUMMARY.exec(source);
+  if (!match) return null;
+  const ms = (v) => (v === '-' ? null : Number(v));
+  const [, calls, failed, p50, p95, p99, max, mean] = match;
+  const error = CONTROL_ERROR.exec(source);
+  return {
+    calls: Number(calls),
+    failed: Number(failed),
+    p50: ms(p50),
+    p95: ms(p95),
+    p99: ms(p99),
+    max: ms(max),
+    mean: ms(mean),
+    firstError: error ? { exit: error[1], said: error[2].trim() } : null,
+  };
+}
+
 /** What changed in the backend's counters (src/perf.rs) between two reads. */
 export function counterDelta(before, after) {
   if (!before || !after) return null;

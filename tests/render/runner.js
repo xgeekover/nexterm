@@ -87,10 +87,11 @@ const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
 const { useBranchStore } = await import('../../src/stores/branchStore.js');
 const { useProjectCommandsStore } = await import('../../src/stores/projectCommandsStore.js');
 const { useSystemStore } = await import('../../src/stores/systemStore.js');
+const { useControlLogStore } = await import('../../src/stores/controlLogStore.js');
 const { default: App } = await import('../../src/App.jsx');
 const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -3051,7 +3052,10 @@ check('RN-114', 'what keeps the side bar cheap and readable: narrow subscription
   expectThat(/\[data-sort-toggle\]\[aria-pressed="true"\] \{\s*outline: 1px solid ButtonText;/.test(forced), 'in forced colours, the pressed sort toggle has no edge');
   expectThat(/\[data-unread-dot\] \{\s*forced-color-adjust: none;\s*background: Highlight;/.test(forced), 'in forced colours, the unread dot is not drawn');
   expectThat(/\[data-status-icon\] \{\s*color: CanvasText;/.test(forced), 'in forced colours, the state icons keep their own colours');
-  for (const file of [board]) expectThat((file.match(/data-status-icon=""/g) || []).length === 2, 'a state icon (line 2 or the group summary) is not marked for forced colours');
+  // Three: line 2's state, the group summary's, and the tone of a status a
+  // program reported (stage 7) — each drawn in CanvasText in forced colours,
+  // its shape and its words saying what its colour does.
+  for (const file of [board]) expectThat((file.match(/data-status-icon=""/g) || []).length === 3, 'a state icon (line 2, the group summary or a reported status) is not marked for forced colours');
   expectThat(!/\[data-last-note[^\]]*\][^{]*\{[^}]*GrayText/.test(forced), 'in forced colours, a read note is painted GrayText again (it reads as disabled, and some palettes make it the loudest text)');
   expectThat(/\[data-pending-dot\] \{\s*forced-color-adjust: none;\s*background: Highlight;/.test(forced), 'in forced colours, the "newer order waiting" dot is black on black');
   expectThat(/data-pending-dot=""/.test(panel), 'the "newer order waiting" dot is not marked for forced colours');
@@ -4074,6 +4078,222 @@ scenario(
     expectThat(visibleText(row).includes('Disabled'), 'does not say Disabled');
     expectThat(buttonsIn(row).some((b) => b.text === 'Reset'), 'a changed setting offers no Reset');
     expectThat(html.includes('data-setting-action="clearSavedScrollback"'), 'the Clear button went with the setting');
+  }
+);
+
+// ---- The control API (stage 7, spec D5/D6) ---------------------------------------
+
+scenario(
+  'RN-183',
+  'Settings ▸ Terminal ▸ Control: under its heading, the API on and typing and other terminals off by default, each saying what it opens and that only terminals NexTerm started reach it',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const headings = [...html.matchAll(/data-settings-subsection="Control"/g)];
+    expectThat(headings.length === 1, `the Control heading is drawn ${headings.length} times`);
+    expectText(html, 'Terminal ▸ Control');
+    const keys = ['terminal.control.enabled', 'terminal.control.typeAndRead', 'terminal.control.otherTerminals'];
+    const at = keys.map((k) => html.indexOf(k));
+    expectThat(at.every((i, n) => i !== -1 && (n === 0 || i > at[n - 1])), `the three rows are not drawn in order: ${at}`);
+    expectThat(html.indexOf('data-settings-subsection="Control"') < at[0], 'the heading is not above the rows');
+    // Last in the Terminal section: no other row is drawn under its heading.
+    const under = html.slice(html.indexOf('data-settings-subsection="Control"'), html.indexOf('data-section="workbench"'));
+    const keysUnder = [...under.matchAll(/font-mono text-ui-sm text-vsc-muted">([^<]+)</g)].map((m) => m[1]);
+    expectThat(JSON.stringify(keysUnder) === JSON.stringify(keys), `rows under the Control heading: ${keysUnder.join(', ')}`);
+    const [api, typing, others] = keys.map((k) => settingRowAt(html, k));
+    expectThat(rowChecked(api), 'the API is not on by default');
+    expectThat(!rowChecked(typing), 'typing and reading is on by default');
+    expectThat(!rowChecked(others), 'other terminals is on by default');
+    const say = (row, words) => {
+      const text = visibleText(row).replace(/\s+/g, ' ');
+      for (const w of words) expectThat(text.includes(w), `the row does not say ${JSON.stringify(w)}: ${text}`);
+    };
+    say(api, ['Let Programs in Terminals Control NexTerm', 'nexterm-cli', 'notification', 'status line', 'progress bar', 'open a split', 'Only programs in terminals NexTerm started can reach it, as you', 'nothing listens on the network', 'Show Control Log']);
+    say(typing, ['Let Programs Type Into and Read Terminals', 'nexterm-cli send', 'nexterm-cli read-screen', 'Never into a password prompt', '[hidden]', 'Only from terminals NexTerm started, as you']);
+    say(others, ['Let Programs Control Other Terminals', 'every other terminal', 'unmasked', 'Only from terminals NexTerm started, as you']);
+  }
+);
+
+scenario(
+  'RN-184',
+  "a program's status on its terminal's second line, in the note's place, with its tone's icon and words — and not on another terminal's row",
+  () => {
+    arrangeBoard();
+    useTerminalStore.setState({ reportedStatus: { 'sb-1': { text: 'Running tests', tone: 'warn', at: Date.now() - 60_000 } } });
+  },
+  (html) => {
+    const row = terminalRow(html, 'sb-1');
+    const tag = tagWith(row, 'data-reported-status');
+    expectThat(tag && attrOf(tag, 'data-reported-status') === 'warn', `no reported status on the row: ${row}`);
+    const text = visibleText(row);
+    expectThat(text.includes('Running tests'), 'the status is not drawn');
+    expectThat(text.includes('status, warning:'), 'the tone is not read out');
+    expectThat(!/data-last-note=/.test(row), 'the last note is still drawn beside it');
+    const tooltip = attrOf(tag, 'title') ?? '';
+    expectThat(tooltip.includes('Status from the program in this terminal') && tooltip.includes('Last notification:'), `the tooltip: ${JSON.stringify(tooltip)}`);
+    expectThat(/lucide-triangle-alert/.test(row), 'not the warning icon');
+    expectThat(/data-last-note=/.test(terminalRow(html, 'sb-2')), "another terminal's note went too");
+    expectThat(!/data-reported-status=/.test(terminalRow(html, 'sb-2')), 'a status on a terminal that reported none');
+  }
+);
+
+scenario(
+  'RN-185',
+  "another terminal's program controlled this one: a badge on its chip's corner and a mark on its row, naming the caller — and nothing on the others",
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [tab('t1', { title: 'agent' }), tab('t2', { title: 'build' })],
+      groups: baseGroups(['t1', 't2']),
+      controlled: { t2: { by: 't1', byTitle: 'agent', cmd: 'send', at: Date.now(), n: 1 } },
+    });
+  },
+  (html) => {
+    const chip = tabChip(html, 't2');
+    const badge = tagWith(chip, 'data-controlled-mark');
+    expectThat(badge, `no mark on the chip: ${chip}`);
+    expectThat(attrOf(badge, 'aria-label') === 'Controlled by agent (send)' && attrOf(badge, 'role') === 'img', `the mark does not say who: ${badge}`);
+    expectThat(attrOf(badge, 'title') === 'Controlled by agent (send)', 'no tooltip naming the caller');
+    const cls = classOf(badge).split(/\s+/);
+    // Over the top edge just right of the lock's corner, above the activity dot.
+    for (const word of ['absolute', '-top-[2px]', 'left-[9px]', 'w-[10px]', 'h-[10px]']) {
+      expectThat(cls.includes(word), `the chip's mark is not "${word}" — it must take no room: ${badge}`);
+    }
+    expectThat(!/data-controlled-mark=/.test(tabChip(html, 't1')), 'the caller is marked');
+    const row = terminalRow(html, 't2');
+    expectThat(attrOf(tagWith(row, 'data-controlled-mark'), 'aria-label') === 'Controlled by agent (send)', `no mark on the side bar row: ${row}`);
+    expectThat(!/data-controlled-mark=/.test(terminalRow(html, 't1')), "a mark on the caller's row");
+  }
+);
+
+scenario(
+  'RN-186',
+  'Show Control Log: the calls newest first — who, what, of whom, how much, the answer — and never anything they carried',
+  () => {
+    reset();
+    useControlLogStore.setState({ entries: [], open: true });
+    const record = useControlLogStore.getState().record;
+    record({ at: new Date(2026, 10, 7, 9, 5, 1).getTime(), caller: 't1', callerTitle: 'agent', cmd: 'send', target: 't2', targetTitle: 'build', size: 12, result: 'ok' });
+    record({ at: new Date(2026, 10, 7, 9, 5, 2).getTime(), caller: 't1', callerTitle: 'agent', cmd: 'read-screen', target: 'self', lines: 40, result: 'disabled' });
+  },
+  (html) => {
+    const box = /<div\b[^>]*\sdata-control-log-dialog=""[\s\S]*$/.exec(html)?.[0] ?? '';
+    expectThat(box, 'the dialog is not open');
+    expectThat(/role="dialog"/.test(box) && /aria-modal="true"/.test(box), 'not a modal dialog');
+    expectText(box, 'Control Log');
+    expectText(box, '2 calls');
+    const rows = [...box.matchAll(/<tr\b[^>]*data-control-log-row="[^"]*"[^>]*>[\s\S]*?<\/tr>/g)].map((m) => visibleText(m[0]).replace(/\s+/g, ' ').trim());
+    expectThat(rows.length === 2, `${rows.length} rows`);
+    expectThat(rows[0].startsWith('09:05:02') && rows[0].includes('read-screen') && rows[0].includes('itself') && rows[0].includes('40 lines') && rows[0].includes('disabled'), `the newest row: ${rows[0]}`);
+    expectThat(rows[1].startsWith('09:05:01') && rows[1].includes('agent') && rows[1].includes('build (t2)') && rows[1].includes('12 bytes') && rows[1].includes('ok'), `the older row: ${rows[1]}`);
+    expectText(box, 'What was typed and what was read are never kept.');
+    expectThat(buttonsIn(box).some((b) => b.text === 'Clear'), 'no Clear');
+    expectThat(buttonsIn(box).some((b) => b.label === 'Close'), 'no Close');
+  }
+);
+
+scenario(
+  'RN-187',
+  'Show Control Log with nothing logged says so; closed, it is not drawn at all',
+  () => {
+    reset();
+    useControlLogStore.setState({ entries: [], open: true });
+  },
+  (html) => {
+    expectThat(/data-control-log-empty=""/.test(html), 'no word for an empty log');
+    expectText(html, 'No program has asked NexTerm for anything yet.');
+    useControlLogStore.setState({ open: false });
+    expectThat(!/data-control-log-dialog/.test(renderArranged()), 'drawn while closed');
+  }
+);
+
+scenario(
+  'RN-188',
+  "with the strip hidden, another terminal's program controlling this one marks the handle, and its words say who (review: integration 7)",
+  () =>
+    arrangeHidden({
+      tabIds: ['t1'],
+      extra: { tabs: [tab('t1', { title: 'build' })], controlled: { t1: { by: 't9', byTitle: 'agent', cmd: 'send', at: Date.now(), n: 1 } } },
+    }),
+  (html) => {
+    const handle = handleOf(paneMarkup(html, 'pane-1'));
+    expectThat(/data-handle-mark="controlled"/.test(handle ?? ''), `no controlled mark on the handle: ${handle}`);
+    const words = attrOf(openingTag(handle), 'aria-label') ?? '';
+    expectThat(words.includes('Controlled by agent (send)'), `the handle's words do not say it: ${JSON.stringify(words)}`);
+    expectThat((attrOf(openingTag(handle), 'title') ?? '').includes('Controlled by agent (send)'), "the handle's tooltip does not say it");
+  }
+);
+
+scenario(
+  'RN-189',
+  "with every second-line item off, a program's status still shows on its one-line row — and nowhere else (review: integration 12)",
+  () => {
+    reset();
+    for (const key of ['terminalsPanelBranch', 'terminalsPanelAgent', 'terminalsPanelLastNote']) {
+      useSettingsStore.getState().setSetting(key, false);
+    }
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2')],
+      groups: baseGroups(['t1', 't2']),
+      reportedStatus: { t2: { text: 'Deploying to staging', tone: 'error', at: Date.now() } },
+    });
+  },
+  (html) => {
+    const row = terminalRow(html, 't2');
+    expectThat(classOf(openingTag(row)).split(/\s+/).includes('h-[22px]'), `not a one-line row: ${openingTag(row)}`);
+    const tag = tagWith(row, 'data-reported-status');
+    expectThat(tag && attrOf(tag, 'data-reported-status') === 'error', `no status on the one-line row: ${row}`);
+    expectThat(visibleText(row).includes('Deploying to staging') && visibleText(row).includes('status, error:'), 'the status is not drawn, or not read out');
+    expectThat(!/data-status-line=/.test(row), 'a second line was drawn after all');
+    expectThat(!/data-reported-status=/.test(terminalRow(html, 't1')), 'a status on a terminal that reported none');
+  }
+);
+
+scenario(
+  'RN-190',
+  "a hidden strip's handle marks a program acting on ANY terminal of its pane, naming one that is not the one shown (re-verification F10)",
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [tab('t1', { title: 'shell' }), tab('t2', { title: 'build' })],
+      groups: baseGroups(['t1', 't2']),
+      controlled: { t2: { by: 't9', byTitle: 'agent', cmd: 'send', at: Date.now(), n: 1 } },
+    });
+  },
+  () => {
+    for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+    const handle = renderToString(
+      React.createElement(StripHandle, {
+        paneId: 'pane-1',
+        tabId: 't1',
+        title: 'shell',
+        tabs: [{ id: 't1', title: 'shell' }, { id: 't2', title: 'build' }],
+      })
+    );
+    expectThat(/data-handle-mark="controlled"/.test(handle), `no mark for the terminal behind the one shown: ${handle}`);
+    const words = attrOf(openingTag(handle), 'aria-label') ?? '';
+    expectThat(words.includes('build: Controlled by agent (send)'), `the handle does not name it: ${JSON.stringify(words)}`);
+    const quiet = renderToString(React.createElement(StripHandle, { paneId: 'pane-1', tabId: 't1', title: 'shell', tabs: [{ id: 't1', title: 'shell' }] }));
+    expectThat(!/data-handle-mark="controlled"/.test(quiet), 'a mark for a terminal that is not in the pane');
+  }
+);
+
+scenario(
+  'RN-191',
+  "a program acting on a terminal behind the pane's shown tab flashes that pane's ring (re-verification F10)",
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [tab('t1'), tab('t2')],
+      groups: baseGroups(['t1', 't2']),
+      attentionFlash: { t2: 7 },
+    });
+  },
+  (html) => {
+    const pane = paneMarkup(html, 'pane-1');
+    expectThat(/data-attention-ring="flash"/.test(pane ?? ''), `the pane does not flash for its tab behind: ${String(pane).slice(0, 300)}`);
   }
 );
 

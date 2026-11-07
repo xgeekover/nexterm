@@ -106,6 +106,35 @@ function mockUtf8Bytes(text) {
   return new TextEncoder().encode(text).length;
 }
 
+/**
+ * The control API's error codes (src-tauri/src/control/protocol.rs, `Code`;
+ * the page's `CONTROL_ERROR` in src/lib/controlScope.js is the same set).
+ */
+const MOCK_CONTROL_CODES = Object.freeze([
+  'bad_request', 'unknown_command', 'unauthorized', 'disabled', 'forbidden', 'not_found',
+  'refused', 'rate_limited', 'not_rendered', 'not_responding', 'too_large', 'internal',
+]);
+
+/** The most control requests waiting for the page at once (bridge.rs, `MAX_WAITING`). */
+const MOCK_CONTROL_MAX_WAITING = 64;
+
+/** How long the backend waits for the page's reply (bridge.rs, `REPLY_TIMEOUT`). */
+const MOCK_CONTROL_REPLY_MS = 3000;
+
+/**
+ * The page's `error` made safe to pass on, as the backend makes it
+ * (protocol.rs, `page_failure`): a code outside the set is `internal`, a
+ * message a string of at most 1000 characters.
+ */
+function mockControlFailure(error) {
+  const given = error !== null && typeof error === 'object' ? error : {};
+  const code = MOCK_CONTROL_CODES.includes(given.code) ? given.code : 'internal';
+  const message = typeof given.message === 'string'
+    ? [...given.message].slice(0, 1000).join('')
+    : `NexTerm refused the request (${code})`;
+  return { code, message };
+}
+
 /** Tauri's own refusal of an argument that is missing or of the wrong type: the command never runs. */
 function mockInvalidArgs(command, key, why) {
   return new Error(`invalid args \`${key}\` for command \`${command}\`: ${why}`);
@@ -302,6 +331,86 @@ class BrowserMockBridge {
     // `MOCK_SCROLLBACK_KEY` holds. Gone with the page, as nothing else
     // could keep it.
     this.scrollbackMemory = {};
+    // The control API (stage 7, src-tauri/src/control/). There is no
+    // listener here — no socket, no pipe, no tokens: the suites hand the
+    // page a request with `controlRequest`, as the backend would once it had
+    // checked the caller. `controlSettings` is what `control_set_settings`
+    // was last told (the backend's defaults until then), `controlReplies`
+    // every `control_reply` the page sent, oldest first (the last 200), and
+    // `controlWaiting` the requests waiting for one, by id.
+    this.controlSettings = { enabled: true, type_and_read: false, other_terminals: false };
+    this.controlReplies = [];
+    this.controlWaiting = new Map();
+    this.controlCounter = 0;
+  }
+
+  /**
+   * Hand the page a control request, as the backend does once it has
+   * checked the caller's token, size and rate (src-tauri/src/control/
+   * bridge.rs): the event `control-request` with `{ id, session_id, cmd,
+   * args, type_and_read, other_terminals, deadline_at }` — the bridge's own
+   * id, the session the caller's token belongs to, `args` as given (`{}`
+   * when none), the settings `control_set_settings` last gave, and when the
+   * backend stops waiting (`Date.now()` + `timeoutMs`, milliseconds since
+   * the epoch; the page must not act on a request past it). Never a token.
+   *
+   * Resolves with what the caller would be answered: `{ ok: true, result }`
+   * from the page's `control_reply`, or `{ ok: false, error: { code,
+   * message } }` — the page's error made safe as the backend makes it, or
+   * the backend's own refusal without the page being asked: `disabled`
+   * while the API is off, and for `send`, `read-screen` and a `new-split`
+   * with a `command` while typing and reading are off; `rate_limited` with
+   * 64 waiting already; `not_responding` when no reply came within
+   * `timeoutMs` (the backend's 3 s), after which a reply for it is ignored.
+   * The backend's per-token and per-minute limits are not kept here.
+   *
+   * `{ raw: true }` emits `request` exactly as given (an id is added if it
+   * has none), the backend's refusals skipped — to try the page's own
+   * checks against what the backend would never send.
+   */
+  async controlRequest(request, { timeoutMs = MOCK_CONTROL_REPLY_MS, raw = false } = {}) {
+    const fail = (code, message) => ({ ok: false, error: { code, message } });
+    const settings = this.controlSettings;
+    if (!raw) {
+      if (!settings.enabled) return fail('disabled', 'the control API is off (Settings \u25b8 Terminal \u25b8 Control)');
+      const typing = request?.cmd === 'send' || request?.cmd === 'read-screen'
+        || (request?.cmd === 'new-split' && request?.args != null && Object.prototype.hasOwnProperty.call(request.args, 'command'));
+      if (typing && !settings.type_and_read) {
+        return fail('disabled', 'typing into and reading terminals is off (Settings \u25b8 Terminal \u25b8 Control)');
+      }
+    }
+    if (this.controlWaiting.size >= MOCK_CONTROL_MAX_WAITING) {
+      return fail('rate_limited', `${MOCK_CONTROL_MAX_WAITING} requests are already waiting for NexTerm; try again in a moment`);
+    }
+    this.controlCounter += 1;
+    const id = raw && request?.id !== undefined ? request.id : this.controlCounter;
+    const payload = raw
+      ? { ...request, id }
+      : {
+        id,
+        session_id: request?.session_id,
+        cmd: request?.cmd,
+        args: request?.args ?? {},
+        type_and_read: settings.type_and_read,
+        other_terminals: settings.other_terminals,
+        deadline_at: Date.now() + timeoutMs,
+      };
+    let timer = null;
+    const answered = new Promise((resolve) => {
+      this.controlWaiting.set(id, resolve);
+      timer = setTimeout(() => {
+        if (this.controlWaiting.get(id) !== resolve) return;
+        this.controlWaiting.delete(id);
+        resolve(fail('not_responding', `NexTerm is not responding (no answer within ${MOCK_CONTROL_REPLY_MS / 1000} s)`));
+      }, timeoutMs);
+    });
+    try {
+      await this.emit('control-request', payload);
+      return await answered;
+    } finally {
+      clearTimeout(timer);
+      if (this.controlWaiting.get(id)) this.controlWaiting.delete(id);
+    }
   }
 
   /**
@@ -376,6 +485,20 @@ class BrowserMockBridge {
     if (!session || Boolean(session.secret) === Boolean(secret)) return false;
     session.secret = Boolean(secret);
     await this.emit('pty-echo', { session_id: sessionId, secret: session.secret });
+    return true;
+  }
+
+  /**
+   * Who runs the program in a terminal's foreground, as `pty_foreground_owner`
+   * answers it (src-tauri/src/pty/owner.rs): true (the user's own, the
+   * mock's default), false (`sudo`, `su` or a root shell in the foreground),
+   * or null (cannot be told — what Windows always answers). A test puts a
+   * terminal in either state with this. Returns whether the session exists.
+   */
+  setForegroundOwner(sessionId, sameUser) {
+    const session = this.ptySessions.get(sessionId);
+    if (!session) return false;
+    session.foregroundSameUser = sameUser === null ? null : Boolean(sameUser);
     return true;
   }
 
@@ -664,6 +787,13 @@ class BrowserMockBridge {
         const session = this.ptySessions.get(session_id);
         if (!session) throw new Error(`PTY session not found: ${session_id}`);
         return Boolean(session.secret);
+      }
+      // Who runs the foreground program (`setForegroundOwner`): `{ same_user }`.
+      case 'pty_foreground_owner': {
+        const sessionId = mockStringArg(command, args, 'session_id');
+        const session = this.ptySessions.get(sessionId);
+        if (!session) throw new Error(`PTY session not found: ${sessionId}`);
+        return { same_user: session.foregroundSameUser === undefined ? true : session.foregroundSameUser };
       }
 
       // 4. pty_kill
@@ -1260,6 +1390,46 @@ class BrowserMockBridge {
             : 'invalid type: expected a boolean');
         }
         return null;
+      }
+
+      // 22b. control_reply / control_set_settings — the control API's
+      // commands (src-tauri/src/commands/control.rs). `control_reply` is the
+      // page's answer to a `control-request` (see `controlRequest`): `id` a
+      // u64 and `ok` a boolean, as Tauri takes them; `result` and `error`
+      // may be left out. A reply for an id nobody is waiting for is kept in
+      // `controlReplies` and otherwise ignored, as there.
+      // `control_set_settings` takes the three switches, each a boolean, and
+      // answers `{ enabled, listening, error }` — `listening` is always
+      // false here: the browser has no listener.
+      case 'control_reply': {
+        const id = args?.id;
+        if (id === undefined) throw mockInvalidArgs(command, 'id', `command ${command} missing required key id`);
+        if (!(Number.isInteger(id) && id >= 0 && id < 2 ** 64)) {
+          throw mockInvalidArgs(command, 'id', 'invalid type: expected u64');
+        }
+        if (args?.ok === undefined) throw mockInvalidArgs(command, 'ok', `command ${command} missing required key ok`);
+        if (typeof args.ok !== 'boolean') throw mockInvalidArgs(command, 'ok', 'invalid type: expected a boolean');
+        // What it is handed is JSON: undefined is missing, and missing or
+        // null is `None`.
+        const wire = JSON.parse(JSON.stringify({ result: args.result ?? null, error: args.error ?? null }));
+        const reply = { id, ok: args.ok, result: wire.result, error: wire.error };
+        this.controlReplies.push(reply);
+        if (this.controlReplies.length > 200) this.controlReplies.shift();
+        const resolve = this.controlWaiting.get(id);
+        if (resolve) {
+          this.controlWaiting.delete(id);
+          resolve(args.ok ? { ok: true, result: wire.result } : { ok: false, error: mockControlFailure(wire.error) });
+        }
+        return null;
+      }
+      case 'control_set_settings': {
+        for (const key of ['enabled', 'type_and_read', 'other_terminals']) {
+          if (args?.[key] === undefined) throw mockInvalidArgs(command, key, `command ${command} missing required key ${key}`);
+          if (typeof args[key] !== 'boolean') throw mockInvalidArgs(command, key, 'invalid type: expected a boolean');
+        }
+        const { enabled, type_and_read: typeAndRead, other_terminals: otherTerminals } = args;
+        this.controlSettings = { enabled, type_and_read: typeAndRead, other_terminals: otherTerminals };
+        return { enabled, listening: false, error: null };
       }
 
       // 23. scrollback_write / scrollback_read / scrollback_delete /

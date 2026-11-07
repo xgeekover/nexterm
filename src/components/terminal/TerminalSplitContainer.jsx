@@ -59,7 +59,7 @@ import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { copyText } from '../../lib/copyText.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
 import { pathDropLabel } from '../../lib/terminalFileDrop.js';
-import { LockBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
+import { ControlledBadge, LockBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
 import { headerCloseGestures, stripShown, useRefocusAfterMenu, useStripOverlay } from './stripReveal.js';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 
@@ -687,8 +687,18 @@ function TerminalPane({
   );
   const unreadOf = (tabId) => unreadByTab[node.tabIds.indexOf(tabId)] ?? 0;
   // The flash is for the terminal on screen in this pane — the one being
-  // typed into, which is why it gets a flash and not an entry.
-  const flash = useTerminalStore((s) => (boundTab ? s.attentionFlash[boundTab.id] : undefined));
+  // typed into, which is why it gets a flash and not an entry — or for any
+  // terminal of the pane a program just acted on (stage 7, re-verification
+  // F10): one behind the tab shown is still this pane's to point at. The
+  // newest flash wins, so a second one restarts the ring.
+  const flash = useTerminalStore((s) => {
+    let newest;
+    for (const id of node.tabIds) {
+      const n = s.attentionFlash[id];
+      if (n !== undefined && (newest === undefined || n > newest)) newest = n;
+    }
+    return newest;
+  });
   // Files dragged over this pane. While anything is about to be dropped here
   // the drop's own highlight is what the pane should say, and the ring steps
   // aside rather than being drawn over or under it.
@@ -958,6 +968,10 @@ function TerminalPane({
               {/* Over the chip's own top-left corner, taking no room: a lock
                   coming must not move the ✕ or the "+" under a pointer. */}
               <LockBadge tabId={tab.id} />
+              {/* Over the top edge beside the lock, also taking no room:
+                  another terminal's program just typed here, read it or
+                  focused it (stage 7, spec D6), and it says which. */}
+              <ControlledBadge tabId={tab.id} />
 
               {/* Same slot, size and reveal as an editor tab's: a fixed box
                   so the chip does not change width on hover, hidden until
@@ -1071,6 +1085,7 @@ function TerminalPane({
           paneId={paneId}
           tabId={boundTab?.id ?? null}
           title={boundTab?.title ?? 'Terminal'}
+          tabs={paneTabs}
           unread={boundTab ? unreadOf(boundTab.id) : 0}
           open={overlayShown}
           handleRef={handleRef}

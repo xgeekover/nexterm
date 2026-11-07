@@ -199,6 +199,35 @@ If a mutation survives, it means one of two things, and it is worth deciding
 which: the mutation changed no behaviour (fine — say so), or the behaviour is
 untested (not fine).
 
+## The control API — three places to test it
+
+`nexterm-cli` and the socket or pipe behind it (stage 7) are tested where each
+part lives, because no one suite can hold all three:
+
+- **The backend** — `cargo test` in `src-tauri`: the protocol parser (fuzzed
+  lines, oversize, split and slow frames, invalid UTF-8, a depth bomb), caps
+  and timeouts on tokio's paused clock, the connection cap, tokens (issue,
+  revoke on kill/exit/retain_only), rate limits, the folder and socket modes
+  and link refusal, the peer-uid check on a socketpair, and an end-to-end run
+  over a real temporary socket with a fake page. Five tests are Windows-only
+  and run in CI's windows-latest job: the pipe's DACL read back, a second
+  first-instance server refused, a foreign client turned away, `WSLENV`, and
+  the end-to-end run over a real pipe.
+- **The CLI** — `cargo test` in `src-tauri/cli` (its own crate; run it from
+  that folder so its `.cargo/config.toml` applies, as CI does): argument
+  parsing for every command, request building, answer decoding, exit codes,
+  the server-owner checks, and the real binary against a tiny fake server.
+- **The page** — `tests/adversarial/control_*.test.js`: key and text encoding
+  per terminal mode (`control_keys`), argument and target rules
+  (`control_scope`), every command through the dispatcher with the store and
+  backend mocked (`control_dispatcher`), and the browser mock's refusals
+  (`control_backend_mock`). A test there reads `controlScope.js` against the
+  backend's error codes and commands so the two cannot drift.
+
+The bundles are checked in CI's build job: every installer and the portable
+zip is opened and must contain `nexterm-cli`, and the Windows one must be a
+console program that does not need `VCRUNTIME140.dll`.
+
 ## Performance mode — measuring the output path
 
 Several agents printing at once is a load no suite produces, and timings are
@@ -229,6 +258,7 @@ temporary folder's `nexterm-perf` by default); the table,
 | S4 | typing beside three flooding terminals | latency where the user is |
 | S5 | typing while a hidden group of four floods | what work nobody can see costs |
 | S6 | typing beside four terminals of 5000 lines that keep printing (`rate --fill 5000`, 30 s) | what saving their scrollback costs (stage 6) |
+| S7 | `nexterm-cli set-status` from a terminal, 200 times (`tests/perf/control.js`) | the control API's round trip as an agent's hook pays it (stage 7) |
 
 S6 is not in the list above on purpose: it runs only when named
 (`NEXTERM_PERF_SCENARIOS=S6`, or appended to the list), as every scenario
@@ -263,6 +293,26 @@ What each figure means:
   never-shown terminals of the same size at once — as a restored group of
   four is — from the reads to xterm having parsed the last one (the slowest
   of the four in brackets); *Typing*: as in S4.
+
+S7 (stage 7, spec D9) runs only when named, as S6 does
+(`NEXTERM_PERF_SCENARIOS=S7`), and needs a build with `nexterm-cli` beside the
+app and Settings ▸ Terminal ▸ Control on (the default). It types
+`node tests/perf/control.js --count 200 --interval 60` into a terminal of its
+own, which calls `$NEXTERM_CLI set-status "perf i/200"` 200 times and clears
+the status at the end; the runner reads the script's summary back from the
+screen. Each call is timed by the script, from before the CLI is started to
+after it has exited — starting the process, connecting to the socket or pipe,
+the token, the backend's queue, the page's round trip, the store write and
+the answer: everything a hook pays. In a table of its own:
+*Calls (failed)*; *Round trip p50/p95/p99/max* in ms; *p95 under 20 ms*, the
+spec's target; and, when a call failed, the first failure's exit code and
+first line (`refused`, `not_responding` …). The calls are 60 ms apart on
+purpose: one token may make 20 requests a second (burst 40), and calls back
+to back would measure the rate limit instead. The frame and CPU columns of
+the main table are those of the same run — a status set 16 times a second
+must redraw one side-bar line, not the panel. To time a CLI by hand, outside
+the app: `node tests/perf/control.js --count 50 --cli path/to/nexterm-cli`
+from a NexTerm terminal.
 
 Rules that keep the numbers honest:
 

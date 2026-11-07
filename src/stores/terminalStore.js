@@ -60,6 +60,7 @@ import {
 import { stripTrailingSep, toPosix } from '../lib/paths.js';
 import { equalizeAll, equalizeLineOf, swapChoices } from '../components/terminal/splitLayout.js';
 import { typingHidden, withoutSecret } from '../lib/secretInput.js';
+import { cleanStatusText } from '../lib/controlScope.js';
 import { LOST_LINE } from '../lib/suggestionLayer.js';
 import { isNetworkPath } from '../lib/terminalLinks.js';
 import {
@@ -1702,6 +1703,36 @@ const flashTimers = new Map();
 let flashCounter = 0;
 
 /**
+ * How long a terminal's tab chip says another terminal's program controlled
+ * it — typed into it, read its screen, focused it (stage 7, spec D6): long
+ * enough to be noticed by someone who glances over a few seconds later.
+ */
+export const CONTROLLED_MARK_MS = 10_000;
+let controlledMarkMs = CONTROLLED_MARK_MS;
+
+/** For the suites: a shorter mark. Returns the previous length. */
+export function __setControlledMarkMs(ms) {
+  const previous = controlledMarkMs;
+  controlledMarkMs = ms;
+  return previous;
+}
+
+/** tab id -> the timer that takes its "controlled" mark down. */
+const controlledTimers = new Map();
+/** Each mark is numbered, as each flash is: a second one restarts the first. */
+let controlledCounter = 0;
+
+/** The tones a reported status may have (`set-status --tone`). */
+const STATUS_TONES = new Set(['info', 'warn', 'error']);
+
+/**
+ * How long `typeForProgram` waits for a shell that has only just started to
+ * draw its first prompt: what is left of the 3 s every control request is
+ * answered in (spec D3), once the password check has had its second.
+ */
+export const PROGRAM_TYPING_WAIT_MS = 1500;
+
+/**
  * tab id -> its bell's rate limit (`createRateLimiter`, the program
  * notifications' own numbers): a program ringing in a loop — or a file of
  * BELs `cat`-ed — costs one entry at most every two seconds, ten a minute.
@@ -1715,6 +1746,32 @@ const bellLimiters = new Map();
 const flashLimiters = new Map();
 /** Tells apart two bell entries for one tab in the same millisecond. */
 let bellCounter = 0;
+
+/**
+ * tab id -> its program notifications' rate limit (`createRateLimiter`,
+ * stage 1's numbers): ONE allowance per terminal, shared by what its
+ * program prints (OSC 9, 99, 777 — terminalRegistry.js hands the addon
+ * `allowProgramNote`) and what it sends through `nexterm-cli notify`
+ * (stage 7). With one each, a program using both had twice the rate.
+ */
+const programNoteLimiters = new Map();
+
+/**
+ * Asked before a program's note in terminal `tabId` is shown on the desktop,
+ * when the caller gave no `allowDesktop` of its own: the control API's
+ * desktop cap (stage 7, re-verification F9), which counts what terminals
+ * opened through the API print as OSC 9, 99 or 777 as well as what
+ * `nexterm-cli notify` sends — a split a program opened is that program's.
+ * Set by src/lib/controlBridge.js; null lets every note through.
+ */
+let programDesktopGate = null;
+
+/** Set the desktop gate (`programDesktopGate`). Returns the previous one, for the suites. */
+export function setProgramDesktopGate(gate) {
+  const previous = programDesktopGate;
+  programDesktopGate = typeof gate === 'function' ? gate : null;
+  return previous;
+}
 
 /**
  * How long rings the rate limit refused wait before they are added to their
@@ -1822,6 +1879,8 @@ export function __attentionKept() {
     flashLimiters: flashLimiters.size,
     bellFolds: bellFolds.size,
     progressThrottles: progressThrottles.size,
+    controlledTimers: controlledTimers.size,
+    programNoteLimiters: programNoteLimiters.size,
   };
 }
 
@@ -1882,6 +1941,46 @@ function withoutProgress(progress, tabIds) {
   const next = { ...progress };
   for (const id of ids) delete next[id];
   return next;
+}
+
+/** Any map by tab id without `tabIds` (a reported status, a mark) — the same object when none was there. */
+const withoutTabs = withoutProgress;
+
+/**
+ * What every shell waits for before it is started: settled once the backend
+ * has been told what Settings ▸ Terminal ▸ Control allows (stage 7,
+ * src/lib/controlBridge.js). The backend listens from its own start with
+ * the spec's defaults and gives each shell it spawns a token then; a user
+ * who turned the API off must not have the first shells of a session get
+ * one. So the page's own start hands the report in here, before any
+ * terminal is made, and `spawnPty` waits for it — never more than
+ * SPAWN_GATE_MAX_MS: a backend that never answers must not cost the user
+ * their terminals.
+ */
+export const SPAWN_GATE_MAX_MS = 3000;
+let spawnGate = null;
+
+/** Hold every `pty_spawn` until `ready` settles (or `maxMs`). Returns the previous gate, for the suites. */
+export function holdSpawnsUntil(ready, maxMs = SPAWN_GATE_MAX_MS) {
+  const previous = spawnGate;
+  if (!ready || typeof ready.then !== 'function') {
+    spawnGate = null;
+    return previous;
+  }
+  let timer = null;
+  spawnGate = Promise.race([
+    Promise.resolve(ready).catch(() => {}),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, maxMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  return previous;
+}
+
+/** `pty_spawn`, once the gate is open (`holdSpawnsUntil`): the one way a shell is started. */
+async function spawnPty(args) {
+  if (spawnGate) await spawnGate;
+  return invoke('pty_spawn', args);
 }
 
 /**
@@ -1986,7 +2085,7 @@ export const useTerminalStore = create((set, get, api) => {
       // A profile picked for THIS terminal wins over the default setting.
       // `resolve_shell` takes a name or a path, so a profile is just a spec.
       const shellSpec = shell || useSettingsStore.getState().terminalDefaultShell;
-      const spawnAt = (dir) => invoke('pty_spawn', { cols: 80, rows: 24, cwd: dir, shell: shellSpec });
+      const spawnAt = (dir) => spawnPty({ cols: 80, rows: 24, cwd: dir, shell: shellSpec });
 
       let ptySession;
       try {
@@ -2840,11 +2939,11 @@ export const useTerminalStore = create((set, get, api) => {
 
       let ptySession;
       try {
-        ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: wantedCwd, shell });
+        ptySession = await spawnPty({ cols: 80, rows: 24, cwd: wantedCwd, shell });
       } catch (_) {
         // The saved directory may no longer exist — retry at the workspace root.
         try {
-          ptySession = await invoke('pty_spawn', { cols: 80, rows: 24, cwd: rootPath, shell });
+          ptySession = await spawnPty({ cols: 80, rows: 24, cwd: rootPath, shell });
         } catch (err) {
           // And if even that fails, skip this one terminal. Letting it throw
           // abandoned the ENTIRE restore and the write-behind then replaced the
@@ -3345,6 +3444,145 @@ export const useTerminalStore = create((set, get, api) => {
       return true;
     },
 
+    // ---- What a program says its terminal is doing (stage 7, spec D4) -----
+    //
+    // tab id -> `{ text, tone, at }`: the line `nexterm-cli set-status` gave,
+    // cleaned for the screen (`cleanStatusText`: no control, direction or
+    // invisible character, at most 80 characters), its tone 'info', 'warn' or
+    // 'error', and when it was set. Its own map, as `progress` is: a hook
+    // sets it on every tool an agent uses, and only that terminal's row of
+    // the status board reads it (statusBoardModel.js) — never `tabs`, which
+    // every pane, chip and the side bar redraw for. Gone with `null`, with
+    // the shell (its exit, a restart) and with the terminal (`pruneAttention`).
+    reportedStatus: {},
+
+    /**
+     * Set `tabId`'s reported status (`{ text, tone }`), or clear it (`null`).
+     * The text is cleaned here, where it is kept: whoever calls, nothing else
+     * is ever drawn. The same text and tone again is no write at all — a hook
+     * saying "Running tests" before every test file redraws nothing — and
+     * keeps the time it was first said. Returns whether the terminal exists
+     * and the text left something to show.
+     */
+    setReportedStatus: (tabId, status) => {
+      if (!get().tabs.some((t) => t.id === tabId)) return false;
+      if (status === null || status === undefined) {
+        set((s) => {
+          const reportedStatus = withoutTabs(s.reportedStatus, [tabId]);
+          return reportedStatus === s.reportedStatus ? s : { reportedStatus };
+        });
+        return true;
+      }
+      const text = cleanStatusText(status.text);
+      if (!text) return false;
+      const tone = STATUS_TONES.has(status.tone) ? status.tone : 'info';
+      set((s) => {
+        const was = s.reportedStatus[tabId];
+        if (was && was.text === text && was.tone === tone) return s;
+        return { reportedStatus: { ...s.reportedStatus, [tabId]: { text, tone, at: Date.now() } } };
+      });
+      return true;
+    },
+
+    // ---- Controlled by another terminal's program (stage 7, spec D6) ------
+    //
+    // tab id -> `{ by, byTitle, cmd, at, n }`: a program in terminal `by`
+    // typed into this one, read its screen or focused it, CONTROLLED_MARK_MS
+    // ago at most. Drawn as a mark on its tab chip naming `byTitle`, the
+    // caller's name when it happened (it may be renamed or closed since).
+    // Only for a terminal other than the caller's own: a program acting on
+    // its own terminal is what it was started to do.
+    controlled: {},
+
+    /**
+     * A program in terminal `by` has just acted on `tabId` with `cmd`: its
+     * pane's ring flashes once (`attentionFlash`) — whatever the flash
+     * setting says, as this is not about the terminal being looked at — and
+     * its chip is marked for CONTROLLED_MARK_MS; a second call restarts the
+     * mark. Returns whether the terminal exists.
+     */
+    noteControlled: (tabId, { by = null, cmd = '' } = {}) => {
+      const state = get();
+      if (!state.tabs.some((t) => t.id === tabId)) return false;
+      const caller = state.tabs.find((t) => t.id === by);
+      const byTitle = caller ? caller.title || caller.defaultTitle || 'another terminal' : 'another terminal';
+      controlledCounter += 1;
+      const n = controlledCounter;
+      clearTimeout(controlledTimers.get(tabId));
+      set((s) => ({ controlled: { ...s.controlled, [tabId]: { by, byTitle, cmd: String(cmd), at: Date.now(), n } } }));
+      controlledTimers.set(
+        tabId,
+        setTimeout(() => {
+          controlledTimers.delete(tabId);
+          set((s) => (s.controlled[tabId]?.n === n ? { controlled: withoutTabs(s.controlled, [tabId]) } : s));
+        }, controlledMarkMs)
+      );
+      flashTerminal(tabId);
+      return true;
+    },
+
+    /**
+     * Type `data` — keys or text a program sent with `nexterm-cli send`
+     * (stage 7, spec D4), already encoded for this terminal's modes — into
+     * `tabId`, the way the user's own keys go (`writeRaw`: the line followed
+     * for Resume, a Ctrl+C arming cmd's batch-job answer).
+     *
+     * Never into a password prompt (`untilTypingSafe`): what a program types
+     * there would be taken as the password, shown nowhere. NOT refused
+     * because something runs: typing into an agent that is running is what
+     * the command is for. A shell started a moment ago is waited for until
+     * its first prompt, as a startup command is — but only `waitMs`, as the
+     * answer has to be back within the request's 3 s; past that it is
+     * 'starting', and the caller can ask again.
+     *
+     * The caller's own checks come last: `ask()` (may wait: the backend's
+     * word on who owns the foreground) and then `check()` (must not: the
+     * screen's prompt line), each a refusal in words or null — and then,
+     * with nothing awaited between them and the write, whether the typing
+     * is hidden and then `commit()`: false when the caller has stopped
+     * waiting (the request's deadline, or its answer already given), and
+     * otherwise the request is committed to this write. Never carried out
+     * late.
+     * Resolves with `{ status }`, `status` one of:
+     *
+     *   'typed'    written
+     *   'hidden'   the terminal is asking for a password: nothing written
+     *   'starting' its new shell has not drawn its first prompt yet
+     *   'exited'   its shell has exited — an Enter would start another one,
+     *              which is the user's to decide
+     *   'gone'     the terminal has closed
+     *   'refused'  `ask` or `check` refused (`reason` says why)
+     *   'late'     `commit()` said it is too late: nothing written
+     */
+    typeForProgram: async (tabId, data, { waitMs = PROGRAM_TYPING_WAIT_MS, ask = null, check = null, commit = null } = {}) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) return { status: 'gone' };
+      if (tab.exited) return { status: 'exited' };
+      if (typeof data !== 'string' || data === '') return { status: 'typed' };
+      let timer = null;
+      const readiness = await Promise.race([
+        untilTypingSafe(tabId),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve('starting'), waitMs);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (readiness === 'starting' || readiness === 'hidden') return { status: readiness };
+      const asked = ask ? await ask() : null;
+      if (asked) return { status: 'refused', reason: asked };
+      // From here to the write nothing is awaited: what is checked is what
+      // holds as the keys go.
+      const now = get().tabs.find((t) => t.id === tabId);
+      if (!now) return { status: 'gone' };
+      if (now.exited || now.sessionId !== tab.sessionId) return { status: 'exited' };
+      if (typingHidden(get(), tabId)) return { status: 'hidden' };
+      const refused = check ? check() : null;
+      if (refused) return { status: 'refused', reason: refused };
+      if (commit && !commit()) return { status: 'late' };
+      await get().writeRaw(tabId, data);
+      return { status: 'typed' };
+    },
+
 
     /**
      * A program in terminal `tabId` asked to tell the user something —
@@ -3379,16 +3617,35 @@ export const useTerminalStore = create((set, get, api) => {
      * typed into now gets nothing, its screen showing what the note says.
      *
      * `attention` is the window's focus and visibility, read as the note
-     * arrives; the suites hand theirs in. Returns where it went, or null for
-     * a tab that is gone.
+     * arrives; the suites hand theirs in. `allowDesktop`, when given, is
+     * asked before a desktop notification is shown, and only then: a note
+     * from `nexterm-cli notify` (stage 7) shows on the desktop only while
+     * the API's cap across all terminals allows — still listed in the bell
+     * either way. Returns where it went, or null for a tab that is gone.
      */
-    notifyFromProgram: (tabId, note, attention = currentAttention(), { keptAt } = {}) => {
+    /**
+     * Whether a program notification from terminal `tabId`, arriving at `now`
+     * (a monotonic clock), may go through — and counted if it may: the one
+     * allowance a terminal has, whether the note came as an OSC sequence or
+     * through `nexterm-cli notify` (`programNoteLimiters`).
+     */
+    allowProgramNote: (tabId, now = monotonicNow()) => {
+      if (!get().tabs.some((t) => t.id === tabId)) return false;
+      let limiter = programNoteLimiters.get(tabId);
+      if (!limiter) {
+        limiter = createRateLimiter();
+        programNoteLimiters.set(tabId, limiter);
+      }
+      return limiter.allow(now);
+    },
+
+    notifyFromProgram: (tabId, note, attention = currentAttention(), { keptAt, allowDesktop } = {}) => {
       const state = get();
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab || !note) return null;
       const fromHistory = typeof keptAt === 'number' && Number.isFinite(keptAt);
       const typingInto = state.activeTabId === tabId && Boolean(attention?.focused);
-      const route = fromHistory
+      let route = fromHistory
         ? { inApp: !typingInto, desktop: false }
         : routeProgramNotification({
             occasion: note.occasion,
@@ -3396,6 +3653,9 @@ export const useTerminalStore = create((set, get, api) => {
             onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
             focused: Boolean(attention?.focused),
           });
+      const desktopAllowed =
+        typeof allowDesktop === 'function' ? allowDesktop : programDesktopGate ? () => programDesktopGate(tabId) !== false : null;
+      if (route.desktop && desktopAllowed && !desktopAllowed()) route = { ...route, desktop: false };
       const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
       const title = note.title || tabTitle;
       const body = note.body || '';
@@ -4253,7 +4513,7 @@ export const useTerminalStore = create((set, get, api) => {
      * A split unzooms the group: a pane made only to be hidden at once would
      * be a terminal the user cannot see, which is why tmux unzooms too.
      */
-    splitPane: async (paneId, direction = 'horizontal', groupId = null) => {
+    splitPane: async (paneId, direction = 'horizontal', groupId = null, { cwd = null, sourceTabId = null } = {}) => {
       const group = resolveGroup(get(), groupId, paneId);
       if (!group) return null;
       const targetPaneId = collectLeaves(group.tree).some((l) => l.id === paneId)
@@ -4262,14 +4522,21 @@ export const useTerminalStore = create((set, get, api) => {
 
       // The split continues the terminal shown in the pane being split — its
       // directory and its shell — unless the Split Directory setting says to
-      // start a new terminal like any other (`splitStartFor`).
+      // start a new terminal like any other (`splitStartFor`). A directory
+      // asked for (`cwd`: `nexterm-cli new-split --cwd`, checked by the
+      // caller to be a local folder) wins over the inherited one; the shell
+      // is still the split's. `sourceTabId` names the terminal continued
+      // when it is not the one the pane shows: a program's split continues
+      // the terminal the program runs in (stage 7), which may be a tab
+      // behind another in its pane.
       const sourceLeaf = collectLeaves(group.tree).find((l) => l.id === targetPaneId);
-      const source = get().tabs.find((t) => t.id === sourceLeaf?.activeTabId) ?? null;
+      const sourceId = sourceTabId && get().tabs.some((t) => t.id === sourceTabId) ? sourceTabId : sourceLeaf?.activeTabId;
+      const source = get().tabs.find((t) => t.id === sourceId) ?? null;
       const start = splitStartFor(source, {
         mode: useSettingsStore.getState().terminalSplitCwd,
         os: useSystemStore.getState().os,
       });
-      const newTab = await spawnTab(null, start.cwd, start.shell);
+      const newTab = await spawnTab(null, cwd || start.cwd, start.shell);
       if (!newTab) return null;
 
       const newPaneId = makePaneId();
@@ -4705,6 +4972,9 @@ export const useTerminalStore = create((set, get, api) => {
         set((state) => ({
           // Nothing is asking for a password in a shell that has ended.
           secretInput: secretInputFor(state.tabs, withoutSecret(state.secretInput, gone)),
+          // Nor doing what a program in it said it was (`set-status`): the
+          // program is gone, and its line would describe a dead shell.
+          reportedStatus: withoutTabs(state.reportedStatus, gone),
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember that this shell is gone. Without it the tab looked
@@ -4913,7 +5183,7 @@ export const useTerminalStore = create((set, get, api) => {
         // none open, which is where the backend's own fallback lands anyway.
         const firstDir = (await startDirFor(null)) ?? rootPath;
         const spawnFirst = (dir) =>
-          invoke('pty_spawn', {
+          spawnPty({
             cols: 80,
             rows: 24,
             cwd: dir,
@@ -5602,6 +5872,9 @@ export const useTerminalStore = create((set, get, api) => {
               first = true;
               return { ...t, exited: { code: null }, running: false, runStartedAt: null };
             }),
+            // An exit as `pty-exit` would have said it: no program's status
+            // outlives its shell.
+            reportedStatus: first ? withoutTabs(state.reportedStatus, [targetId]) : state.reportedStatus,
           }));
           if (first && !notifyTerminal(targetId, 'The shell in this terminal has stopped. Press Enter to start a new one.')) {
             console.error('[TerminalStore] Raw write failed:', err);
@@ -5644,7 +5917,7 @@ export const useTerminalStore = create((set, get, api) => {
         // cursor is.
         const size = parseSize(tab.lastSize);
         const { cols, rows } = size ?? { cols: 80, rows: 24 };
-        const spawnAt = (dir) => invoke('pty_spawn', { cols, rows, cwd: dir, shell: shellSpec });
+        const spawnAt = (dir) => spawnPty({ cols, rows, cwd: dir, shell: shellSpec });
         let ptySession;
         try {
           ptySession = await spawnAt(startDir);
@@ -5669,6 +5942,8 @@ export const useTerminalStore = create((set, get, api) => {
           progress: withoutProgress(state.progress, [tabId]),
           // Nor a password prompt: that was the old shell's.
           secretInput: withoutSecret(state.secretInput, [tabId]),
+          // Nor what a program in the old shell said it was doing.
+          reportedStatus: withoutTabs(state.reportedStatus, [tabId]),
           tabs: state.tabs.map((t) =>
             t.id === tabId
               ? {
@@ -5895,7 +6170,7 @@ function pruneAttention(state) {
     clearTimeout(timer);
     flashTimers.delete(id);
   }
-  for (const limiters of [bellLimiters, flashLimiters]) {
+  for (const limiters of [bellLimiters, flashLimiters, programNoteLimiters]) {
     for (const id of limiters.keys()) if (!live.has(id)) limiters.delete(id);
   }
   for (const [id, fold] of bellFolds) {
@@ -5908,6 +6183,11 @@ function pruneAttention(state) {
     throttle.cancel();
     progressThrottles.delete(id);
   }
+  for (const [id, timer] of controlledTimers) {
+    if (live.has(id)) continue;
+    clearTimeout(timer);
+    controlledTimers.delete(id);
+  }
   const notifications = state.notifications.some((n) => !live.has(n?.tabId))
     ? state.notifications.filter((n) => live.has(n?.tabId))
     : state.notifications;
@@ -5917,15 +6197,21 @@ function pruneAttention(state) {
   // its old shell, and a terminal that has just taken a shell asking for one
   // is locked (spec P4; `secretBySession`).
   const secretInput = secretInputFor(state.tabs, keepLive(state.secretInput, live));
+  // What a program said it was doing there, and that another terminal's
+  // program controlled it (stage 7): gone with the terminal.
+  const reportedStatus = keepLive(state.reportedStatus, live);
+  const controlled = keepLive(state.controlled, live);
   if (
     notifications === state.notifications &&
     progress === state.progress &&
     attentionFlash === state.attentionFlash &&
-    secretInput === state.secretInput
+    secretInput === state.secretInput &&
+    reportedStatus === state.reportedStatus &&
+    controlled === state.controlled
   ) {
     return;
   }
-  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput });
+  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled });
 }
 
 // Attention upkeep, on every change to the store:

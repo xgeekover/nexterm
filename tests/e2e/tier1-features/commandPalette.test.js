@@ -55,8 +55,10 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'Run Project Command…',
         'Open Project Commands File',
         "Stop Trusting This Folder's Commands",
+        // Stage 7: what programs in terminals asked of NexTerm through nexterm-cli.
+        'Show Control Log',
       ],
-      'The palette offers exactly the thirteen commands the app implements'
+      'The palette offers exactly the fourteen commands the app implements'
     );
   });
 

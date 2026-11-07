@@ -86,7 +86,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: src-tauri
+          # nexterm-cli is a workspace of its own (src-tauri/cli/Cargo.toml).
+          workspaces: |
+            src-tauri
+            src-tauri/cli
           key: test-${{ matrix.platform }}
 
       - name: Install npm dependencies
@@ -105,6 +108,18 @@ jobs:
       # reads back and pushes through the real explorer code.
       - name: Cargo test
         working-directory: src-tauri
+        run: cargo test
+
+      # nexterm-cli is its own crate, outside the app's workspace, so the step
+      # above never reaches it. Its suite checks the socket's and the pipe's
+      # owner against real ones of its own, and runs the built binary against
+      # a fake NexTerm (a socket here, a real named pipe on Windows). Run from
+      # the crate's folder (`cargo test --manifest-path src-tauri/cli/Cargo.toml`
+      # from anywhere else would test the same code): that is where cargo picks
+      # up its .cargo/config.toml, so the binary under test is linked as the one
+      # that ships.
+      - name: CLI test
+        working-directory: src-tauri/cli
         run: cargo test
 
       - name: E2E tests
@@ -152,6 +167,8 @@ jobs:
           # lifecycle script or a build.rs can read it back out.
           persist-credentials: false
 
+      # `rpm` only reads the built .rpm back (the CLI must be inside it); the
+      # bundler does not need it.
       - name: Install Tauri Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -161,7 +178,8 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            rpm
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -172,17 +190,35 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            src-tauri/cli
 
       - name: Install npm dependencies
         run: npm ci
+
+      # nexterm-cli, which every installer carries beside the app (Tauri's
+      # bundle.externalBin), staged as src-tauri/binaries/nexterm-cli-<triple>.
+      # The overlay passed below runs this again before it compiles the app
+      # (its beforeBuildCommand) and finds nothing left to build; it is a step
+      # of its own so that a CLI that does not build says so here, and not in
+      # the middle of the bundler's log.
+      - name: Build nexterm-cli
+        run: npm run build:cli
 
       # Builds only. This job never receives GITHUB_TOKEN and never publishes
       # anything — a tag build produces exactly the same bundles as a branch
       # build, and the release job below is the only thing that can put them
       # in front of users.
+      #
+      # tauri.sidecar.conf.json adds bundle.externalBin. It is not in
+      # tauri.conf.json because tauri-build insists the file exists whenever
+      # the app crate compiles — which would break `cargo test` in the test
+      # job and every developer's `cargo check` until the CLI had been built.
       - name: Build bundles
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        with:
+          args: --config src-tauri/tauri.sidecar.conf.json
 
       # A Tauri app is a single self-contained exe; zipping it gives Windows
       # users a no-install build. It still needs the WebView2 runtime, which
@@ -213,6 +249,16 @@ jobs:
             throw "$($exe.Name) is Subsystem=$subsystem — Windows will open a console window beside the app"
           }
 
+      # The other way round for nexterm-cli: it must BE a console program, or
+      # cmd and PowerShell neither wait for it nor show what it prints. And it
+      # must not need VCRUNTIME140.dll, which a PC without the Visual C++
+      # redistributable lacks (the app links its C runtime in; so does the CLI,
+      # src-tauri/cli/.cargo/config.toml). This is the copy tauri-build put
+      # beside the app because the overlay named it in bundle.externalBin.
+      - name: nexterm-cli must be a standalone console application
+        if: matrix.platform == 'windows-latest'
+        run: node src-tauri/cli/check-windows-exe.mjs src-tauri/target/release/nexterm-cli.exe
+
       - name: Package Windows portable build
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -223,11 +269,101 @@ jobs:
             Where-Object { $_.BaseName -ieq "nexterm" } |
             Select-Object -First 1
           if (-not $exe) { throw "no NexTerm binary in src-tauri/target/release" }
+          # Beside NexTerm.exe, as the installers put it: the app finds it
+          # there and puts that folder first on PATH in its terminals.
+          $cli = "src-tauri/target/release/nexterm-cli.exe"
+          if (-not (Test-Path $cli)) { throw "no $cli — the bundle was built without src-tauri/tauri.sidecar.conf.json" }
           $name = "NexTerm-windows-x64-portable"
           New-Item -ItemType Directory -Force -Path $name | Out-Null
           Copy-Item $exe.FullName "$name/NexTerm.exe"
+          Copy-Item $cli "$name/nexterm-cli.exe"
           Copy-Item "README.md" "$name/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "$name/*" -DestinationPath "$name.zip" -Force
+
+      # Read every bundle back: nexterm-cli must be inside each one, beside the
+      # app, and run. The release job below publishes these files as they are,
+      # so this is the last look at them.
+      - name: nexterm-cli must be inside every bundle (macOS, Linux)
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle=src-tauri/target/release/bundle
+          fail() { echo "::error::$*"; exit 1; }
+          # Listings go into a variable first: `… | grep -q` under pipefail
+          # fails when grep stops reading early.
+          has() { grep -qE "$2" <<<"$1"; }
+          case "$RUNNER_OS" in
+            macOS)
+              app=$(find "$bundle/macos" -maxdepth 1 -name '*.app' -print -quit)
+              [ -n "$app" ] || fail "no .app in $bundle/macos"
+              cli="$app/Contents/MacOS/nexterm-cli"
+              [ -x "$cli" ] || fail "$app has no Contents/MacOS/nexterm-cli"
+              "$cli" --version
+              while IFS= read -r tgz; do
+                has "$(tar -tzf "$tgz")" '\.app/Contents/MacOS/nexterm-cli$' || fail "$tgz has no nexterm-cli"
+              done < <(find "$bundle" -name '*.app.tar.gz')
+              dmg=$(find "$bundle/dmg" -name '*.dmg' -print -quit)
+              [ -n "$dmg" ] || fail "no .dmg in $bundle/dmg"
+              mnt=$(mktemp -d)
+              hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" >/dev/null
+              found=$(find "$mnt" -maxdepth 4 -path '*.app/Contents/MacOS/nexterm-cli' -print -quit)
+              hdiutil detach "$mnt" >/dev/null
+              [ -n "$found" ] || fail "$dmg has no nexterm-cli in its app"
+              ;;
+            Linux)
+              deb=$(find "$bundle/deb" -name '*.deb' -print -quit)
+              [ -n "$deb" ] || fail "no .deb in $bundle/deb"
+              # Tauri's deb names its entries `usr/bin/…`, other tools `./usr/bin/…`.
+              has "$(dpkg-deb -c "$deb")" ' (\./)?usr/bin/nexterm-cli$' || fail "$deb does not install /usr/bin/nexterm-cli"
+              rpm=$(find "$bundle/rpm" -name '*.rpm' -print -quit)
+              [ -n "$rpm" ] || fail "no .rpm in $bundle/rpm"
+              has "$(rpm -qlp "$rpm")" '^/usr/bin/nexterm-cli$' || fail "$rpm does not install /usr/bin/nexterm-cli"
+              appimage=$(find "$bundle/appimage" -name '*.AppImage' -print -quit)
+              [ -n "$appimage" ] || fail "no .AppImage in $bundle/appimage"
+              appimage=$(realpath "$appimage")
+              chmod +x "$appimage"
+              out=$(mktemp -d)
+              (cd "$out" && "$appimage" --appimage-extract >/dev/null)
+              [ -x "$out/squashfs-root/usr/bin/nexterm-cli" ] || fail "$appimage has no usr/bin/nexterm-cli"
+              "$out/squashfs-root/usr/bin/nexterm-cli" --version
+              ;;
+          esac
+
+      - name: nexterm-cli must be inside every bundle (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/release/bundle"
+          # The NSIS installer: 7-Zip lists what it would install.
+          $setup = Get-ChildItem "$bundle/nsis" -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS installer in $bundle/nsis" }
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = "$env:ProgramFiles\7-Zip\7z.exe" }
+          $listing = & $sevenZip l $setup.FullName
+          if ($LASTEXITCODE -ne 0) { $listing; throw "7-Zip could not read $($setup.Name)" }
+          if (-not ($listing | Select-String -SimpleMatch 'nexterm-cli.exe')) { $listing; throw "$($setup.Name) does not install nexterm-cli.exe" }
+          # The MSI: an administrative install only unpacks its files.
+          $msi = Get-ChildItem "$bundle/msi" -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw "no MSI in $bundle/msi" }
+          $out = Join-Path $env:RUNNER_TEMP "msi-files"
+          $p = Start-Process msiexec.exe -ArgumentList "/a `"$($msi.FullName)`" /qn TARGETDIR=`"$out`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec /a $($msi.Name) exited $($p.ExitCode)" }
+          $files = Get-ChildItem $out -Recurse -File
+          $cli = $files | Where-Object { $_.Name -ieq 'nexterm-cli.exe' } | Select-Object -First 1
+          $app = $files | Where-Object { $_.Extension -ieq '.exe' -and $_.BaseName -ieq 'nexterm' } | Select-Object -First 1
+          if (-not $cli) { $files.FullName; throw "$($msi.Name) does not install nexterm-cli.exe" }
+          if (-not $app -or $cli.DirectoryName -ne $app.DirectoryName) { $files.FullName; throw "$($msi.Name) does not put nexterm-cli.exe beside NexTerm.exe" }
+          & $cli.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "the MSI's nexterm-cli.exe --version exited $LASTEXITCODE" }
+          # The portable zip, unpacked as a user would.
+          $zip = Join-Path $env:RUNNER_TEMP "portable"
+          Expand-Archive "NexTerm-windows-x64-portable.zip" -DestinationPath $zip -Force
+          foreach ($f in 'NexTerm.exe', 'nexterm-cli.exe') {
+            if (-not (Test-Path (Join-Path $zip $f))) { throw "the portable zip has no $f" }
+          }
+          & (Join-Path $zip 'nexterm-cli.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "the portable nexterm-cli.exe --version exited $LASTEXITCODE" }
 
       # Collect the installers into one flat directory so the release job does
       # not have to know Tauri's per-platform bundle layout.

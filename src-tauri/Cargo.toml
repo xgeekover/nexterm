@@ -47,6 +47,11 @@ arboard = { version = "3.6", default-features = false }
 # says which system call it ends in on each platform, and what is checked
 # before it on Windows).
 trash = "5.2.9"
+# The control API's tokens and instance names (src/control/): the system's
+# random source, and base64url for the token. Both already in Cargo.lock
+# (getrandom 0.4 through uuid, base64 0.22 through tauri), so no new crate.
+getrandom = "0.4"
+base64 = "0.22"
 
 # getuid(), so the shell-integration files go somewhere only this user can reach.
 [target.'cfg(unix)'.dependencies]
@@ -67,11 +72,21 @@ junction = "2"
 # with the side bar's branch lookup (src/fs/git.rs). Already in the tree through tauri and wry.
 # `Win32_Globalization`: cmd.exe's own messages read in the console's code
 # page when it fails to run npm's `opencode.cmd` (src/commands/agent.rs).
+# `Win32_Foundation`, `Win32_Security`, `Win32_Security_Authorization` and
+# `Win32_System_Pipes`: the control API's named pipe (src/control/windows.rs)
+# — a DACL for this user alone, and who is at the other end of it.
+# `Win32_System_Diagnostics_ToolHelp`: the processes a terminal's shell
+# started, and whether any is elevated or another user's (src/pty/owner.rs).
 windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
@@ -90,3 +105,8 @@ windows-sys = { version = "0.59", features = [
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL", "NSValue"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSWorkspace"] }
+
+# The control API's timeouts are tested on tokio's paused clock
+# (src/control/): `test-util` is a feature of the tokio already here.
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full", "test-util"] }

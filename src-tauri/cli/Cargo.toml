@@ -1,0 +1,63 @@
+[package]
+name = "nexterm-cli"
+# Kept equal to the app's version (src-tauri/Cargo.toml, tauri.conf.json,
+# package.json) — `version_matches_the_app` fails when a bump misses this file.
+version = "0.24.0"
+description = "Controls NexTerm from a program running in one of its terminals"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Its own workspace, so cargo never takes it for a member of the app's
+# (src-tauri/Cargo.toml) and the app's Cargo.lock never lists it. The two
+# crates do not depend on each other: the app finds this binary beside its own
+# executable at run time, and the bundler puts it there (bundle.externalBin,
+# src-tauri/tauri.sidecar.conf.json).
+[workspace]
+
+[[bin]]
+name = "nexterm-cli"
+path = "src/main.rs"
+
+# A small, synchronous program: std for the socket or pipe, serde_json for the
+# one line each way. No tokio — the app's runtime is not needed to send a line
+# and read one back. The versions are the ones the app's Cargo.lock already
+# holds, so building both costs no extra downloads.
+[dependencies]
+serde_json = "1.0.151"
+
+# getuid() and the peer's uid of a connected socket (getpeereid / SO_PEERCRED):
+# std has neither on stable.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+# Who serves the pipe, before the token is sent: GetNamedPipeServerProcessId
+# (Pipes) → OpenProcess / OpenProcessToken (Threading) → the token's user SID
+# (Security). SECURITY_IDENTIFICATION (Storage_FileSystem) keeps that server
+# from acting as us. The same windows-sys the app uses.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+# The tests' own pipe server (CreateNamedPipeW, ConnectNamedPipe).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+# A command run by hooks on every tool use: small and quick to start.
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
