@@ -25,6 +25,16 @@ export const SETTINGS_DEFAULTS = {
   terminalCursorStyle: 'bar',
   terminalCursorBlink: true,
   terminalScrollback: 5000,
+  /**
+   * Save what each terminal printed — its normal buffer as text and colour,
+   * secret-looking strings masked — in the app's local data folder, and show
+   * it above the new shell when the session comes back (stage 6, spec D9).
+   * On by default: the session already comes back by default, and its
+   * output is the part people miss; Terminal.app restores text by default
+   * too. Off: nothing is saved or restored, and every saved file is deleted.
+   * See src/lib/scrollbackSession.js.
+   */
+  terminalRestoreScrollback: true,
   terminalTheme: 'dark-modern',
   /**
    * Terminal themes the user imported in the gallery (spec P5): at most 20

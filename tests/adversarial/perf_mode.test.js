@@ -354,5 +354,66 @@ describe('Performance mode: what is typed, and the table', () => {
     assert.match(md, /Most memory held, by process: webview: com\.apple\.WebKit\.WebContent 900 MB · webview: com\.apple\.WebKit\.GPU 300 MB · app: nexterm 50 MB/);
     assert.match(md, /\| \*\*S2\*\* S2 title \| 3\/3 \|/);
     assert.match(md, /S4: the typing terminal never showed its prompt/);
+    assert.doesNotMatch(md, /Scrollback \(stage 6\)/, 'a scrollback table for runs that saved none');
+  });
+});
+
+describe('Performance mode: S6, saving the scrollback (stage 6)', () => {
+  test('PF-19: S6 is four full scrollbacks that keep printing, typed beside — long enough to be saved more than once — and not run unless named', async () => {
+    const src = read('../../src/lib/perf/perfRunner.js');
+    assert.match(src, /S6: \{\s*title: 'Typing while four terminals of 5000 lines save their scrollback',\s*loads: \[FILLED_LOG, FILLED_LOG, FILLED_LOG, FILLED_LOG\],\s*typing: 'beside',\s*scrollback: true,/);
+    assert.match(src, /export const SAVE_SECONDS = 30;/);
+    assert.match(src, /const FILLED_LOG = `rate --lines 200 --seconds \$\{SAVE_SECONDS\} --fill 5000`;/);
+    assert.match(src, /if \(count >= 5\) panes\.push\(await store\.splitPane\(panes\[3\], 'horizontal', group\.id\)\);/, 'no fifth pane to type in');
+    // Every save is timed only while it runs, and nobody is left listening.
+    assert.match(src, /const stopWatching = scenario\.scrollback \? watchSaves\(loadTabs\) : null;/);
+    assert.match(src, /setScrollbackSnapshotObserver\(null\);\s*run\.error/);
+    // The scenarios that run are the ones named: nothing is added by default.
+    const rust = read('../../src-tauri/src/perf.rs');
+    assert.match(rust, /scenarios: parse_scenarios\(std::env::var\("NEXTERM_PERF_SCENARIOS"\)\.ok\(\)\.as_deref\(\)\),/);
+    assert.deepEqual(floodArgs(['rate', '--lines', '200', '--seconds', '30', '--fill', '5000']), { mode: 'rate', options: { lines: 200, seconds: 30, fill: 5000 } });
+  });
+
+  test('PF-20: a fill and the log after it are numbered as one run — the lost-line check reads them so', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { fileURLToPath } = await import('node:url');
+    const script = fileURLToPath(new URL('../perf/flood.js', import.meta.url));
+    const out = spawnSync(process.execPath, [script, 'rate', '--lines', '40', '--seconds', '0.4', '--fill', '120'], { encoding: 'utf8' });
+    assert.equal(out.status, 0, out.stderr);
+    const rows = out.stdout.split('\n').map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''));
+    const seq = checkSequence(rows);
+    assert.ok(seq.checked > 120, `only ${seq.checked} lines: the log after the fill wrote nothing`);
+    assert.equal(seq.first, 0);
+    assert.equal(seq.gaps + seq.outOfOrder, 0, 'the log started its numbering again after the fill');
+    const summary = parseGeneratorSummary(out.stdout);
+    assert.equal(summary.lines, seq.checked, 'the summary does not count the fill');
+  });
+
+  test('PF-21: the scrollback table — serialize p50/p95/max, the largest save, the restore of all four, typing — medians of the runs', () => {
+    const run = (n) => ({
+      scenario: 'S6',
+      title: 'S6 title',
+      durationMs: 30_000,
+      page: {},
+      typing: { p50: 10 + n, p95: 20 + n, max: 40 + n, lost: 0 },
+      terminals: [],
+      scrollback: {
+        saves: 12 + n,
+        serialize: { p50: 4 + n, p95: 9 + n, max: 15 + n },
+        maxBytes: 1048576 * n,
+        maxLines: 5000 + n,
+        restore: { wallMs: 300 + n, slowestMs: 200 + n, restored: 4, lines: 20_000 + n },
+      },
+    });
+    const report = { startedAt: 'now', environment: { repeat: 3 }, runs: [run(1), run(2), run(3)] };
+    const rows = scenarioRows(report, []);
+    const sb = rows[0].scrollback;
+    assert.deepEqual(
+      [sb.saves, sb.serializeP50, sb.serializeP95, sb.serializeMax, sb.savedMB, sb.restoreMs, sb.restoreSlowestMs, sb.restored],
+      [14, 6, 11, 17, 2, 302, 202, 4]
+    );
+    const md = toMarkdown(report, rows, []);
+    assert.match(md, /\| Saves \| Serialize p50\/p95\/max ms \| Largest save MB \(lines\) \| Restore all ms \(slowest\) \| Restored terminals \(lines\) \| Typing p50\/p95\/max ms \(lost\) \|/);
+    assert.match(md, /\| \*\*S6\*\* S6 title \| 14 \| 6\.0 \/ 11\.0 \/ 17\.0 \| 2\.00 \(5002\) \| 302 \(202\) \| 4 \(20002\) \| 12 \/ 22 \/ 42 \(0\) \|/);
   });
 });

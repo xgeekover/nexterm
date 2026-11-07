@@ -18,7 +18,8 @@ export function resetAll(askReset) {
   if (question) askReset(question);
   else useSettingsStore.getState().resetSettings();
 }
-import { isWindows } from '../../lib/platform.js';
+import { isMac, isWindows } from '../../lib/platform.js';
+import { clearSavedScrollback } from '../../lib/scrollbackSession.js';
 import { expandHome } from '../../lib/paths.js';
 import { isNetworkPath } from '../../lib/terminalLinks.js';
 import { NETWORK_START_DIR } from '../../lib/terminalCwd.js';
@@ -96,6 +97,27 @@ export function focusAfterClose(opener, doc) {
   if (doc.activeElement && doc.activeElement !== doc.body) return null;
   return typeof opener.focus === 'function' ? opener : null;
 }
+
+/**
+ * Where the scrollback files are, as this platform writes the folder: the
+ * backend keeps them in Tauri's `app_local_data_dir` — the local, never the
+ * roaming, app data folder — for the identifier `com.nexterm.ide`
+ * (src-tauri/tauri.conf.json), in `scrollback`. Said in the setting's words
+ * so nobody has to wonder where their output went.
+ */
+export function scrollbackFolder({ mac = isMac, windows = isWindows } = {}) {
+  if (windows) return '%LOCALAPPDATA%\\com.nexterm.ide\\scrollback';
+  if (mac) return '~/Library/Application Support/com.nexterm.ide/scrollback';
+  return '~/.local/share/com.nexterm.ide/scrollback';
+}
+
+/** What Clear Saved Scrollback asks before it deletes anything. */
+export const CLEAR_SCROLLBACK_QUESTION = {
+  title: 'Clear Saved Scrollback?',
+  message:
+    'The output saved for every terminal is deleted from this computer, and none of it comes back at the next start. What the terminals show now stays on screen; while Restore Scrollback is on, it is saved again as they print more.',
+  confirmLabel: 'Clear',
+};
 
 const SECTIONS = [
   { id: 'keyboard', label: 'Keyboard Shortcuts' },
@@ -252,6 +274,27 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       min: 100,
       max: 100000,
       step: 100,
+    },
+    // ---- Scrollback across a restart (stage 6, spec D9) ----
+    {
+      id: 'terminalRestoreScrollback',
+      section: 'terminal',
+      key: 'terminalRestoreScrollback',
+      settingKey: 'terminal.integrated.restoreScrollback',
+      title: 'Restore Scrollback',
+      description: `When NexTerm starts again with the same terminals, each shows what it printed last time above its new prompt, under a dim "Previous output" line. Only the text and its colours come back — nothing is run again, and a full-screen program's screen is not kept. Saved a second after a terminal changes — at most every five seconds while it keeps printing, and at once when it is cleared — up to the Scrollback setting's lines, in ${scrollbackFolder()} on this computer only. Strings that look like secrets — API keys, tokens, passwords after NAME= — are replaced with [hidden] before anything is written. Disabled: nothing is saved or restored, and the saved files are deleted.`,
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalClearSavedScrollback',
+      section: 'terminal',
+      title: 'Clear Saved Scrollback',
+      description:
+        'Deletes the output saved for every terminal, after asking. The terminals keep what they show now.',
+      // A button, not a setting: nothing is stored, so nothing to reset.
+      control: 'action',
+      actionLabel: 'Clear Saved Scrollback…',
+      action: 'clearSavedScrollback',
     },
     {
       id: 'terminalTheme',
@@ -682,13 +725,13 @@ function TextAreaControl({ item, value, onCommit }) {
   );
 }
 
-function SettingRow({ item, value, isDefault, onChange, onReset, note }) {
+function SettingRow({ item, value, isDefault, onChange, onReset, onAction, note }) {
   return (
     <div className="py-3 px-1 border-b border-vsc-border last:border-b-0 group">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-ui text-vsc-fg font-medium">{item.title}</div>
-          <div className="font-mono text-ui-sm text-vsc-muted">{item.settingKey}</div>
+          {item.settingKey && <div className="font-mono text-ui-sm text-vsc-muted">{item.settingKey}</div>}
         </div>
         {!isDefault && (
           <button
@@ -740,6 +783,19 @@ function SettingRow({ item, value, isDefault, onChange, onReset, note }) {
 
         {item.control === 'themeGallery' && <ThemeGallery />}
 
+        {/* Something done rather than a value kept — Clear Saved Scrollback.
+            It only asks; what it does waits for the answer. */}
+        {item.control === 'action' && (
+          <button
+            type="button"
+            data-setting-action={item.action}
+            onClick={() => onAction?.(item)}
+            className="h-[26px] px-3 rounded-[3px] text-ui bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover transition-colors"
+          >
+            {item.actionLabel}
+          </button>
+        )}
+
         {/* What the backend said about this value — a path that is not there,
             typically. Said here rather than left to be discovered when a
             terminal quietly opens somewhere else. */}
@@ -762,6 +818,7 @@ export function SettingsWindow() {
   const terminalCursorStyle = useSettingsStore((s) => s.terminalCursorStyle);
   const terminalCursorBlink = useSettingsStore((s) => s.terminalCursorBlink);
   const terminalScrollback = useSettingsStore((s) => s.terminalScrollback);
+  const terminalRestoreScrollback = useSettingsStore((s) => s.terminalRestoreScrollback);
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
@@ -802,6 +859,7 @@ export function SettingsWindow() {
     terminalCursorStyle,
     terminalCursorBlink,
     terminalScrollback,
+    terminalRestoreScrollback,
     terminalTheme,
     terminalSuggestions,
     terminalStickyHeader,
@@ -839,6 +897,8 @@ export function SettingsWindow() {
   const [query, setQuery] = useState('');
   // What Reset All is asking before it runs, or null (`resetAllQuestion`).
   const [resetQuestion, setResetQuestion] = useState(null);
+  // Whether Clear Saved Scrollback is asking before it deletes anything.
+  const [clearAsked, setClearAsked] = useState(false);
   const [activeSection, setActiveSection] = useState('editor');
   // Per-item validation messages, keyed by item id. Async because the only
   // honest answer to "is that a directory?" comes from the backend.
@@ -894,6 +954,7 @@ export function SettingsWindow() {
     setQuery('');
     setActiveSection('editor');
     setResetQuestion(null);
+    setClearAsked(false);
     const raf = requestAnimationFrame(() => searchRef.current?.focus());
     return () => cancelAnimationFrame(raf);
   }, [isOpen]);
@@ -1001,6 +1062,10 @@ export function SettingsWindow() {
     setSetting(item.key, settingsDefaults[item.key]);
   };
 
+  const handleAction = (item) => {
+    if (item.action === 'clearSavedScrollback') setClearAsked(true);
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
@@ -1102,8 +1167,9 @@ export function SettingsWindow() {
                 {filteredItems
                   .filter((item) => item.section === section.id)
                   .map((item) => {
-                    const value = values[item.key];
-                    const isDefault = Object.is(value, settingsDefaults[item.key]);
+                    const value = item.key ? values[item.key] : undefined;
+                    // An action keeps no value, so there is nothing to reset.
+                    const isDefault = item.key ? Object.is(value, settingsDefaults[item.key]) : true;
                     return (
                       <SettingRow
                         key={item.id}
@@ -1113,6 +1179,7 @@ export function SettingsWindow() {
                         isDefault={isDefault}
                         onChange={(raw) => handleChange(item, raw)}
                         onReset={() => handleReset(item)}
+                        onAction={handleAction}
                       />
                     );
                   })}
@@ -1138,6 +1205,21 @@ export function SettingsWindow() {
           resetSettings();
         }}
         onCancel={() => setResetQuestion(null)}
+      />
+      {/* The same guards as Reset All's: Cancel has the keyboard, and the
+          click that opened it cannot land on Clear (`confirmClickCounts`). */}
+      <ConfirmDialog
+        open={clearAsked}
+        title={CLEAR_SCROLLBACK_QUESTION.title}
+        message={CLEAR_SCROLLBACK_QUESTION.message}
+        confirmLabel={CLEAR_SCROLLBACK_QUESTION.confirmLabel}
+        danger
+        initialFocus="cancel"
+        onConfirm={() => {
+          setClearAsked(false);
+          clearSavedScrollback();
+        }}
+        onCancel={() => setClearAsked(false)}
       />
     </div>
   );

@@ -65,6 +65,11 @@ that layout the next time you open it.
   anything is typed. Your own commands for every folder live in Settings.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
+- **Output comes back too.** Each terminal of the restored session shows what
+  it printed last time, with its colours, above its new shell and a dim
+  *Previous output* line. Text only — nothing runs again. Secret-looking
+  strings are hidden before anything is written to disk; see
+  [Output after a restart](#output-after-a-restart).
 - **Editor tabs come back too.** Each folder remembers its open files — the
   editor groups, which tab each shows, which is active — and reopens them at
   launch or when you open that folder again (up to 50 tabs, 12 folders).
@@ -714,6 +719,82 @@ Nothing to set up; what you notice is what does *not* happen any more.
 
 To measure it yourself, see *Performance mode* in
 [TEST_INFRA.md](TEST_INFRA.md).
+
+### Output after a restart
+
+Reopen NexTerm and every terminal of the session you closed starts with
+what it printed last time, under a dim line:
+
+```
+── Previous output · Nov 7, 2026, 10:42 AM ──
+```
+
+- **Text, not programs.** The output comes back with its colours and styles;
+  the shell is a new one and nothing in it runs. A full-screen program's
+  screen — OpenCode, vim, less — is not kept, only what the shell printed
+  around it. On Windows 10, which does not pass the full screen on, its last
+  frames may come back as text.
+- **On Windows it sits just above the screen.** ConPTY clears the screen and
+  draws the prompt by position as a shell starts, so the restored lines go
+  into the scrollback: the prompt starts at the top, and the separator is
+  one line up.
+- **It reads like any output.** It rewraps when the pane is resized, ⌘F /
+  `Ctrl+F` finds in it, and file names and URLs in it can be clicked
+  (resolved from the terminal's folder). Links a program sent as OSC 8,
+  command marks and the sticky command line do not come back. Each restart
+  adds its own separator; the oldest lines leave as the scrollback fills.
+- **Only the session's own terminals.** Opening a saved group, a layout
+  template or a workspace, a new tab or a split starts empty.
+- **When it is saved.** A second after a terminal stops printing (but not
+  sooner than five seconds after its previous save), every ten seconds while
+  it keeps printing, at once when it is cleared (⌘K / *Clear Terminal*, or
+  `clear`, Ctrl+L, `reset` in the shell — at most every two seconds), and when
+  the window is closed — the ✕, File ▸ Exit,
+  `Ctrl+Shift+W`, Alt+F4, the taskbar — which waits for it (at most a second
+  and a half; the window is not brought forward for it). Quitting a Mac with
+  ⌘Q, the Dock or a logout does not wait: a logout must never be held up by
+  it. Then, and after a crash, Task Manager or Windows shutting down, what
+  changed since the last save is missing: at most the last five seconds, or
+  ten of a terminal that never stopped printing. A terminal of the restored
+  session that you have not opened since keeps what it had, and so does one
+  whose file could not be read in time at the start.
+- **Where.** One file per terminal, in the app's local data folder:
+  `~/Library/Application Support/com.nexterm.ide/scrollback` on macOS,
+  `%LOCALAPPDATA%\com.nexterm.ide\scrollback` on Windows (local, so a roaming
+  profile does not carry it), `~/.local/share/com.nexterm.ide/scrollback` on
+  Linux, readable only by you on macOS and Linux, and left out of Time
+  Machine. At most 2 MB and the *Scrollback* setting's lines per terminal,
+  50 MB in all (the oldest files go first). Closing a terminal deletes its
+  file; at start, files of terminals that are not coming back are deleted. A
+  second NexTerm started while one is open neither saves nor restores output
+  until it is started again with the first one closed.
+- **Secrets.** Before a file is written, strings shaped like credentials are
+  replaced with `[hidden]`:
+  - keys and tokens by their prefix: OpenAI and Anthropic (`sk-…`), GitHub
+    (`ghp_…`, `github_pat_…`), Slack (`xoxb-…`, webhook URLs), AWS (`AKIA…`,
+    and a bare secret access key), Google (`AIza…`, `ya29.…`), GitLab, npm,
+    Stripe, Hugging Face, Groq, SendGrid, Vault, DigitalOcean, Shopify, PyPI,
+    age, JWTs, Discord webhooks;
+  - values by their name — `NAME=value`, `NAME: value`, `"name": "…"` (spaces
+    and all) — where the name holds `PASSWORD`, `SECRET`, `API_KEY`,
+    `PRIVATE_KEY`, `CREDENTIAL`, or a part `PASS`, `TOKEN`, `AUTH`, `DSN`,
+    `COOKIE`, `SIG`, or is an `APP_KEY`-style key;
+  - the password in `scheme://user:password@host`, `Authorization: Bearer …`,
+    and passwords on command lines (`--password X`, `mysql -pX`, `7z -pX`,
+    `sshpass -p`, `docker login -p`, `mongosh -p`, `redis-cli -a`,
+    `sqlcmd -P`, `zip -P`, `openssl -k`, `smbclient -U user%X`,
+    `curl -u user:X`, `pass:X`, `.netrc`);
+  - private keys — PEM, PGP, PuTTY — and base64 of a PEM block (`kubectl get
+    secret`), also with a line number, a file name or a time stamp in front
+    of each line, and when the top of the block has already scrolled away;
+  - a token a program broke onto the next line at the pane's edge.
+
+  A secret with no recognisable shape — a base64 value under an ordinary
+  name, a password typed as prose — is not caught: the file is as private as
+  your shell history.
+- **Off.** Settings ▸ Terminal ▸ *Restore Scrollback* (on by default) turns
+  it off and deletes every saved file; *Clear Saved Scrollback* deletes them
+  and keeps saving from then on.
 
 ### Keyboard shortcuts
 

@@ -76,6 +76,21 @@ export function scenarioRows(report, samples) {
       peakRssMB: median(cpu.map((c) => mb((c?.appPeakRss ?? 0) + (c?.webviewPeakRss ?? 0)))),
       lostLines: ok.reduce((total, r) => total + terminals(r).reduce((n, t) => n + (t.sequence?.gaps ?? 0) + (t.sequence?.outOfOrder ?? 0), 0), 0),
       timedOut: runs.filter((r) => r.timedOut).length,
+      // Saving the scrollback (S6): null for a scenario that does not.
+      scrollback: ok.some((r) => r.scrollback)
+        ? {
+            saves: m((r) => r.scrollback?.saves),
+            serializeP50: m((r) => r.scrollback?.serialize?.p50),
+            serializeP95: m((r) => r.scrollback?.serialize?.p95),
+            serializeMax: m((r) => r.scrollback?.serialize?.max),
+            savedMB: m((r) => mb(r.scrollback?.maxBytes)),
+            savedLines: m((r) => r.scrollback?.maxLines),
+            restoreMs: m((r) => r.scrollback?.restore?.wallMs),
+            restoreSlowestMs: m((r) => r.scrollback?.restore?.slowestMs),
+            restored: m((r) => r.scrollback?.restore?.restored),
+            restoredLines: m((r) => r.scrollback?.restore?.lines),
+          }
+        : null,
     });
   }
   return rows;
@@ -112,6 +127,22 @@ export function toMarkdown(report, rows, samples = []) {
     lines.push(
       `| **${r.scenario}** ${r.title} | ${r.runs}${r.timedOut ? ` (${r.timedOut} timed out)` : ''} | ${fmt(r.seconds, 1)} | ${fmt(r.eventsPerSecond)} | ${fmt(r.charsPerEvent)} | ${fmt(r.readsPerEmit, 2)} | ${fmt(r.heldSeconds, 1)} | ${fmt(r.frameP50, 1)} / ${fmt(r.frameP95, 1)} / ${fmt(r.frameMax)} | ${fmt(r.over50)} / ${fmt(r.over100)} | ${fmt(r.writeLagP95)} / ${fmt(r.writeLagMax)} | ${fmt(r.typingP50)} / ${fmt(r.typingP95)} / ${fmt(r.typingMax)} (${fmt(r.typingLost)}) | ${fmt(r.drainSeconds, 1)} | ${fmt(r.generatorMBps, 1)} | ${fmt(r.appCpu)} / ${fmt(r.webviewCpu)} | ${fmt(r.peakRssMB)} | ${r.lostLines} |`
     );
+  }
+  const saving = rows.filter((r) => r.scrollback);
+  if (saving.length) {
+    lines.push(
+      '',
+      'Scrollback (stage 6): each save serialized on the page, and the four read back and written into fresh terminals at once, as a restored group of four is.',
+      '',
+      '| | Saves | Serialize p50/p95/max ms | Largest save MB (lines) | Restore all ms (slowest) | Restored terminals (lines) | Typing p50/p95/max ms (lost) |',
+      '|---|---|---|---|---|---|---|'
+    );
+    for (const r of saving) {
+      const sb = r.scrollback;
+      lines.push(
+        `| **${r.scenario}** ${r.title} | ${fmt(sb.saves)} | ${fmt(sb.serializeP50, 1)} / ${fmt(sb.serializeP95, 1)} / ${fmt(sb.serializeMax, 1)} | ${fmt(sb.savedMB, 2)} (${fmt(sb.savedLines)}) | ${fmt(sb.restoreMs)} (${fmt(sb.restoreSlowestMs)}) | ${fmt(sb.restored)} (${fmt(sb.restoredLines)}) | ${fmt(r.typingP50)} / ${fmt(r.typingP95)} / ${fmt(r.typingMax)} (${fmt(r.typingLost)}) |`
+      );
+    }
   }
   const peaks = peakByProcess(samples);
   if (peaks.length) lines.push('', `Most memory held, by process: ${peaks.map((p) => `${p.name} ${fmt(mb(p.rss))} MB`).join(' · ')}`);

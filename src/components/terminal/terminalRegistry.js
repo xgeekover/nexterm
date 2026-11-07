@@ -74,6 +74,12 @@ import { installProgramNotifications } from '../../lib/programNotifications.js';
 import { installTerminalProgress } from '../../lib/terminalProgress.js';
 import { exitNotice, freshScreen } from '../../lib/shellExit.js';
 import { screenRow, setBatchJobScreenReader } from '../../lib/batchJobReply.js';
+import { MAX_FILE_BYTES, snapshotTerminal } from '../../lib/scrollbackSnapshot.js';
+import { RESTORE_FIT_WAIT_MS, restoreScrollback } from '../../lib/scrollbackRestore.js';
+import { scrollbackEnabled, scrollbackSaver, setScrollbackSnapshotSource, takeRestore } from '../../lib/scrollbackSession.js';
+import { watchScrollbackChanges } from '../../lib/scrollbackWatch.js';
+import { usablePtySize } from '../../lib/terminalCompat.js';
+import { isWindows } from '../../lib/platform.js';
 
 const instances = new Map();
 
@@ -632,6 +638,12 @@ function ensureSettingsSubscriptionStarted() {
     const changed = LIVE_TERMINAL_SETTINGS_KEYS.some((key) => state[key] !== prevState[key]);
     if (changed) applyLiveTerminalSettings(state);
     if (THEME_SETTINGS_KEYS.some((key) => state[key] !== prevState[key])) scheduleThemeRepaint();
+    // Restore Scrollback turned back on: what every terminal shows now is
+    // saved, not only what they print from here on — turning it off deleted
+    // every file (scrollbackSession.js).
+    if (scrollbackEnabled(state) && !scrollbackEnabled(prevState)) {
+      for (const [tabId, entry] of instances) if (!entry.disposed) scrollbackSaver.markDirty(tabId);
+    }
   });
 }
 
@@ -742,9 +754,13 @@ function registerRevealLinks(term, tabId, container) {
     const cwd = tabOf(state)?.cwd;
     if (!cwd || cwd === tabOf(prev)?.cwd) return;
     // The folder's mark goes after what the shell printed in the old one,
-    // held or not (`note` waits for xterm to have read what it was given).
-    flushPacedOutput(tabId);
-    dirs.note(cwd);
+    // held or not (`note` waits for xterm to have read what it was given),
+    // and after a restore still being written (`afterRestore`).
+    const note = () => {
+      flushPacedOutput(tabId);
+      dirs.note(cwd);
+    };
+    afterRestore(instances.get(tabId), note);
   });
   const links = installRevealLinks(term, container, {
     modifier: revealModifier,
@@ -842,8 +858,13 @@ function bindSession(entry, sessionId) {
     forgetOutput(entry.sessionId);
     // Nor is what its programs left on the screen any business of the new
     // one. Written before the new shell's output is attached, so before any
-    // of it. See `freshScreen`.
-    if (sessionId) entry.term.write(freshScreen(entry.term.rows));
+    // of it — and after a restore still being written, so its text goes up
+    // into the scrollback with the rest. See `freshScreen`.
+    const fresh = () => {
+      if (sessionId) entry.term.write(freshScreen(entry.term.rows));
+    };
+    if (entry.restoring) entry.restoring.then(fresh, fresh);
+    else fresh();
   }
   entry.sessionId = sessionId;
   entry.exited = false;
@@ -857,22 +878,32 @@ function bindSession(entry, sessionId) {
     // printed before this terminal existed — a tab never shown kept it there —
     // then everything live, with nothing lost or doubled in between.
     startPtyOutputBus();
-    // What was kept is written as history (`entry.history`): the progress it
-    // reports and the bells it rings are over by now, and a message in it is
-    // filed under when it arrived. Ended whatever the write does — left up,
-    // every bell and bar of the terminal's life would be taken for history.
-    ptyUnlisten = attachOutput(sessionId, (data, kept, at, read) => {
-      if (!kept) {
-        deliverLive(entry, data, read);
-        return;
-      }
-      entry.history.before(at);
-      try {
-        writeOutput(entry, data, read);
-      } finally {
-        entry.history.after(entry.term);
-      }
-    });
+    const attach = () => {
+      if (cancelled) return;
+      // What was kept is written as history (`entry.history`): the progress it
+      // reports and the bells it rings are over by now, and a message in it is
+      // filed under when it arrived. Ended whatever the write does — left up,
+      // every bell and bar of the terminal's life would be taken for history.
+      ptyUnlisten = attachOutput(sessionId, (data, kept, at, read) => {
+        if (!kept) {
+          deliverLive(entry, data, read);
+          return;
+        }
+        entry.history.before(at);
+        try {
+          writeOutput(entry, data, read);
+        } finally {
+          entry.history.after(entry.term);
+        }
+      });
+    };
+    // A tab the start restored shows its saved output first (stage 6, spec
+    // D7): the shell's is attached once that has been written, so its first
+    // prompt — and everything it printed meanwhile, which the bus keeps —
+    // comes after it. Keys reach the shell all the while. `entry.restoring`
+    // always settles, whatever the restore met (scrollbackRestore.js).
+    if (entry.restoring) entry.restoring.then(attach, attach);
+    else attach();
 
     // When the shell exits, say so — with the code as Windows documents it —
     // and that Enter starts a new one (the store's `restartShell`). The pane
@@ -883,8 +914,14 @@ function bindSession(entry, sessionId) {
       const { session_id, exit_code } = payload || {};
       if (session_id !== sessionId || entry.exited) return;
       entry.exited = true;
-      flushPaced(entry);
-      entry.term.write(exitNotice(typeof exit_code === 'number' ? exit_code : null));
+      // After what the shell printed: behind a restore still being written,
+      // and the output attached after it.
+      const notice = () => {
+        flushPaced(entry);
+        entry.term.write(exitNotice(typeof exit_code === 'number' ? exit_code : null));
+      };
+      if (entry.restoring) entry.restoring.then(notice, notice);
+      else notice();
     }).then((off) => {
       if (cancelled) off();
       else exitUnlisten = off;
@@ -1028,14 +1065,38 @@ function deliverLive(entry, data, read) {
 }
 
 /**
+ * `fn` now — or, while the output `entry`'s tab had last time is still being
+ * restored (`entry.restoring`, stage 6), once that has been written: the
+ * restored text and its separator, then the shell's own output, which waits
+ * for the same restore (`bindSession`) and was queued for it first.
+ *
+ * Everything that writes to the terminal, or acts on its screen as it
+ * stands, goes through here. Before the restore lands the terminal is empty,
+ * and what was done to it then ended up above the restored text, or was
+ * undone by it: a ⌘K during the wait cleared nothing and was then saved with
+ * the restored text in it; a notice, a command's mark and the progress
+ * bar's barrier landed above it (review, round 2).
+ */
+function afterRestore(entry, fn) {
+  const restoring = entry?.restoring;
+  if (restoring) restoring.then(fn, fn);
+  else fn();
+}
+
+/**
  * `fn` once xterm has read everything this terminal has been given so far —
  * held output first. A write is parsed later than it is made, so whatever
  * acts on the screen as it stands (a command's mark, a clear) waits for it
  * (found in review: a mark made right after a flush landed on the row the
- * held output had not reached yet).
+ * held output had not reached yet). And after a restore still being written
+ * (`afterRestore`).
  */
 function afterOutputSoFar(entry, fn) {
   if (!entry || entry.disposed) return false;
+  if (entry.restoring) {
+    afterRestore(entry, () => afterOutputSoFar(entry, fn));
+    return true;
+  }
   flushPaced(entry);
   entry.term.write('', () => {
     if (entry.disposed) return;
@@ -1181,6 +1242,16 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
       console.warn('[Terminal] could not take the bell:', err);
     }
   });
+  // What changed since its scrollback was last saved, and a clear in the
+  // output — `clear`, Ctrl+L, a reset — which is saved at once, at most once
+  // every 2 s (stage 6, spec D5; src/lib/scrollbackWatch.js, the saver's
+  // `saveCleared`). Not what a restore writes (`scrollbackQuiet`): that is
+  // what the file already holds. Disposed with the terminal.
+  const scrollbackWatch = watchScrollbackChanges(term, {
+    changed: () => scrollbackSaver.markDirty(tabId),
+    cleared: () => scrollbackSaver.saveCleared(tabId),
+    quiet: () => Boolean(entry?.scrollbackQuiet),
+  });
   const linkProvider = registerLinks(term, tabId);
   // After `registerLinks`, so its links come first where both would claim
   // the same text (`findLinks` keeps them apart anyway).
@@ -1275,6 +1346,13 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     bellDisposable,
     // Kept output being read — see `createHistoryMark`.
     history,
+    // Its scrollback's change tracking (`scrollbackWatch`), and — while the
+    // output it had last time is being restored — that restore, which the
+    // shell's output and every other write wait for (`afterRestore`), and
+    // that what is parsed meanwhile is not a change.
+    scrollbackWatch,
+    restoring: null,
+    scrollbackQuiet: false,
     sessionId: null,
     container,
     dataDisposable,
@@ -1305,18 +1383,133 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   entry.renderDisposable = term.onRender(() => {
     drawn.lastDrawnAt = clock();
   });
+  // What it printed when NexTerm last closed, if the start brought this tab
+  // back (stage 6, spec D7). Taken once: a remount or a move to another pane
+  // reuses this xterm and never comes here again. The shell's output is
+  // attached once it has settled (`bindSession`).
+  if (takeRestore(tabId)) entry.restoring = restoreSavedOutput(tabId, entry);
   bindSession(entry, sessionId);
   instances.set(tabId, entry);
   // A tab first shown after its shell already exited heard no exit event:
   // what the shell printed comes from the output bus above, and the notice
-  // that it is gone — and how to get a new one — goes after it.
+  // that it is gone — and how to get a new one — goes after it, so after a
+  // restore that output waits for.
   const exited = useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.exited;
-  if (exited && sessionId) {
-    entry.exited = true;
-    term.write(exitNotice(typeof exited.code === 'number' ? exited.code : null));
-  }
+  const noticeExited = () => {
+    if (exited && sessionId) {
+      entry.exited = true;
+      term.write(exitNotice(typeof exited.code === 'number' ? exited.code : null));
+    }
+  };
+  if (entry.restoring) entry.restoring.then(noticeExited, noticeExited);
+  else noticeExited();
   return entry;
 }
+
+/**
+ * Whether the pane has given `entry`'s terminal its size: it is laid out,
+ * and fitting it would change nothing (what `fitAndReport` would size it to
+ * is what it has). False while it cannot be told.
+ */
+function fittedToPane(entry) {
+  if (!isFittable(entry.container)) return false;
+  try {
+    const size = usablePtySize(entry.fitAddon.proposeDimensions());
+    return Boolean(size) && size.cols === entry.term.cols && size.rows === entry.term.rows;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves once the terminal has its pane's size — at once when it already
+ * has, else on its first resize — or after RESTORE_FIT_WAIT_MS. Looked at
+ * once a frame meanwhile: a pane that fits an 80×24 terminal exactly
+ * resizes nothing.
+ */
+function firstFit(entry, timeoutMs = RESTORE_FIT_WAIT_MS) {
+  return new Promise((resolve) => {
+    let done = false;
+    let frame = 0;
+    let resized = null;
+    let timer = 0;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resized?.dispose();
+      if (frame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+      resolve();
+    };
+    const look = () => {
+      frame = 0;
+      if (done) return;
+      if (entry.disposed || fittedToPane(entry)) {
+        finish();
+        return;
+      }
+      if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(look);
+    };
+    timer = setTimeout(finish, timeoutMs);
+    try {
+      resized = entry.term.onResize(finish);
+    } catch {
+      finish();
+      return;
+    }
+    look();
+  });
+}
+
+/**
+ * Write the output `tabId` had last time into its new terminal, before any
+ * of its shell's (scrollbackRestore.js). Pushed into the scrollback on
+ * Windows — ConPTY paints by absolute position on a screen it takes to be
+ * empty, for every shell in it, cmd, PowerShell, Git Bash and WSL alike;
+ * left above the prompt elsewhere. Settles whatever happens, and only then
+ * is the output attached: a failed restore costs nothing but the restore.
+ */
+function restoreSavedOutput(tabId, entry) {
+  const { term } = entry;
+  const os = useSystemStore.getState().os;
+  const done = () => {
+    entry.restoring = null;
+  };
+  return restoreScrollback({
+    term,
+    tabId,
+    read: (id) => scrollbackSaver.read(id),
+    waitForFit: () => firstFit(entry),
+    history: entry.history,
+    quiet: (on) => {
+      entry.scrollbackQuiet = on;
+    },
+    // A read that timed out or failed leaves the file alone this session.
+    keepFile: (id) => scrollbackSaver.keepFile(id),
+    // The first terminals are made before `system_get_info` has answered.
+    pushIntoScrollback: os ? os === 'windows' : isWindows,
+    locale: typeof navigator !== 'undefined' ? navigator.language : undefined,
+    maxLines: (term.options.scrollback ?? useSettingsStore.getState().terminalScrollback) + term.rows,
+  }).then(done, done);
+}
+
+/**
+ * What the saver writes for `tabId` (scrollbackSaver.js): its normal buffer
+ * as the file's text, up to the scrollback setting's lines and the screen's
+ * rows and MAX_FILE_BYTES — or undefined, which leaves the file as it was,
+ * for a tab with no terminal (never shown since the start, or closed).
+ */
+setScrollbackSnapshotSource((tabId) => {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed) return undefined;
+  const { term } = entry;
+  return snapshotTerminal(term, {
+    tabId,
+    now: Date.now(),
+    maxLines: (term.options.scrollback ?? 0) + term.rows,
+    maxBytes: MAX_FILE_BYTES,
+  });
+});
 
 /**
  * Colours for the search decorations, read from the app's own tokens.
@@ -1381,8 +1574,12 @@ export function clearTerminalSearch(tabId) {
 export function writeNotice(tabId, message) {
   const entry = instances.get(tabId);
   if (!entry || !message) return false;
-  flushPaced(entry);
-  entry.term.write(`\r\n\x1b[33m[NexTerm] ${message}\x1b[0m\r\n`);
+  // Below the restored text, never above it (`afterRestore`).
+  afterRestore(entry, () => {
+    if (entry.disposed) return;
+    flushPaced(entry);
+    entry.term.write(`\r\n\x1b[33m[NexTerm] ${message}\x1b[0m\r\n`);
+  });
   return true;
 }
 
@@ -1410,12 +1607,22 @@ setTerminalOutputBarrier((tabId, fn) => {
       console.warn('[Terminal] the output barrier\'s callback failed:', err);
     }
   };
-  try {
-    flushPaced(entry);
-    entry.term.write('', guarded);
-  } catch {
-    guarded();
-  }
+  const wait = () => {
+    if (entry.disposed) {
+      guarded();
+      return;
+    }
+    try {
+      flushPaced(entry);
+      entry.term.write('', guarded);
+    } catch {
+      guarded();
+    }
+  };
+  // After a restore still being written, and the output it holds back
+  // (`afterRestore`): that output is what the bar is waiting to see read.
+  if (entry.restoring) entry.restoring.then(wait, wait);
+  else wait();
 });
 
 // The row on a tab's screen as a Ctrl+C arms the wait for cmd's batch-job
@@ -1452,8 +1659,25 @@ export function reportFocusOut(tabId) {
  * there was a terminal to clear.
  */
 export function clearTerminal(tabId) {
-  // What arrived before the clear is cleared with it: written, and read.
-  return afterOutputSoFar(instances.get(tabId), (entry) => entry.term.clear());
+  // What arrived before the clear is cleared with it: written, and read —
+  // restored output included, while it is still being written
+  // (`afterOutputSoFar`). And the cleared terminal is saved at once (stage
+  // 6, `noteCleared`).
+  return afterOutputSoFar(instances.get(tabId), (entry) => {
+    entry.term.clear();
+    noteCleared(entry);
+  });
+}
+
+/**
+ * A terminal just cleared by Terminal: Clear is saved now, every time, not a
+ * second later: a macOS quit is never held for a save (spec D6), and one
+ * inside the wait brought back what was cleared at the next start (review,
+ * round 2). `term.clear()` goes past xterm's parser, so the watcher never
+ * hears of it; the batch it is parsed in is only a change to it.
+ */
+function noteCleared(entry) {
+  scrollbackSaver.saveNow(entry.tabId);
 }
 
 /**
@@ -1519,6 +1743,8 @@ export function disposeTerminal(tabId) {
   entry.revealLinks?.dispose();
   entry.searchAddon?.dispose();
   entry.commandMarks.dispose();
+  // Its file is the store's to delete, with the tab (`forgetScrollback`).
+  entry.scrollbackWatch?.dispose();
   entry.term.dispose();
   instances.delete(tabId);
   // The context just freed may be the one a terminal on screen is waiting for.

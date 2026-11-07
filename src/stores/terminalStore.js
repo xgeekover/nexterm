@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invoke, listen } from '../lib/ipc.js';
 import { forgetOutput, startPtyOutputBus } from '../lib/ptyOutputBus.js';
+import { forgetScrollback, startScrollbackSession } from '../lib/scrollbackSession.js';
 import { notifyTerminal } from '../lib/terminalNotice.js';
 import { parseSize, restartsShell, sessionIsGone } from '../lib/shellExit.js';
 // `loadState` is deliberately NOT used for reads any more: it treats any older
@@ -2793,6 +2794,9 @@ export const useTerminalStore = create((set, get, api) => {
       // way, and a tab of theirs never brought forward kept up to BACKLOG_LIMIT
       // characters for the life of the app.
       forgetOutput(tab.sessionId);
+      // And its saved scrollback, as in `closeTab`: after its terminal is
+      // disposed, so nothing it parses on the way out is saved again.
+      forgetScrollback(tabId);
       set((state) => settle(state, { tabs: state.tabs.filter((t) => t.id !== tabId) }));
     } finally {
       closingTabs.delete(tabId);
@@ -4875,6 +4879,16 @@ export const useTerminalStore = create((set, get, api) => {
         }
 
         if (restored) {
+          // What each restored terminal printed last time comes back above
+          // its new shell once its xterm is made (stage 6, spec D7), and
+          // every other saved file goes — before the tabs are in the store,
+          // so no save of theirs can be queued ahead of that. A restored tab
+          // whose id a terminal made meanwhile already held takes a new one
+          // (`keepTabsMadeMeanwhile`) and is not restored: its file is named
+          // after the id it no longer has. Only here: a template, a saved
+          // group or workspace, a new tab or a split never restores.
+          const heldMeanwhile = new Set(get().tabs.map((t) => t.id));
+          startScrollbackSession(restored.tabs.map((t) => t.id).filter((id) => !heldMeanwhile.has(id)));
           set((state) => ({
             ...keepTabsMadeMeanwhile(state, {
               tabs: restored.tabs,
@@ -4929,6 +4943,8 @@ export const useTerminalStore = create((set, get, api) => {
         };
         const group = makeGroup({ name: 'Group 1', tabIds: [initialTab.id] });
 
+        // Nothing came back, so no saved scrollback belongs to anything now.
+        startScrollbackSession([]);
         set((state) => ({
           ...keepTabsMadeMeanwhile(state, {
             tabs: [initialTab],
@@ -5088,6 +5104,10 @@ export const useTerminalStore = create((set, get, api) => {
         batchJobReplies.forget(tabId);
         // Whatever its shell printed that no terminal ever showed goes with it.
         forgetOutput(tab.sessionId);
+        // So does what was saved of its scrollback (stage 6): a closed tab is
+        // never restored, and keeps nothing on disk. After its terminal is
+        // disposed, so nothing it parses on the way out is saved again.
+        forgetScrollback(tabId);
 
         // `settle` sweeps a dropped tab id out of EVERY group (not just one
         // tree), prunes whichever pane it emptied, and drops a group that ends

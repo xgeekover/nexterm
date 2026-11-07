@@ -1182,6 +1182,56 @@ Set up a scratch folder `%TEMP%\nexterm-qa\pc` with `.nexterm\commands.json`:
 Note in `%TEMP%\nexterm-qa\report.md` what each value printed, and anything
 refused that should not have been.
 
+### V45 — output comes back after a restart
+
+Checked on macOS, in the browser mock and against `@xterm/headless`. On
+Windows nothing but CI has run it, and CI has no ConPTY on screen: whether
+the restored lines survive what ConPTY sends as a shell starts — it may clear
+the screen and paints by position — is what this check is for. NexTerm moves
+the restored lines into the scrollback above an empty screen for exactly
+that reason (`restoreText`, `pushIntoScrollback`); if they are painted over
+or erased anyway, say so with a screenshot.
+
+The files are in `%LOCALAPPDATA%\com.nexterm.ide\scrollback` (one
+`tab-term-N.scrollback` per terminal), not in Roaming.
+
+1. In a **cmd** terminal: `dir %WINDIR%`, then `echo 한글 출력 확인` and
+   `echo ghp_A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5A1b2C3d4E5`. Split it and in a
+   **PowerShell** terminal run `Get-ChildItem Env: | Select-Object -First 20`
+   and `Write-Host red -ForegroundColor Red`. If WSL is installed, a **WSL**
+   terminal with `ls --color=always /`. Wait two seconds.
+2. Close the window with ✕. Reopen NexTerm → each terminal starts with an
+   empty screen and its prompt at the top; scroll up one line → a dim
+   `── Previous output · <today's date and time> ──` line, and above it the
+   output of step 1 with its colours, Hangul two cells wide and lined up,
+   and the token shown as `ghp_[hidden]`. Nothing was run again. Open the
+   file of the cmd terminal in Notepad → the token is not in it.
+3. Resize the window narrower and wider → the restored lines rewrap like the
+   rest. ⌘F / `Ctrl+F` finds a word of the restored output; Ctrl+click a
+   file name in the `dir` output reveals it in Explorer.
+4. Start `opencode` (or `vim` in WSL) in a terminal, wait, close the window
+   while it is open, reopen → what the shell printed before it is back, the
+   full-screen program's screen is not. On Windows 10 ConPTY does not pass
+   the alternate screen on, so its frames may come back as text — note it.
+5. Print something new, wait six seconds, end NexTerm from Task Manager
+   (*End task*), reopen → it is all back. Print again and end it at once →
+   up to the last five seconds may be missing. Do the same while a terminal
+   keeps printing (`ping -t localhost`) → at most the last ten seconds are
+   missing. Run `cls`, end it at once from Task Manager, reopen → note
+   whether what `cls` cleared comes back (it should not if ConPTY clears the
+   scrollback for `cls`; say which).
+6. Close the window from the taskbar's thumbnail while NexTerm is
+   minimised → it closes without popping up first. Start a second NexTerm
+   while one is open → it restores nothing and saves nothing (the first
+   keeps its files).
+7. Close a terminal (its tab's ✕) → its file is gone from the folder.
+   Settings ▸ Terminal ▸ *Clear Saved Scrollback* → asks first; confirm →
+   the folder is empty. Turn *Restore Scrollback* off → the files go and
+   nothing comes back at the next start; on again → saved again from then on.
+
+Note in `%TEMP%\nexterm-qa\report.md` what came back where, the screenshot
+of step 2, and the file sizes.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

@@ -240,11 +240,11 @@ describe('Output pacing: wired into the registry', () => {
     // xterm to have READ what was flushed, not just to have been handed it.
     assert.match(
       src,
-      /function afterOutputSoFar\(entry, fn\) \{\s*if \(!entry \|\| entry\.disposed\) return false;\s*flushPaced\(entry\);\s*entry\.term\.write\('', \(\) => \{\s*if \(entry\.disposed\) return;[\s\S]*?try \{\s*fn\(entry\);/,
+      /function afterOutputSoFar\(entry, fn\) \{\s*if \(!entry \|\| entry\.disposed\) return false;\s*if \(entry\.restoring\) \{\s*afterRestore\(entry, \(\) => afterOutputSoFar\(entry, fn\)\);\s*return true;\s*\}\s*flushPaced\(entry\);\s*entry\.term\.write\('', \(\) => \{\s*if \(entry\.disposed\) return;[\s\S]*?try \{\s*fn\(entry\);/,
       'flushed, then after the parse'
     );
     const clear = src.slice(src.indexOf('export function clearTerminal(tabId) {'));
-    assert.match(clear, /^[^}]*?return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => entry\.term\.clear\(\)\);/, 'a clear');
+    assert.match(clear, /^[^}]*?return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*entry\.term\.clear\(\);/, 'a clear');
     assert.match(src, /flushPacedOutput\(tabId\);\s*dirs\.note\(cwd\);/, "the folder's mark after what was printed in the old one");
     const bind = src.slice(src.indexOf('function bindSession(entry, sessionId) {'));
     assert.match(bind, /^function bindSession\(entry, sessionId\) \{[\s\S]*?flushPaced\(entry\);\s*entry\.stopPtyListener\?\.\(\);/, 'another shell bound');

@@ -12,6 +12,9 @@
  *   S3  four full-screen programs at 60 fps        what four OpenCodes redrawing cost
  *   S4  typing beside three flooding terminals     input latency where the user is
  *   S5  typing while a hidden group of four floods what work nobody can see costs
+ *   S6  typing while four terminals of 5000 lines  what saving their scrollback costs
+ *       save their scrollback                      (stage 6): each save's serialize, the
+ *                                                  restore of all four, and typing beside them
  *
  * Each runs in groups of its own that are closed afterwards; the group that
  * was on screen comes back. The load is tests/perf/flood.js, typed into the
@@ -33,10 +36,23 @@ import { useSystemStore } from '../../stores/systemStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { existingTerminal, focusTerminalView, getGpuStats } from '../../components/terminal/terminalRegistry.js';
 import { checkSequence, counterDelta, parseGeneratorSummary, summarizeTimes } from './perfStats.js';
+import { Terminal } from '@xterm/xterm';
+import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
+import { activateGraphemeWidths } from '../terminalCompat.js';
+import { parseSnapshot, restoreText } from '../scrollbackSnapshot.js';
+import { scrollbackEnabled, scrollbackSaver, setScrollbackSnapshotObserver } from '../scrollbackSession.js';
 
 export const LOAD_SECONDS = 10;
 const FLOOD = `flood --seconds ${LOAD_SECONDS}`;
 const TUI = `tui --fps 60 --seconds ${LOAD_SECONDS}`;
+/**
+ * S6: long enough for each terminal to be saved several times. Printing ten
+ * times a second, a terminal is never quiet for the saver's second, so it is
+ * saved at the 10 s ceiling (scrollbackSaver.js) — three times in 30 s.
+ */
+export const SAVE_SECONDS = 30;
+/** 5000 lines at once, then a log of 200 lines a second: a full scrollback that keeps printing. */
+const FILLED_LOG = `rate --lines 200 --seconds ${SAVE_SECONDS} --fill 5000`;
 
 export const SCENARIOS = {
   S1: { title: 'One terminal takes 50 MB at once', loads: ['bulk --mb 50'], timeoutMs: 180_000 },
@@ -44,6 +60,13 @@ export const SCENARIOS = {
   S3: { title: 'Four full-screen programs redraw at 60 fps for 10 s', loads: [TUI, TUI, TUI, TUI] },
   S4: { title: 'Typing beside three flooding terminals', loads: [FLOOD, FLOOD, FLOOD], typing: 'beside' },
   S5: { title: 'Typing while a hidden group of four floods', loads: [FLOOD, FLOOD, FLOOD, FLOOD], typing: 'hidden' },
+  S6: {
+    title: 'Typing while four terminals of 5000 lines save their scrollback',
+    loads: [FILLED_LOG, FILLED_LOG, FILLED_LOG, FILLED_LOG],
+    typing: 'beside',
+    scrollback: true,
+    timeoutMs: SAVE_SECONDS * 1000 + 60_000,
+  },
 };
 
 /** Between one key and the next while measuring typing. */
@@ -106,7 +129,11 @@ function tailText(term, count = 16) {
   return bufferRows(term, cursorRow - count + 1, cursorRow + 1).join('\n');
 }
 
-/** A new group of `count` terminals (one, two side by side, or two by two); its id and tab ids in pane order. */
+/**
+ * A new group of `count` terminals (one, two side by side, two by two, or —
+ * for S6's fifth, the one typed in — the last of those split again); its id
+ * and tab ids in pane order.
+ */
 async function openGroup(name, count) {
   const store = useTerminalStore.getState();
   const group = await store.createGroup({ name });
@@ -115,6 +142,7 @@ async function openGroup(name, count) {
   if (count >= 2) panes.push(await store.splitPane(panes[0], 'horizontal', group.id));
   if (count >= 3) panes.push(await store.splitPane(panes[0], 'vertical', group.id));
   if (count >= 4) panes.push(await store.splitPane(panes[1], 'vertical', group.id));
+  if (count >= 5) panes.push(await store.splitPane(panes[3], 'horizontal', group.id));
   const tree = useTerminalStore.getState().groups.find((g) => g.id === group.id)?.tree;
   const leaves = leavesOf(tree);
   const tabIds = panes.map((paneId) => leaves.find((l) => l.id === paneId)?.activeTabId).filter(Boolean);
@@ -193,6 +221,61 @@ async function measureTyping(tabId, stop) {
   return { ...summarizeTimes(latencies), lost, timerLag: summarizeTimes(timerLags) };
 }
 
+/**
+ * Every scrollback save of `tabIds` while it runs (S6): how long each
+ * snapshot took to serialize — on the page's main thread, which is what the
+ * keyboard waits behind — and how big it came out. Returns the stop, which
+ * hands back what was seen.
+ */
+function watchSaves(tabIds) {
+  const wanted = new Set(tabIds);
+  const saves = [];
+  setScrollbackSnapshotObserver((tabId, ms, shot) => {
+    if (wanted.has(tabId)) saves.push({ tabId, ms, bytes: shot?.bytes ?? 0, lines: shot?.lines ?? 0 });
+  });
+  return () => {
+    setScrollbackSnapshotObserver(null);
+    return saves;
+  };
+}
+
+/**
+ * What restoring `tabIds` costs, as the start does it for a restored group of
+ * four: each one's file read back through the backend and written into a
+ * fresh xterm of the same size, all four at once — from the read to xterm
+ * having parsed the restored text and its separator. The fresh terminals are
+ * never shown and are thrown away after.
+ */
+async function measureRestore(tabIds, platform) {
+  const startedAt = now();
+  const each = await Promise.all(
+    tabIds.map(async (tabId) => {
+      const source = existingTerminal(tabId);
+      const t0 = now();
+      const text = await scrollbackSaver.read(tabId);
+      const parsed = parseSnapshot(text, { tabId, now: Date.now() });
+      if (!source || !parsed) return { tabId, ms: null, lines: 0, bytes: 0 };
+      const term = new Terminal({ cols: source.cols, rows: source.rows, scrollback: source.options.scrollback, allowProposedApi: true });
+      try {
+        activateGraphemeWidths(term, UnicodeGraphemesAddon);
+        const data = restoreText(parsed, { pushIntoScrollback: platform === 'windows', rows: source.rows });
+        await new Promise((resolve) => term.write(data, resolve));
+        return { tabId, ms: now() - t0, lines: parsed.lines, bytes: text.length };
+      } finally {
+        term.dispose();
+      }
+    })
+  );
+  const times = each.map((r) => r.ms).filter((ms) => ms !== null);
+  return {
+    wallMs: Math.round(now() - startedAt),
+    slowestMs: times.length ? Math.round(Math.max(...times)) : null,
+    restored: times.length,
+    lines: each.reduce((total, r) => total + r.lines, 0),
+    each,
+  };
+}
+
 async function counters() {
   try {
     return await invoke('perf_counters');
@@ -230,6 +313,8 @@ export async function runScenario(id, { tools, probe, platform }) {
     const lines = loadTabs.map((tabId, i) => nodeCommand(script, scenario.loads[i], shellKindFor(tabOf(tabId)?.shell, platform)));
     if (lines.some((line) => !line)) throw new Error(`cannot quote ${script} for these shells`);
 
+    if (scenario.scrollback && !scrollbackEnabled()) throw new Error('Restore Scrollback is off: there is nothing to measure');
+    const stopWatching = scenario.scrollback ? watchSaves(loadTabs) : null;
     const before = await counters();
     probe.reset();
     probe.startFrames();
@@ -264,6 +349,19 @@ export async function runScenario(id, { tools, probe, platform }) {
     run.page = probe.snapshot();
     run.backend = counterDelta(before, await counters());
     run.timedOut = !done;
+    if (stopWatching) {
+      // The last of what they printed, saved now rather than a second on:
+      // the restore below reads it back.
+      await scrollbackSaver.flushAll({ timeoutMs: 10_000 });
+      const saves = stopWatching();
+      run.scrollback = {
+        saves: saves.length,
+        serialize: summarizeTimes(saves.map((s) => s.ms)),
+        maxBytes: saves.reduce((most, s) => Math.max(most, s.bytes), 0),
+        maxLines: saves.reduce((most, s) => Math.max(most, s.lines), 0),
+        restore: await measureRestore(loadTabs, platform),
+      };
+    }
     run.terminals = loadTabs.map((tabId) => {
       const term = existingTerminal(tabId);
       return {
@@ -279,6 +377,7 @@ export async function runScenario(id, { tools, probe, platform }) {
     });
   } catch (err) {
     probe.stopFrames();
+    setScrollbackSnapshotObserver(null);
     run.error = String(err?.message || err);
   } finally {
     for (const groupId of opened.reverse()) {

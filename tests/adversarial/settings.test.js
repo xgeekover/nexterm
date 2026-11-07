@@ -37,6 +37,9 @@ const SETTINGS_KEYS = [
   'terminalCursorStyle',
   'terminalCursorBlink',
   'terminalScrollback',
+  // Restore Scrollback (stage 6, spec D9). The Clear Saved Scrollback row
+  // beside it is a button, not a setting: it keeps no value.
+  'terminalRestoreScrollback',
   'terminalTheme',
   // Edited by the theme gallery's Import and Delete rather than a control of
   // its own; still a setting the window edits and persists.
@@ -121,6 +124,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalCursorStyle: 'block',
       terminalCursorBlink: false,
       terminalScrollback: 10000,
+      terminalRestoreScrollback: false,
       terminalTheme: 'dracula',
       terminalCustomThemes: [{ id: 'custom:probe', label: 'Probe', theme: { background: '#101010' } }],
       terminalSuggestions: false,
@@ -867,6 +871,25 @@ describe('Only what the user changed is saved', () => {
 
       state.setSetting('reducedMotion', true);
       assert.deepEqual(saved(), { terminalTheme: 'nord', reducedMotion: true }, 'garbage was carried forward');
+    })
+  );
+
+  test(
+    'SET-34: Restore Scrollback is on by default and is saved only once turned off — and off is read back',
+    withOwnStorage(async () => {
+      const store = (await launch()).useSettingsStore;
+      assert.equal(store.getState().settingsDefaults.terminalRestoreScrollback, true, 'off by default (spec D9: on)');
+      assert.equal(store.getState().terminalRestoreScrollback, true);
+      store.getState().setSetting('terminalFontSize', 14);
+      assert.equal('terminalRestoreScrollback' in saved(), false, 'the default was written to storage');
+      store.getState().setSetting('terminalRestoreScrollback', false);
+      assert.deepEqual(saved(), { terminalFontSize: 14, terminalRestoreScrollback: false });
+      const next = (await launch()).useSettingsStore;
+      assert.equal(next.getState().terminalRestoreScrollback, false, 'turned off, and on again at the next start');
+      next.getState().setSetting('terminalRestoreScrollback', true);
+      assert.deepEqual(saved(), { terminalFontSize: 14 }, 'put back to its default, it stays in storage');
+      writtenByAnOlderRelease({ terminalRestoreScrollback: 'no' });
+      assert.equal((await launch()).useSettingsStore.getState().terminalRestoreScrollback, true, 'a value of the wrong type was trusted');
     })
   );
 

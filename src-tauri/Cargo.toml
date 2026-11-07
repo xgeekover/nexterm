@@ -83,8 +83,10 @@ windows-sys = { version = "0.59", features = [
 # (src/commands/clipboard.rs). arboard reads the text through these already.
 # NSWorkspace opens a folder from a terminal's output in a Finder window
 # (src/fs/reveal.rs) — never by `open`, which launches what LaunchServices
-# takes for an application.
+# takes for an application. NSURL's resource values keep the saved scrollback
+# out of Time Machine (src/scrollback.rs); `NSURL`, `NSValue` and `NSError`
+# are enabled in the tree already (tao, wry), so they cost no build time.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL", "NSValue"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSWorkspace"] }
