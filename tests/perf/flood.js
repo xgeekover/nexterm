@@ -8,6 +8,9 @@
  *   node tests/perf/flood.js flood --seconds 10     the same, for a time instead of a size
  *   node tests/perf/flood.js rate  --lines 2000 --seconds 10
  *                                                   a log: that many lines a second
+ *   node tests/perf/flood.js rate  --lines 200 --seconds 30 --fill 5000
+ *                                                   the same after 5000 lines at once: a terminal
+ *                                                   with a full scrollback that keeps printing (S6)
  *   node tests/perf/flood.js tui   --fps 60 --seconds 10
  *                                                   a full-screen program: the whole screen redrawn
  *                                                   that often in the alternate screen, every frame
@@ -94,7 +97,12 @@ async function writeLines(out, done) {
   return { lines, bytes };
 }
 
-async function runRate(out, perSecond, seconds) {
+/**
+ * `perSecond` lines a second for `seconds`, numbered from `first` — after a
+ * fill, the numbering goes on from it, so the line check reads both as one
+ * run.
+ */
+async function runRate(out, perSecond, seconds, first = 0) {
   const started = Date.now();
   let lines = 0;
   let bytes = 0;
@@ -104,7 +112,7 @@ async function runRate(out, perSecond, seconds) {
     const due = Math.floor(((Date.now() - started) / 1000) * perSecond);
     let block = '';
     while (lines < due) {
-      block += lineFor(lines);
+      block += lineFor(first + lines);
       lines += 1;
     }
     if (block) {
@@ -182,7 +190,11 @@ async function main() {
     const until = started + (options.seconds ?? 10) * 1000;
     result = await writeLines(out, () => Date.now() >= until);
   } else if (mode === 'rate') {
-    result = await runRate(out, options.lines ?? 2000, options.seconds ?? 10);
+    // `--fill N`: N lines first, as fast as the terminal takes them.
+    const fill = Math.max(0, Math.floor(options.fill ?? 0));
+    const filled = fill > 0 ? await writeLines(out, (lines) => lines >= fill) : { lines: 0, bytes: 0 };
+    const rated = await runRate(out, options.lines ?? 2000, options.seconds ?? 10, filled.lines);
+    result = { lines: filled.lines + rated.lines, bytes: filled.bytes + rated.bytes };
   } else if (mode === 'tui') {
     result = await runTui(out, options.fps ?? 60, options.seconds ?? 10);
   } else {

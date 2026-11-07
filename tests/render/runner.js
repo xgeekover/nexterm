@@ -4004,6 +4004,79 @@ scenario(
     expectThat(buttonsIn(html).some((b) => b.text === 'Show the New Version'), 'no way to see the new version');
   }
 );
+// ---- Scrollback across a restart (stage 6, spec D9) ---------------------------
+
+/** One Settings row, from its title to the next row: `settingKey`'s, or the action button's. */
+/** Whether the row's checkbox is drawn checked; throws when it has none. */
+function rowChecked(row) {
+  const box = /<input\b[^>]*type="checkbox"[^>]*>/.exec(row)?.[0];
+  expectThat(box, 'no checkbox in the row');
+  return /\schecked=""/.test(box);
+}
+
+function settingRowAt(html, marker) {
+  const at = html.indexOf(marker);
+  expectThat(at !== -1, `no row with ${marker}`);
+  const start = html.lastIndexOf('<div class="py-3 px-1', at);
+  const next = html.indexOf('<div class="py-3 px-1', at);
+  return html.slice(start, next === -1 ? undefined : next);
+}
+
+scenario(
+  'RN-181',
+  'Settings ▸ Terminal ▸ Restore Scrollback: on by default, saying what is kept, where, that secrets are masked and that off deletes — and Clear Saved Scrollback as a button',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const row = settingRowAt(html, 'terminal.integrated.restoreScrollback');
+    const text = visibleText(row);
+    expectThat(text.includes('Restore Scrollback'), 'no title');
+    for (const words of [
+      'under a dim "Previous output" line',
+      'nothing is run again',
+      // Which folder depends on the platform the suite runs on (Node 21+ has a
+      // `navigator`); SW-20 holds each one to the backend's.
+      'com.nexterm.ide',
+      'on this computer only',
+      'replaced with [hidden]',
+      'the saved files are deleted',
+    ]) {
+      expectThat(text.includes(words), `the description does not say ${JSON.stringify(words)}: ${text.replace(/\s+/g, ' ')}`);
+    }
+    expectThat(rowChecked(row), 'not on by default');
+    expectThat(!buttonsIn(row).some((b) => b.text === 'Reset'), 'a default offers Reset');
+    const order = ['terminal.integrated.scrollback', 'terminal.integrated.restoreScrollback', 'data-setting-action="clearSavedScrollback"'].map((m) => html.indexOf(m));
+    expectThat(order.every((at, i) => at !== -1 && (i === 0 || at > order[i - 1])), `not beside Scrollback: ${order}`);
+
+    const clear = settingRowAt(html, 'data-setting-action="clearSavedScrollback"');
+    const button = buttonsIn(clear).find((b) => b.text === 'Clear Saved Scrollback…');
+    expectThat(button && !button.disabled, 'no Clear Saved Scrollback button');
+    expectThat(visibleText(clear).includes('after asking'), 'does not say it asks first');
+    expectThat(!/font-mono text-ui-sm text-vsc-muted">[^<]*</.test(clear), 'an action row shows a setting key it does not have');
+    expectThat(!buttonsIn(clear).some((b) => b.text === 'Reset'), 'an action offers Reset');
+    expectThat(!/role="alertdialog"/.test(html), 'the question is open before anything was asked');
+  }
+);
+
+scenario(
+  'RN-182',
+  'Restore Scrollback turned off: Disabled, with Reset — and the Clear button still there',
+  () => {
+    reset();
+    useSettingsStore.getState().setSetting('terminalRestoreScrollback', false);
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const row = settingRowAt(html, 'terminal.integrated.restoreScrollback');
+    expectThat(!rowChecked(row), 'still drawn as on');
+    expectThat(visibleText(row).includes('Disabled'), 'does not say Disabled');
+    expectThat(buttonsIn(row).some((b) => b.text === 'Reset'), 'a changed setting offers no Reset');
+    expectThat(html.includes('data-setting-action="clearSavedScrollback"'), 'the Clear button went with the setting');
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

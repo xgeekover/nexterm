@@ -15,6 +15,7 @@ pub mod menu;
 pub mod models;
 pub mod perf;
 pub mod pty;
+pub mod scrollback;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -213,9 +214,15 @@ fn main() {
             commands::clipboard::clipboard_read,
             commands::agent::agent_sessions,
             commands::app::app_set_unsaved,
+            commands::app::app_set_pending_save,
             commands::app::app_close_ack,
             commands::app::app_close_window,
             commands::app::app_quit,
+            commands::scrollback::scrollback_write,
+            commands::scrollback::scrollback_read,
+            commands::scrollback::scrollback_delete,
+            commands::scrollback::scrollback_retain_only,
+            commands::scrollback::scrollback_clear,
             commands::perf::perf_info,
             commands::perf::perf_counters,
             commands::perf::perf_write,

@@ -5,5 +5,6 @@ pub mod fs;
 pub mod notification;
 pub mod perf;
 pub mod pty;
+pub mod scrollback;
 pub mod system;
 pub mod taskbar;

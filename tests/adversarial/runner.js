@@ -132,6 +132,12 @@ import './project_commands_store.test.js';
 import './project_commands_palette.test.js';
 import './project_commands_run.test.js';
 import './project_commands_dialog_mounted.test.js';
+import './scrollback_backend_mock.test.js';
+import './scrollback_snapshot.test.js';
+import './scrollback_saver.test.js';
+import './scrollback_restore.test.js';
+import './scrollback_exit.test.js';
+import './scrollback_store.test.js';
 
 async function run() {
   console.log('====================================================');

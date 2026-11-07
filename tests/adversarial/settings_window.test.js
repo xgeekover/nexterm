@@ -322,3 +322,36 @@ describe('The window buttons take no focus', () => {
     }
   });
 });
+
+describe('Settings: Restore Scrollback says where, and Clear asks first', () => {
+  test('SW-20: the folder the setting names is the one the backend writes — app_local_data_dir, the identifier, "scrollback"', async () => {
+    const scrollbackFolder = await exported('scrollbackFolder');
+    const conf = JSON.parse(readFileSync(new URL('../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+    const id = conf.identifier;
+    assert.equal(id, 'com.nexterm.ide');
+    // dirs 6's data_local_dir, which Tauri 2's app_local_data_dir joins the identifier to.
+    assert.equal(scrollbackFolder({ mac: true, windows: false }), `~/Library/Application Support/${id}/scrollback`);
+    assert.equal(scrollbackFolder({ mac: false, windows: true }), `%LOCALAPPDATA%\\${id}\\scrollback`);
+    assert.equal(scrollbackFolder({ mac: false, windows: false }), `~/.local/share/${id}/scrollback`);
+    const command = readFileSync(new URL('../../src-tauri/src/commands/scrollback.rs', import.meta.url), 'utf8');
+    assert.match(command, /\.app_local_data_dir\(\)/, 'the backend keeps the files somewhere else (roaming?)');
+    const store = readFileSync(new URL('../../src-tauri/src/scrollback.rs', import.meta.url), 'utf8');
+    assert.match(store, /pub const DIR: &str = "scrollback";/);
+  });
+
+  test('SW-21: Clear Saved Scrollback asks before it deletes — Cancel focused, its confirm guarded — and only the answer clears', async () => {
+    const question = await exported('CLEAR_SCROLLBACK_QUESTION');
+    assert.equal(question.confirmLabel, 'Clear');
+    assert.match(question.message, /deleted from this computer/);
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(
+      src,
+      /<ConfirmDialog\s+open=\{clearAsked\}[\s\S]*?danger\s+initialFocus="cancel"\s+onConfirm=\{\(\) => \{\s*setClearAsked\(false\);\s*clearSavedScrollback\(\);\s*\}\}\s+onCancel=\{\(\) => setClearAsked\(false\)\}/,
+      'the confirmation is not guarded as Reset All is, or Cancel clears'
+    );
+    assert.match(src, /if \(item\.action === 'clearSavedScrollback'\) setClearAsked\(true\);/, 'the button clears without asking');
+    assert.equal((src.match(/clearSavedScrollback\(\)/g) ?? []).length, 1, 'cleared from somewhere other than the answer');
+    // Asked afresh each time the window opens.
+    assert.match(src, /setResetQuestion\(null\);\s*setClearAsked\(false\);/);
+  });
+});

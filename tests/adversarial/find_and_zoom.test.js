@@ -284,7 +284,9 @@ describe('Clear Terminal', () => {
     // Once xterm has read what it was given — output held for a terminal
     // without focus (outputPacing.js) included — so what came before the
     // clear is cleared with it; no terminal, or a closed one, clears nothing.
-    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => entry\.term\.clear\(\)\);/);
+    // The clear's own callback also saves the cleared terminal at once, so
+    // what was cleared is not restored at the next start (stage 6).
+    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*entry\.term\.clear\(\);\s*noteCleared\(entry\);\s*\}\);/);
     assert.match(registry, /function afterOutputSoFar\(entry, fn\) \{\s*if \(!entry \|\| entry\.disposed\) return false;/);
     assert.match(read('../../src-tauri/src/menu.rs'), /terminal_safe\("clear-terminal", "Clear Terminal", "CmdOrCtrl\+L"\)/);
     assert.match(read('../../src/components/command/CommandPalette.jsx'), /case 'clear_terminal':\s*clearTerminal\(\);/);

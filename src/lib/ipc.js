@@ -77,6 +77,89 @@ function mockBranchName(name) {
 /** The most of `.nexterm/commands.json` that `project_commands_read` reads — the backend's `MAX_BYTES` (src-tauri/src/fs/project_commands.rs). */
 const MOCK_PROJECT_COMMANDS_MAX_BYTES = 256 * 1024;
 
+/**
+ * The saved scrollback's caps, as the backend keeps them: 2 MiB of UTF-8 a
+ * file and 50 MiB in all — `MAX_FILE_BYTES` and `TOTAL_MAX_BYTES` in
+ * src-tauri/src/scrollback.rs (the page's own copy of the first is in
+ * src/lib/scrollbackSnapshot.js). Restated here so the mock imports nothing
+ * of the app's.
+ */
+const MOCK_SCROLLBACK_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MOCK_SCROLLBACK_TOTAL_MAX_BYTES = 50 * 1024 * 1024;
+/**
+ * The only tab ids that name a saved file — the backend's `is_tab_id`: a
+ * counter, or the `<ms>-<n>` of builds before v0.1.2 that a restored layout
+ * still carries. ASCII digits only: `[0-9]` is, in a JS pattern.
+ */
+const MOCK_SCROLLBACK_ID = /^tab-term-(?:[1-9][0-9]{0,8}|[1-9][0-9]{12}-[1-9][0-9]{0,3})$/;
+/**
+ * Where the mock keeps the saved scrollback, so that it survives a reload of
+ * the page as the backend's files survive a restart: `{ [tabId]: { content,
+ * at } }`, `at` the time of the last write, which is what the total cap goes
+ * by. It shares the page's storage with the app's own state, so a write it
+ * has no room for is refused, as the backend's would be on a full disk.
+ */
+const MOCK_SCROLLBACK_KEY = 'nexterm.mock.scrollback';
+
+/** UTF-8 bytes of `text`, which is what the backend's caps count. */
+function mockUtf8Bytes(text) {
+  return new TextEncoder().encode(text).length;
+}
+
+/** Tauri's own refusal of an argument that is missing or of the wrong type: the command never runs. */
+function mockInvalidArgs(command, key, why) {
+  return new Error(`invalid args \`${key}\` for command \`${command}\`: ${why}`);
+}
+
+/**
+ * A command's string argument, refused as Tauri refuses it: missing — a
+ * `tabId` where the command takes `tab_id` is that — or not a string. And a
+ * string with a lone surrogate, which the page can hold and the IPC cannot
+ * carry: it goes as JSON, and serde_json refuses `\ud800` without its pair
+ * ("unexpected end of hex escape") before any command sees it.
+ */
+function mockStringArg(command, args, key) {
+  const value = args?.[key];
+  if (value === undefined) throw mockInvalidArgs(command, key, `command ${command} missing required key ${key}`);
+  if (typeof value !== 'string') throw mockInvalidArgs(command, key, 'invalid type: expected a string');
+  if (typeof value.isWellFormed === 'function' && !value.isWellFormed()) {
+    throw mockInvalidArgs(command, key, 'unexpected end of hex escape (a lone surrogate)');
+  }
+  return value;
+}
+
+/**
+ * `tabId`, a scrollback command's `tab_id`, or the backend's refusal of one
+ * that cannot name a file. Asked after every argument is taken, as the
+ * command's body asks it.
+ */
+function mockScrollbackId(tabId) {
+  if (!MOCK_SCROLLBACK_ID.test(tabId)) {
+    const chars = Array.from(tabId);
+    const shown = JSON.stringify(chars.slice(0, 40).join(''));
+    throw new Error(`Not a terminal tab's id: ${shown}${chars.length > 40 ? '\u{2026}' : ''}`);
+  }
+  return tabId;
+}
+
+/** The saved scrollback as stored, keeping only entries the backend could have written: a tab id's, with text and a time. */
+function mockScrollbackParse(raw) {
+  if (raw == null) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const store = {};
+  for (const [tabId, entry] of Object.entries(parsed)) {
+    if (!MOCK_SCROLLBACK_ID.test(tabId) || !entry || typeof entry.content !== 'string' || !Number.isFinite(entry.at)) continue;
+    store[tabId] = { content: entry.content, at: entry.at };
+  }
+  return store;
+}
+
 /** SHA-256's round constants and first hash: the fractional parts of the cube and square roots of the first primes. */
 const SHA256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -214,6 +297,43 @@ class BrowserMockBridge {
     // count reads by it.
     this.projectCommandsAnswer = null;
     this.projectCommandsReads = [];
+    // The saved scrollback while the page has no storage to keep it in —
+    // Node, a private window that throws on a look at it — in the shape
+    // `MOCK_SCROLLBACK_KEY` holds. Gone with the page, as nothing else
+    // could keep it.
+    this.scrollbackMemory = {};
+  }
+
+  /**
+   * The saved scrollback: `{ store, kept }`, `kept` when it came from the
+   * page's storage and goes back there. Every look at the storage is in a
+   * try, as in src/lib/persistence.js: a webview can throw on the mere
+   * access.
+   */
+  scrollbackLoad() {
+    let raw = null;
+    try {
+      if (typeof localStorage === 'undefined' || localStorage === null) {
+        return { store: { ...this.scrollbackMemory }, kept: false };
+      }
+      raw = localStorage.getItem(MOCK_SCROLLBACK_KEY);
+    } catch (_) {
+      return { store: { ...this.scrollbackMemory }, kept: false };
+    }
+    return { store: mockScrollbackParse(raw), kept: true };
+  }
+
+  /** Put `store` back where `scrollbackLoad` found it. A storage that will not take it fails the command, as a full disk fails the backend's. */
+  scrollbackSave(store, kept) {
+    if (!kept) {
+      this.scrollbackMemory = store;
+      return;
+    }
+    try {
+      localStorage.setItem(MOCK_SCROLLBACK_KEY, JSON.stringify(store));
+    } catch (err) {
+      throw new Error(`The saved scrollback could not be written: ${err?.message ?? err}`);
+    }
   }
 
   /**
@@ -1128,6 +1248,95 @@ class BrowserMockBridge {
       case 'app_quit': {
         this.quitRequests += 1;
         return null;
+      }
+      // Whether a terminal's scrollback is waiting to be saved: the backend
+      // then holds a window's close (never a macOS quit) and asks, as for an
+      // unsaved tab. Nothing closes here, so there is nothing to hold; the
+      // argument is still checked, as Tauri checks it.
+      case 'app_set_pending_save': {
+        if (typeof args?.pending !== 'boolean') {
+          throw mockInvalidArgs(command, 'pending', args?.pending === undefined
+            ? `command ${command} missing required key pending`
+            : 'invalid type: expected a boolean');
+        }
+        return null;
+      }
+
+      // 23. scrollback_write / scrollback_read / scrollback_delete /
+      // scrollback_retain_only / scrollback_clear — each terminal's saved
+      // output, one file per tab in the app's local data folder
+      // (src-tauri/src/scrollback.rs). The mock keeps it in the page's
+      // storage (`MOCK_SCROLLBACK_KEY`), so that it survives a reload as the
+      // files survive a restart, with the backend's rules: only a tab id of
+      // its one shape names anything (`tab_id`, snake_case, as Tauri is
+      // told to take it); 2 MiB of UTF-8 a file, a larger write refused with
+      // nothing changed and a larger entry not read; 50 MiB in all, the
+      // least recently written going first after each write — never the one
+      // just written. There are no links, temporary files or bytes that are
+      // not UTF-8 here.
+      case 'scrollback_write': {
+        const asked = mockStringArg(command, args, 'tab_id');
+        const content = mockStringArg(command, args, 'content');
+        const tabId = mockScrollbackId(asked);
+        const bytes = mockUtf8Bytes(content);
+        if (bytes > MOCK_SCROLLBACK_MAX_FILE_BYTES) {
+          throw new Error(`The scrollback of ${tabId} is ${bytes} bytes; at most ${MOCK_SCROLLBACK_MAX_FILE_BYTES} are saved`);
+        }
+        const { store, kept } = this.scrollbackLoad();
+        // Taken out and put back last, so that entries written at the same
+        // millisecond still go in the order they were written.
+        delete store[tabId];
+        store[tabId] = { content, at: Date.now() };
+        const sizes = new Map(Object.entries(store).map(([id, entry]) => [id, mockUtf8Bytes(entry.content)]));
+        let total = [...sizes.values()].reduce((sum, size) => sum + size, 0);
+        const others = Object.entries(store)
+          .filter(([id]) => id !== tabId)
+          .sort(([, a], [, b]) => a.at - b.at);
+        for (const [id] of others) {
+          if (total <= MOCK_SCROLLBACK_TOTAL_MAX_BYTES) break;
+          total -= sizes.get(id);
+          delete store[id];
+        }
+        this.scrollbackSave(store, kept);
+        return null;
+      }
+      case 'scrollback_read': {
+        const tabId = mockScrollbackId(mockStringArg(command, args, 'tab_id'));
+        const entry = this.scrollbackLoad().store[tabId];
+        if (!entry) return null;
+        if (mockUtf8Bytes(entry.content) > MOCK_SCROLLBACK_MAX_FILE_BYTES) {
+          console.warn(`[IPC Mock] The saved scrollback of ${tabId} is not restored: it is larger than ${MOCK_SCROLLBACK_MAX_FILE_BYTES} bytes`);
+          return null;
+        }
+        return entry.content;
+      }
+      case 'scrollback_delete': {
+        const tabId = mockScrollbackId(mockStringArg(command, args, 'tab_id'));
+        const { store, kept } = this.scrollbackLoad();
+        if (Object.prototype.hasOwnProperty.call(store, tabId)) {
+          delete store[tabId];
+          this.scrollbackSave(store, kept);
+        }
+        return null;
+      }
+      case 'scrollback_retain_only': {
+        const tabIds = args?.tab_ids;
+        if (tabIds === undefined) throw mockInvalidArgs(command, 'tab_ids', `command ${command} missing required key tab_ids`);
+        if (!Array.isArray(tabIds) || tabIds.some((id) => typeof id !== 'string')) {
+          throw mockInvalidArgs(command, 'tab_ids', 'invalid type: expected a sequence of strings');
+        }
+        const keep = new Set(tabIds);
+        const { store, kept } = this.scrollbackLoad();
+        const doomed = Object.keys(store).filter((id) => !keep.has(id));
+        for (const id of doomed) delete store[id];
+        if (doomed.length > 0) this.scrollbackSave(store, kept);
+        return doomed.length;
+      }
+      case 'scrollback_clear': {
+        const { store, kept } = this.scrollbackLoad();
+        const count = Object.keys(store).length;
+        if (count > 0) this.scrollbackSave({}, kept);
+        return count;
       }
 
       default:

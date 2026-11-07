@@ -76,7 +76,11 @@ export class Terminal {
     this.modes = { mouseTrackingMode: 'none' };
     this.buffer = {
       active: { type: 'normal', cursorX: 0, cursorY: 0, baseY: 0, viewportY: 0, length: 0, getLine: () => undefined },
+      // The registry notes a switch of buffers as a change to save, and reads
+      // the normal buffer's length to tell a shell's `clear` (stage 6).
+      onBufferChange: () => ({ dispose() {} }),
     };
+    this.buffer.normal = this.buffer.active;
     this.element = undefined;
     this.textarea = undefined;
     this.focused = false;
@@ -92,6 +96,10 @@ export class Terminal {
     this.onScroll = this._noop;
     // The registry hands the bell to the store; nothing here ever rings.
     this.onBell = this._noop;
+    // The registry notes parsed output as a change to save (stage 6); what
+    // the double is written is never saved.
+    this.onWriteParsed = this._noop;
+    this.onResize = this._noop;
     this._dirty = false;
     this._wasOnScreen = false;
     this._lastBlink = -Infinity;

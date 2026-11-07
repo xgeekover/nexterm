@@ -620,6 +620,38 @@ describe('The guard as the app runs it', () => {
     });
   });
 
+  test('UG-22: the hook tells the backend when scrollback waits to be saved, saves it before closing, and says "nothing pending" when it goes', async () => {
+    // Stage 6 (spec D6): the backend holds a window close while scrollback is
+    // pending. The app's saver, marked as a terminal's output would mark it;
+    // with no terminal behind the tab, its save writes nothing and is done.
+    const { scrollbackSaver } = await import('../../src/lib/scrollbackSession.js');
+    await insideTheApp(async ({ bridge, mount, unmount }) => {
+      mount();
+      await until(() => bridge.sentWith('app_set_pending_save').length === 1, 'the first report');
+      assert.deepEqual(bridge.sentWith('app_set_pending_save'), [{ pending: false }]);
+      scrollbackSaver.markDirty('tab-term-77');
+      await until(() => bridge.sentWith('app_set_pending_save').length === 2, 'the change to be reported');
+      assert.deepEqual(bridge.sentWith('app_set_pending_save')[1], { pending: true });
+
+      bridge.emit('app-close-requested', 11);
+      await until(() => bridge.sentWith('app_close_window').length === 1, 'the window to be closed once saved');
+      assert.equal(scrollbackSaver.isDirty('tab-term-77'), false, 'closed with the scrollback still unsaved');
+      await until(() => bridge.sentWith('app_set_pending_save').length === 3, 'the save to be reported');
+      assert.deepEqual(bridge.sentWith('app_set_pending_save')[2], { pending: false });
+
+      scrollbackSaver.markDirty('tab-term-77');
+      await until(() => bridge.sentWith('app_set_pending_save').length === 4, 'pending again');
+      unmount();
+      await until(() => bridge.sentWith('app_set_pending_save').length === 5, 'the last word').catch(() => {});
+      assert.deepEqual(
+        bridge.sentWith('app_set_pending_save').slice(3),
+        [{ pending: true }, { pending: false }],
+        'the backend still holds every close for a guard that is gone'
+      );
+      scrollbackSaver.stop();
+    });
+  });
+
   test('UG-99: teardown', () => {
     S.setState(emptyEditor());
     assert.equal(S.getState().tabs.length, 0);
