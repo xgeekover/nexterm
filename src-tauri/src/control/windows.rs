@@ -328,17 +328,26 @@ mod tests {
         }
     }
 
-    /// LocalSystem's SID, as bytes: a user this test's process is not.
-    fn system_sid() -> Vec<u8> {
+    /// The SID an SDDL trustee names, as bytes. It takes `S-1-…` and the
+    /// aliases Windows writes for well-known accounts when it turns a
+    /// descriptor into text: CI's runner is the built-in Administrator, so its
+    /// pipe's DACL reads back as `D:P(A;;FA;;;LA)`, not with the `S-1-5-21-…`
+    /// it was made from.
+    fn sid_of(trustee: &str) -> Vec<u8> {
         let mut sid: PSID = null_mut();
-        let text = wide("S-1-5-18");
+        let text = wide(trustee);
         // SAFETY: a NUL-terminated string; `sid` is allocated by the call.
         unsafe {
-            assert_ne!(ConvertStringSidToSidW(text.as_ptr(), &mut sid), 0);
+            assert_ne!(ConvertStringSidToSidW(text.as_ptr(), &mut sid), 0, "{trustee}: {}", io::Error::last_os_error());
             let bytes = std::slice::from_raw_parts(sid as *const u8, GetLengthSid(sid) as usize).to_vec();
             LocalFree(sid);
             bytes
         }
+    }
+
+    /// LocalSystem's SID, as bytes: a user this test's process is not.
+    fn system_sid() -> Vec<u8> {
+        sid_of("S-1-5-18")
     }
 
     #[test]
@@ -359,7 +368,12 @@ mod tests {
         assert!(dacl.starts_with("D:"), "{dacl}");
         assert_eq!(dacl.matches('(').count(), 1, "one entry and no other: {dacl}");
         assert!(dacl.contains("(A;"), "an allow entry: {dacl}");
-        assert!(dacl.ends_with(&format!(";;;{ours})")), "for this user: {dacl}");
+        // Compared as SIDs: the text may name the user by an alias (see `sid_of`).
+        let trustee = dacl
+            .strip_suffix(')')
+            .and_then(|entry| entry.rsplit(';').next())
+            .unwrap_or_else(|| panic!("no trustee in {dacl}"));
+        assert_eq!(sid_of(trustee), incoming.security.sid, "for this user ({ours}): {dacl}");
         // Every later instance has it too.
         let another = incoming.security.create(&incoming.name, false).unwrap();
         assert_eq!(dacl_of(&another), dacl);
