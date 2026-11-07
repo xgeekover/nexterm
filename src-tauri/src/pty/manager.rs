@@ -21,6 +21,7 @@ use crate::models::PtyCwdPayload;
 use crate::models::PtyTitlePayload;
 
 use crate::models::{PtyExitPayload, PtyOutputPayload, PtySessionInfo};
+use crate::control::{self, Control, SessionEnv};
 
 pub struct PtySession {
     pub id: String,
@@ -351,11 +352,47 @@ const OPENTUI_NOTIFICATION_PROTOCOL: &str = "OPENTUI_NOTIFICATION_PROTOCOL";
 /// A function of its own so that a test can start a real shell with exactly
 /// this environment, which it cannot do through `spawn`: that needs an
 /// `AppHandle`.
-fn set_session_env(cmd: &mut CommandBuilder) {
+///
+/// `control` is what the control API gives this shell (src/control/), or
+/// `None` while the API is off:
+/// - `NEXTERM_CONTROL`: the socket's path, or the pipe's name on Windows;
+/// - `NEXTERM_CONTROL_TOKEN`: this shell's token;
+/// - `NEXTERM_CLI`: the CLI's absolute path, when it is beside the app: the
+///   link to it (a copy on Windows) in a folder of NexTerm's that holds only
+///   it — and that folder put in front of `PATH`, so that `nexterm-cli` is
+///   found by name and nothing else comes with it (src/control/cli.rs). If
+///   there is no such folder, the real CLI, and `PATH` left alone;
+/// - Windows: `WSLENV` gains `NEXTERM_CONTROL:NEXTERM_CONTROL_TOKEN`, so that
+///   a WSL shell started from this one has them too, and `nexterm-cli.exe`
+///   works from there through interop.
+///
+/// None of the three is ever inherited: a NexTerm started from inside
+/// another's terminal (`tauri dev`, say) would otherwise hand its shells the
+/// other's address and token, and with the API off they would talk to it.
+fn set_session_env(cmd: &mut CommandBuilder, control: Option<&SessionEnv>) {
     // ConPTY (Windows) ignores TERM/COLORTERM; harmless to set anyway.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("NEXTERM", "1");
+
+    for key in [control::ENV_ADDRESS, control::ENV_TOKEN, control::ENV_CLI] {
+        cmd.env_remove(key);
+    }
+    if let Some(env) = control {
+        cmd.env(control::ENV_ADDRESS, &env.address);
+        cmd.env(control::ENV_TOKEN, &env.token);
+        if let Some(cli) = &env.cli {
+            cmd.env(control::ENV_CLI, cli);
+        }
+        if let Some(path) = env.path_dir.as_deref().and_then(|dir| control::path_with(dir, cmd.get_env("PATH"))) {
+            cmd.env("PATH", path);
+        }
+        #[cfg(windows)]
+        {
+            let wslenv = cmd.get_env("WSLENV").map(|v| v.to_string_lossy().into_owned());
+            cmd.env("WSLENV", control::wslenv_with(wslenv.as_deref()));
+        }
+    }
 
     // OpenCode's TUI (OpenTUI) sends a notification only in a protocol it has
     // chosen. It asks the terminal as it starts — kitty's OSC 99 query — and
@@ -389,6 +426,32 @@ pub struct PtyManager {
     /// Every window minimised: flow control lets the page fall much further
     /// behind (flow_gate.rs, AWAY_HIGH_WATER). Kept by main.rs.
     away: Arc<std::sync::atomic::AtomicBool>,
+    /// The control API, which gives every shell a token as it starts and
+    /// forgets it as its session ends (src/control/). `None` in the tests
+    /// that need no API.
+    control: Option<Arc<Control>>,
+}
+
+/// A token issued for a shell that has not started yet: taken back unless
+/// the session gets as far as the map, from where `kill` and the end of
+/// the session take it back instead.
+struct IssuedToken<'a> {
+    control: Option<&'a Control>,
+    session_id: &'a str,
+}
+
+impl IssuedToken<'_> {
+    fn kept(mut self) {
+        self.control = None;
+    }
+}
+
+impl Drop for IssuedToken<'_> {
+    fn drop(&mut self) {
+        if let Some(control) = self.control {
+            control.revoke(self.session_id);
+        }
+    }
 }
 
 impl Default for PtyManager {
@@ -403,7 +466,14 @@ impl PtyManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             counter: AtomicU64::new(1),
             away: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            control: None,
         }
+    }
+
+    /// Every shell given a token of `control`'s.
+    pub fn with_control(mut self, control: Arc<Control>) -> Self {
+        self.control = Some(control);
+        self
     }
 
     /// Whether every window is minimised (main.rs watches).
@@ -520,7 +590,9 @@ impl PtyManager {
                 cmd.cwd(dir);
             }
         }
-        set_session_env(&mut cmd);
+        let control_env = self.control.as_ref().and_then(|c| c.issue(&session_id));
+        let issued = IssuedToken { control: self.control.as_deref().filter(|_| control_env.is_some()), session_id: &session_id };
+        set_session_env(&mut cmd, control_env.as_ref());
         let integration = shell_integration::for_shell(&shell_path);
         for (key, value) in integration.env {
             cmd.env(key, value);
@@ -579,8 +651,12 @@ impl PtyManager {
         self.sessions
             .lock()
             .insert(session_id.clone(), session.clone());
+        // From here on the session ends through `kill` or its reader below,
+        // and each takes the token back.
+        issued.kept();
 
         let session_id_clone = session_id.clone();
+        let control_clone = self.control.clone();
         let app_handle_clone = app_handle.clone();
         let sessions_map_clone = self.sessions.clone();
         let session_weak = Arc::downgrade(&session);
@@ -673,6 +749,12 @@ impl PtyManager {
                 // one any more — before it is told it ended.
                 #[cfg(unix)]
                 echo_watch.finish();
+
+                // The session is over: its token with it, before the page
+                // hears of the end and perhaps starts a new shell.
+                if let Some(control) = &control_clone {
+                    control.revoke(&session_id_clone);
+                }
 
                 let exit_payload = PtyExitPayload {
                     session_id: session_id_clone.clone(),
@@ -782,6 +864,35 @@ impl PtyManager {
         }
     }
 
+    /// Whether every program in the foreground of `session_id`'s terminal
+    /// runs as this user (owner.rs): on unix every member of its foreground
+    /// process group, on Windows the shell and everything it started.
+    /// `Some(false)` for `sudo`, `su`, `login`, `gsudo` or the shells they
+    /// started, and for anything that cannot be read; `None` only on Windows
+    /// when no process snapshot can be taken (or the shell has no id). An
+    /// unknown session is an error. What the page asks before a control
+    /// `send` types (`pty_foreground_owner`).
+    pub fn foreground_owner(&self, session_id: &str) -> Result<Option<bool>, String> {
+        let session = {
+            let sessions = self.sessions.lock();
+            sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| format!("PTY session not found: {session_id}"))?
+        };
+        #[cfg(unix)]
+        {
+            let group = session.master.lock().as_deref().and_then(|m| m.process_group_leader());
+            // SAFETY: geteuid cannot fail.
+            Ok(Some(super::owner::foreground_runs_as(group, unsafe { libc::geteuid() })))
+        }
+        #[cfg(windows)]
+        {
+            let shell = session.child.lock().process_id();
+            Ok(shell.and_then(super::owner::descendants_run_as_us))
+        }
+    }
+
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), String> {
         let session = {
             let sessions = self.sessions.lock();
@@ -827,6 +938,10 @@ impl PtyManager {
     }
 
     pub fn kill(&self, session_id: &str) -> Result<(), String> {
+        // Its token goes first, whatever is left of the session.
+        if let Some(control) = &self.control {
+            control.revoke(session_id);
+        }
         let session = self.sessions.lock().remove(session_id);
         if let Some(session) = session {
             // Close the input queue first so the writer thread is not left
@@ -950,6 +1065,56 @@ mod tests {
         assert!(manager.kill("invalid-session").is_ok());
     }
 
+    /// A killed session's token goes with it — even one `kill` finds no
+    /// session for any more (its reader ended it first, or it never got as
+    /// far as the map).
+    #[test]
+    fn killing_a_session_takes_its_token_back_and_no_other() {
+        let control = Arc::new(Control::new(None));
+        let manager = PtyManager::new().with_control(control.clone());
+        let mine = control.token_for_test("pty-1");
+        let other = control.token_for_test("pty-2");
+        manager.kill("pty-1").unwrap();
+        assert!(!control.knows(&mine));
+        assert!(control.knows(&other));
+    }
+
+    /// A token issued for a shell that never got as far as the map is taken
+    /// back as the guard goes; one kept is not.
+    #[test]
+    fn a_token_for_a_shell_that_failed_to_start_is_taken_back() {
+        let control = Control::new(None);
+        let failed = control.token_for_test("pty-1");
+        drop(IssuedToken { control: Some(&control), session_id: "pty-1" });
+        assert!(!control.knows(&failed));
+        let started = control.token_for_test("pty-2");
+        IssuedToken { control: Some(&control), session_id: "pty-2" }.kept();
+        assert!(control.knows(&started));
+    }
+
+    /// The other ways a session's token goes, read from `spawn` itself:
+    /// a shell that fails to start (`IssuedToken`, until the session is in
+    /// the map) and a session that ends (its reader, before `pty-exit`).
+    /// `spawn` needs an AppHandle, which a unit test cannot build.
+    #[test]
+    fn spawn_takes_the_token_back_on_failure_and_at_the_end() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("pty").join("manager.rs"),
+        )
+        .unwrap();
+        let body = &src[src.find("    pub fn spawn(").expect("spawn is gone")..];
+        let body = &body[..body.find("\n    pub fn write(").expect("write is gone")];
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("spawn no longer has {needle:?}"));
+        assert!(at("c.issue(&session_id)") < at("set_session_env(&mut cmd, control_env.as_ref())"));
+        assert!(at("let issued = IssuedToken { control: self.control.as_deref()") < at("set_session_env(&mut cmd, control_env.as_ref())"));
+        // Kept only once the session is where `kill` will find it.
+        assert!(at(".insert(session_id.clone(), session.clone())") < at("issued.kept()"));
+        assert!(at("issued.kept()") < at("let reader_thread"));
+        // And taken back as the session ends, before the page is told.
+        assert!(at("control.revoke(&session_id_clone)") < at("emit(\"pty-exit\""));
+        assert!(at("let reader_thread") < at("control.revoke(&session_id_clone)"));
+    }
+
     /// `retain_only` against real spawned shells.
     ///
     /// This is what stops a reloaded webview leaking its terminals, so it is
@@ -964,7 +1129,8 @@ mod tests {
         // a unit test has no way to build — so the sessions are assembled by
         // hand around real shells. `retain_only` is map bookkeeping plus a
         // kill, and both are exercised here.
-        let manager = PtyManager::new();
+        let control = Arc::new(Control::new(None));
+        let manager = PtyManager::new().with_control(control.clone());
         let spawn = |id: &str| {
             let pair = native_pty_system()
                 .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
@@ -1043,9 +1209,13 @@ mod tests {
         let b = spawn("pty-b");
         let c = spawn("pty-c");
         assert_eq!(manager.list_sessions().len(), 3);
+        let [token_a, token_b, token_c] = [&a, &b, &c].map(|id| control.token_for_test(id));
 
         let reaped = manager.retain_only(&[b.clone()]);
         assert_eq!(reaped, 2, "it reports how many it killed");
+        // A reaped session's token is no longer good; a kept one's is.
+        assert!(!control.knows(&token_a) && !control.knows(&token_c));
+        assert!(control.knows(&token_b));
 
         let left: Vec<String> = manager.list_sessions().into_iter().map(|s| s.session_id).collect();
         assert_eq!(left, vec![b.clone()], "only the named session survives");
@@ -1060,6 +1230,7 @@ mod tests {
         // And the empty list — what `bootstrap` sends — clears everything.
         assert_eq!(manager.retain_only(&[]), 1);
         assert!(manager.list_sessions().is_empty());
+        assert!(!control.knows(&token_b));
     }
 
     /// V26, Windows 10: a shell that exits ends its session. The console host
@@ -1579,6 +1750,144 @@ mod canonical_limit_tests {
         }
     }
 
+    /// A session held by hand around a real program in a real pty, as the
+    /// tests above hold theirs; what it prints comes out of the receiver.
+    fn hold(mgr: &PtyManager, id: &str, cmd: CommandBuilder) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let (printed, output) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let _ = printed.send(buf[..n].to_vec());
+            }
+        });
+        let tx = spawn_writer_thread(pair.master.take_writer().expect("writer"), id).unwrap();
+        mgr.sessions.lock().insert(
+            id.into(),
+            Arc::new(PtySession {
+                id: id.into(),
+                shell: "test".into(),
+                created_at: Utc::now(),
+                master: Mutex::new(Some(pair.master)),
+                input: Mutex::new(Some(tx)),
+                child: Mutex::new(child),
+                flow: Arc::new(FlowGate::default()),
+            }),
+        );
+        output
+    }
+
+    /// The foreground of a real pty: our own `cat` is this user; `su`,
+    /// set-uid root and waiting for a password, is not — the case the page
+    /// refuses to type into. Each program is its session's own, so it is in
+    /// the foreground from the start.
+    #[test]
+    fn the_foreground_of_a_terminal_is_this_user_s_or_not() {
+        use std::os::unix::fs::MetadataExt;
+        let mgr = PtyManager::new();
+        assert!(mgr.foreground_owner("nope").is_err(), "an unknown session is an error");
+
+        let mut cat = CommandBuilder::new("/bin/sh");
+        cat.args(["-c", "exec cat"]);
+        let _output = hold(&mgr, "ours", cat);
+        assert_eq!(mgr.foreground_owner("ours"), Ok(Some(true)));
+        let _ = mgr.kill("ours");
+
+        let su = ["/usr/bin/su", "/bin/su"].into_iter().find(|path| {
+            std::fs::metadata(path).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o4000 != 0)
+        });
+        // SAFETY: cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("running as root: su would be this user; skipping that half");
+        } else if let Some(su) = su {
+            let output = hold(&mgr, "su", CommandBuilder::new(su));
+            // Asked once it is asking: just after the exec, the system can
+            // still report the credentials it had before (measured on macOS).
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut seen = String::new();
+            while !seen.to_lowercase().contains("password") {
+                match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                    Err(_) => panic!("{su} never asked for a password; it printed {seen:?}"),
+                }
+            }
+            assert_eq!(mgr.foreground_owner("su"), Ok(Some(false)), "{su} asking for a password");
+            let _ = mgr.kill("su");
+        } else {
+            eprintln!("no set-uid su here; skipping that half");
+        }
+    }
+
+    /// What `output` prints, into `seen`, until `needle` appears after
+    /// byte `from` of it; a failure (with what was printed) after 20 s.
+    fn wait_for(output: &std::sync::mpsc::Receiver<Vec<u8>>, seen: &mut String, from: usize, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !seen.get(from..).is_some_and(|after| after.contains(needle)) {
+            match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => panic!("{needle:?} never came; the terminal printed {seen:?}"),
+            }
+        }
+    }
+
+    /// The reviewer's shapes (review 7, round 2), started at the prompt of a
+    /// shell with job control as a user would: a set-uid program that is not
+    /// its foreground group's leader (`sh -c 'su; :'`, `time login`), and
+    /// one whose group leader has already gone (`true | su`, `true | login`).
+    /// Each is asked once it is waiting at its prompt.
+    #[test]
+    fn every_member_of_the_foreground_group_is_looked_at() {
+        use std::os::unix::fs::MetadataExt;
+        let Some(bash) = ["/bin/bash", "/usr/bin/bash"].into_iter().find(|p| std::path::Path::new(p).exists()) else {
+            eprintln!("no bash here; skipping");
+            return;
+        };
+        // SAFETY: cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("running as root: set-uid root programs are this user; skipping");
+            return;
+        }
+        let setuid = |path: &str| std::fs::metadata(path).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o4000 != 0);
+        let mut shapes: Vec<(String, &str)> = Vec::new();
+        if let Some(su) = ["/usr/bin/su", "/bin/su"].into_iter().find(|p| setuid(p)) {
+            shapes.push((format!("sh -c '{su}; :'"), "assword"));
+            shapes.push((format!("true | {su} </dev/tty"), "assword"));
+        }
+        if std::path::Path::new("/usr/bin/time").exists() && setuid("/usr/bin/login") {
+            shapes.push(("/usr/bin/time /usr/bin/login".into(), "login:"));
+            shapes.push(("/usr/bin/true | /usr/bin/login </dev/tty".into(), "login:"));
+        }
+        if shapes.is_empty() {
+            eprintln!("no set-uid su or login here; skipping");
+            return;
+        }
+        let mgr = PtyManager::new();
+        for (n, (line, waiting)) in shapes.iter().enumerate() {
+            let id = format!("shape-{n}");
+            let mut cmd = CommandBuilder::new(bash);
+            cmd.args(["--norc", "--noprofile", "-i"]);
+            cmd.env("PS1", "nx-ready> ");
+            cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
+            let output = hold(&mgr, &id, cmd);
+            let mut seen = String::new();
+            wait_for(&output, &mut seen, 0, "nx-ready> ");
+            assert_eq!(mgr.foreground_owner(&id), Ok(Some(true)), "bash at its prompt");
+            let mark = seen.len();
+            mgr.write(&id, &format!("{line}\n")).unwrap();
+            wait_for(&output, &mut seen, mark, waiting);
+            assert_eq!(mgr.foreground_owner(&id), Ok(Some(false)), "{line}");
+            let _ = mgr.kill(&id);
+        }
+    }
+
     #[test]
     fn the_guard_rejects_only_what_the_kernel_would_drop() {
         let cooked = probe(false, "guard-cooked");
@@ -1739,7 +2048,7 @@ mod session_env_tests {
     fn opencode_is_told_to_notify_with_osc_99() {
         let mut cmd = CommandBuilder::new("sh");
         cmd.env_remove(OPENTUI_NOTIFICATION_PROTOCOL);
-        set_session_env(&mut cmd);
+        set_session_env(&mut cmd, None);
         assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc99"));
     }
 
@@ -1749,7 +2058,7 @@ mod session_env_tests {
         for inherited in ["osc9", "osc99", "", "something-newer"] {
             let mut cmd = CommandBuilder::new("sh");
             cmd.env("OPENTUI_NOTIFICATION_PROTOCOL", inherited);
-            set_session_env(&mut cmd);
+            set_session_env(&mut cmd, None);
             assert_eq!(
                 value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(),
                 Some(inherited),
@@ -1764,9 +2073,185 @@ mod session_env_tests {
             let mut cmd = CommandBuilder::new("cmd.exe");
             cmd.env_remove(OPENTUI_NOTIFICATION_PROTOCOL);
             cmd.env("opentui_notification_protocol", "osc9");
-            set_session_env(&mut cmd);
+            set_session_env(&mut cmd, None);
             assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc9"));
         }
+    }
+}
+
+/// What the control API gives a shell (src/control/), set up by the same
+/// code `spawn` uses.
+#[cfg(test)]
+mod control_env_tests {
+    use super::*;
+    use portable_pty::CommandBuilder;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn value(cmd: &CommandBuilder, key: &str) -> Option<String> {
+        cmd.get_env(key).map(|v| v.to_string_lossy().into_owned())
+    }
+
+    /// The folder of NexTerm's that holds only the CLI.
+    fn cli_dir() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Users\u\AppData\Local\com.nexterm.ide\bin")
+        } else {
+            PathBuf::from("/Users/u/Library/Application Support/com.nexterm.ide/bin")
+        }
+    }
+
+    pub(super) fn given() -> SessionEnv {
+        SessionEnv {
+            address: OsString::from(if cfg!(windows) { r"\\.\pipe\nexterm-00ff00ff" } else { "/tmp/nxc/00ff00ff00ff00ff.sock" }),
+            // Fake, and written so that no secret scanner takes it for one.
+            token: "to·ken-of-pty-1".replace('·', ""),
+            cli: Some(cli_dir().join(control::CLI_NAME)),
+            path_dir: Some(cli_dir()),
+        }
+    }
+
+    fn path_of(dirs: &[&str]) -> OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    #[test]
+    fn a_shell_is_given_the_address_its_token_and_the_cli_first_on_path() {
+        let env = given();
+        let (a, b) = if cfg!(windows) { (r"C:\Windows", r"C:\bin") } else { ("/usr/bin", "/bin") };
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.env("PATH", path_of(&[a, b]));
+        cmd.env_remove("WSLENV");
+        set_session_env(&mut cmd, Some(&env));
+        assert_eq!(value(&cmd, "NEXTERM_CONTROL"), Some(env.address.to_string_lossy().into_owned()));
+        assert_eq!(value(&cmd, "NEXTERM_CONTROL_TOKEN"), Some(env.token.clone()));
+        let cli = env.cli.clone().unwrap();
+        assert_eq!(value(&cmd, "NEXTERM_CLI"), Some(cli.to_string_lossy().into_owned()));
+        let dir = cli_dir();
+        assert_eq!(cmd.get_env("PATH").map(OsString::from), Some(path_of(&[dir.to_str().unwrap(), a, b])));
+        #[cfg(windows)]
+        assert_eq!(value(&cmd, "WSLENV").as_deref(), Some("NEXTERM_CONTROL:NEXTERM_CONTROL_TOKEN"));
+        #[cfg(not(windows))]
+        assert_eq!(value(&cmd, "WSLENV"), None, "WSL is a Windows matter");
+    }
+
+    #[test]
+    fn with_the_api_off_a_shell_has_none_of_them_not_even_inherited_ones() {
+        let parent = |cmd: &mut CommandBuilder| {
+            cmd.env("NEXTERM_CONTROL", "/another/nexterm.sock");
+            cmd.env("NEXTERM_CONTROL_TOKEN", "a-parent-to·ken".replace('·', ""));
+            cmd.env("NEXTERM_CLI", "/another/nexterm-cli");
+        };
+        let mut cmd = CommandBuilder::new("sh");
+        parent(&mut cmd);
+        let path = value(&cmd, "PATH");
+        let wslenv = value(&cmd, "WSLENV");
+        set_session_env(&mut cmd, None);
+        for key in ["NEXTERM_CONTROL", "NEXTERM_CONTROL_TOKEN", "NEXTERM_CLI"] {
+            assert_eq!(value(&cmd, key), None, "{key} was left in");
+        }
+        assert_eq!(value(&cmd, "PATH"), path, "PATH untouched");
+        assert_eq!(value(&cmd, "WSLENV"), wslenv, "WSLENV untouched");
+
+        // On, a parent's are replaced by this instance's own.
+        let mut cmd = CommandBuilder::new("sh");
+        parent(&mut cmd);
+        set_session_env(&mut cmd, Some(&given()));
+        assert_eq!(value(&cmd, "NEXTERM_CONTROL_TOKEN"), Some(given().token));
+    }
+
+    #[test]
+    fn without_the_cli_beside_the_app_path_is_left_as_it_was() {
+        let env = SessionEnv { cli: None, path_dir: None, ..given() };
+        let mut cmd = CommandBuilder::new("sh");
+        let path = value(&cmd, "PATH");
+        set_session_env(&mut cmd, Some(&env));
+        assert_eq!(value(&cmd, "NEXTERM_CLI"), None);
+        assert_eq!(value(&cmd, "PATH"), path);
+        assert!(value(&cmd, "NEXTERM_CONTROL").is_some() && value(&cmd, "NEXTERM_CONTROL_TOKEN").is_some());
+    }
+
+    /// The CLI could not be given a folder of its own: hooks still have its
+    /// path, and PATH is exactly what the shell inherited — the CLI's own
+    /// folder (/usr/bin, Contents/MacOS, the install folder) never goes on it.
+    #[test]
+    fn with_no_folder_of_its_own_the_real_cli_is_named_and_path_left_alone() {
+        let real = if cfg!(windows) { PathBuf::from(r"C:\Program Files\NexTerm\nexterm-cli.exe") } else { PathBuf::from("/usr/bin/nexterm-cli") };
+        let env = SessionEnv { cli: Some(real.clone()), path_dir: None, ..given() };
+        let mut cmd = CommandBuilder::new("sh");
+        let path = value(&cmd, "PATH");
+        set_session_env(&mut cmd, Some(&env));
+        assert_eq!(value(&cmd, "NEXTERM_CLI"), Some(real.to_string_lossy().into_owned()));
+        assert_eq!(value(&cmd, "PATH"), path);
+    }
+
+    /// Windows: a `WSLENV` the user has keeps everything in it, gains the
+    /// two names once, and a variable spelt in another case is the same one.
+    #[cfg(windows)]
+    #[test]
+    fn wslenv_keeps_what_the_user_had() {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env_remove("WSLENV");
+        cmd.env("wslenv", "GOPATH/l:NEXTERM_CONTROL");
+        set_session_env(&mut cmd, Some(&given()));
+        assert_eq!(value(&cmd, "WSLENV").as_deref(), Some("GOPATH/l:NEXTERM_CONTROL:NEXTERM_CONTROL_TOKEN"));
+    }
+}
+
+/// A real shell started with exactly what `set_session_env` gives it reads
+/// the address, the token and the CLI back, and finds the CLI's folder first
+/// on its PATH.
+#[cfg(all(test, unix))]
+mod control_env_shell_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_real_shell_reads_back_what_it_was_given() {
+        let env = super::control_env_tests::given();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", r#"printf 'nx=%s|%s|%s|%s=nx\n' "$NEXTERM_CONTROL" "$NEXTERM_CONTROL_TOKEN" "$NEXTERM_CLI" "${PATH%%:*}""#]);
+        set_session_env(&mut cmd, Some(&env));
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 500, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn sh");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let (tx, output) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = String::new();
+        while !seen.contains("=nx") {
+            match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let line = seen
+            .split("nx=")
+            .nth(1)
+            .and_then(|rest| rest.split("=nx").next())
+            .unwrap_or_else(|| panic!("the shell printed {seen:?}"));
+        let cli = env.cli.clone().unwrap();
+        let expected = format!(
+            "{}|{}|{}|{}",
+            env.address.to_string_lossy(),
+            env.token,
+            cli.display(),
+            env.path_dir.as_ref().unwrap().display()
+        );
+        assert_eq!(line, expected);
     }
 }
 
@@ -1803,7 +2288,7 @@ mod locale_tests {
     #[test]
     fn a_shell_that_inherits_no_locale_is_given_lang_and_nothing_else() {
         let mut cmd = without_a_locale("/bin/sh");
-        set_session_env(&mut cmd);
+        set_session_env(&mut cmd, None);
         let vars = locale_vars(&cmd);
         // LANG is the weakest of the three, so a locale set by the user's own
         // rc files still wins over it.
@@ -1823,7 +2308,7 @@ mod locale_tests {
         ] {
             let mut cmd = without_a_locale("/bin/sh");
             cmd.env(key, value);
-            set_session_env(&mut cmd);
+            set_session_env(&mut cmd, None);
             assert_eq!(
                 locale_vars(&cmd),
                 vec![(key.to_string(), value.to_string())],
@@ -1881,7 +2366,7 @@ mod locale_tests {
         cmd.env("PS1", "nexterm-ready> ");
         // macOS's bash 3.2 otherwise opens with a paragraph about zsh.
         cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
-        set_session_env(&mut cmd);
+        set_session_env(&mut cmd, None);
         let lang = cmd.get_env("LANG").map(|v| v.to_string_lossy().into_owned());
 
         let pair = native_pty_system()

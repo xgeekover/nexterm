@@ -417,3 +417,79 @@ describe('Performance mode: S6, saving the scrollback (stage 6)', () => {
     assert.match(md, /\| \*\*S6\*\* S6 title \| 14 \| 6\.0 \/ 11\.0 \/ 17\.0 \| 2\.00 \(5002\) \| 302 \(202\) \| 4 \(20002\) \| 12 \/ 22 \/ 42 \(0\) \|/);
   });
 });
+
+describe('Performance mode: S7, the control API round trip (stage 7, spec D9)', () => {
+  test('PF-22: tests/perf/control.js times each nexterm-cli call, counts failures, and its summary reads back', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const { parseControlSummary } = await import('../../src/lib/perf/perfStats.js');
+    const { parseArgs: controlArgs, summaryLine } = await import('../perf/control.js');
+    assert.deepEqual(controlArgs(['--count', '20', '--interval', '0', '--cli', '/x/nexterm-cli']), { count: 20, interval: 0, cli: '/x/nexterm-cli' });
+    assert.deepEqual(controlArgs([]), { count: 200, interval: 60, cli: null }, 'under the backend\'s 20 requests a second');
+    const script = fileURLToPath(new URL('../perf/control.js', import.meta.url));
+    const dir = mkdtempSync(join(tmpdir(), 'nexterm-control-perf-'));
+    try {
+      // A stand-in CLI that records each call and fails the third.
+      const calls = join(dir, 'calls.txt');
+      const fake = join(dir, 'fake-cli.mjs');
+      writeFileSync(
+        fake,
+        `import { appendFileSync, readFileSync, existsSync } from 'node:fs';\n` +
+          `appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n` +
+          `const n = readFileSync(${JSON.stringify(calls)}, 'utf8').split('\\n').filter(Boolean).length;\n` +
+          `if (n === 3) { process.stderr.write('refused: typing into and reading terminals is off\\n'); process.exit(4); }\n`
+      );
+      const out = spawnSync(process.execPath, [script, '--count', '5', '--interval', '0', '--cli', fake], { encoding: 'utf8' });
+      assert.equal(out.status, 0, out.stderr);
+      const summary = parseControlSummary(out.stdout);
+      assert.equal(summary.calls, 5);
+      assert.equal(summary.failed, 1);
+      for (const key of ['p50', 'p95', 'p99', 'max', 'mean']) assert.ok(summary[key] > 0, `${key}: ${summary[key]}`);
+      assert.ok(summary.p50 <= summary.p95 && summary.p95 <= summary.max);
+      assert.deepEqual(summary.firstError, { exit: '4', said: 'refused: typing into and reading terminals is off' });
+      const made = readFileSync(calls, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      assert.deepEqual(made[0], ['set-status', 'perf 1/5'], 'another text each time, so the page writes each one');
+      assert.deepEqual(made.at(-1), ['set-status', '--clear'], 'and the status cleared at the end');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assert.equal(parseControlSummary(summaryLine([], 3)).p95, null, 'nothing measured is no number, not 0');
+    assert.equal(parseControlSummary('[nexterm-perf] mode=bulk lines=1 bytes=1 seconds=1 skipped=0'), null);
+    assert.equal(parseControlSummary(null), null);
+  });
+
+  test('PF-23: S7 is control.js in a terminal of its own, its summary the run\'s, and it runs only when named', () => {
+    const src = read('../../src/lib/perf/perfRunner.js');
+    assert.match(src, /S7: \{\s*title: 'nexterm-cli set-status from a terminal, 200 times',\s*control: \{ count: CONTROL_CALLS, interval: CONTROL_INTERVAL_MS \},/);
+    assert.match(src, /export const CONTROL_CALLS = 200;/);
+    assert.match(src, /export const CONTROL_INTERVAL_MS = 60;/);
+    assert.match(src, /if \(scenario\.control\) return runControl\(id, scenario, \{ tools, probe, platform \}\);/);
+    assert.match(src, /joinPath\(tools, 'control\.js', platform\)/);
+    assert.match(src, /run\.control = summary \? read\(\) : null;/);
+  });
+
+  test('PF-24: the control table — calls, failures, p50/p95/p99/max against the 20 ms target, the first failure — medians of the runs', () => {
+    const run = (n, extra = {}) => ({
+      scenario: 'S7',
+      title: 'S7 title',
+      durationMs: 12_000,
+      page: {},
+      terminals: [],
+      control: { calls: 200, failed: 0, p50: 4 + n, p95: 8 + n, p99: 12 + n, max: 30 + n, mean: 5 + n, firstError: null, ...extra },
+    });
+    const report = { startedAt: 'now', environment: { repeat: 3 }, runs: [run(1), run(2, { failed: 2, firstError: { exit: '4', said: 'refused | off' } }), run(3)] };
+    const rows = scenarioRows(report, []);
+    const c = rows[0].control;
+    assert.deepEqual([c.calls, c.failed, c.p50, c.p95, c.p99, c.max, c.mean], [200, 0, 6, 10, 14, 32, 7]);
+    assert.equal(rows[0].drainSeconds, null, 'no load terminals: no drain (the median leaves out the -Infinity of none), not a number');
+    const md = toMarkdown(report, rows, []);
+    assert.match(md, /\| Calls \(failed\) \| Round trip p50\/p95\/p99\/max ms \| Mean ms \| p95 under 20 ms \| First failure \|/);
+    assert.match(md, /\| \*\*S7\*\* S7 title \| 200 \(0\) \| 6\.0 \/ 10\.0 \/ 14\.0 \/ 32\.0 \| 7\.0 \| yes \| exit 4: refused \\\| off \|/);
+    const slow = toMarkdown({ ...report, runs: [run(20)] }, scenarioRows({ ...report, runs: [run(20)] }, []), []);
+    assert.match(slow, /\| \*\*no\*\* \|/, 'a p95 over 20 ms is said to miss the target');
+    assert.doesNotMatch(toMarkdown(report, scenarioRows({ ...report, runs: [{ ...run(1), control: null }] }, []), []), /Control API \(stage 7\)/);
+  });
+});

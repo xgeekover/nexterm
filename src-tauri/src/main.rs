@@ -10,6 +10,7 @@
 #![deny(warnings)]
 
 pub mod commands;
+pub mod control;
 pub mod fs;
 pub mod menu;
 pub mod models;
@@ -28,6 +29,9 @@ pub struct AppState {
     pub pty_manager: Arc<pty::PtyManager>,
     pub fs_watcher: Arc<fs::FsWatcherManager>,
     pub workspace: Arc<fs::Workspace>,
+    /// The local control API (src/control/): its listener and the tokens
+    /// the PTY manager hands every shell.
+    pub control: Arc<control::Control>,
 }
 
 /// What the window-state plugin is allowed to remember: everything but the
@@ -57,7 +61,8 @@ fn window_state_flags() -> StateFlags {
 }
 
 fn main() {
-    let pty_manager = Arc::new(pty::PtyManager::new());
+    let control = Arc::new(control::Control::new(control::find_cli()));
+    let pty_manager = Arc::new(pty::PtyManager::new().with_control(control.clone()));
     let fs_watcher = Arc::new(fs::FsWatcherManager::new());
     let workspace = Arc::new(fs::Workspace::new());
 
@@ -65,9 +70,10 @@ fn main() {
         pty_manager,
         fs_watcher,
         workspace,
+        control: control.clone(),
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // Desktop notifications for what a program in a terminal asks to be
@@ -105,6 +111,26 @@ fn main() {
                 let _ = app_state
                     .fs_watcher
                     .start_watching(app.handle().clone(), &root.to_string_lossy());
+            }
+
+            // The control API listens from the start with D5's defaults, so
+            // that the address is there for the first shell; the page sends
+            // the user's own settings before it starts one. Nothing can use
+            // it before then: a token comes only with a shell.
+            match app.path().app_local_data_dir() {
+                Ok(dir) => {
+                    app_state.control.configure(
+                        tauri::async_runtime::handle().inner().clone(),
+                        Arc::new(control::TauriPage(app.handle().clone())),
+                        control::Place::for_app(&dir),
+                    );
+                    // A folder of its own for the CLI, first on the shells' PATH.
+                    app_state.control.install_cli(&dir);
+                    app_state.control.begin(control::Settings::default());
+                }
+                Err(e) => {
+                    eprintln!("[NexTerm] No local data directory, so the control API is not available: {e}");
+                }
             }
 
             // macOS always has a menu bar at the top of the screen, so the
@@ -184,6 +210,7 @@ fn main() {
             commands::pty::pty_retain_only,
             commands::pty::pty_list_sessions,
             commands::pty::pty_input_hidden,
+            commands::pty::pty_foreground_owner,
             commands::pty::pty_ack,
             commands::pty::pty_flow_reset,
             commands::fs::fs_get_root,
@@ -212,6 +239,8 @@ fn main() {
             commands::notification::show_desktop_notification,
             commands::taskbar::set_taskbar_progress,
             commands::clipboard::clipboard_read,
+            commands::control::control_reply,
+            commands::control::control_set_settings,
             commands::agent::agent_sessions,
             commands::app::app_set_unsaved,
             commands::app::app_set_pending_save,
@@ -227,8 +256,15 @@ fn main() {
             commands::perf::perf_counters,
             commands::perf::perf_write,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running nexterm application");
+        .build(tauri::generate_context!())
+        .expect("error while building nexterm application");
+    // The control socket is removed as the app exits (src/control/unix.rs);
+    // a crash leaves it to the next start's sweep.
+    app.run(move |_, event| {
+        if let tauri::RunEvent::Exit = event {
+            control.shutdown();
+        }
+    });
 }
 
 /// The attribute that keeps Windows from opening a console beside the app.

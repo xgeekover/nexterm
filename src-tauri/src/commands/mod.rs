@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod app;
 pub mod clipboard;
+pub mod control;
 pub mod fs;
 pub mod notification;
 pub mod perf;

@@ -19,12 +19,14 @@ import {
   ShieldOff,
   FileWarning,
   FilePen,
+  ScrollText,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useProjectCommandsStore } from '../../stores/projectCommandsStore.js';
+import { useControlLogStore } from '../../stores/controlLogStore.js';
 import { invoke, listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
@@ -68,6 +70,7 @@ function iconFor(item) {
   if (item.command === 'swap_pane') return <ArrowLeftRight size={16} />;
   if (item.command === 'rename_terminal') return <Pencil size={16} />;
   if (item.command === 'close_terminal') return <X size={16} />;
+  if (item.command === 'show_control_log') return <ScrollText size={16} />;
   if (item.type === 'pane') return <PanelTop size={16} />;
   return <Terminal size={16} />;
 }
@@ -438,6 +441,11 @@ export function CommandPalette() {
         return;
       case 'stop_trusting_project_commands':
         useProjectCommandsStore.getState().distrustCurrent();
+        return;
+      case 'show_control_log':
+        // The dialog takes the keyboard, and gives it back to what had it
+        // before the palette (`focusAfterPalette` says 'dialog').
+        useControlLogStore.getState().setOpen(true);
         return;
       default:
         return;

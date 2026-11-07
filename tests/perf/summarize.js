@@ -76,6 +76,19 @@ export function scenarioRows(report, samples) {
       peakRssMB: median(cpu.map((c) => mb((c?.appPeakRss ?? 0) + (c?.webviewPeakRss ?? 0)))),
       lostLines: ok.reduce((total, r) => total + terminals(r).reduce((n, t) => n + (t.sequence?.gaps ?? 0) + (t.sequence?.outOfOrder ?? 0), 0), 0),
       timedOut: runs.filter((r) => r.timedOut).length,
+      // The control API's round trip (S7, stage 7): null for a scenario that has none.
+      control: ok.some((r) => r.control)
+        ? {
+            calls: m((r) => r.control?.calls),
+            failed: m((r) => r.control?.failed),
+            p50: m((r) => r.control?.p50),
+            p95: m((r) => r.control?.p95),
+            p99: m((r) => r.control?.p99),
+            max: m((r) => r.control?.max),
+            mean: m((r) => r.control?.mean),
+            firstError: ok.map((r) => r.control?.firstError).find(Boolean) ?? null,
+          }
+        : null,
       // Saving the scrollback (S6): null for a scenario that does not.
       scrollback: ok.some((r) => r.scrollback)
         ? {
@@ -141,6 +154,24 @@ export function toMarkdown(report, rows, samples = []) {
       const sb = r.scrollback;
       lines.push(
         `| **${r.scenario}** ${r.title} | ${fmt(sb.saves)} | ${fmt(sb.serializeP50, 1)} / ${fmt(sb.serializeP95, 1)} / ${fmt(sb.serializeMax, 1)} | ${fmt(sb.savedMB, 2)} (${fmt(sb.savedLines)}) | ${fmt(sb.restoreMs)} (${fmt(sb.restoreSlowestMs)}) | ${fmt(sb.restored)} (${fmt(sb.restoredLines)}) | ${fmt(r.typingP50)} / ${fmt(r.typingP95)} / ${fmt(r.typingMax)} (${fmt(r.typingLost)}) |`
+      );
+    }
+  }
+  const controlling = rows.filter((r) => r.control);
+  if (controlling.length) {
+    lines.push(
+      '',
+      'Control API (stage 7): `nexterm-cli set-status` from a terminal, each call timed from before the CLI starts to after it exits — starting it, connecting, the token, the page\'s round trip, the answer. The target is p95 under 20 ms.',
+      '',
+      '| | Calls (failed) | Round trip p50/p95/p99/max ms | Mean ms | p95 under 20 ms | First failure |',
+      '|---|---|---|---|---|---|'
+    );
+    for (const r of controlling) {
+      const c = r.control;
+      const target = c.p95 === null ? '–' : c.p95 < 20 ? 'yes' : '**no**';
+      const failure = c.firstError ? `exit ${c.firstError.exit}: ${c.firstError.said}`.replace(/\|/g, '\\|') : '';
+      lines.push(
+        `| **${r.scenario}** ${r.title} | ${fmt(c.calls)} (${fmt(c.failed)}) | ${fmt(c.p50, 1)} / ${fmt(c.p95, 1)} / ${fmt(c.p99, 1)} / ${fmt(c.max, 1)} | ${fmt(c.mean, 1)} | ${target} | ${failure} |`
       );
     }
   }

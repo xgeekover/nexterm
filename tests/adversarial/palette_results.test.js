@@ -115,7 +115,12 @@ describe('Command palette: where the keyboard goes when it closes', () => {
     assert.equal(focusAfterPalette(historyRow), 'terminal');
     assert.equal(focusAfterPalette(fileRow), 'editor');
     assert.equal(focusAfterPalette(recentRow), 'opener');
-    for (const command of paletteCommands()) assert.equal(focusAfterPalette(command), 'opener', command.command);
+    // A built-in that opens a dialog of its own (Show Control Log, stage 7)
+    // hands the keyboard to it, as a project command's run dialog does.
+    for (const command of paletteCommands()) {
+      assert.equal(focusAfterPalette(command), command.opensDialog === true ? 'dialog' : 'opener', command.command);
+    }
+    assert.equal(focusAfterPalette(paletteCommands().find((c) => c.command === 'show_control_log')), 'dialog');
     assert.equal(focusAfterPalette(null), 'opener', 'closed without a choice');
   });
 

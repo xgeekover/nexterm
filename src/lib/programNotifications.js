@@ -115,8 +115,12 @@ const OCCASIONS = new Set(['always', 'unfocused', 'invisible']);
  * A notification as the rest of the app sees it, or null when nothing would
  * be left to show. `title` may be '': the program gave none, and the store
  * titles it after the terminal.
+ *
+ * Exported for `nexterm-cli notify` (stage 7, src/lib/controlDispatcher.js):
+ * a note that comes through the control API is cleaned by exactly these
+ * rules, so it cannot show what an OSC 9 could not.
  */
-function makeNote(title, body, occasion = 'always', urgency = 1) {
+export function makeNote(title, body, occasion = 'always', urgency = 1) {
   const cleanTitle = sanitizeText(title, TITLE_MAX);
   const cleanBody = sanitizeText(body, BODY_MAX);
   if (!cleanTitle && !cleanBody) return null;
@@ -456,11 +460,16 @@ const monotonicClock = () => (typeof performance !== 'undefined' ? performance.n
  * dropped.
  */
 class ProgramNotificationsAddon {
-  constructor({ onNotify, enabled, clock = monotonicClock, rateLimit = RATE_LIMIT, keptAt } = {}) {
+  constructor({ onNotify, enabled, clock = monotonicClock, rateLimit = RATE_LIMIT, keptAt, allowLive } = {}) {
     this._onNotify = onNotify;
     this._enabled = enabled;
     this._clock = clock;
     this._limiter = createRateLimiter(rateLimit);
+    // The terminal's one live allowance, when the app keeps it (the store's
+    // `allowProgramNote`): shared with `nexterm-cli notify` (stage 7), so a
+    // program using both gets stage 1's rate, not twice it. Its own
+    // otherwise (the suites, a test double).
+    this._allowLive = typeof allowLive === 'function' ? allowLive : null;
     // Output kept for the terminal before it was shown, replayed into it as it
     // is made, holds messages printed then — minutes or an hour apart, read
     // here within a millisecond. Counted on the live clock, a burst of them
@@ -514,6 +523,17 @@ class ProgramNotificationsAddon {
     }
   }
 
+  /** Whether a live note may go through now: the shared allowance, else this addon's own. */
+  _allowLiveNow() {
+    const now = this._clock();
+    if (!this._allowLive) return this._limiter.allow(now);
+    try {
+      return this._allowLive(now) === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** When the output being read was printed, for kept output; null for live output. */
   _readKeptAt() {
     try {
@@ -532,7 +552,7 @@ class ProgramNotificationsAddon {
   _deliver(note) {
     if (!note) return false;
     const keptAt = this._readKeptAt();
-    const allowed = keptAt === null ? this._limiter.allow(this._clock()) : this._keptLimiter.allow(keptAt);
+    const allowed = keptAt === null ? this._allowLiveNow() : this._keptLimiter.allow(keptAt);
     if (allowed) {
       try {
         this._onNotify?.(note, keptAt);
@@ -561,7 +581,9 @@ class ProgramNotificationsAddon {
  * `{ title, body, occasion, urgency }`, cleaned — while `enabled()` is true.
  * `keptAt()`, when given, says when the output being read was printed if it
  * is output kept from before the terminal was shown, and null otherwise; it
- * is handed on as `keptAt`. `clock` and `rateLimit` are there for the tests.
+ * is handed on as `keptAt`. `allowLive(now)`, when given, is the live rate
+ * limit — one the app shares with `nexterm-cli notify`. `clock` and
+ * `rateLimit` are there for the tests.
  * Returns the addon, or null when `term` has no parser to listen to (a test
  * double).
  */

@@ -1232,6 +1232,66 @@ The files are in `%LOCALAPPDATA%\com.nexterm.ide\scrollback` (one
 Note in `%TEMP%\nexterm-qa\report.md` what came back where, the screenshot
 of step 2, and the file sizes.
 
+### V46 — nexterm-cli and the control API
+
+Checked on macOS (a real socket) and in CI. On Windows, CI has created the
+pipe, read its DACL back, checked that a second server under the same name is
+refused, and run the CLI against a real pipe; nobody has called it from a
+NexTerm terminal on a real PC, or from another account. That is what this
+check is for.
+
+1. In a **cmd** terminal: `where nexterm-cli` → one copy, in
+   `%LOCALAPPDATA%\com.nexterm.ide\bin` (a folder that holds nothing else —
+   `where uninstall` and `where nexterm` find nothing there);
+   `echo %NEXTERM_CLI%` is the same path. `nexterm-cli --version` → the app's
+   version. `nexterm-cli notify "Test" "한글 알림"` → a notification from
+   that terminal, Hangul intact (also on the desktop while NexTerm is in the
+   background). `nexterm-cli set-status "빌드 중"` → that terminal's line in
+   the TERMINALS side bar; `nexterm-cli set-status --clear` → gone.
+   `nexterm-cli set-progress 40` → the tab's bar and the taskbar button at
+   40 %; `--clear` → gone. `nexterm-cli list` → a table with this terminal
+   marked as itself.
+2. The same from **PowerShell** and **Git Bash**. In **WSL**:
+   `nexterm-cli.exe list` works (interop), and `echo $NEXTERM_CONTROL` shows
+   the pipe name.
+3. `nexterm-cli new-split --down -- dir` → a split below, `dir` typed and
+   run there, the new tab's id printed. `nexterm-cli send --to child:<that id>
+   "echo hi" --keys Enter` → refused: typing is off. Turn on Settings ▸
+   Terminal ▸ Control ▸ *Let programs type into and read terminals*, repeat →
+   typed into the split, which flashes and shows a mark naming the caller;
+   *Show Control Log* in the palette lists the call without the text.
+   `nexterm-cli read-screen --of child:<id> --lines 20` → its last lines.
+   Into any other terminal → refused until *Let programs control other
+   terminals* is on. In the split run `ssh localhost` or
+   `powershell -c Read-Host -AsSecureString` and, at its password prompt,
+   `nexterm-cli send --to child:<id> "x"` → refused (the prompt-line
+   heuristic is all Windows has; note any prompt it misses).
+   `echo dir | nexterm-cli send --to child:<id> -` → `dir` typed and run.
+   From another terminal, `nexterm-cli focus child:<id>` while you are
+   typing in NexTerm → the split only flashes and is marked, the keyboard
+   stays; with NexTerm minimised → the taskbar button flashes, and when you
+   come back the same tab still has the keyboard. Run `gsudo cmd` (if
+   installed) or an elevated `sudo` inline in the split, then
+   `nexterm-cli send --to child:<id> "whoami"` → refused (elevated).
+4. Run `runas /user:<another local account> cmd`, and in that window
+   `set NEXTERM_CONTROL=<the pipe name from step 2>` and run any
+   `nexterm-cli` command → refused (exit 4), nothing in NexTerm, nothing in
+   the log. If no second account exists, say "could not check".
+5. Start a second NexTerm while one is open; a token from a terminal of one
+   (`set NEXTERM_CONTROL_TOKEN=…` copied into a terminal of the other) →
+   `unauthorized`.
+6. In a cmd terminal, `set` → `NEXTERM_CONTROL_TOKEN` is printed; close and
+   reopen NexTerm → the restored output shows it as `[hidden]`.
+7. Turn *Let programs in terminals control NexTerm* off → every call from an
+   open terminal fails with "NexTerm is not running, or its control is turned
+   off" (exit 5); a new terminal has no `NEXTERM_CONTROL`. On again → new
+   terminals work; older ones do not until restarted.
+8. Run `nexterm-cli list` in a Windows Terminal or PowerShell window outside
+   NexTerm → "Not inside a NexTerm terminal", exit 3.
+
+Note in `%TEMP%\nexterm-qa\report.md` each command's output and exit code
+(`echo %ERRORLEVEL%`), and anything refused that should not have been.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

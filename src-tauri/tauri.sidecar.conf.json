@@ -1,0 +1,8 @@
+{
+  "build": {
+    "beforeBuildCommand": "npm run build && npm run build:cli"
+  },
+  "bundle": {
+    "externalBin": ["binaries/nexterm-cli"]
+  }
+}

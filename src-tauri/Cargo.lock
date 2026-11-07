@@ -2295,9 +2295,11 @@ name = "nexterm"
 version = "0.24.0"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "chrono",
  "clipboard-win",
  "dunce",
+ "getrandom 0.4.3",
  "junction",
  "libc",
  "notify",

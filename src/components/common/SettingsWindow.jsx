@@ -593,6 +593,43 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       placeholder: '{ "version": 1, "commands": [ { "name": "Deploy", "command": "npm run deploy -- {{stage}}" } ] }',
       check: userCommandsCheck,
     },
+    // ---- Control (stage 7, spec D5): what programs in terminals may ask of
+    // NexTerm through nexterm-cli. Under a heading of their own, as one
+    // thing the three of them decide — and last in the section, so no other
+    // row is drawn under that heading.
+    {
+      id: 'terminalControl',
+      section: 'terminal',
+      subsection: 'Control',
+      key: 'terminalControl',
+      settingKey: 'terminal.control.enabled',
+      title: 'Let Programs in Terminals Control NexTerm',
+      description:
+        'Lets a program running in a terminal — an agent\'s hook, a script — use nexterm-cli to show a notification, set a status line for its terminal in the TERMINALS side bar, show a progress bar, list the terminals of this window, open a split beside its own terminal and point you to a terminal — its pane flashes and its tab is marked, and while NexTerm is in the background the Dock or taskbar asks for you too; it never switches terminals for you or raises the window. Only programs in terminals NexTerm started can reach it, as you: each shell gets a token of its own, the address is a socket or pipe only your user account can open, and nothing listens on the network. Every call is in the palette\'s Show Control Log. Off, nothing answers, and every terminal\'s token stops working.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalControlTypeAndRead',
+      section: 'terminal',
+      subsection: 'Control',
+      key: 'terminalControlTypeAndRead',
+      settingKey: 'terminal.control.typeAndRead',
+      title: 'Let Programs Type Into and Read Terminals',
+      description:
+        'Also lets them type text and keys into a terminal (nexterm-cli send), read what is on its screen (nexterm-cli read-screen) and have a command typed into a split they open — their own terminal, and the splits they opened. Never into a password prompt or into something running as another user (sudo, su), and secrets on the screen are read as [hidden]. Typing into a terminal, or reading another one, flashes its pane and marks its tab for 10 seconds. Only from terminals NexTerm started, as you; needs the setting above.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalControlOtherTerminals',
+      section: 'terminal',
+      subsection: 'Control',
+      key: 'terminalControlOtherTerminals',
+      settingKey: 'terminal.control.otherTerminals',
+      title: 'Let Programs Control Other Terminals',
+      description:
+        'Lets a program in one terminal do all of the above to every other terminal of this window, not only its own and the splits it opened — and read a screen unmasked, secrets included. Whatever any terminal runs can then drive all of them. Each such call still flashes the pane, marks its tab and is logged. Only from terminals NexTerm started, as you.',
+      control: 'checkbox',
+    },
     // ---- Workbench ----
     {
       id: 'reducedMotion',
@@ -834,6 +871,9 @@ export function SettingsWindow() {
   const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
   const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
   const terminalProgress = useSettingsStore((s) => s.terminalProgress);
+  const terminalControl = useSettingsStore((s) => s.terminalControl);
+  const terminalControlTypeAndRead = useSettingsStore((s) => s.terminalControlTypeAndRead);
+  const terminalControlOtherTerminals = useSettingsStore((s) => s.terminalControlOtherTerminals);
   const terminalsPanelFolder = useSettingsStore((s) => s.terminalsPanelFolder);
   const terminalsPanelBranch = useSettingsStore((s) => s.terminalsPanelBranch);
   const terminalsPanelAgent = useSettingsStore((s) => s.terminalsPanelAgent);
@@ -875,6 +915,9 @@ export function SettingsWindow() {
     terminalBellAttention,
     terminalAttentionFlashFocused,
     terminalProgress,
+    terminalControl,
+    terminalControlTypeAndRead,
+    terminalControlOtherTerminals,
     terminalsPanelFolder,
     terminalsPanelBranch,
     terminalsPanelAgent,
@@ -1166,21 +1209,31 @@ export function SettingsWindow() {
                 {section.id === 'keyboard' && <KeybindingSettings query={query} />}
                 {filteredItems
                   .filter((item) => item.section === section.id)
-                  .map((item) => {
+                  .map((item, i, shownHere) => {
                     const value = item.key ? values[item.key] : undefined;
                     // An action keeps no value, so there is nothing to reset.
                     const isDefault = item.key ? Object.is(value, settingsDefaults[item.key]) : true;
+                    // A group of rows under a heading of its own (Terminal ▸
+                    // Control): the heading once, above the first of them
+                    // still shown — a search can leave any one of them.
+                    const heading = item.subsection && shownHere[i - 1]?.subsection !== item.subsection ? item.subsection : null;
                     return (
-                      <SettingRow
-                        key={item.id}
-                        note={notes[item.id]}
-                        item={item}
-                        value={value}
-                        isDefault={isDefault}
-                        onChange={(raw) => handleChange(item, raw)}
-                        onReset={() => handleReset(item)}
-                        onAction={handleAction}
-                      />
+                      <React.Fragment key={item.id}>
+                        {heading && (
+                          <h4 data-settings-subsection={heading} className="m-0 pt-4 pb-1 text-ui-sm font-semibold text-vsc-fg">
+                            {section.label} ▸ {heading}
+                          </h4>
+                        )}
+                        <SettingRow
+                          note={notes[item.id]}
+                          item={item}
+                          value={value}
+                          isDefault={isDefault}
+                          onChange={(raw) => handleChange(item, raw)}
+                          onReset={() => handleReset(item)}
+                          onAction={handleAction}
+                        />
+                      </React.Fragment>
                     );
                   })}
               </div>

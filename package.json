@@ -9,6 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "build:cli": "node src-tauri/cli/stage.mjs",
+    "bundle": "tauri build --config src-tauri/tauri.sidecar.conf.json",
     "lint": "eslint src tests --max-warnings 3",
     "test:render": "node tests/render/runner.js"
   },

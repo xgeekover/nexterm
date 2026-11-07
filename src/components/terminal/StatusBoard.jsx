@@ -10,7 +10,10 @@ import {
   CircleX,
   GitBranch,
   GitCommitHorizontal,
+  Info,
   LoaderCircle,
+  OctagonAlert,
+  TriangleAlert,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
@@ -18,6 +21,7 @@ import { folderForBranch, useFolderBranch } from '../../stores/branchStore.js';
 import { unreadCountByTab } from '../../lib/attention.js';
 import {
   agentLabel,
+  agoLabel,
   branchLabel,
   branchTitle,
   groupSummaryItems,
@@ -75,6 +79,66 @@ const STATE_ICON = Object.freeze({
 /** `[Icon, colour]` for a status (`terminalStatus`'s), a paused bar being its own. */
 const iconOf = (status) => STATE_ICON[status.paused ? 'paused' : status.state] ?? null;
 
+/**
+ * The icon of a status a program reported (`nexterm-cli set-status --tone`),
+ * by tone, and the word read out for it: three shapes as well as three
+ * colours, so the tone survives forced colours and a screen reader.
+ */
+const TONE_ICON = Object.freeze({
+  info: [Info, 'text-vsc-info', ''],
+  warn: [TriangleAlert, 'text-vsc-warn', 'warning: '],
+  error: [OctagonAlert, 'text-vsc-error', 'error: '],
+});
+
+
+// ---- What a program says its terminal is doing (stage 7) -------------------------
+
+/**
+ * A status a program reported (`nexterm-cli set-status`): the tone's icon
+ * and the text, cut with an ellipsis. Its tooltip is the whole text, who
+ * said it and how long ago — and the last note, when it is drawn in that
+ * note's place (`note`), brought up to date as the pointer arrives, as the
+ * note's is. `quiet` is the row's secondary colour, for an `info` status.
+ */
+function StatusReport({ reported, note = null, quiet = '', className }) {
+  const [ToneIcon, toneColour, toneWord] = TONE_ICON[reported.tone] ?? TONE_ICON.info;
+  const tooltipOf = () =>
+    [
+      reported.text,
+      `Status from the program in this terminal, ${agoLabel(Date.now() - reported.at)}`,
+      note ? `Last notification: ${noteTooltip(note)}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  return (
+    <span
+      data-reported-status={reported.tone}
+      title={tooltipOf()}
+      onPointerEnter={(e) => {
+        e.currentTarget.title = tooltipOf();
+      }}
+      className={cn('min-w-0 flex-[1_1_40%] flex items-center gap-1 overflow-hidden', reported.tone === 'info' && quiet, className)}
+    >
+      <ToneIcon size={11} aria-hidden="true" data-status-icon="" className={cn('shrink-0', toneColour)} />
+      <span className="sr-only">{`status, ${toneWord}`}</span>
+      <span className="min-w-0 truncate">
+        <bdi>{reported.text}</bdi>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The status a program reported, on a ONE-line row — every second-line item
+ * switched off (integration review 12). The program asked for it to be
+ * shown, so it is, after the title and its marks, giving way to the title
+ * first. Subscribed to this tab's entry alone, as the second line's is.
+ */
+export const ProgramStatus = memo(function ProgramStatus({ tabId, active = false }) {
+  const reported = useTerminalStore((s) => s.reportedStatus?.[tabId] ?? null);
+  if (!reported) return null;
+  return <StatusReport reported={reported} quiet={secondaryText(active)} className="max-w-[50%] text-ui-sm" />;
+});
 
 // ---- A terminal's second line ---------------------------------------------------
 
@@ -117,7 +181,8 @@ function useAgentFits(lineRef, agent, shape) {
           agentPx: textWidth(line, agent),
           statusPx: status ? status.getBoundingClientRect().width : 0,
           hasBranch: Boolean(line.querySelector('[data-branch]')),
-          hasNote: Boolean(line.querySelector('[data-last-note]')),
+          // A program's status takes the note's place, and its share.
+          hasNote: Boolean(line.querySelector('[data-last-note], [data-reported-status]')),
         })
       );
     };
@@ -163,6 +228,13 @@ function useAgentFits(lineRef, agent, shape) {
  * Read out as one sentence ("OpenCode, Waiting, branch main, last
  * notification, unread: Session done"): the icons are hidden, and what the
  * gaps say to the eye is said in words.
+ *
+ * WHAT A PROGRAM SAYS IT IS DOING (stage 7, `nexterm-cli set-status`): while
+ * it has said something, that takes the last note's place — it is the newer
+ * and the more particular of the two — with an icon for its tone; the note
+ * is still in its tooltip. Subscribed to this tab's entry of
+ * `reportedStatus` alone, so a hook setting it on every tool use redraws this
+ * one line and nothing else (statusBoardModel.js).
  */
 export const TerminalStatusLine = memo(function TerminalStatusLine({
   tab,
@@ -176,6 +248,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const unread = useTerminalStore((s) => (showAgent ? unreadCountByTab(s.notifications)[tabId] ?? 0 : 0));
   const bar = useTerminalStore((s) => (showAgent ? s.progress?.[tabId] ?? null : null));
   const note = useTerminalStore((s) => (showLastNote ? lastNoteOf(s.notifications, tabId) : null));
+  const reported = useTerminalStore((s) => s.reportedStatus?.[tabId] ?? null);
   const os = useSystemStore((s) => s.os);
   const branch = useFolderBranch(showBranch ? folderForBranch(tab, os) : null);
   const lineRef = useRef(null);
@@ -185,10 +258,11 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const words = status ? statusText(status) : '';
   const shortWords = status ? compactStatusText(status) : '';
   const branchName = showBranch ? branchLabel(branch) : '';
-  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${Boolean(branchName)}|${Boolean(note)}`);
+  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${Boolean(branchName)}|${Boolean(note || reported)}`);
   const agentShown = Boolean(agent) && fits;
   // The agent's name, drawn, already says who spoke; left out for width, the
-  // note keeps a title that says it (terminalStatus.js).
+  // note keeps a title that says it (terminalStatus.js). A program's status,
+  // while it has one, is drawn in the note's place (below).
   const noteText = note ? noteLine(note, { agentShown }) : '';
   const quiet = secondaryText(active);
   // What the line says in full, for its tooltip: the agent's name even when
@@ -262,7 +336,9 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
       </span>
     );
   }
-  if (noteText) {
+  if (reported) {
+    items.push(<StatusReport key="reported" reported={reported} note={note} quiet={quiet} />);
+  } else if (noteText) {
     items.push(
       <span
         key="note"

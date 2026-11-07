@@ -65,6 +65,10 @@ that layout the next time you open it.
   anything is typed. Your own commands for every folder live in Settings.
 - **Session restore.** Groups, layouts, names and each terminal's `cwd` are
   written to local storage and restored on next launch, without being asked.
+- **Control from a terminal.** `nexterm-cli` lets agent hooks and scripts in a
+  NexTerm terminal send notifications, set a status line and a progress bar,
+  open splits and switch terminals — and, when you allow it, type into and
+  read terminals. See [Control NexTerm from a terminal](#control-nexterm-from-a-terminal).
 - **Output comes back too.** Each terminal of the restored session shows what
   it printed last time, with its colours, above its new shell and a dim
   *Previous output* line. Text only — nothing runs again. Secret-looking
@@ -134,7 +138,7 @@ Grab a build from the [Releases](../../releases) page:
 | Linux (x86_64) | `.AppImage` / `.deb` / `.rpm` | Built on Ubuntu 22.04 |
 
 There is no Intel macOS build yet — CI runs on `macos-latest`, which is Apple
-Silicon. Build one locally with `npm run tauri build -- --target x86_64-apple-darwin`.
+Silicon. Build one locally with `npm run bundle -- --target x86_64-apple-darwin`.
 
 ## Using it
 
@@ -796,6 +800,99 @@ what it printed last time, under a dim line:
   it off and deletes every saved file; *Clear Saved Scrollback* deletes them
   and keeps saving from then on.
 
+### Control NexTerm from a terminal
+
+Programs running in a NexTerm terminal — an agent's hooks, a build script —
+can talk to NexTerm with `nexterm-cli`, which comes with the app and is on the
+`PATH` of every shell NexTerm starts, from a folder that holds nothing else
+(its full path is in `$NEXTERM_CLI`):
+
+```sh
+nexterm-cli notify "Tests" "All 412 passed"     # a notification from this terminal
+nexterm-cli set-status "Running migrations"     # this terminal's line in the side bar
+nexterm-cli set-progress 40                     # the progress bar on its tab
+nexterm-cli set-progress --clear
+nexterm-cli list                                # the terminals in this window
+nexterm-cli new-split --down -- npm run dev     # a split of this terminal (its folder and shell)
+nexterm-cli focus child:tab-term-7              # point the user at a terminal
+```
+
+A Claude Code hook that says when it is done, in `.claude/settings.json`:
+
+```json
+{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "nexterm-cli notify 'Claude Code' 'Done'" }] }] } }
+```
+
+`nexterm-cli help <command>` explains each one; `--json` prints NexTerm's
+answer for scripts. It exits 0 when done, 2 for wrong usage (found by the
+tool or by NexTerm — nothing was done), 3 outside a NexTerm terminal, 4 when
+refused (not allowed, no such terminal), 5 when NexTerm is busy (a rate
+limit), not running, not answering, or has its control turned off — try
+again later.
+
+- A new split opens beside the terminal that asked, in its folder and shell,
+  and the keyboard stays where you are. At most 8 open at a time per
+  terminal, 32 in all, 10 a minute.
+- `focus` points you at a terminal and never moves the keyboard: it flashes
+  that terminal and marks it, and with NexTerm in the background asks for
+  your attention (Dock, taskbar). It never switches tabs or pulls the window
+  over other apps — a program cannot catch what you type next.
+- From WSL the tool is `nexterm-cli.exe`, and `--cwd` takes a Windows path.
+  In Git Bash, a text starting with `/` (an agent's `/help`) is rewritten into
+  a Windows path by MSYS; prefix the command with `MSYS_NO_PATHCONV=1`.
+
+**Typing and reading** are off until you turn them on:
+
+```sh
+nexterm-cli send "npm test" --keys Enter        # type into this terminal
+nexterm-cli send --to child:tab-term-7 --keys Ctrl+C
+nexterm-cli read-screen --lines 200             # what a terminal shows, secrets masked
+```
+
+Keys follow what the program there asked for (application cursor keys,
+Shift+Enter for OpenCode). One line break at the end is Enter, so
+`echo npm test | nexterm-cli send -` types the command and runs it; several
+lines go as one paste where the program asked for bracketed paste and are
+refused elsewhere unless you pass `--raw`. Keys cannot spell an escape
+sequence (Escape then `[`, also across two calls). Nothing is typed into a
+password prompt (the terminal says when input is hidden on macOS and Linux;
+NexTerm also reads the prompt line — `Password:`, `pass phrase`, `PIN`,
+`암호:`, `비밀번호:`), into a terminal where anything in the foreground runs
+as another user or elevated (sudo, su, gsudo — NexTerm looks at every
+process there), or into a terminal you have not opened since NexTerm
+started.
+
+**Who can do what.** Settings ▸ Terminal ▸ *Control*:
+
+| Setting | Default | Opens |
+| --- | --- | --- |
+| Let programs in terminals control NexTerm | on | notify, status, progress, list, new split, focus |
+| Let programs type into and read terminals | off | `send` and `read-screen` |
+| Let programs control other terminals | off | any terminal, not only the caller and the splits it opened; an unmasked `read-screen` |
+
+- **Only from NexTerm's own terminals.** Each shell NexTerm starts gets a token
+  of its own (`NEXTERM_CONTROL_TOKEN`) that dies with it; a call without one is
+  refused. A terminal acts on itself and on the splits it opened; any other
+  terminal needs the third setting.
+- **Only as you, only on this computer.** No network port: a Unix socket in a
+  folder only you can open (macOS, Linux), a named pipe only your account can
+  open that refuses other computers (Windows). NexTerm checks who connected,
+  and `nexterm-cli` checks it is talking to a NexTerm of yours before it sends
+  the token. A web page cannot reach either.
+- **The token is in the environment.** Any program in that terminal can use
+  it, and `env` prints it — it is masked in the saved scrollback, but do not
+  paste such output elsewhere. ssh, docker and sudo do not pass it on unless
+  told to; off this computer it is useless.
+- **You see it.** A terminal typed into, read, focused or opened by a
+  program — another terminal's or its own — flashes and shows a small mark
+  naming the caller for ten seconds (on the tab, or on the strip's handle
+  when the tab strip is hidden); the
+  palette's *Show Control Log* lists the last 500 calls (what, who, which
+  terminal, how much — never the text typed or the screen read). Calls are
+  rate-limited.
+- **Off.** Turning the first setting off closes the socket or pipe and voids
+  every token; terminals started while it was off have none until restarted.
+
 ### Keyboard shortcuts
 
 | Shortcut | Action |
@@ -914,8 +1011,13 @@ npm run dev              # frontend only, in a browser, on :1420
 ## Build
 
 ```sh
-npm run tauri build
+npm run bundle
 ```
+
+That is `tauri build` with `src-tauri/tauri.sidecar.conf.json`, which builds
+`nexterm-cli` (src-tauri/cli) and puts it in every bundle beside the app; a
+plain `npm run tauri build` makes installers without it. `cargo test` and
+`cargo check` of the app need neither.
 
 CI (`.github/workflows/build.yml`) runs the test suite on every push and builds
 macOS, Windows and Linux bundles. Publishing is a separate, tag-only job:
