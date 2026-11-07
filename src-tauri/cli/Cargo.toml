@@ -2,7 +2,7 @@
 name = "nexterm-cli"
 # Kept equal to the app's version (src-tauri/Cargo.toml, tauri.conf.json,
 # package.json) — `version_matches_the_app` fails when a bump misses this file.
-version = "0.24.0"
+version = "0.25.0"
 description = "Controls NexTerm from a program running in one of its terminals"
 edition = "2021"
 license = "MIT"
