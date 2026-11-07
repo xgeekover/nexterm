@@ -228,6 +228,14 @@ temporary folder's `nexterm-perf` by default); the table,
 | S3 | four full-screen programs redrawing at 60 fps (alternate screen, DEC 2026) | what four OpenCodes cost |
 | S4 | typing beside three flooding terminals | latency where the user is |
 | S5 | typing while a hidden group of four floods | what work nobody can see costs |
+| S6 | typing beside four terminals of 5000 lines that keep printing (`rate --fill 5000`, 30 s) | what saving their scrollback costs (stage 6) |
+
+S6 is not in the list above on purpose: it runs only when named
+(`NEXTERM_PERF_SCENARIOS=S6`, or appended to the list), as every scenario
+does — nothing runs by default — and it takes 30 s a repeat rather than 10,
+long enough for each terminal to be saved at the saver's 10 s ceiling three
+times. Restore Scrollback must be on (it is by default); with it off the run
+says so instead of measuring nothing.
 
 What each figure means:
 
@@ -246,6 +254,15 @@ What each figure means:
   counted.
 - **Lost lines** — every generated line is numbered; a number not following
   the one before in what the terminal kept is a loss or a reordering.
+- **S6 only, in a table of its own** — *Saves* and *Serialize p50/p95/max*:
+  each scrollback snapshot of the four loaded terminals, timed on the page's
+  main thread, which is what the keyboard waits behind (src/lib/
+  scrollbackSaver.js serializes one terminal per task); *Largest save*: the
+  biggest file written, in MB and lines; *Restore all*: once the load ends,
+  the four files read back through the backend and written into four fresh,
+  never-shown terminals of the same size at once — as a restored group of
+  four is — from the reads to xterm having parsed the last one (the slowest
+  of the four in brackets); *Typing*: as in S4.
 
 Rules that keep the numbers honest:
 
