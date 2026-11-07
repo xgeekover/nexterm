@@ -164,7 +164,8 @@ const STAND_INS = {
     export const ShieldAlert = icon('ShieldAlert');
     export const ShieldOff = icon('ShieldOff');
     export const FileWarning = icon('FileWarning');
-    export const FilePen = icon('FilePen');`,
+    export const FilePen = icon('FilePen');
+    export const ScrollText = icon('ScrollText');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */

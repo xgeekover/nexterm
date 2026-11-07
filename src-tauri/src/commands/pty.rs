@@ -90,6 +90,23 @@ pub fn pty_input_hidden(state: State<AppState>, session_id: String) -> Result<Op
     state.pty_manager.input_hidden(&session_id)
 }
 
+/// What `pty_foreground_owner` answers.
+#[derive(serde::Serialize)]
+pub struct ForegroundOwner {
+    /// Whether the program in the terminal's foreground runs as this user:
+    /// false for `sudo`, `su` or a root shell they started; null where that
+    /// cannot be told (Windows, a process gone).
+    pub same_user: Option<bool>,
+}
+
+/// Who runs the program in `session_id`'s foreground, read there and then
+/// (src/pty/owner.rs). What the page asks right before a control `send`
+/// types into a terminal, and refuses on `same_user: false` (spec F3).
+#[tauri::command(rename_all = "snake_case")]
+pub fn pty_foreground_owner(state: State<AppState>, session_id: String) -> Result<ForegroundOwner, String> {
+    Ok(ForegroundOwner { same_user: state.pty_manager.foreground_owner(&session_id)? })
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn pty_list_sessions(state: State<AppState>) -> Result<Vec<PtySessionInfo>, String> {
     Ok(state.pty_manager.list_sessions())

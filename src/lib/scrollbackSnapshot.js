@@ -173,9 +173,13 @@ function appendRow(runs, line, cell, continues, gapBeforeWide) {
  * The normal buffer of `term` from row `fromRow` on, as logical lines, each
  * `{ runs: [{ sgr, text }], endCells }` (`endCells`: the cells its last row
  * uses), oldest first. Blank lines at the start and the end are left out.
+ *
+ * `buffer` is the normal one unless asked otherwise: `nexterm-cli
+ * read-screen` (stage 7, src/lib/controlScreen.js) reads the alternate
+ * screen too when a full-screen program is on it, since that is what the
+ * user sees. Saving never does — the alternate screen is not history.
  */
-export function readLogicalLines(term, fromRow = 0) {
-  const buffer = term.buffer.normal;
+export function readLogicalLines(term, fromRow = 0, buffer = term.buffer.normal) {
   const cell = buffer.getNullCell();
   const lines = [];
   let current = null;
@@ -957,6 +961,14 @@ function leadingToken(text, full) {
   return alone && run.length >= 8 && /[A-Za-z]/.test(run) && /[0-9]/.test(run) ? [start, end] : null;
 }
 
+/** The variable NexTerm's control token travels in, and the token's shape: 256 bits of base64url, unpadded. */
+const CONTROL_TOKEN_NAME = 'NEXTERM_CONTROL_TOKEN';
+const CONTROL_TOKEN_NAMED = /nexterm_control_token/i;
+const CONTROL_TOKEN_PIECE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{16,43}(?![A-Za-z0-9_-])/g;
+/** A piece of a token, not the variable's own name: a digit, or both cases. */
+const tokenLike = (word) =>
+  word.toUpperCase() !== CONTROL_TOKEN_NAME && (/[0-9]/.test(word) || (/[a-z]/.test(word) && /[A-Z]/.test(word)));
+
 const HEX_KEY_LABEL = /^\s*(?:privateExponent|prime1|prime2|exponent1|exponent2|coefficient|priv):\s*$/;
 const HEX_LINE = /^\s*[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){0,31}:?\s*$/;
 
@@ -1008,10 +1020,11 @@ export function maskLine(line, pem = { inside: false, lines: 0, gap: 0, ppk: 0 }
  *   (`endCells`, within four columns of `cols`), the run of token characters
  *   that starts the next line is the rest of it.
  */
-export function maskLines(lines, { cols = 0, insideKey = false, putty = false, ppk = 0, hexKey: hexAbove = false } = {}) {
+export function maskLines(lines, { cols = 0, insideKey = false, putty = false, ppk = 0, hexKey: hexAbove = false, tokenNext: tokenAbove = false } = {}) {
   const pem = { inside: insideKey, lines: 0, gap: 0, ppk, shape: null, putty };
   let walkFloor = -1;
   let hexKey = hexAbove;
+  let tokenNext = tokenAbove;
   const counts = new Array(lines.length).fill(0);
   const plains = [];
   let carry = false;
@@ -1028,6 +1041,26 @@ export function maskLines(lines, { cols = 0, insideKey = false, putty = false, p
       else hexKey = false;
     }
     if (HEX_KEY_LABEL.test(text)) hexKey = true;
+    // NexTerm's own control token (stage 7): a line naming it — PowerShell's
+    // `gci env:` table, `Format-List`'s `Value :`, fish's `set -x`, the
+    // command `echo $NEXTERM_CONTROL_TOKEN` — and the line after it (the bare
+    // value it printed) have every 43-character base64url word hidden. The
+    // NAME=value forms are hidden by the name rule already (found in review:
+    // the other forms reached the saved scrollback while the token was live).
+    // Any case: Windows names are (`%nexterm_control_token%`,
+    // `$Env:NexTerm_Control_Token`). The line after is the next one that is
+    // not blank, and on both a piece of 16 to 43 characters counts — a
+    // `Format-Table -Wrap` in a narrow pane splits the token over two lines
+    // (found in review).
+    const namesToken = CONTROL_TOKEN_NAMED.test(text);
+    if (namesToken || tokenNext) {
+      CONTROL_TOKEN_PIECE.lastIndex = 0;
+      for (let m; (m = CONTROL_TOKEN_PIECE.exec(text)); ) {
+        if (tokenLike(m[0])) ranges.push([m.index, m.index + m[0].length]);
+      }
+    }
+    if (namesToken) tokenNext = true;
+    else if (text.trim() !== '') tokenNext = false;
     if (carry) {
       const lead = leadingToken(text, carry === 'full');
       if (lead) ranges.push(lead);
@@ -1090,9 +1123,16 @@ export function maskLines(lines, { cols = 0, insideKey = false, putty = false, p
  * above with no END after it), PuTTY's `Private-Lines: N` still running, or
  * openssl's private hex under its name (found in review: each left the lines
  * under the cut in clear).
+ *
+ * Exported for `read-screen` (stage 7, src/lib/controlScreen.js), whose
+ * window onto the buffer has the same top edge to mask across.
  */
-function stateAbove(buffer, row) {
-  const state = { insideKey: false, putty: false, ppk: 0, hexKey: false };
+export function stateAbove(buffer, row) {
+  const state = { insideKey: false, putty: false, ppk: 0, hexKey: false, tokenNext: false };
+  // The nearest row above that is not blank names NexTerm's control token:
+  // the first row of the window may be its value (`read-screen --lines 2`
+  // right after `echo $NEXTERM_CONTROL_TOKEN`; found in review).
+  let tokenSeen = false;
   let pemSeen = false;
   let hexSeen = false;
   let ppkSeen = false;
@@ -1127,7 +1167,11 @@ function stateAbove(buffer, row) {
     }
     // A PuTTY header just above the cut: its Private-Lines may be below it.
     if (row - y <= 20 && text.includes('PuTTY-User-Key-File-')) state.putty = true;
-    if (pemSeen && hexSeen && ppkSeen && row - y > 20) break;
+    if (!tokenSeen && text.trim() !== '') {
+      tokenSeen = true;
+      state.tokenNext = CONTROL_TOKEN_NAMED.test(text);
+    }
+    if (pemSeen && hexSeen && ppkSeen && tokenSeen && row - y > 20) break;
   }
   return state;
 }

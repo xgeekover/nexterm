@@ -5,6 +5,9 @@ mod locale;
 // the module's own documentation).
 #[cfg(unix)]
 mod echo_watch;
+// Who runs what is in a terminal's foreground: its process group on unix,
+// the shell and what it started on Windows.
+mod owner;
 pub mod manager;
 pub mod flow_gate;
 pub mod osc;

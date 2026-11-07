@@ -5,6 +5,7 @@ import { StatusBar } from './components/layout/StatusBar.jsx';
 import { PanelLayout } from './components/layout/PanelLayout.jsx';
 import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { SettingsWindow } from './components/common/SettingsWindow.jsx';
+import { ControlLogDialog } from './components/common/ControlLogDialog.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
 import { ProjectCommandDialog } from './components/command/ProjectCommandDialog.jsx';
@@ -22,11 +23,13 @@ import { useSettingsStore } from './stores/settingsStore.js';
 import { useProjectCommandsStore } from './stores/projectCommandsStore.js';
 import { mockBridge } from './lib/ipc.js';
 import { startPerfMode } from './lib/perf/perfMode.js';
+import { startControl } from './lib/controlBridge.js';
+import { useControlLogStore } from './stores/controlLogStore.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
 if (import.meta.env.DEV || new URLSearchParams(window.location.search).has('debug')) {
-  window.__nexterm = { useTerminalStore, useEditorStore, useSettingsStore, useProjectCommandsStore, mockBridge };
+  window.__nexterm = { useTerminalStore, useEditorStore, useSettingsStore, useProjectCommandsStore, useControlLogStore, mockBridge };
 }
 
 export default function App() {
@@ -48,6 +51,12 @@ export default function App() {
 
   const initTerminal = useTerminalStore((s) => s.init);
   const initEditor = useEditorStore((s) => s.init);
+
+  // What programs in terminals ask of NexTerm through nexterm-cli (stage 7):
+  // answered here, and the backend kept told what Settings allows. Before
+  // the terminals start (effects run in order): the backend wants the
+  // settings ahead of the first shell, so that "off" holds from the first.
+  useEffect(() => startControl(), []);
 
   useEffect(() => {
     // What earlier sessions ran. Read once, before anything can record over
@@ -99,6 +108,9 @@ export default function App() {
 
       {/* VS Code-style Settings window — opened from the activity bar / menu */}
       <SettingsWindow />
+
+      {/* What programs in terminals asked of NexTerm — the palette's Show Control Log */}
+      <ControlLogDialog />
 
       {/* "Paste N lines?" before a multi-line paste a program would run line by line */}
       <PasteWarningDialog />

@@ -167,6 +167,17 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       subtitle: `Forget that you trusted ${COMMANDS_FILE} here; it is reviewed again before it is offered`,
       hint: hint('stop-trusting-project-commands'),
     },
+    // Stage 7 (spec D6): what programs in terminals asked of NexTerm through
+    // nexterm-cli. A palette command only, like the project commands.
+    {
+      type: 'command',
+      id: 'cmd-show-control-log',
+      command: 'show_control_log',
+      title: 'Show Control Log',
+      subtitle: 'What programs in terminals asked NexTerm to do through nexterm-cli — the last 500 calls, never what was typed or read',
+      // A dialog, which takes the keyboard as it opens (`focusAfterPalette`).
+      opensDialog: true,
+    },
   ];
 }
 
@@ -295,6 +306,8 @@ export function focusAfterPalette(item) {
   // palette (src/lib/dialogReturn.js). Handed back to the terminal first, a
   // program there that asks to be told of focus heard it come and go.
   if (item?.type === 'project-command' || item?.type === 'project-review') return 'dialog';
+  // A built-in that opens a dialog of its own — Show Control Log — the same.
+  if (item?.type === 'command' && item.opensDialog === true) return 'dialog';
   return 'opener';
 }
 

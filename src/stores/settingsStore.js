@@ -200,6 +200,27 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalProgress: true,
   /**
+   * Settings ▸ Terminal ▸ Control (stage 7, spec D5): what a program running
+   * in a terminal NexTerm started may ask of NexTerm through `nexterm-cli` —
+   * reachable only from those terminals (each shell gets a token of its own,
+   * the address of a socket or pipe only this user can open, and nothing
+   * listens on the network). See src/lib/controlDispatcher.js.
+   *
+   * - Control NexTerm: notifications, a status line in the side bar, a
+   *   progress bar, the list of terminals, a new split beside the caller,
+   *   pointing the user to a terminal (it flashes; never switched to). On
+   *   by default: low risk, and an agent's
+   *   hooks should work without setup. Off closes the listener and every
+   *   token stops working.
+   * - Type Into and Read Terminals: `send` and `read-screen`, even for the
+   *   caller's own terminal. Off by default.
+   * - Control Other Terminals: all of the above for terminals the caller did
+   *   not open with `new-split`, and an unmasked read. Off by default.
+   */
+  terminalControl: true,
+  terminalControlTypeAndRead: false,
+  terminalControlOtherTerminals: false,
+  /**
    * What each row of the TERMINALS side bar shows besides its title. With
    * any of the second-line items on, every row is two lines of the same
    * height, so nothing moves under the pointer when one of them changes; with

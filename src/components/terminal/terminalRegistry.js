@@ -1125,6 +1125,49 @@ export function flushPacedOutput(tabId) {
   flushPaced(instances.get(tabId));
 }
 
+/**
+ * `tabId`'s xterm once it has read every byte it was handed so far — held
+ * output first (`afterOutputSoFar`) — for reading its screen as the program
+ * left it (`nexterm-cli read-screen`, stage 7) and its modes before a key is
+ * encoded for it (`send`): a background terminal's output waits for its
+ * pace, and a program's `CSI ? 1 h` can be in what waits. At most `waitMs`:
+ * a terminal still parsing 50 MB is read as it stands. Null for a terminal
+ * that has no xterm — never shown — which is never made one here.
+ */
+export function terminalAfterOutput(tabId, waitMs = 500) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const done = () => resolve(entry.disposed ? null : entry.term);
+    const timer = setTimeout(done, waitMs);
+    const queued = afterOutputSoFar(entry, () => {
+      clearTimeout(timer);
+      done();
+    });
+    if (!queued) {
+      clearTimeout(timer);
+      done();
+    }
+  });
+}
+
+/**
+ * The modes a key or a paste sent to `tabId` must follow (stage 7, `send`;
+ * src/lib/controlKeys.js): DECCKM, bracketed paste, and modifyOtherKeys'
+ * level, as its program last set them. Null for a terminal with no xterm —
+ * nothing has read its output to know.
+ */
+export function terminalModes(tabId) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed) return null;
+  const modes = entry.term.modes ?? {};
+  return {
+    applicationCursorKeys: modes.applicationCursorKeysMode === true,
+    bracketedPaste: modes.bracketedPasteMode === true,
+    modifyOtherKeys: entry.modifyOtherKeys?.level ?? 0,
+  };
+}
+
 let focusSubscription = null;
 
 /** The terminal typed in is never behind: what was held for it goes the moment it gets focus. */
@@ -1209,6 +1252,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // before the terminal was shown (`history`): the addon rate-limits such
     // messages by that time, apart from live ones, and hands it on.
     keptAt: () => (history.reading ? history.at ?? Date.now() : null),
+    // Live ones count against the terminal's one allowance, which
+    // `nexterm-cli notify` shares (stage 7): one rate, however they come.
+    allowLive: (now) => useTerminalStore.getState().allowProgramNote?.(tabId, now) ?? true,
     // One from kept output goes with the time it was printed: the store files
     // it there, and never shows it on the desktop or as a flash.
     onNotify: (note, keptAt) => {

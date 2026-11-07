@@ -941,6 +941,58 @@ describe('Scrollback: secrets are hidden before the file is written', () => {
     for (const b of body) assert.ok(!blame.map(encodeLine).join('\n').includes(b.slice(0, 12)), `git blame across commits: ${b.slice(0, 12)}`);
   });
 
+  // 43 characters of base64url, the shape of NexTerm's control token, made at
+  // run time: a literal here is what secret scanners flag (GitGuardian's
+  // generic high-entropy rule did, for one assembled from three pieces).
+  const controlTokenLike = () => {
+    const b64url = `${'ABCDEFGHIJKLMNOPQRSTUVWXYZ'}${'abcdefghijklmnopqrstuvwxyz'}0123456789-_`;
+    return Array.from({ length: 43 }, (_, i) => b64url[(i * 37 + 11) % 64]).join('');
+  };
+
+  test('SM-29: NexTerm\'s own control token is hidden in every form a shell prints it', () => {
+    const token = controlTokenLike();
+    assert.equal(token.length, 43);
+    const outputs = [
+      [`NEXTERM_CONTROL_TOKEN=${token}`],
+      [`declare -x NEXTERM_CONTROL_TOKEN="${token}"`],
+      [`NEXTERM_CONTROL_TOKEN          ${token}`],
+      ['Name  : NEXTERM_CONTROL_TOKEN', `Value : ${token}`],
+      [`set -x NEXTERM_CONTROL_TOKEN ${token}`],
+      ['$ echo $NEXTERM_CONTROL_TOKEN', token],
+      ['$ printenv NEXTERM_CONTROL_TOKEN', token],
+      ['C:\\> echo %nexterm_control_token%', token],
+      ['PS> Write-Output $Env:NexTerm_Control_Token', token],
+      ['$ echo $NEXTERM_CONTROL_TOKEN', '', token],
+      ['NEXTERM_CONTROL_TOKEN    ' + token.slice(0, 22), '                         ' + token.slice(22)],
+    ];
+    for (const text of outputs) {
+      const lines = text.map((x) => ({ runs: [{ sgr: '', text: x }] }));
+      maskLines(lines);
+      const out = lines.map(encodeLine).join('\n');
+      assert.ok(!out.includes(token.slice(0, 20)) && !out.includes(token.slice(22, 40)), `${text[0]}: hidden`);
+      assert.ok(/nexterm_control_token/i.test(out) || !/nexterm_control_token/i.test(text.join('')), 'the name itself stays');
+    }
+    // The window's first line is the value, its name just above the cut.
+    const top = [{ runs: [{ sgr: '', text: token }] }];
+    maskLines(top, { tokenNext: true });
+    assert.ok(!encodeLine(top[0]).includes(token.slice(0, 20)), 'a value right under the cut');
+    // A 43-character word elsewhere is not a token.
+    const other = [{ runs: [{ sgr: '', text: `commit ${'a1b2c3d4e5'.repeat(4)}abc` }] }];
+    maskLines(other);
+    assert.ok(encodeLine(other[0]).includes('a1b2c3d4e5a1'), 'left alone without the name');
+  });
+
+  test('SM-30: a snapshot cut right under `echo $NEXTERM_CONTROL_TOKEN` still hides the value on its first line', async () => {
+    const token = controlTokenLike();
+    const term = terminal({ cols: 80, rows: 4, scrollback: 50 });
+    // A blank line between: the line read for context above the cut is that
+    // blank one, so only the state carried from further up can tell.
+    await write(term, `filler\r\n$ echo; echo $NEXTERM_CONTROL_TOKEN\r\n\r\n${token}\r\nafter\r\n`);
+    const snap = snapshotTerminal(term, { tabId: TAB, now: NOW, maxLines: 2 });
+    assert.ok(!snap.text.includes('echo $NEXTERM'), 'the line naming it is above the cut');
+    assert.ok(!snap.text.includes(token.slice(0, 20)), 'the value is hidden');
+  });
+
   test('SM-08: masking works on the runs: what surrounds the token keeps its colour', () => {
     const line = { runs: [{ sgr: '32', text: 'ok ' }, { sgr: '31', text: GHP.slice(0, 20) }, { sgr: '', text: `${GHP.slice(20)} tail` }] };
     const [n] = maskLines([line]);

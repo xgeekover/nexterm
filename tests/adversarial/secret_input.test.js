@@ -532,17 +532,19 @@ describe('Password lock: nothing is typed into a hidden prompt on the user\'s be
     const store = read('../../src/stores/terminalStore.js');
     assert.match(store, /reply: \(tabId, text\) => \{\n\s*if \(typingHidden\(useTerminalStore\.getState\(\), tabId\)\) return undefined;/);
     // Every write the app makes for the user goes through the guard: the
-    // three that type a line, each after `untilTypingSafe` — an agent
-    // started, one resumed, and `typeWhenSafe`, which types a startup
-    // command and a project command (stage 5) alike.
+    // four that type a line or keys, each after `untilTypingSafe` — an agent
+    // started, one resumed, `typeWhenSafe`, which types a startup command
+    // and a project command (stage 5) alike, and `typeForProgram`, which
+    // types what `nexterm-cli send` sent (stage 7), its wait raced against
+    // the time a control request has.
     const lines = [...store.matchAll(/await get\(\)\.writeRaw\([^\n]*\\r`\)|get\(\)\.writeRaw\(tabId, data\)/g)].map((m) => m.index);
-    assert.equal(lines.length, 3, 'a new writer on the user\'s behalf: put it behind untilTypingSafe and count it here');
+    assert.equal(lines.length, 4, 'a new writer on the user\'s behalf: put it behind untilTypingSafe and count it here');
     for (const typer of ['typeStartupCommand', 'typeProjectCommand']) {
       assert.match(store, new RegExp(`${typer}: async[\\s\\S]{0,1500}?return typeWhenSafe\\(`), `${typer} types through typeWhenSafe`);
     }
     for (const at of lines) {
       const before = store.slice(Math.max(0, at - 1500), at);
-      assert.ok(before.includes('await untilTypingSafe('), `a write without the guard before it: ${store.slice(at, at + 80)}`);
+      assert.match(before, /await (?:Promise\.race\(\[\s*)?untilTypingSafe\(/, `a write without the guard before it: ${store.slice(at, at + 80)}`);
     }
   });
 

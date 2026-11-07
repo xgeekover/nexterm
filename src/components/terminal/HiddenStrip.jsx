@@ -1,5 +1,6 @@
 import React from 'react';
-import { Lock } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
+import { Cable, Lock } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { unreadLabel } from '../../lib/attention.js';
@@ -82,8 +83,75 @@ export function LockBadge({ tabId }) {
 }
 
 /**
+ * Whether, and by whom, `tabId`'s terminal was just controlled by a program
+ * in another terminal (stage 7, spec D6): its entry of the store's
+ * `controlled` map, nothing else to redraw for.
+ */
+const useControlled = (tabId) => useTerminalStore((s) => (tabId ? s.controlled?.[tabId] ?? null : null));
+
+/** What the mark says: "Controlled by Terminal 2 (send)". */
+const controlledWords = (mark) => `Controlled by ${mark.byTitle}${mark.cmd ? ` (${mark.cmd})` : ''}`;
+
+/**
+ * The "controlled" mark on a TAB CHIP (spec D6): for 10 s after a program in
+ * another terminal typed into this one, read its screen or focused it — so
+ * that nothing a program does to a terminal goes unseen. A 10 px badge over
+ * the chip's top edge, taking no room — nothing on the chip moves when it
+ * comes, the ✕ least of all — just right of the lock's corner and above the
+ * activity dot, so the two badges never cover each other and it reads as
+ * this chip's. On the top-right corner it sat over the empty slot an
+ * inactive chip keeps for its ✕, and read as the "+" button's. A press on it
+ * is a press on the chip. Its tooltip and its words name the caller as it
+ * was named when it happened. Nothing moves, so reduced motion has nothing
+ * to stop.
+ */
+export function ControlledBadge({ tabId }) {
+  const mark = useControlled(tabId);
+  if (!mark) return null;
+  const words = controlledWords(mark);
+  return (
+    <span
+      role="img"
+      aria-label={words}
+      title={words}
+      data-controlled-mark={tabId}
+      data-controlled-by={mark.by ?? ''}
+      className={cn(
+        'absolute -top-[2px] left-[9px] z-[1] flex items-center justify-center',
+        'w-[10px] h-[10px] rounded-full bg-vsc-panel text-vsc-info ring-1 ring-vsc-border'
+      )}
+    >
+      <Cable size={8} strokeWidth={2.5} aria-hidden="true" />
+    </span>
+  );
+}
+
+/**
+ * The same mark in line, on the terminal's row in the TERMINALS side bar,
+ * whose only target is the whole row — so nothing clickable moves when it
+ * comes.
+ */
+export function ControlledMark({ tabId, className }) {
+  const mark = useControlled(tabId);
+  if (!mark) return null;
+  const words = controlledWords(mark);
+  return (
+    <span
+      role="img"
+      aria-label={words}
+      title={words}
+      data-controlled-mark={tabId}
+      className={cn('shrink-0 inline-flex items-center justify-center w-[12px] h-[14px] text-vsc-info', className)}
+    >
+      <Cable size={11} strokeWidth={2.25} aria-hidden="true" />
+    </span>
+  );
+}
+
+/**
  * What a terminal's row in the TERMINALS side bar says besides its title:
- * whether its typing is hidden (`LockMark`), then its unread count. A
+ * whether its typing is hidden (`LockMark`), whether another terminal's
+ * program just controlled it (`ControlledMark`), then its unread count. A
  * fragment, no wrapper: with nothing to say it draws exactly what the pill
  * alone drew, on a line of fixed height.
  */
@@ -91,14 +159,25 @@ export function TabMarks({ tabId, unread, className }) {
   return (
     <>
       <LockMark tabId={tabId} className={className} />
+      <ControlledMark tabId={tabId} className={className} />
       <UnreadPill count={unread} className={className} />
     </>
   );
 }
 
-/** The handle's marks in words: "Typing is hidden (password prompt), 2 unread notifications, 40% done". */
-function handleWords({ locked = false, unread = 0, bar = null } = {}) {
-  return [locked ? TYPING_HIDDEN_LABEL : '', unread > 0 ? unreadLabel(unread) : '', progressWords(bar)]
+/**
+ * The handle's marks in words: "Typing is hidden (password prompt),
+ * Controlled by agent (send), 2 unread notifications, 40% done".
+ * `controlled` is `[{ mark, title, shown }]`: each of the pane's terminals a
+ * program has just controlled, named unless it is the one shown.
+ */
+function handleWords({ locked = false, controlled = [], unread = 0, bar = null } = {}) {
+  return [
+    locked ? TYPING_HIDDEN_LABEL : '',
+    ...controlled.map(({ mark, title, shown }) => (shown ? controlledWords(mark) : `${title}: ${controlledWords(mark)}`)),
+    unread > 0 ? unreadLabel(unread) : '',
+    progressWords(bar),
+  ]
     .filter(Boolean)
     .join(', ');
 }
@@ -115,8 +194,10 @@ function handleWords({ locked = false, unread = 0, bar = null } = {}) {
  *
  * It carries what the strip's chip would say while the strip is down, as
  * small marks told apart by shape, not by colour alone: a padlock (a
- * password prompt), a dot (unread notifications), and the program's
- * progress as the 2 px bar along its bottom. Their words are its tooltip and
+ * password prompt), a plug (another terminal's program just controlled it,
+ * stage 7 — with the strip hidden, the chip's badge would be out of sight),
+ * a dot (unread notifications), and the program's progress as the 2 px bar
+ * along its bottom. Their words are its tooltip and
  * its accessible name, with what it does. In forced colours the dot and the
  * grip keep system colours (index.css), the padlock is drawn in the text
  * colour, and the bar as every progress bar is.
@@ -124,13 +205,21 @@ function handleWords({ locked = false, unread = 0, bar = null } = {}) {
  * `open`: the strip is up (`aria-expanded`). The right-click opens the
  * strip's own menu, as a right-click on the strip's empty space does.
  */
-export function StripHandle({ paneId, tabId, title, unread = 0, open = false, handleRef, onToggle, onPress, onContextMenu }) {
+export function StripHandle({ paneId, tabId, title, tabs = [], unread = 0, open = false, handleRef, onToggle, onPress, onContextMenu }) {
   const locked = useLocked(tabId);
+  // Every terminal of the pane, not only the one shown (re-verification
+  // F10): a program acting on any of them is shown on the handle, by name.
+  // Subscribed to those terminals' marks alone, compared one by one.
+  const ids = tabs.length ? tabs.map((t) => t.id) : tabId ? [tabId] : [];
+  const marks = useTerminalStore(useShallow((s) => ids.map((id) => s.controlled?.[id] ?? null)));
+  const controlled = ids
+    .map((id, i) => (marks[i] ? { mark: marks[i], title: tabs.find((t) => t.id === id)?.title ?? id, shown: id === tabId } : null))
+    .filter(Boolean);
   const barsOn = useSettingsStore((s) => s.terminalProgress !== false);
   const stored = useTerminalStore((s) => (tabId ? s.progress[tabId] : undefined));
   const bar = barsOn ? stored ?? null : null;
-  const marks = handleWords({ locked, unread, bar });
-  const words = `${title}${marks ? ` — ${marks}` : ''}. ${open ? 'Hide' : 'Show'} its tab strip`;
+  const said = handleWords({ locked, controlled, unread, bar });
+  const words = `${title}${said ? ` — ${said}` : ''}. ${open ? 'Hide' : 'Show'} its tab strip`;
   return (
     <button
       ref={handleRef}
@@ -169,6 +258,11 @@ export function StripHandle({ paneId, tabId, title, unread = 0, open = false, ha
         {locked && (
           <span data-handle-mark="lock" className="flex items-center text-vsc-warn">
             <Lock size={6} strokeWidth={3} aria-hidden="true" />
+          </span>
+        )}
+        {controlled.length > 0 && (
+          <span data-handle-mark="controlled" className="flex items-center text-vsc-info">
+            <Cable size={6} strokeWidth={3} aria-hidden="true" />
           </span>
         )}
         {unread > 0 && <span data-handle-mark="unread" className="w-[4px] h-[4px] rounded-full bg-vsc-attention" />}

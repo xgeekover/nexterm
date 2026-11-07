@@ -65,6 +65,11 @@ const SETTINGS_KEYS = [
   'terminalAttentionFlashFocused',
   'terminalBellAttention',
   'terminalProgress',
+  // Settings ▸ Terminal ▸ Control (stage 7, spec D5): what programs in
+  // terminals may ask of NexTerm through nexterm-cli.
+  'terminalControl',
+  'terminalControlTypeAndRead',
+  'terminalControlOtherTerminals',
   'terminalsPanelFolder',
   'terminalsPanelBranch',
   'terminalsPanelAgent',
