@@ -142,6 +142,7 @@ import './control_backend_mock.test.js';
 import './control_keys.test.js';
 import './control_scope.test.js';
 import './control_dispatcher.test.js';
+import './claude_startup_headless.test.js';
 
 async function run() {
   console.log('====================================================');

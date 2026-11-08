@@ -261,8 +261,14 @@ export function trackDirectories(term, { initial = null, current = () => null, m
   return {
     note(cwd) {
       term.write('', () => {
-        if (disposed || term.buffer.active.type === 'alternate') return;
-        trail.note(markForChange(), cwd);
+        // Inside xterm's write loop: a throw here would stop the terminal
+        // parsing anything ever again, as terminalRegistry.js guards its own.
+        try {
+          if (disposed || term.buffer.active.type === 'alternate') return;
+          trail.note(markForChange(), cwd);
+        } catch (err) {
+          console.warn('[Terminal] could not mark where the directory changed:', err);
+        }
       });
     },
     at: (line) => trail.at(line),
