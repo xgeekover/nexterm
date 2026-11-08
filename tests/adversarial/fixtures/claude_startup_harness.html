@@ -1,0 +1,336 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/claude_startup_headless.test.js.
+
+  Claude Code 2.1.319 starting in a NexTerm terminal, replayed from a
+  recording (claude-2.1.319-startup.json). The app's own TerminalView is
+  mounted with React, so the terminal is the one getOrCreateTerminal makes,
+  with the view's onData (the store's writeRaw), its second onData listener,
+  its fit, its focus and its WebGL renderer; the store's own listeners are
+  attached. The pane is sized so the terminal fits 169x46, the size claude
+  drew for in the recording. The tab goes the way it goes in the app: a
+  prompt (OSC 133 D), `claude` typed key by key and echoed, OSC 133 C — so
+  the store records a Claude Code agent from the typed line, as it does for
+  one typed by hand. Then every chunk claude printed goes through
+  ptyOutputBus.deliver (what the one `pty-output` listener calls) in the
+  recorded order, at the recorded times, idle gaps over a second shortened
+  to one:
+
+    batched   as the backend sends it (src-tauri/src/pty/output_batch.rs:
+              output after 8 ms of quiet at once, output while output flows
+              held up to 8 ms, a window title sending what is held first)
+    chunks    every recorded chunk as an event of its own
+
+  each event whole characters, as the backend cuts them.
+
+  The backend is the browser mock, with `pty_write` taken over to record what
+  the terminal sent the program (a program in raw mode echoes nothing) and
+  `pty_ack` to count flow control's acknowledgements.
+
+  `run(mode)` reports, per event, whether xterm's write callback for it ran
+  and what the terminal answered while parsing it; then the buffer, and a DA1
+  probe after the replay. Not part of the app's own routes.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; background: #111; }
+      .pane { position: fixed; left: 0; top: 0; width: 1400px; height: 800px; overflow: hidden; }
+      /* The few utility classes TerminalView lays itself out with. */
+      .relative { position: relative; }
+      .w-full { width: 100%; }
+      .h-full { height: 100%; }
+      .overflow-hidden { overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      import '@xterm/xterm/css/xterm.css';
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { mockBridge } from '../../../src/lib/ipc.js';
+      import { useSettingsStore } from '../../../src/stores/settingsStore.js';
+      import { useTerminalStore } from '../../../src/stores/terminalStore.js';
+      import { TerminalView } from '../../../src/components/terminal/TerminalView.jsx';
+      import {
+        disposeTerminal,
+        existingTerminal,
+        getGpuStats,
+        getOrCreateTerminal,
+        setWriteObserver,
+      } from '../../../src/components/terminal/terminalRegistry.js';
+      import { deliver } from '../../../src/lib/ptyOutputBus.js';
+      import recording from './claude-2.1.319-startup.json';
+
+      // The size claude drew for: `CSI 115 C`, a border and 53 cells fill a
+      // row of 169, and its last row is `CSI 46 ; 1 H`.
+      const COLS = 169;
+      const ROWS = 46;
+      // The longest wait kept between two events: claude sits idle for
+      // seconds after drawing its screen, and nothing in that wait is tested.
+      const MAX_GAP_MS = 1000;
+      // src-tauri/src/pty/output_batch.rs DEFAULT_WINDOW and DEFAULT_MAX.
+      const BATCH_WINDOW_S = 0.008;
+      const BATCH_MAX = 256 * 1024;
+
+      // What reached the console, in the page's words.
+      const consoleLines = [];
+      for (const level of ['warn', 'error']) {
+        const original = console[level].bind(console);
+        console[level] = (...args) => {
+          consoleLines.push(`${level}: ${args.map((a) => (a instanceof Error ? a.stack || a.message : String(a))).join(' ')}`);
+          original(...args);
+        };
+      }
+      const rejections = [];
+      window.addEventListener('unhandledrejection', (event) => {
+        rejections.push(String(event.reason?.stack || event.reason));
+      });
+
+      useSettingsStore.setState({
+        terminalFontFamily: 'monospace',
+        terminalFontSize: 12,
+        terminalLineHeight: 1,
+        terminalScrollback: 1000,
+      });
+
+      // The backend: the browser mock, but for what a terminal sends its
+      // program, recorded as a pty in raw mode takes it, and flow control.
+      const sent = new Map();
+      const acked = new Map();
+      const realInvoke = mockBridge.invoke.bind(mockBridge);
+      mockBridge.invoke = async (command, args = {}) => {
+        if (command === 'pty_write') {
+          sent.get(args.session_id)?.push({ data: args.data, after: lastParsed });
+          return null;
+        }
+        if (command === 'pty_ack') {
+          acked.set(args.session_id, (acked.get(args.session_id) ?? 0) + args.bytes);
+          return null;
+        }
+        if (command === 'pty_resize' || command === 'pty_flow_reset') return null;
+        return realInvoke(command, args);
+      };
+      await useTerminalStore.getState().attachListeners();
+
+      // Which event each write into xterm was, and when xterm had read it.
+      let label = null;
+      let lastParsed = null;
+      const parsed = new Map();
+      setWriteObserver(() => {
+        const mine = label;
+        return () => {
+          parsed.set(mine, performance.now());
+          lastParsed = mine;
+        };
+      });
+
+      const utf8 = new TextEncoder();
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      async function until(check, ms) {
+        const end = performance.now() + ms;
+        while (performance.now() < end) {
+          if (check()) return true;
+          await wait(10);
+        }
+        return check();
+      }
+      const bytesOf = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const show = (s) => JSON.stringify(s).slice(1, -1);
+      // OSC 0 / 2: a title the backend also reports (`Marker::Title`).
+      const TITLE = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/;
+
+      /**
+       * The recording's output as `pty-output` events: `{ t, text, chunks,
+       * title }`, `t` when it goes, whole characters only (osc.rs keeps a
+       * character cut by a read for the next).
+       */
+      function events(mode) {
+        const decoder = new TextDecoder('utf-8');
+        const reads = recording.chunks
+          .map((c, index) => ({ ...c, index }))
+          .filter((c) => c.dir === 'o')
+          .map((c) => ({ t: c.t, index: c.index, text: decoder.decode(bytesOf(c.b64), { stream: true }) }))
+          .filter((r) => r.text !== '');
+        if (mode === 'chunks') {
+          return reads.map((r) => ({ t: r.t, text: r.text, chunks: [r.index], title: TITLE.exec(r.text)?.[1] ?? null }));
+        }
+        // output_batch.rs `Batcher` on the recorded clock.
+        const out = [];
+        let held = null;
+        let lastSent = null;
+        const take = (t) => {
+          if (!held) return;
+          out.push({ t, text: held.text, chunks: held.chunks, title: null });
+          held = null;
+          lastSent = t;
+        };
+        for (const r of reads) {
+          if (held && r.t >= held.since + BATCH_WINDOW_S) take(held.since + BATCH_WINDOW_S);
+          const title = TITLE.exec(r.text)?.[1] ?? null;
+          const quiet = !held && (lastSent === null || r.t - lastSent >= BATCH_WINDOW_S);
+          if (quiet) {
+            out.push({ t: r.t, text: r.text, chunks: [r.index], title });
+            lastSent = r.t;
+            continue;
+          }
+          if (!held) held = { since: r.t, text: '', chunks: [] };
+          held.text += r.text;
+          held.chunks.push(r.index);
+          // A title is a marker: what is held goes before it.
+          if (title !== null) {
+            take(r.t);
+            out[out.length - 1].title = title;
+          } else if (held.text.length >= BATCH_MAX) take(r.t);
+        }
+        if (held) take(held.since + BATCH_WINDOW_S);
+        return out;
+      }
+
+      /** Size `pane` until its terminal fits COLS x ROWS — as a window that size would. */
+      async function sizePane(pane, entry) {
+        for (let pass = 0; pass < 4; pass += 1) {
+          const dims = entry.fitAddon.proposeDimensions();
+          if (!dims) break;
+          if (dims.cols === COLS && dims.rows === ROWS) break;
+          const box = pane.getBoundingClientRect();
+          const cellW = box.width / Math.max(1, dims.cols);
+          const cellH = box.height / Math.max(1, dims.rows);
+          pane.style.width = `${Math.floor(box.width + (COLS - dims.cols) * cellW + cellW / 2)}px`;
+          pane.style.height = `${Math.floor(box.height + (ROWS - dims.rows) * cellH + cellH / 2)}px`;
+        }
+        // TerminalView fits on its ResizeObserver, a frame later.
+        await until(() => entry.term.cols === COLS && entry.term.rows === ROWS, 1000);
+        return `${entry.term.cols}x${entry.term.rows}`;
+      }
+
+      /** The screen as text, and which buffer it is. */
+      function screen(term) {
+        const buffer = term.buffer.active;
+        const rows = [];
+        for (let y = 0; y < buffer.length; y += 1) rows.push(buffer.getLine(y)?.translateToString(true) ?? '');
+        return { type: buffer.type, text: rows.join('\n') };
+      }
+
+      let runs = 0;
+      async function run(mode = 'batched') {
+        runs += 1;
+        const tabId = `cc-tab-${runs}`;
+        const sessionId = `cc-session-${runs}`;
+        sent.set(sessionId, []);
+        const name = (what) => `${runs}:${what}`;
+        /** One event of output, as the `pty-output` listener hands it on. */
+        const output = (what, text) => {
+          label = name(what);
+          deliver(sessionId, text, Date.now(), utf8.encode(text).length);
+          label = null;
+        };
+        useTerminalStore.setState((state) => ({
+          tabs: [
+            ...state.tabs,
+            {
+              id: tabId,
+              title: `Terminal ${runs}`,
+              defaultTitle: `Terminal ${runs}`,
+              sessionId,
+              cwd: '/workspace',
+              agent: null,
+              agentResumeOffered: false,
+              shell: '/bin/zsh',
+              running: false,
+              lastExitCode: null,
+              spawnedAt: Date.now(),
+            },
+          ],
+          activeTabId: tabId,
+        }));
+        const pane = document.createElement('div');
+        pane.className = 'pane';
+        document.body.append(pane);
+        const root = createRoot(pane);
+        root.render(React.createElement(TerminalView, { tabId, active: true }));
+        const report = { mode, events: [] };
+        try {
+          if (!(await until(() => existingTerminal(tabId) !== null, 5000))) return report;
+          const entry = getOrCreateTerminal(tabId);
+          const { term } = entry;
+          // Everything xterm itself sends, whether or not the store passes it on.
+          const emitted = [];
+          term.onData((data) => emitted.push({ data, after: lastParsed }));
+          report.size = await sizePane(pane, entry);
+          await wait(100);
+          report.focused = term.element?.classList.contains('focus') ?? false;
+          report.gpu = getGpuStats().live > 0;
+
+          // The shell: its prompt, `claude` typed and echoed, the command begun.
+          await mockBridge.emit('pty-command-done', { session_id: sessionId, exit_code: 0 });
+          output('prompt', 'placeholder % ');
+          await wait(50);
+          for (const key of 'claude') {
+            term.input(key, true);
+            await wait(5);
+            output('echo', key);
+            await wait(30);
+          }
+          term.input('\r', true);
+          await wait(5);
+          output('echo', '\r\n');
+          await mockBridge.emit('pty-command-started', { session_id: sessionId });
+          await wait(50);
+          const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
+          report.tab = { running: tab?.running ?? null, agent: tab?.agent?.kind ?? null, commandLine: tab?.commandLine ?? null };
+          report.typed = sent.get(sessionId).map((s) => s.data).join('');
+          sent.get(sessionId).length = 0;
+          emitted.length = 0;
+
+          // The recording, at its own pace.
+          const schedule = events(mode);
+          const start = performance.now();
+          let offset = 0;
+          let previous = schedule[0].t;
+          let bytes = 0;
+          const ackedBefore = acked.get(sessionId) ?? 0;
+          for (const [i, e] of schedule.entries()) {
+            offset += Math.min((e.t - previous) * 1000, MAX_GAP_MS);
+            previous = e.t;
+            const due = start + offset;
+            if (due > performance.now()) await wait(due - performance.now());
+            bytes += utf8.encode(e.text).length;
+            report.events.push({ event: i, t: Number(e.t.toFixed(4)), chunks: e.chunks, chars: e.text.length, head: show(e.text.slice(0, 40)) });
+            output(i, e.text);
+            if (e.title !== null) await mockBridge.emit('pty-title', { session_id: sessionId, title: e.title });
+          }
+          await until(() => schedule.every((_, i) => parsed.has(name(i))), 2000);
+          for (const ev of report.events) {
+            ev.parsed = parsed.has(name(ev.event));
+            const after = ev.event === 0 ? name('echo') : name(ev.event - 1);
+            ev.replies = emitted.filter((e) => e.after === after).map((e) => show(e.data));
+          }
+          report.firstUnparsed = report.events.find((e) => !e.parsed) ?? null;
+          report.emitted = emitted.map((e) => show(e.data));
+          report.sent = sent.get(sessionId).map((s) => show(s.data));
+          await until(() => (acked.get(sessionId) ?? 0) - ackedBefore >= bytes, 500);
+          report.bytes = bytes;
+          report.acked = (acked.get(sessionId) ?? 0) - ackedBefore;
+          report.screen = screen(term);
+
+          // And the terminal still answers after it.
+          const before = emitted.length;
+          output('probe', '\x1b[c');
+          const probeParsed = await until(() => parsed.has(name('probe')), 1000);
+          report.probe = { parsed: probeParsed, replies: emitted.slice(before).map((e) => show(e.data)) };
+          return report;
+        } finally {
+          report.console = consoleLines.splice(0);
+          report.rejections = rejections.splice(0);
+          root.unmount();
+          disposeTerminal(tabId);
+          pane.remove();
+        }
+      }
+
+      window.__cc = { run, events, ready: true };
+    </script>
+  </body>
+</html>

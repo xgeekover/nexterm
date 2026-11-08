@@ -343,6 +343,59 @@ describe('Output context: a directory change holds from the start of the command
     assert.equal(dirs.at(app), 'C:\\w', 'no block to start it from: the prompt line and dir\'s heading say where instead');
     term.dispose();
   });
+
+  test('OC-24: a directory change whose mark cannot be made does not stop the terminal parsing', async () => {
+    // `note` places its mark from xterm's write callback, inside xterm's
+    // write loop: a throw there leaves the write queue waiting for ever, and
+    // the terminal parses nothing after it — every other callback in
+    // terminalRegistry.js is guarded for that reason. Out of real xterm such
+    // a throw is uncaught and would take the whole run down, so this case
+    // holds on to it instead and fails on what it did to the terminal. The
+    // terminal is made first: nothing that can throw comes between the swap
+    // and the try whose finally undoes it.
+    const term = new HeadlessTerminal({ cols: 60, rows: 12, allowProposedApi: true });
+    const replies = [];
+    term.onData((data) => replies.push(data));
+    const runner = process.listeners('uncaughtException');
+    const uncaught = [];
+    const hold = (err) => uncaught.push(err);
+    const warn = console.warn;
+    const warned = [];
+    process.removeAllListeners('uncaughtException');
+    process.on('uncaughtException', hold);
+    console.warn = (...args) => warned.push(args.map(String).join(' '));
+    try {
+      const dirs = trackDirectories(term, {
+        initial: '/workspace',
+        current: () => '/workspace/src',
+        marks: () => {
+          throw new Error('the command marks cannot be read');
+        },
+      });
+      await write(term, 'me@mac % cd src\r\n');
+      dirs.note('/workspace/src');
+      const parsed = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), 1000);
+        term.write('AFTER-THE-CHANGE\r\n\x1b[c', () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
+      assert.equal(parsed, true, 'output written after the change was never parsed — the terminal is wedged');
+      const buffer = term.buffer.active;
+      let shown = false;
+      for (let y = 0; y < buffer.length; y += 1) if (buffer.getLine(y).translateToString(true) === 'AFTER-THE-CHANGE') shown = true;
+      assert.equal(shown, true, 'the output after the change is on screen');
+      assert.deepEqual(replies, ['\x1b[?1;2c'], 'and a query after it is answered');
+      assert.deepEqual(uncaught.map((err) => err.message), [], 'nothing was thrown out of xterm');
+      assert.ok(warned.some((line) => line.includes('the command marks cannot be read')), `said why: ${JSON.stringify(warned)}`);
+    } finally {
+      term.dispose();
+      console.warn = warn;
+      process.removeListener('uncaughtException', hold);
+      for (const listener of runner) process.on('uncaughtException', listener);
+    }
+  });
 });
 
 describe('Output context: the command a row belongs to', () => {
