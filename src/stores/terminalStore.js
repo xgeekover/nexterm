@@ -57,6 +57,8 @@ import {
   serializeAgent,
   startCommand,
 } from '../lib/agents.js';
+import { historyKeyOfTab, historyRecord } from '../lib/agentHistory.js';
+import { claudeConversationSaved } from '../lib/claudeConversations.js';
 import { stripTrailingSep, toPosix } from '../lib/paths.js';
 import { equalizeAll, equalizeLineOf, swapChoices } from '../components/terminal/splitLayout.js';
 import { typingHidden, withoutSecret } from '../lib/secretInput.js';
@@ -1165,6 +1167,45 @@ export function onProgramSignal(listener) {
   };
 }
 
+/**
+ * What a Resume says when the Claude Code conversation it was to pick up was
+ * never saved, and a new one was started instead (`resumeAgent`).
+ */
+export const NEVER_SAVED_NOTE = 'That Claude Code session had no saved conversation, so a new one was started.';
+
+/**
+ * Who wants to hear that a Resume started a NEW conversation in place of the
+ * one it was asked for (`onAgentConversationReplaced`) — the agent session
+ * history, which then drops the old one's entry: it can never be resumed.
+ */
+const conversationReplacedListeners = new Set();
+
+/**
+ * Call `listener({ tabId, kind, from, to, reason })` each time a Resume typed
+ * a new conversation instead of the one it was asked for: `from` the id it
+ * was asked for, `to` the new one's, `reason` 'neverSaved' — a Claude Code
+ * conversation never sent a first message, so never saved, which `claude
+ * --resume` can only fail on (`resumeAgent`). Heard once the new one is the
+ * terminal's record and has been typed. Returns what stops it.
+ */
+export function onAgentConversationReplaced(listener) {
+  if (typeof listener !== 'function') return () => {};
+  conversationReplacedListeners.add(listener);
+  return () => {
+    conversationReplacedListeners.delete(listener);
+  };
+}
+
+function conversationReplaced(event) {
+  for (const listener of [...conversationReplacedListeners]) {
+    try {
+      listener(event);
+    } catch (err) {
+      console.warn('[TerminalStore] a conversation-replaced listener failed:', err);
+    }
+  }
+}
+
 function programSignalled(tabId) {
   for (const listener of [...programSignalListeners]) {
     try {
@@ -1378,6 +1419,9 @@ export function __setAgentResolveRetryMs(delays) {
 
 /** Numbers each resume notice, so one that repeats the last is still new to the banner. */
 let noticeSeq = 0;
+
+/** The history keys `resumeFromHistory` is opening a terminal for: one at a time each. */
+const resumingKeys = new Set();
 
 /** Why lookups failed, as reported to the console this run: each reason once. */
 const reportedLookupFailures = new Set();
@@ -2064,8 +2108,12 @@ export const useTerminalStore = create((set, get, api) => {
    * can put the new tab only in the freshly-created pane of one group,
    * instead of it also lingering wherever focus happened to be when the PTY
    * finished spawning.
+   *
+   * `strictCwd`: in `cwd` or not at all — no fallback here, and the backend
+   * asked for none (`pty_spawn`'s `strict_cwd`); null when it cannot start
+   * there. Only a resume from the agent session history asks this.
    */
-  const spawnTab = async (title = null, cwd = null, shell = null) => {
+  const spawnTab = async (title = null, cwd = null, shell = null, { strictCwd = false } = {}) => {
     // A terminal asked for while the store is starting — the empty pane's New
     // Terminal, a shortcut, the menu — is made once the start is over. Made
     // beside it, it was dropped when the restore put its layout in place, its
@@ -2089,14 +2137,22 @@ export const useTerminalStore = create((set, get, api) => {
 
       let ptySession;
       try {
-        ptySession = await spawnAt(startDir);
+        // Strict: the folder asked for itself (`startDirFor` hands back an
+        // asked one as it is, unless it names another machine), and a
+        // failure is the answer.
+        if (strictCwd && (typeof cwd !== 'string' || startDir !== cwd.trim())) {
+          throw new Error(`not a folder a terminal can start in: ${cwd}`);
+        }
+        ptySession = await (strictCwd
+          ? spawnPty({ cols: 80, rows: 24, cwd: startDir, shell: shellSpec, strict_cwd: true })
+          : spawnAt(startDir));
       } catch (err) {
         // A directory can exist and still refuse the shell — no permission to
         // enter it, a path too long for Windows. The backend only checks that
         // it IS a directory, so the spawn is where that surfaces. A missing
         // directory already falls back; an unusable one does the same, rather
         // than a setting pointing there costing every new terminal.
-        if (startDir === null) throw err;
+        if (startDir === null || strictCwd) throw err;
         console.warn(`[TerminalStore] Could not start a terminal in "${startDir}" — using the default directory:`, err);
         ptySession = await spawnAt(null);
       }
@@ -2656,6 +2712,26 @@ export const useTerminalStore = create((set, get, api) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, agent, agentResumeOffered: true, agentTyped: null } : t)),
     }));
+  };
+
+  /**
+   * What a Resume about to type `command` for `agent` in `tabId` types
+   * instead when it is `claude --resume <id>` of a conversation Claude Code
+   * never saved (`claudeConversationSaved` false): a new conversation,
+   * `startCommand('claude')` — `{ agent, command }` — and otherwise the same.
+   * Asked now, right before typing, not when the offer was made: a
+   * conversation saved since is still resumed. Null when the terminal went,
+   * or something else took it, while it was asked: then nothing is typed.
+   */
+  const unlessNeverSaved = async (tabId, agent, command) => {
+    if (agent?.kind !== 'claude' || !isSessionIdFor('claude', agent.sessionId) || command !== resumeCommand(agent)) {
+      return { agent, command };
+    }
+    const shell = get().tabs.find((t) => t.id === tabId)?.sessionId;
+    const saved = await claudeConversationSaved(agent.sessionId);
+    const now = get().tabs.find((t) => t.id === tabId);
+    if (!now || now.sessionId !== shell || now.exited || now.agent !== agent) return null;
+    return saved === false ? startCommand('claude') : { agent, command };
   };
 
   /**
@@ -5236,24 +5312,37 @@ export const useTerminalStore = create((set, get, api) => {
       // createTab({ title, paneId, groupId }), or createTab('Title', { paneId,
       // groupId }). A caller-supplied paneId/groupId targets that pane (and
       // brings its group on screen) instead of whatever is active — see
-      // TerminalSplitContainer's per-pane "+" button.
+      // TerminalSplitContainer's per-pane "+" button. `cwd` starts it in that
+      // folder rather than where a new terminal starts (`startDirFor`) — a
+      // resume from the agent session history (`resumeFromHistory`), which
+      // also asks `strictCwd: true`: there or nowhere (`spawnTab`), null
+      // when it cannot start there.
       let title = null;
       let paneId = null;
       let groupId = null;
       let shell = null;
+      let cwd = null;
+      let strictCwd = false;
       if (titleOrOptions && typeof titleOrOptions === 'object') {
         title = titleOrOptions.title ?? null;
         paneId = titleOrOptions.paneId ?? null;
         groupId = titleOrOptions.groupId ?? null;
         shell = titleOrOptions.shell ?? null;
+        cwd = titleOrOptions.cwd ?? null;
+        strictCwd = titleOrOptions.strictCwd === true;
       } else {
         title = titleOrOptions;
         paneId = options?.paneId ?? null;
         groupId = options?.groupId ?? null;
         shell = options?.shell ?? null;
+        cwd = options?.cwd ?? null;
+        strictCwd = options?.strictCwd === true;
       }
 
-      const newTab = await spawnTab(title, null, shell);
+      const asked = typeof cwd === 'string' && cwd.trim() ? cwd : null;
+      // Strict with no folder asked: nowhere to be strict about.
+      if (strictCwd && asked === null) return null;
+      const newTab = await spawnTab(title, asked, shell, { strictCwd });
       if (!newTab) return null;
 
       set((state) => {
@@ -5480,6 +5569,17 @@ export const useTerminalStore = create((set, get, api) => {
      * `choice` is a pick from the banner's list (`chosenResume`): refused,
      * with a notice naming the terminal, when another terminal already has
      * it (`takenByOther`). Resolves with whether a command was typed.
+     *
+     * A Claude Code conversation by id is first asked about, right before it
+     * would be typed (`claudeConversationSaved`, src/lib/claudeConversations.js):
+     * one Claude Code never saved — the terminal was quit before a first
+     * message was sent — is never typed as `claude --resume <id>`, which can
+     * only fail ("No conversation found with session ID"). A NEW conversation
+     * is typed in its place, on the same schedule, exactly as New Claude Code
+     * Terminal types one (`startCommand`); it becomes the terminal's record,
+     * the terminal says why (NEVER_SAVED_NOTE), and `onAgentConversationReplaced`
+     * is told. When it cannot be told — the lookup failed, or took longer
+     * than CLAUDE_LOOKUP_TIMEOUT_MS — the resume is typed as it always was.
      */
     resumeAgent: async (tabId, choice = null) => {
       const targetId = tabId || get().activeTabId;
@@ -5531,10 +5631,173 @@ export const useTerminalStore = create((set, get, api) => {
         if (!notifyTerminal(targetId, why)) console.warn(`[TerminalStore] ${why}`);
         return false;
       }
+      const typed = await unlessNeverSaved(targetId, agent, command);
+      if (!typed) return false;
+      const fresh = typed.agent !== agent;
+      if (fresh && !notifyTerminal(targetId, NEVER_SAVED_NOTE)) console.warn(`[TerminalStore] ${NEVER_SAVED_NOTE}`);
       if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
-      recordAgent(targetId, agent, readiness === 'ready');
-      await get().writeRaw(targetId, `${command}\r`);
+      recordAgent(targetId, typed.agent, readiness === 'ready');
+      await get().writeRaw(targetId, `${typed.command}\r`);
+      if (fresh) {
+        conversationReplaced({
+          tabId: targetId,
+          kind: 'claude',
+          from: agent.sessionId,
+          to: typed.agent.sessionId,
+          reason: 'neverSaved',
+        });
+      }
       return true;
+    },
+
+    /**
+     * What the last `resumeFromHistory` that did not open a terminal had to
+     * say — `{ kind, text, key, tabId, seq }`, for the side bar or the
+     * palette to show — or null. `kind` is the outcome (see there).
+     */
+    agentHistoryNotice: null,
+
+    dismissAgentHistoryNotice: () => set({ agentHistoryNotice: null }),
+
+    /**
+     * Put up a notice about the agent session history that no pick made —
+     * a clear that failed (agentHistoryStore.js, kind 'clearFailed').
+     */
+    showAgentHistoryNotice: (kind, text) =>
+      set({ agentHistoryNotice: { kind, text: String(text ?? ''), key: null, tabId: null, seq: (noticeSeq += 1) } }),
+
+    /**
+     * Pick a conversation of the agent session history back up — the entry
+     * under `key` (src/lib/agentHistory.js) — in a NEW terminal, through the
+     * same `resumeAgent` a restored terminal uses: typed after the shell's
+     * first prompt, `claude --resume <id>` / `opencode -s <id>`, `claude
+     * --continue` for a claude entry with no id, an opencode one with none
+     * looked up by its title, never a conversation another terminal holds
+     * (`takenByOther`), `--continue` only when no other opencode terminal is
+     * within reach (`aloneInReach`), and the banner's list when it cannot
+     * tell.
+     *
+     * In order:
+     *  1. The entry is read from the file again (`agent_history_list`), and
+     *     rebuilt as a record through `serializeAgent` (`historyRecord`): one
+     *     whose id is not its agent's shape — the file is anyone's to write —
+     *     or of an agent this build does not know is refused, and nothing is
+     *     typed anywhere.
+     *  2. A terminal of this window that holds it — runs that conversation,
+     *     or offers it back (`holdersElsewhere`; for claude, its id in a
+     *     record; with no id, the same folder and title) — is switched to
+     *     instead, and no terminal is opened: two terminals in one
+     *     conversation is what all of this exists to prevent.
+     *  3. A folder that is not there any more (`fs_dir_exists`) opens
+     *     nothing either. The entry stays.
+     *  4. Otherwise a terminal opens in the entry's folder, in the active
+     *     pane, and becomes the active one; its record is the entry's,
+     *     offered (`agentResumeOffered`), and `resumeAgent` takes the offer.
+     *     In that folder or nowhere (`createTab`'s `strictCwd`): one that
+     *     cannot start there — gone since the look, or refusing the shell —
+     *     is 'failed', and nothing is typed anywhere.
+     *
+     * A notice an earlier pick left is taken down as this one goes ahead.
+     *
+     * Resolves with `{ outcome, tabId, typed, notice }`: `outcome` 'opened'
+     * (`typed` whether a command was typed — not when the banner asks),
+     * 'focused' (`tabId` the terminal switched to), 'missingFolder',
+     * 'refused', 'gone' (no such entry now), 'unreadable' (the history could
+     * not be read), 'busy' (this entry is being opened already) or 'failed'
+     * (no terminal could be started). Every outcome but 'opened' and 'busy'
+     * also sets `agentHistoryNotice`, and `notice` is that. So does an
+     * 'opened' that started a new Claude Code conversation because the one
+     * picked was never saved (`resumeAgent`): kind 'newConversation'.
+     */
+    resumeFromHistory: async (key) => {
+      const say = (outcome, text, tabId = null) => {
+        const notice = { kind: outcome, text, key, tabId, seq: (noticeSeq += 1) };
+        set({ agentHistoryNotice: notice });
+        return { outcome, tabId, typed: false, notice };
+      };
+      if (typeof key !== 'string' || resumingKeys.has(key)) return { outcome: 'busy', tabId: null, typed: false, notice: null };
+      resumingKeys.add(key);
+      // What an earlier pick said is not about this one: an outcome below
+      // that says something puts its own notice up; 'opened' leaves none.
+      if (get().agentHistoryNotice) set({ agentHistoryNotice: null });
+      try {
+        let entries;
+        try {
+          entries = await invoke('agent_history_list');
+        } catch (err) {
+          return say('unreadable', `The agent session history could not be read: ${err?.message ?? err}`);
+        }
+        const entry = Array.isArray(entries) ? entries.find((e) => e?.key === key) : undefined;
+        if (!entry) return say('gone', 'That agent session is not in the history any more.');
+        const record = historyRecord(entry);
+        if (!record) {
+          return say('refused', 'NexTerm does not resume that entry: its agent, folder or conversation id is not one it could have recorded.');
+        }
+        const label = agentLabel(record.kind);
+        const what = record.title ? `${label} conversation \u{201C}${record.title}\u{201D}` : `This ${label} conversation`;
+
+        // Who in this window has it already. Asked again after every wait.
+        const holderOf = () => {
+          const state = get();
+          if (record.sessionId && record.kind === 'opencode') return holdersElsewhere(state, null).get(record.sessionId) ?? null;
+          if (record.sessionId) return state.tabs.find((t) => t.agent?.kind === record.kind && t.agent.sessionId === record.sessionId) ?? null;
+          const os = useSystemStore.getState().os;
+          return state.tabs.find((t) => t.agent?.kind === record.kind && !isSessionIdFor(record.kind, t.agent.sessionId) && historyKeyOfTab(t, os) === key) ?? null;
+        };
+        const focus = (holder) => {
+          get().switchTab(holder.id);
+          const how = holder.agentResumeOffered ? 'is offered back in' : 'is already open in';
+          return say('focused', `${what} ${how} ${nameOf(holder)} \u{2014} switched to it rather than opening it twice.`, holder.id);
+        };
+        let holder = holderOf();
+        if (holder) return focus(holder);
+
+        let exists = false;
+        try {
+          exists = (await invoke('fs_dir_exists', { path: entry.cwd })) === true;
+        } catch (_) {
+          exists = false;
+        }
+        if (!exists) {
+          return say('missingFolder', `${entry.cwd} is not there any more, so ${label} cannot be resumed in it. The entry stays in the list.`);
+        }
+        holder = holderOf();
+        if (holder) return focus(holder);
+
+        // In the entry's folder or not at all (`strictCwd`): a terminal that
+        // fell back to another folder would resume that folder's
+        // conversation — `claude --continue` there is another one.
+        const tab = await get().createTab({ cwd: entry.cwd, strictCwd: true });
+        if (!tab) return say('failed', `No terminal could be started in ${entry.cwd}, so nothing was typed. The entry stays in the list.`);
+        // Offered, as a restored terminal's record is, so `resumeAgent` takes
+        // it with every rule it has. `agentHistoryKey` tells the history
+        // which entry this was (src/stores/agentHistoryStore.js).
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tab.id ? { ...t, agent: record, agentResumeOffered: true, agentResumeNotice: null, agentHistoryKey: key } : t
+          ),
+        }));
+        // A Claude Code conversation never saved is started anew instead
+        // (`resumeAgent`), and the pick says so, as the terminal does.
+        let replaced = null;
+        const stopHearing = onAgentConversationReplaced((event) => {
+          if (event.tabId === tab.id) replaced = event;
+        });
+        let typed;
+        try {
+          typed = await get().resumeAgent(tab.id, record.sessionId ? { sessionId: record.sessionId, title: record.title } : null);
+        } finally {
+          stopHearing();
+        }
+        if (replaced) {
+          const notice = { kind: 'newConversation', text: NEVER_SAVED_NOTE, key, tabId: tab.id, seq: (noticeSeq += 1) };
+          set({ agentHistoryNotice: notice });
+          return { outcome: 'opened', tabId: tab.id, typed, notice };
+        }
+        return { outcome: 'opened', tabId: tab.id, typed, notice: null };
+      } finally {
+        resumingKeys.delete(key);
+      }
     },
 
     /**

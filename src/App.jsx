@@ -7,6 +7,8 @@ import { CommandPalette } from './components/command/CommandPalette.jsx';
 import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { ControlLogDialog } from './components/common/ControlLogDialog.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
+import { AgentHistoryNotice } from './components/terminal/AgentHistoryNotice.jsx';
+import { AgentHistoryClearDialog } from './components/terminal/AgentHistoryClearDialog.jsx';
 import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
 import { ProjectCommandDialog } from './components/command/ProjectCommandDialog.jsx';
 import { ProjectCommandsTrustDialog } from './components/command/ProjectCommandsTrustDialog.jsx';
@@ -25,6 +27,7 @@ import { mockBridge } from './lib/ipc.js';
 import { startPerfMode } from './lib/perf/perfMode.js';
 import { startControl } from './lib/controlBridge.js';
 import { useControlLogStore } from './stores/controlLogStore.js';
+import { useAgentHistoryStore } from './stores/agentHistoryStore.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
@@ -57,6 +60,12 @@ export default function App() {
   // the terminals start (effects run in order): the backend wants the
   // settings ahead of the first shell, so that "off" holds from the first.
   useEffect(() => startControl(), []);
+
+  // The agent session history (AGENT SESSIONS, Resume Agent Session...):
+  // read, and the terminals' agents recorded into it from here on. Started
+  // here rather than when the store is imported, so a test suite that loads
+  // the store records nothing it did not ask for; stopped on unmount / HMR.
+  useEffect(() => useAgentHistoryStore.getState().start(), []);
 
   useEffect(() => {
     // What earlier sessions ran. Read once, before anything can record over
@@ -103,6 +112,9 @@ export default function App() {
       {/* Why a file that was asked for did not open */}
       <OpenFailureNotice />
 
+      {/* What picking an AGENT SESSIONS entry did instead of opening a terminal */}
+      <AgentHistoryNotice />
+
       {/* Global ⌘K Command Palette */}
       <CommandPalette />
 
@@ -114,6 +126,9 @@ export default function App() {
 
       {/* "Paste N lines?" before a multi-line paste a program would run line by line */}
       <PasteWarningDialog />
+
+      {/* "Clear Agent Session History?" — from the side bar's menu or the palette */}
+      <AgentHistoryClearDialog />
 
       {/* A folder's commands, reviewed before they are trusted, and the exact
           line of one, shown before it is typed */}

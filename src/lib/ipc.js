@@ -107,6 +107,308 @@ function mockUtf8Bytes(text) {
 }
 
 /**
+ * The agent session history, as the backend keeps it in
+ * `agent-sessions.json` (src-tauri/src/agent_history.rs, whose module doc
+ * says why each rule is there). Restated so the mock imports nothing of the
+ * app's, and held to the backend by tests/adversarial/agent_history_contract.test.js,
+ * which replays what `cargo test` recorded the backend answering
+ * (tests/fixtures/agent-history.json). Every constant is the backend's.
+ *
+ * The mock keeps the file's TEXT under MOCK_AGENT_HISTORY_KEY in the page's
+ * storage — a memory stand-in without one — so a suite can delete it or
+ * write garbage into it (`agentHistoryDeleteFile`, `agentHistoryCorruptFile`)
+ * as a user could the file. There are no links, locks, temporary files or
+ * bytes that are not UTF-8 here; a lone surrogate stands in for the last.
+ * `agentHistoryHoldAsides` stands in for another program holding the files
+ * moved aside open, which a clear then cannot delete.
+ *
+ * Where JSON.parse and serde_json read a text differently, the mock reads it
+ * as the backend does: an escaped lone surrogate (`"\ud800"`, in a value or a
+ * key) and nesting past MOCK_AGENT_HISTORY_MAX_DEPTH make it "not JSON", so
+ * the file is moved aside; `-0` is a float to serde_json, so no time and no
+ * version. The contract replays each of these.
+ *
+ * Known difference, the one left: the backend refuses a time or a version
+ * written with a fraction or an exponent (`5.0`, `1e3`, `1E3`), which
+ * JSON.parse cannot tell from `5` and `1000`; the mock keeps such an entry.
+ * Only a hand-edited file can hold one, and the page checks every entry
+ * again before it types anything (`historyRecord`).
+ */
+const MOCK_AGENT_HISTORY_KEY = 'nexterm.mock.agentHistory';
+const MOCK_AGENT_HISTORY_FILE = 'agent-sessions.json';
+const MOCK_AGENT_HISTORY_VERSION = 1;
+const MOCK_AGENT_HISTORY_CAP = 200;
+const MOCK_AGENT_HISTORY_MAX_READ_BYTES = 1024 * 1024;
+const MOCK_AGENT_HISTORY_KEEP_BAD = 3;
+const MOCK_AGENT_HISTORY_MAX_CWD_BYTES = 4096;
+const MOCK_AGENT_HISTORY_MAX_TITLE_CHARS = 200;
+const MOCK_AGENT_HISTORY_MAX_OTHER_ID_CHARS = 128;
+const MOCK_AGENT_HISTORY_NEWER = 'The agent session history was written by a newer NexTerm';
+const MOCK_AGENT_HISTORY_INVALID = 'Not a valid agent session';
+const MOCK_AGENT_HISTORY_COPIES_LEFT = 'The agent session history was emptied, but';
+/** `BAD_AHEAD_MS`: a name moved aside further ahead of the clock than this orders nothing. */
+const MOCK_AGENT_HISTORY_BAD_AHEAD_MS = 24 * 60 * 60 * 1000;
+/** serde_json's recursion limit: arrays and objects inside each other, the file's object included. */
+const MOCK_AGENT_HISTORY_MAX_DEPTH = 127;
+/** `is_kind`: ASCII, no `u` flag needed. */
+const MOCK_AGENT_KIND = /^[a-z][a-z0-9-]{0,31}$/;
+/** The two id shapes the backend knows — src/lib/agents.js `CLAUDE_SESSION_ID` and `OPENCODE_SESSION_ID`. */
+const MOCK_AGENT_SESSION_IDS = new Map([
+  ['claude', /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/],
+  ['opencode', /^ses_[0-9A-Za-z]{8,64}$/],
+]);
+/** `refused_char`: C0, DEL, C1, the line and paragraph separators, the bidi controls. */
+const MOCK_AGENT_REFUSED_CHAR = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+/** `is_absolute`: `/…`, `\\…`, or a drive letter and a separator. */
+const MOCK_AGENT_ABSOLUTE = /^(?:\/|\\\\|[A-Za-z]:[\\/])/;
+
+/**
+ * Claude Code's own record of its conversations, as `claude_conversations`
+ * reads it (src-tauri/src/claude_conversations.rs, whose module doc says
+ * why): at most MOCK_CLAUDE_MAX_IDS ids a call, each checked to be a Claude
+ * Code session id before anything is looked up, and for each one
+ * `{ sessionId, saved, title }` — `saved` true when a transcript is there;
+ * false only when the projects folder holds none AND Claude Code's
+ * `session-env/<id>` marker folder is there (the session started, and saved
+ * nothing); null in every other case;
+ * `title` the newest `ai-title` record's `aiTitle`, else the newest
+ * `last-prompt` record's `lastPrompt`, a string that is not blank, cut to
+ * MOCK_CLAUDE_MAX_TITLE_CHARS characters.
+ *
+ * The mock's transcripts are `mockBridge.claudeTranscripts`: null for no
+ * `projects` folder (every answer null — the default, so a suite that does
+ * not set it resumes with `--resume` as before), or `{ [sessionId]: records }`
+ * with `records` a transcript's records oldest first, as objects, or null for
+ * one that is there but not read (a link). The session markers are
+ * `mockBridge.claudeSessionMarkers`, the ids whose `session-env/<id>` is a
+ * real folder (none by default). What the mock does not have: bytes,
+ * so neither the 256 KiB window nor a cut first line — the backend's own tests
+ * cover those.
+ */
+const MOCK_CLAUDE_MAX_IDS = 200;
+const MOCK_CLAUDE_MAX_TITLE_CHARS = 1000;
+const MOCK_CLAUDE_TOO_MANY = 'At most 200 Claude Code conversations can be looked up at once';
+
+/** `newest_title`: the newest ai-title, else the newest last-prompt. */
+function mockClaudeTitle(records) {
+  const text = (record, type, field) => {
+    if (!record || typeof record !== 'object' || record.type !== type) return null;
+    const value = record[field];
+    return typeof value === 'string' && value.trim() !== '' ? Array.from(value).slice(0, MOCK_CLAUDE_MAX_TITLE_CHARS).join('') : null;
+  };
+  const newest = (type, field) => {
+    for (let at = records.length - 1; at >= 0; at -= 1) {
+      const found = text(records[at], type, field);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  return newest('ai-title', 'aiTitle') ?? newest('last-prompt', 'lastPrompt');
+}
+
+/** A field of `entry` as the backend reads it: missing is null. */
+function mockHistoryField(entry, name) {
+  return Object.prototype.hasOwnProperty.call(entry, name) ? entry[name] : null;
+}
+
+/** `is_session_id_for`. */
+function mockHistoryIdFits(kind, id) {
+  const pattern = MOCK_AGENT_SESSION_IDS.get(kind);
+  if (pattern) return pattern.test(id);
+  const chars = Array.from(id).length;
+  return chars >= 1 && chars <= MOCK_AGENT_HISTORY_MAX_OTHER_ID_CHARS && !MOCK_AGENT_REFUSED_CHAR.test(id);
+}
+
+/** `key_of`. */
+function mockHistoryKey(kind, sessionId, cwd, title) {
+  return sessionId !== null ? `${kind}:${sessionId}` : `${kind}:~${cwd}\u0000${title ?? ''}`;
+}
+
+/**
+ * `entry_from`: `{ entry }` with its key made from its fields, or `{ why }`
+ * — the same questions in the same order as the backend, with its answers.
+ */
+function mockHistoryEntry(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return { why: 'it is not an object' };
+  const field = (name) => mockHistoryField(value, name);
+  // `-0` is a float to serde_json: no time.
+  const isTime = (v) => Number.isSafeInteger(v) && v >= 0 && !Object.is(v, -0);
+  const kind = field('kind');
+  if (typeof kind !== 'string' || !MOCK_AGENT_KIND.test(kind)) return { why: "its kind is not an agent's name" };
+  const sessionId = field('sessionId');
+  if (sessionId !== null && (typeof sessionId !== 'string' || !mockHistoryIdFits(kind, sessionId))) {
+    return { why: `its session id is not one that ${kind} gives a conversation` };
+  }
+  const cwd = field('cwd');
+  if (typeof cwd !== 'string' || cwd === '' || mockUtf8Bytes(cwd) > MOCK_AGENT_HISTORY_MAX_CWD_BYTES
+    || !MOCK_AGENT_ABSOLUTE.test(cwd) || MOCK_AGENT_REFUSED_CHAR.test(cwd)) {
+    return { why: 'its folder is not an absolute path' };
+  }
+  const title = field('title');
+  if (title !== null) {
+    const chars = typeof title === 'string' ? Array.from(title).length : 0;
+    if (chars < 1 || chars > MOCK_AGENT_HISTORY_MAX_TITLE_CHARS || MOCK_AGENT_REFUSED_CHAR.test(title)) {
+      return { why: `its title is not one line of at most ${MOCK_AGENT_HISTORY_MAX_TITLE_CHARS} characters` };
+    }
+  }
+  const startedAt = field('startedAt');
+  if (!isTime(startedAt)) return { why: 'its startedAt is not a time' };
+  const lastUsedAt = field('lastUsedAt');
+  if (!isTime(lastUsedAt)) return { why: 'its lastUsedAt is not a time' };
+  const endedAt = field('endedAt');
+  if (endedAt !== null && !isTime(endedAt)) return { why: 'its endedAt is not a time' };
+  const endReason = field('endReason');
+  if (endReason !== null && endReason !== 'exited' && endReason !== 'closed') {
+    return { why: 'its endReason is neither exited nor closed' };
+  }
+  if ((endedAt === null) !== (endReason === null)) {
+    return { why: 'it has an endedAt without an endReason, or an endReason without an endedAt' };
+  }
+  return {
+    entry: {
+      key: mockHistoryKey(kind, sessionId, cwd, title),
+      kind, sessionId, cwd, title, startedAt, lastUsedAt, endedAt, endReason,
+    },
+  };
+}
+
+/** Most recently used first; stable, as the backend's sort is. */
+function mockHistorySort(entries) {
+  return entries.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+}
+
+/** `merge`: `incoming`, then the entry under its key, then the one it replaces. */
+function mockHistoryMerge(incoming, others) {
+  const all = [incoming, ...others];
+  const newestFirst = mockHistorySort([...all]);
+  const newest = newestFirst[0];
+  const title = incoming.sessionId !== null
+    ? (newestFirst.find((e) => e.title !== null)?.title ?? null)
+    : incoming.title;
+  return {
+    ...incoming,
+    title,
+    startedAt: Math.min(...all.map((e) => e.startedAt)),
+    lastUsedAt: newest.lastUsedAt,
+    endedAt: newest.endedAt,
+    endReason: newest.endReason,
+  };
+}
+
+/** `valid_entries`. */
+function mockHistoryValid(values) {
+  const entries = [];
+  for (const value of values) {
+    const { entry } = mockHistoryEntry(value);
+    if (entry && !entries.some((e) => e.key === entry.key)) entries.push(entry);
+  }
+  return mockHistorySort(entries).slice(0, MOCK_AGENT_HISTORY_CAP);
+}
+
+/**
+ * Whether serde_json reads what JSON.parse made of a text: no string or key
+ * holding a lone surrogate — escaped, as the text itself is well formed —
+ * and no deeper than MOCK_AGENT_HISTORY_MAX_DEPTH.
+ */
+function mockHistorySerdeReads(doc) {
+  const wellFormed = (s) => typeof s.isWellFormed !== 'function' || s.isWellFormed();
+  const stack = [[doc, 1]];
+  while (stack.length > 0) {
+    const [value, depth] = stack.pop();
+    if (typeof value === 'string') {
+      if (!wellFormed(value)) return false;
+      continue;
+    }
+    if (value === null || typeof value !== 'object') continue;
+    if (depth > MOCK_AGENT_HISTORY_MAX_DEPTH) return false;
+    for (const [key, inner] of Object.entries(value)) {
+      if (!Array.isArray(value) && !wellFormed(key)) return false;
+      stack.push([inner, depth + 1]);
+    }
+  }
+  return true;
+}
+
+/** `parse` and the size check before it: `{ why }` for a file to move aside, or `{ version, entries }`. */
+function mockHistoryParse(text) {
+  if (mockUtf8Bytes(text) > MOCK_AGENT_HISTORY_MAX_READ_BYTES) {
+    return { why: `it is larger than ${MOCK_AGENT_HISTORY_MAX_READ_BYTES} bytes` };
+  }
+  if (typeof text.isWellFormed === 'function' && !text.isWellFormed()) return { why: 'it is not UTF-8 text' };
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (_) {
+    return { why: 'it is not JSON' };
+  }
+  if (!mockHistorySerdeReads(doc)) return { why: 'it is not JSON' };
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return { why: 'it is not an agent session history' };
+  const version = mockHistoryField(doc, 'version');
+  if (!Number.isSafeInteger(version) || version < 1) return { why: 'it has no format version' };
+  const entries = mockHistoryField(doc, 'entries');
+  if (version === MOCK_AGENT_HISTORY_VERSION && !Array.isArray(entries)) return { why: 'it has no list of entries' };
+  return { version, entries: mockHistoryValid(Array.isArray(entries) ? entries : []) };
+}
+
+/** The file's text for `entries`, byte for byte as the backend writes it (`document_text`). */
+function mockHistoryText(entries) {
+  return `${JSON.stringify({ version: MOCK_AGENT_HISTORY_VERSION, entries }, null, 2)}\n`;
+}
+
+/**
+ * `fitted_text`: `{ entries, text }` with the least recently used dropped —
+ * never the one keyed `written` — until the text is within the read cap.
+ * The fewest that make it fit, as the backend finds them.
+ */
+function mockHistoryFitted(entries, written) {
+  const fits = (list) => mockUtf8Bytes(mockHistoryText(list)) <= MOCK_AGENT_HISTORY_MAX_READ_BYTES;
+  const droppable = entries.map((e, at) => (e.key === written ? -1 : at)).filter((at) => at !== -1).reverse();
+  if (fits(entries) || droppable.length === 0) return { entries, text: mockHistoryText(entries) };
+  const without = (n) => {
+    const gone = new Set(droppable.slice(0, n));
+    return entries.filter((_, at) => !gone.has(at));
+  };
+  let low = 1;
+  let high = droppable.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (fits(without(middle))) high = middle;
+    else low = middle + 1;
+  }
+  const kept = without(low);
+  return { entries: kept, text: mockHistoryText(kept) };
+}
+
+/** The time in the name of a file moved aside (`bad_ms`): none past the largest safe integer. */
+function mockHistoryBadMs(name) {
+  const match = /^agent-sessions\.json\.bad-([0-9]{1,20})$/.exec(name);
+  const ms = match ? Number(match[1]) : null;
+  return ms !== null && ms <= Number.MAX_SAFE_INTEGER ? ms : null;
+}
+
+/** `copies_left`: why a clear fails that emptied the history but left `left` copies of it. */
+function mockHistoryCopiesLeft(left) {
+  const copies = left === 1 ? '1 damaged copy of it' : `${left} damaged copies of it`;
+  return `${MOCK_AGENT_HISTORY_COPIES_LEFT} ${copies} kept aside could not be deleted. Try again; or delete ${MOCK_AGENT_HISTORY_FILE}.bad-* in NexTerm's data folder`;
+}
+
+/**
+ * What Tauri hands the command as `entry`: what survives the trip as JSON,
+ * or its refusal — missing, or a string with a lone surrogate, which
+ * serde_json refuses before any command runs.
+ */
+function mockHistoryWireEntry(command, args) {
+  if (args?.entry === undefined) throw mockInvalidArgs(command, 'entry', `command ${command} missing required key entry`);
+  const wellFormed = (v) => {
+    if (typeof v === 'string') return typeof v.isWellFormed !== 'function' || v.isWellFormed();
+    if (v === null || typeof v !== 'object') return true;
+    return Object.entries(v).every(([k, inner]) => wellFormed(k) && wellFormed(inner));
+  };
+  if (!wellFormed(args.entry)) throw mockInvalidArgs(command, 'entry', 'unexpected end of hex escape (a lone surrogate)');
+  return JSON.parse(JSON.stringify(args.entry));
+}
+
+/**
  * The control API's error codes (src-tauri/src/control/protocol.rs, `Code`;
  * the page's `CONTROL_ERROR` in src/lib/controlScope.js is the same set).
  */
@@ -331,6 +633,20 @@ class BrowserMockBridge {
     // `MOCK_SCROLLBACK_KEY` holds. Gone with the page, as nothing else
     // could keep it.
     this.scrollbackMemory = {};
+    // The agent session history's file while the page has no storage to
+    // keep it in: its text, or null when there is no file. The files the
+    // backend would have moved aside (`agent-sessions.json.bad-<ms>`), as
+    // `{ name, text }` oldest first, at most 3 — kept for the life of the
+    // page only. And whether the refusal of a newer file was logged.
+    this.agentHistoryMemory = null;
+    this.agentHistoryBad = [];
+    this.agentHistoryNewerSaid = false;
+    // Claude Code's transcripts, as `claude_conversations` reads them: null
+    // for no `projects` folder (every answer "cannot tell"), or by session id
+    // the records of each, oldest first — null for one that is there but not
+    // read. See MOCK_CLAUDE_MAX_IDS.
+    this.claudeTranscripts = null;
+    this.claudeSessionMarkers = [];
     // The control API (stage 7, src-tauri/src/control/). There is no
     // listener here — no socket, no pipe, no tokens: the suites hand the
     // page a request with `controlRequest`, as the backend would once it had
@@ -446,12 +762,127 @@ class BrowserMockBridge {
   }
 
   /**
+   * The agent session history's file: `{ text, kept }`, `text` null when
+   * there is none, `kept` when it lives in the page's storage. As
+   * `scrollbackLoad`, every look at the storage is in a try.
+   */
+  agentHistoryRead() {
+    try {
+      if (typeof localStorage === 'undefined' || localStorage === null) {
+        return { text: this.agentHistoryMemory, kept: false };
+      }
+      return { text: localStorage.getItem(MOCK_AGENT_HISTORY_KEY), kept: true };
+    } catch (_) {
+      return { text: this.agentHistoryMemory, kept: false };
+    }
+  }
+
+  /** Replace the file with `text` (null: delete it). A storage that will not take it fails the command, as a full disk fails the backend's write. */
+  agentHistoryWriteText(text, kept) {
+    if (!kept) {
+      this.agentHistoryMemory = text;
+      return;
+    }
+    try {
+      if (text === null) localStorage.removeItem(MOCK_AGENT_HISTORY_KEY);
+      else localStorage.setItem(MOCK_AGENT_HISTORY_KEY, text);
+    } catch (err) {
+      throw new Error(`The agent session history could not be saved: ${err?.message ?? err}`);
+    }
+  }
+
+  /** Test hook: the file's text as it is now, or null when there is none. */
+  agentHistoryFile() {
+    return this.agentHistoryRead().text;
+  }
+
+  /** Test hook: the user deletes the file, while the app runs or while it is closed. */
+  agentHistoryDeleteFile() {
+    this.agentHistoryWriteText(null, this.agentHistoryRead().kept);
+  }
+
+  /** Test hook: something writes `text` over the file — by default a history cut short mid-write. */
+  agentHistoryCorruptFile(text = '{"version":1,"entries":[{"kind":"claude","sessionId":"0f8f') {
+    this.agentHistoryWriteText(String(text), this.agentHistoryRead().kept);
+  }
+
+  /** Test hook: another program holds every file moved aside so far open — a clear cannot delete them. */
+  agentHistoryHoldAsides(held = true) {
+    for (const bad of this.agentHistoryBad) bad.heldOpen = held;
+  }
+
+  /** `set_aside`: the unreadable `text` moved aside, the newest KEEP_BAD kept, a new history started. */
+  agentHistorySetAside(text, why, kept) {
+    const now = Date.now();
+    const times = this.agentHistoryBad
+      .map((b) => mockHistoryBadMs(b.name))
+      .filter((ms) => ms !== null && ms <= now + MOCK_AGENT_HISTORY_BAD_AHEAD_MS);
+    const last = Math.max(-1, ...times);
+    const name = `${MOCK_AGENT_HISTORY_FILE}.bad-${Math.max(now, last + 1)}`;
+    this.agentHistoryBad.push({ name, text });
+    while (this.agentHistoryBad.length > MOCK_AGENT_HISTORY_KEEP_BAD) this.agentHistoryBad.shift();
+    console.warn(`[IPC Mock] The agent session history could not be read (${why}); it was moved aside to ${name}, and a new one was started`);
+    this.agentHistoryWriteText(mockHistoryText([]), kept);
+  }
+
+  /**
+   * `load`: `{ version, entries, kept }` — the file made when it is missing,
+   * moved aside and started again when it cannot be read.
+   */
+  agentHistoryLoad() {
+    const { text, kept } = this.agentHistoryRead();
+    if (text === null) {
+      this.agentHistoryWriteText(mockHistoryText([]), kept);
+      return { version: MOCK_AGENT_HISTORY_VERSION, entries: [], kept };
+    }
+    const parsed = mockHistoryParse(text);
+    if (parsed.why) {
+      this.agentHistorySetAside(text, parsed.why, kept);
+      return { version: MOCK_AGENT_HISTORY_VERSION, entries: [], kept };
+    }
+    return { ...parsed, kept };
+  }
+
+  /** `writable`: the entries to change, or the refusal of a newer file, logged once. */
+  agentHistoryWritable({ version, entries }) {
+    if (version === MOCK_AGENT_HISTORY_VERSION) return entries;
+    const why = `${MOCK_AGENT_HISTORY_NEWER} (format version ${version}); this one reads it and changes nothing in it`;
+    if (!this.agentHistoryNewerSaid) {
+      this.agentHistoryNewerSaid = true;
+      console.warn(`[IPC Mock] ${why}`);
+    }
+    throw new Error(why);
+  }
+
+  /**
    * What `fs_path_kinds` answers for one path: 'dir', 'file' or null, from
    * the virtual tree — the backend's rules (src-tauri/src/fs/reveal.rs): an
    * absolute path of a sane length, never one on another machine, and not
    * confined to the open folder. Outside the tree the mock knows the two
    * folders `fs_dir_exists` knows: the filesystem root and the home.
    */
+  /**
+   * Whether a terminal asked to start in `path` starts there
+   * (`Workspace::start_dir`): what `fs_dir_exists` answers, and what a
+   * `pty_spawn` with `strict_cwd` asks.
+   */
+  canStartIn(path) {
+    const wanted = String(path ?? '').trim();
+    if (!wanted) return false;
+    const root = this.root ?? '/workspace';
+    const target = resolvePath(root, wanted);
+    if (!wanted.startsWith('/') && target !== root && !target.startsWith(`${root}/`)) {
+      return false; // `..` out of the open folder, which `confine` refuses
+    }
+    // Outside the virtual tree the mock knows two directories that every
+    // machine has: the filesystem root, and the home it reports.
+    if (target === '/' || target === this.systemInfo.home_dir) return true;
+    return (
+      this.directories.has(target)
+      || [...this.files.keys()].some((f) => f.startsWith(target + '/'))
+    );
+  }
+
   kindOf(path) {
     if (typeof path !== 'string' || !path) return null;
     if (new TextEncoder().encode(path).length > MOCK_MAX_KIND_PATH_BYTES) return null;
@@ -611,6 +1042,11 @@ class BrowserMockBridge {
       // 1. pty_spawn
       case 'pty_spawn': {
         const { cols = 80, rows = 24, shell = '/bin/zsh' } = args;
+        // `strict_cwd`: that directory or no terminal at all, as the
+        // backend's `Workspace::strict_spawn_dir` — no fallback.
+        if (args.strict_cwd === true && !this.canStartIn(args.cwd)) {
+          throw new Error(`No terminal can start in ${JSON.stringify(String(args.cwd ?? ''))}: it is not a folder on this machine`);
+        }
         // `null` is how the store says "backend, you decide" — the real one
         // then uses the open folder. A default parameter only covers
         // `undefined`, so a null used to become the session's cwd, and the
@@ -847,20 +1283,7 @@ class BrowserMockBridge {
       // one `fs_set_root` last opened, else the virtual root `fs_get_root`
       // reports.
       case 'fs_dir_exists': {
-        const wanted = String(args?.path ?? '').trim();
-        if (!wanted) return false;
-        const root = this.root ?? '/workspace';
-        const target = resolvePath(root, wanted);
-        if (!wanted.startsWith('/') && target !== root && !target.startsWith(`${root}/`)) {
-          return false; // `..` out of the open folder, which `confine` refuses
-        }
-        // Outside the virtual tree the mock knows two directories that every
-        // machine has: the filesystem root, and the home it reports.
-        if (target === '/' || target === this.systemInfo.home_dir) return true;
-        return (
-          this.directories.has(target)
-          || [...this.files.keys()].some((f) => f.startsWith(target + '/'))
-        );
+        return this.canStartIn(args?.path);
       }
 
       // fs_path_kinds / fs_reveal_path — the names in a terminal's output
@@ -1358,6 +1781,33 @@ class BrowserMockBridge {
           .map(({ id, title, updated, created }) => ({ id, title, updated, created }));
       }
 
+      // 21b. claude_conversations — whether Claude Code saved each
+      // conversation, and the title it gave it, from its own transcripts
+      // (src-tauri/src/claude_conversations.rs). The mock reads
+      // `this.claudeTranscripts`; see MOCK_CLAUDE_MAX_IDS.
+      case 'claude_conversations': {
+        const ids = args?.ids;
+        if (ids === undefined) throw mockInvalidArgs(command, 'ids', `command ${command} missing required key ids`);
+        if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) {
+          throw mockInvalidArgs(command, 'ids', 'invalid type: expected a sequence of strings');
+        }
+        if (ids.length > MOCK_CLAUDE_MAX_IDS) throw new Error(MOCK_CLAUDE_TOO_MANY);
+        const claudeId = MOCK_AGENT_SESSION_IDS.get('claude');
+        const transcripts = this.claudeTranscripts;
+        return ids.map((sessionId) => {
+          if (!claudeId.test(sessionId) || !transcripts || typeof transcripts !== 'object') {
+            return { sessionId, saved: null, title: null };
+          }
+          if (!Object.prototype.hasOwnProperty.call(transcripts, sessionId)) {
+            const started = Array.isArray(this.claudeSessionMarkers) && this.claudeSessionMarkers.includes(sessionId);
+            return { sessionId, saved: started ? false : null, title: null };
+          }
+          const records = transcripts[sessionId];
+          if (!Array.isArray(records)) return { sessionId, saved: null, title: null };
+          return { sessionId, saved: true, title: mockClaudeTitle(records) };
+        });
+      }
+
       // 22. app_set_unsaved / app_close_ack / app_close_window / app_quit —
       // the backend keeps whether an editor tab is unsaved, holds a close or
       // a quit while one is and asks the page, waits only for a page that
@@ -1509,6 +1959,70 @@ class BrowserMockBridge {
         return count;
       }
 
+      // 24. agent_history_list / agent_history_upsert / agent_history_remove /
+      // agent_history_clear — the agent session history, one file in the
+      // app's local data folder (src-tauri/src/agent_history.rs). The mock
+      // keeps the file's text (MOCK_AGENT_HISTORY_KEY) with the backend's
+      // rules: made by the first operation that finds it missing, moved
+      // aside when it cannot be read, read only when newer; an entry
+      // checked field by field and keyed from its fields; merged per key and
+      // with the provisional entry `replaces` names; 200 at most, and never
+      // more than the 1 MiB it may be read back at, never the one just
+      // written going. An invalid entry is refused before the file is
+      // touched. Each answer is a copy: nothing the page holds is the
+      // mock's own.
+      case 'agent_history_list': {
+        return this.agentHistoryLoad().entries.map((e) => ({ ...e }));
+      }
+      case 'agent_history_upsert': {
+        const wire = mockHistoryWireEntry(command, args);
+        const replaces = args?.replaces ?? null;
+        if (replaces !== null) mockStringArg(command, args, 'replaces');
+        const { entry: incoming, why } = mockHistoryEntry(wire);
+        if (why) throw new Error(`${MOCK_AGENT_HISTORY_INVALID}: ${why}`);
+        const loaded = this.agentHistoryLoad();
+        const entries = this.agentHistoryWritable(loaded);
+        const take = (pick) => {
+          const at = entries.findIndex(pick);
+          return at === -1 ? [] : entries.splice(at, 1);
+        };
+        const others = take((e) => e.key === incoming.key);
+        if (replaces !== null && replaces !== incoming.key) {
+          others.push(...take((e) => e.key === replaces && e.sessionId === null && e.kind === incoming.kind));
+        }
+        const merged = mockHistoryMerge(incoming, others);
+        entries.unshift(merged);
+        mockHistorySort(entries);
+        while (entries.length > MOCK_AGENT_HISTORY_CAP) {
+          const at = entries.findLastIndex((e) => e.key !== merged.key);
+          if (at === -1) break;
+          entries.splice(at, 1);
+        }
+        this.agentHistoryWriteText(mockHistoryFitted(entries, merged.key).text, loaded.kept);
+        return { ...merged };
+      }
+      case 'agent_history_remove': {
+        const key = mockStringArg(command, args, 'key');
+        const loaded = this.agentHistoryLoad();
+        const entries = this.agentHistoryWritable(loaded);
+        const at = entries.findIndex((e) => e.key === key);
+        if (at === -1) return false;
+        entries.splice(at, 1);
+        this.agentHistoryWriteText(mockHistoryFitted(entries, null).text, loaded.kept);
+        return true;
+      }
+      case 'agent_history_clear': {
+        // The files moved aside go too: a cleared history leaves no copies.
+        // A refused clear (a newer file) touches neither. One held open
+        // (`agentHistoryHoldAsides`) stays, and the clear says so.
+        const loaded = this.agentHistoryLoad();
+        const entries = this.agentHistoryWritable(loaded);
+        this.agentHistoryWriteText(mockHistoryText([]), loaded.kept);
+        this.agentHistoryBad = this.agentHistoryBad.filter((b) => b.heldOpen === true);
+        if (this.agentHistoryBad.length > 0) throw new Error(mockHistoryCopiesLeft(this.agentHistoryBad.length));
+        return entries.length;
+      }
+
       default:
         throw new Error(`Unknown IPC command: ${command}`);
     }
@@ -1587,6 +2101,16 @@ export function pathKinds(paths) {
  */
 export function revealInFileManager(path) {
   return invoke('fs_reveal_path', { path });
+}
+
+/**
+ * For each of `ids`, Claude Code session ids (200 at most), whether Claude
+ * Code saved a conversation under it and the title it gave it, in order:
+ * `{ sessionId, saved: true|false|null, title: string|null }`
+ * (`claude_conversations`, src-tauri/src/claude_conversations.rs). Read-only.
+ */
+export function claudeConversations(ids) {
+  return invoke('claude_conversations', { ids });
 }
 
 const unwrap = (callback) => (evt) => callback(evt?.payload !== undefined ? evt.payload : evt);

@@ -105,6 +105,24 @@ in different languages and either one can be edited alone, and the symptom of
 drift is a menu that shows one key at launch and another a moment later, once
 the frontend pushes its own down.
 
+`cargo test` also writes `tests/fixtures/agent-history.json`: a set of
+scenarios run against the real agent session history
+(`src-tauri/src/agent_history.rs`). Each scenario records the commands, what
+each returned, the file's bytes after each one, and the `.bad-*` copies it
+moved aside. The scenarios cover the 200-entry cap, the 1 MiB size cap, moving
+damaged files aside (keep 3), refusing a newer version, and clear deleting the
+copies. They also cover every refusal case of the Rust unit test, both as a
+write and inside an otherwise valid file (dropped on read), and the text
+`JSON.parse` reads but serde_json does not (an escaped lone surrogate, nesting
+past 128 levels, `-0`). `tests/adversarial/agent_history_contract.test.js`
+(AH-*) replays each scenario against the browser mock's `agent_history_*`
+commands (`src/lib/ipc.js`) and requires the same results, the same bytes and
+the same copies. AH-02 checks that the scenarios the frontend relies on are
+present. Change one side and the replay fails until the other side matches.
+One difference is known and accepted: the backend refuses a time or version
+written as `5.0` or `1e3`, which the mock cannot tell from `5` and `1000`
+(see the note above `MOCK_AGENT_HISTORY_KEY` in `src/lib/ipc.js`).
+
 The fixtures are gitignored: they are per-platform output, not source. Run the
 JS suites without them and those cases report `SKIPPED`, never `passed`. In CI
 they fail outright, because there `cargo test` always runs first and a missing

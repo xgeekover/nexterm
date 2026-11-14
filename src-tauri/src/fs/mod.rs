@@ -885,6 +885,18 @@ impl Workspace {
             .unwrap_or_else(home_dir)
     }
 
+    /// Where a terminal asked to start in `requested`, and nowhere else,
+    /// starts: `spawn_dir` without the fallback, for a caller that would
+    /// rather have no terminal than one in another folder — a resume from the
+    /// agent session history types a command that means "this folder's
+    /// conversation" (`pty_spawn`'s `strict_cwd`).
+    pub fn strict_spawn_dir(&self, requested: Option<&str>) -> Result<PathBuf, String> {
+        let asked = requested.unwrap_or("");
+        requested
+            .and_then(|path| self.start_dir(path))
+            .ok_or_else(|| format!("No terminal can start in {asked:?}: it is not a folder on this machine"))
+    }
+
     /// Whether a terminal asked to start in `requested` would start there
     /// rather than fall back — what the Settings check (`fs_dir_exists`)
     /// reports about a path the user has typed.
@@ -1704,6 +1716,34 @@ mod confine_tests {
         // open is exactly that case.
         let temp = std::env::temp_dir().canonical().unwrap();
         assert!(workspace.can_start_in(&temp.to_string_lossy()));
+    }
+
+    /// A resume from the agent session history asks for its folder and no
+    /// other (`pty_spawn`'s `strict_cwd`): where `spawn_dir` falls back,
+    /// `strict_spawn_dir` refuses, and where it starts, the same folder.
+    #[test]
+    fn a_strict_spawn_starts_in_the_folder_asked_for_or_not_at_all() {
+        let root = temp_root("strict");
+        let elsewhere = temp_root("strict-elsewhere");
+        let workspace = Workspace::new();
+        workspace.set_root(&root).unwrap();
+
+        let path = elsewhere.to_string_lossy().to_string();
+        assert_eq!(workspace.strict_spawn_dir(Some(&path)), Ok(workspace.spawn_dir(Some(&path))), "a folder: the same as ever");
+        assert_eq!(workspace.strict_spawn_dir(Some("inner")), Ok(root.join("inner")), "relative: in the open folder");
+
+        let gone = elsewhere.join("gone-since");
+        let file = root.join("inner").join("file.txt");
+        let doubled = format!("//{}", path.trim_start_matches(['/', '\\']));
+        for asked in [gone.to_string_lossy().to_string(), file.to_string_lossy().to_string(), doubled, " ".to_string(), "src".to_string()] {
+            assert_eq!(workspace.spawn_dir(Some(&asked)), root, "premise: {asked:?} falls back");
+            let refused = workspace.strict_spawn_dir(Some(&asked)).unwrap_err();
+            assert!(refused.starts_with("No terminal can start in "), "{asked:?}: {refused}");
+        }
+        assert!(workspace.strict_spawn_dir(None).is_err(), "nothing asked: nowhere");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
     }
 
     fn temp_store(tag: &str) -> PathBuf {

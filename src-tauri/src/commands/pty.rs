@@ -9,6 +9,13 @@ use crate::AppState;
 /// `Workspace::spawn_dir` for where it starts when that one will not do. The
 /// chosen directory comes back as `PtySessionInfo::cwd`.
 ///
+/// `strict_cwd: true` asks for that directory or no terminal: refused when it
+/// is not one a terminal can start in (`Workspace::strict_spawn_dir`), and
+/// the shell killed when it did not start there after all — the folder gone
+/// in between. A resume from the agent session history asks this way, as
+/// what it types next means "this folder's conversation". Absent or false:
+/// the fallback above, as for every other terminal.
+///
 /// `async` here does not make the body asynchronous — it tells Tauri to run
 /// this command off the IPC thread. Spawning forks a shell and writes the
 /// shell-integration rc files, which is not work to do on the thread that
@@ -23,13 +30,27 @@ pub fn pty_spawn(
     // `shell` is a well-known name ("cmd", "powershell", "pwsh", "zsh", …) or a
     // path; empty or absent means the platform default.
     shell: Option<String>,
+    strict_cwd: Option<bool>,
 ) -> Result<PtySessionInfo, String> {
-    let cwd = state
-        .workspace
-        .spawn_dir(cwd.as_deref())
-        .to_string_lossy()
-        .to_string();
-    state.pty_manager.spawn(app, cols, rows, Some(cwd), shell)
+    if strict_cwd != Some(true) {
+        let cwd = state
+            .workspace
+            .spawn_dir(cwd.as_deref())
+            .to_string_lossy()
+            .to_string();
+        return state.pty_manager.spawn(app, cols, rows, Some(cwd), shell);
+    }
+    let dir = state.workspace.strict_spawn_dir(cwd.as_deref())?;
+    let info = state
+        .pty_manager
+        .spawn(app, cols, rows, Some(dir.to_string_lossy().to_string()), shell)?;
+    // The manager starts the shell without a directory when the one given is
+    // no longer one by then, and says so with no `cwd`.
+    if info.cwd.is_none() {
+        let _ = state.pty_manager.kill(&info.session_id);
+        return Err(format!("No terminal can start in {}: it is not a folder any more", dir.display()));
+    }
+    Ok(info)
 }
 
 /// Stays synchronous on purpose: the manager hands the bytes to the session's

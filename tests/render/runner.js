@@ -88,10 +88,12 @@ const { useBranchStore } = await import('../../src/stores/branchStore.js');
 const { useProjectCommandsStore } = await import('../../src/stores/projectCommandsStore.js');
 const { useSystemStore } = await import('../../src/stores/systemStore.js');
 const { useControlLogStore } = await import('../../src/stores/controlLogStore.js');
+const { useAgentHistoryStore } = await import('../../src/stores/agentHistoryStore.js');
+const { useAgentHistoryPromptStore } = await import('../../src/stores/agentHistoryPromptStore.js');
 const { default: App } = await import('../../src/App.jsx');
 const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -4294,6 +4296,254 @@ scenario(
   (html) => {
     const pane = paneMarkup(html, 'pane-1');
     expectThat(/data-attention-ring="flash"/.test(pane ?? ''), `the pane does not flash for its tab behind: ${String(pane).slice(0, 300)}`);
+  }
+);
+
+// ---- The agent session history: AGENT SESSIONS and Resume Agent Session… ----------
+
+const CLAUDE_ID = 'd4bef4d0-c043-40ef-b157-640fb31ac0ea';
+/** An entry as `agent_history_list` answers, last used `minutesAgo` minutes ago. */
+const historyEntry = (key, extra = {}, minutesAgo = 5) => ({
+  key,
+  kind: 'opencode',
+  sessionId: null,
+  cwd: '/work/app',
+  title: null,
+  startedAt: Date.now() - (minutesAgo + 60) * 60e3,
+  lastUsedAt: Date.now() - minutesAgo * 60e3,
+  endedAt: null,
+  endReason: null,
+  ...extra,
+});
+const HISTORY = [
+  historyEntry('k-open', { sessionId: 'ses_abcdefgh1234567', title: 'Fix the login flow', cwd: '/work/api' }, 5),
+  historyEntry('k-claude', { kind: 'claude', sessionId: CLAUDE_ID, cwd: '/work/web' }, 120),
+  historyEntry('k-free', { cwd: '/work/tools' }, 3 * 24 * 60),
+];
+
+/** The AGENT SESSIONS section's markup, up to the context menu after it. */
+function agentSessionsSection(html) {
+  const at = html.indexOf('data-agent-sessions=""');
+  return at === -1 ? null : html.slice(at);
+}
+
+/** Its rows, each as `{ key, text, title, tag }`, in the order drawn. */
+function agentSessionRowsIn(html) {
+  return [...html.matchAll(/<div\b[^>]*\sdata-agent-session="([^"]*)"[^>]*>[\s\S]*?<\/div>/g)].map((m) => ({
+    key: m[1],
+    text: visibleText(m[0]).replace(/\s+/g, ' ').trim(),
+    title: visibleText(/\stitle="([^"]*)"/.exec(m[0])?.[1] ?? ''),
+    tag: m[0],
+  }));
+}
+
+scenario(
+  'RN-200',
+  'AGENT SESSIONS lists the history newest first: agent, title or short id, folder, when, and a badge for one a terminal holds (AC16)',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: HISTORY, loaded: true, holders: { 'k-open': { tabId: 't1', state: 'open' } } });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    expectThat(section, 'no AGENT SESSIONS section');
+    expectThat(html.indexOf('>Saved</span>') < html.indexOf('>Agent Sessions</span>'), 'the section is not below SAVED');
+    expectThat(/data-agent-sessions-count="3"/.test(section), 'the header does not count the entries');
+    const rows = agentSessionRowsIn(section);
+    expectThat(JSON.stringify(rows.map((r) => r.key)) === JSON.stringify(['k-open', 'k-claude', 'k-free']), JSON.stringify(rows.map((r) => r.key)));
+    const [open, claude, free] = rows;
+    for (const words of ['Fix the login flow', 'opencode', 'api', '5m ago', 'open']) expectThat(open.text.includes(words), `the first row lacks ${JSON.stringify(words)}: ${open.text}`);
+    expectThat(/data-agent-holder="open"/.test(open.tag), 'the held entry has no badge');
+    expectThat(open.title.includes('/work/api'), `the folder's full path is not in the tooltip: ${open.title}`);
+    for (const words of ['d4bef4d0', 'Claude Code', 'web', '2h ago']) expectThat(claude.text.includes(words), `the Claude Code row lacks ${JSON.stringify(words)}: ${claude.text}`);
+    expectThat(!/data-agent-holder/.test(claude.tag), 'an entry no terminal holds has a badge');
+    for (const words of ['most recent in folder', 'tools', '3d ago']) expectThat(free.text.includes(words), `the id-less row lacks ${JSON.stringify(words)}: ${free.text}`);
+    expectThat(!/Show all/.test(section), 'three entries offer "Show all"');
+    expectThat(!visibleText(section).includes('are listed here, newest first'), 'the empty-state hint is drawn beside entries');
+  }
+);
+
+scenario(
+  'RN-201',
+  'AGENT SESSIONS with no entries: a count of 0 and the one-line hint (AC16)',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: [], loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    expectThat(section, 'no AGENT SESSIONS section');
+    expectThat(/data-agent-sessions-count="0"/.test(section), 'the header does not say 0');
+    expectThat(agentSessionRowsIn(section).length === 0, 'rows with no entries');
+    expectText(section, 'Claude Code and OpenCode sessions run in these terminals are listed here, newest first.');
+  }
+);
+
+scenario(
+  'RN-202',
+  'more than 15 entries: the first 15, then "Show all (N)…"; an offered entry is badged as such',
+  () => {
+    reset();
+    const many = Array.from({ length: 18 }, (_, i) => historyEntry(`k-${i}`, { title: `Task ${i}` }, i + 1));
+    useAgentHistoryStore.setState({ entries: many, loaded: true, holders: { 'k-2': { tabId: 't1', state: 'offered' } } });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    const rows = agentSessionRowsIn(section);
+    expectThat(rows.length === 15, `${rows.length} rows drawn`);
+    expectThat(rows[0].key === 'k-0' && rows[14].key === 'k-14', JSON.stringify(rows.map((r) => r.key)));
+    expectThat(/data-agent-sessions-count="18"/.test(section), 'the header does not count every entry');
+    expectThat(/data-agent-sessions-all=""/.test(section), 'no "Show all" row');
+    expectText(section, 'Show all (18)…');
+    expectThat(/data-agent-holder="offered"/.test(rows[2].tag), 'the offered entry is not badged "offered"');
+  }
+);
+
+scenario(
+  'RN-203',
+  "the palette lists Resume Agent Session… and Clear Agent Session History… among NexTerm's commands (AC17)",
+  () => {
+    reset();
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'all' });
+  },
+  (html) => {
+    const titles = paletteRows(paletteGroup(html, 'commands') ?? '').map((r) => r.title);
+    expectThat(titles.includes('Resume Agent Session…'), `no Resume Agent Session…: ${JSON.stringify(titles)}`);
+    expectThat(titles.includes('Clear Agent Session History…'), 'no Clear Agent Session History…');
+    expectThat(!html.includes('>agent sessions</div>'), 'with nothing typed, the default palette lists the entries');
+  }
+);
+
+scenario(
+  'RN-204',
+  'Resume Agent Session… lists every entry newest first, title, folder and agent on each row (AC17)',
+  () => {
+    reset();
+    // Out of order on purpose: the pick sorts by when each was last used.
+    useAgentHistoryStore.setState({ entries: [HISTORY[2], HISTORY[0], HISTORY[1]], loaded: true });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'agent-sessions' });
+  },
+  (html) => {
+    const rows = paletteRows(html);
+    expectThat(
+      JSON.stringify(rows.map((r) => [r.title, r.subtitle, r.hint])) ===
+        JSON.stringify([
+          ['Fix the login flow', '/work/api', 'opencode'],
+          ['d4bef4d0', '/work/web', 'Claude Code'],
+          ['most recent in folder', '/work/tools', 'opencode'],
+        ]),
+      JSON.stringify(rows.map((r) => [r.title, r.subtitle, r.hint]))
+    );
+    expectThat(/placeholder="Resume an agent session/.test(html), 'the pick does not say what it is for');
+  }
+);
+
+scenario(
+  'RN-205',
+  'Resume Agent Session… with an empty history says how the list fills',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: [], loaded: true });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'agent-sessions' });
+  },
+  (html) => {
+    expectThat(paletteRows(html).length === 0, 'a row with nothing to resume');
+    expectText(html, 'No agent sessions yet. Claude Code and OpenCode conversations run in a NexTerm terminal are listed here, newest first.');
+  }
+);
+
+scenario(
+  'RN-206',
+  'a resume that switched to the terminal holding the entry says so, and can be dismissed',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      agentHistoryNotice: { kind: 'focused', text: 'That opencode conversation is already open in t1 — switched to it rather than opening it twice.', key: 'k-open', tabId: 't1', seq: 1 },
+    });
+  },
+  (html) => {
+    const notice = /<div\b[^>]*\sdata-agent-history-notice="focused"[^>]*>[\s\S]*?<\/button><\/div>/.exec(html)?.[0];
+    expectThat(notice, 'no notice drawn');
+    expectThat(/\srole="status"/.test(notice), 'a switch is announced as an error');
+    expectText(notice, 'Already open');
+    expectText(notice, 'switched to it rather than opening it twice.');
+    expectThat(buttonsIn(notice).some((b) => b.title === 'Dismiss'), 'nothing to close it with');
+  }
+);
+
+scenario(
+  'RN-207',
+  "a resume refused for a missing folder is an alert, beside the editor's open failure rather than over it",
+  () => {
+    reset();
+    useTerminalStore.setState({
+      agentHistoryNotice: { kind: 'missingFolder', text: '/work/gone is not there any more, so opencode cannot be resumed in it. The entry stays in the list.', key: 'k', tabId: null, seq: 2 },
+    });
+    useEditorStore.setState({ openFailure: { path: '/workspace/a.bin', fileName: 'a.bin', reason: 'Binary file' } });
+  },
+  (html) => {
+    const notice = /<div\b[^>]*\sdata-agent-history-notice="missingFolder"[^>]*>/.exec(html)?.[0];
+    expectThat(notice, 'no notice drawn');
+    expectThat(/\srole="alert"/.test(notice), 'not announced');
+    expectThat(/right-\[416px\]/.test(notice), `drawn over the open-failure notice: ${notice}`);
+    expectText(html, 'Folder not found');
+    expectText(html, '/work/gone is not there any more');
+    expectText(html, 'Could not open a.bin');
+  }
+);
+
+scenario(
+  'RN-208',
+  'a Clear Agent Session History… that left a copy behind is an alert that says so',
+  () => {
+    reset();
+    useTerminalStore.getState().showAgentHistoryNotice(
+      'clearFailed',
+      'The agent session history was emptied, but 1 damaged copy of it kept aside could not be deleted. Try again; or delete agent-sessions.json.bad-* in NexTerm’s data folder'
+    );
+  },
+  (html) => {
+    const notice = /<div\b[^>]*\sdata-agent-history-notice="clearFailed"[^>]*>[\s\S]*?<\/button><\/div>/.exec(html)?.[0];
+    expectThat(notice, 'no notice drawn');
+    expectThat(/\srole="alert"/.test(notice), 'not announced as an alert');
+    expectText(notice, 'Agent session history not cleared');
+    expectText(notice, 'could not be deleted. Try again');
+    expectThat(buttonsIn(notice).some((b) => b.title === 'Dismiss'), 'nothing to close it with');
+  }
+);
+
+const CLAUDE_TITLED = historyEntry('k-claude', { kind: 'claude', sessionId: CLAUDE_ID, cwd: '/work/web', title: 'Rotate the deploy key ghp_[hidden]' }, 120);
+
+scenario(
+  'RN-209',
+  "AGENT SESSIONS draws a Claude Code entry by the title Claude Code gave it, not by its short id (AC23)",
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: [HISTORY[0], CLAUDE_TITLED], loaded: true, holders: {} });
+  },
+  (html) => {
+    const claude = agentSessionRowsIn(agentSessionsSection(html) ?? '').find((r) => r.key === 'k-claude');
+    expectThat(claude, 'no Claude Code row');
+    for (const words of ['Rotate the deploy key ghp_[hidden]', 'Claude Code', 'web']) expectThat(claude.text.includes(words), `the row lacks ${JSON.stringify(words)}: ${claude.text}`);
+    expectThat(!claude.text.includes('d4bef4d0'), `the short id is drawn instead: ${claude.text}`);
+    expectThat(claude.title.startsWith('Claude Code: Rotate the deploy key'), `the tooltip does not name it: ${claude.title}`);
+  }
+);
+
+scenario(
+  'RN-210',
+  "Resume Agent Session… shows a Claude Code entry's own title on its row (AC23)",
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: [HISTORY[0], CLAUDE_TITLED], loaded: true });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'agent-sessions' });
+  },
+  (html) => {
+    const rows = paletteRows(html).map((r) => [r.title, r.hint]);
+    expectThat(
+      JSON.stringify(rows) === JSON.stringify([['Fix the login flow', 'opencode'], ['Rotate the deploy key ghp_[hidden]', 'Claude Code']]),
+      JSON.stringify(rows)
+    );
   }
 );
 

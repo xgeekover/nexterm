@@ -186,7 +186,17 @@ jobs:
           node-version: 20
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # Pinned, unlike the test job. Rust 1.100 (2026-11-12) changed Cargo's
+      # build-dir layout so that OUT_DIR is <profile>/build/<pkg>/<hash>/out.
+      # tauri-build 2.6.3 copies bundle.externalBin sidecars to OUT_DIR's third
+      # parent, which is then target/release/build instead of target/release,
+      # so nexterm-cli.exe was missing beside the app and the Windows checks
+      # below failed. The pin keeps the build on the last toolchain the release
+      # bundles were built with. Remove it once tauri-build is 2.7.4 or later,
+      # which looks for the `build` ancestor instead.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # toolchain pinned below
+        with:
+          toolchain: "1.99.1"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

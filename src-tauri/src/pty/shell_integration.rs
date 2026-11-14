@@ -402,7 +402,10 @@ const BASH_HOOKS: &str = r#"
 #     being run from a copy, so an installer that looks for its hook there
 #     still finds it when ~/.bashrc is read again. starship's, not finding
 #     it, would keep ours and run it from its own hook — and a copy run by
-#     ours holds starship's hook, so each would run the other forever.
+#     ours holds starship's hook, so each would run the other forever. In
+#     an array (bash 5.1+) the first of ours goes in front of the user's
+#     commands in the first element, the one `$PROMPT_COMMAND` reads, and
+#     the last is an element of its own at the end.
 #   - The DEBUG trap that was there runs from ours, with the exit status and
 #     $_ of the command it fired for, and returns what it returns (under
 #     extdebug, non-zero skips the command). It does not run for our two
@@ -524,24 +527,37 @@ __nexterm_debug_trap_before() {
 
 # The user's PROMPT_COMMAND between ours. An array stays one on bash 5.1+,
 # which runs every element; anywhere else it is the string bash runs (an
-# older bash only ever ran an array's first element). The `;` after ours
-# keeps `;_direnv_hook;` findable for direnv's installed-already check, and
-# the newline before the last one ends any trailing comment.
+# older bash only ever ran an array's first element). Both ways ours comes
+# first in what `$PROMPT_COMMAND` reads — the string, or an array's first
+# element — followed by `;` and the user's commands that were there:
+# starship looks for its hook in `$PROMPT_COMMAND`, and direnv for
+# `;_direnv_hook;` in all of it, and a hook either does not find there is
+# installed again whenever ~/.bashrc is read again, to run twice. In a
+# string the last of ours follows a newline, which ends any trailing
+# comment; in an array it is the last element. An array's other elements
+# stay as they are, systemd's prompt hook among them: its
+# 80-systemd-osc-context.sh leaves the first element empty for a ~/.bashrc
+# to assign, and adds its hook after it.
 __nexterm_wrap_prompt_command() {
   if [[ "${PROMPT_COMMAND[*]-}" == *__nexterm_precmd* ]]; then
     return 0
   fi
   local __nexterm_begin='__nexterm_prompt_begin "$_" && __nexterm_return 0 "$_"'
+  # `PROMPT_COMMAND="$PROMPT_COMMAND;history -a"`, run while it was empty,
+  # leaves a `;` first. After ours that is `;;`, a syntax error, and bash
+  # skips the rest of a string that has one — the markers with it. (bash
+  # on its own complains before every prompt; here the command runs.) An
+  # array's first element is run the same way, so it loses the `;` too.
+  # Any other syntax error on the user's first line takes the first of ours
+  # with it, in an array's first element as in a string, where the last goes
+  # too: bash runs nothing of a line that does not parse, nor what follows.
+  local __nexterm_user=${PROMPT_COMMAND-}
+  __nexterm_user=${__nexterm_user#"${__nexterm_user%%[![:space:];]*}"}
   if [[ "$(builtin declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]] &&
     (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-    PROMPT_COMMAND=("$__nexterm_begin" "${PROMPT_COMMAND[@]}" __nexterm_precmd)
+    PROMPT_COMMAND[0]="$__nexterm_begin;$__nexterm_user"
+    PROMPT_COMMAND+=(__nexterm_precmd)
   else
-    # `PROMPT_COMMAND="$PROMPT_COMMAND;history -a"`, run while it was empty,
-    # leaves a `;` first. After ours that is `;;`, a syntax error, and bash
-    # skips the rest of a string that has one — the markers with it. (bash
-    # on its own complains before every prompt; here the command runs.)
-    local __nexterm_user=${PROMPT_COMMAND-}
-    __nexterm_user=${__nexterm_user#"${__nexterm_user%%[![:space:];]*}"}
     PROMPT_COMMAND="$__nexterm_begin;$__nexterm_user"$'\n'"__nexterm_precmd"
   fi
 }
@@ -943,6 +959,11 @@ mod tests {
             assert!(bashrc.contains("source \"$HOME/.bashrc\""), "{bashrc}");
             assert!(!bashrc.contains("/etc/profile"), "bash off macOS is not a login shell:\n{bashrc}");
         }
+        // The rcfile a non-login bash gets, checked on every OS as off macOS
+        // above, so that /etc/profile named anywhere in it, a comment
+        // included, fails on a Mac too.
+        let non_login = bash_rcfile(false);
+        assert!(!non_login.contains("/etc/profile"), "a non-login bash reads no /etc/profile:\n{non_login}");
     }
 
     /// A zsh started the way NexTerm starts one on macOS, from an app opened in
@@ -1155,14 +1176,45 @@ mod tests {
     /// Unless `files` brings a login file of its own, the fake HOME gets a
     /// ~/.bash_profile that sources ~/.bashrc, as a Mac user's does: a login
     /// shell reads only the former.
+    ///
+    /// A login shell reads an empty /etc/profile of the test's own, not the
+    /// machine's (see `SystemProfile`). A Debian or Ubuntu bash still reads
+    /// /etc/bash.bashrc before any --rcfile, the machine's; nothing here
+    /// changes that. Where that file adds to PROMPT_COMMAND for an xterm
+    /// TERM, as Arch's reportedly does, the exact elements a test expects can
+    /// differ on that machine; Ubuntu's, as on CI, adds none.
     #[cfg(unix)]
     fn run_real_bash(login: bool, files: &[(&str, &str)], input: &str) -> Option<String> {
-        run_real_bash_with_path(login, files, input, &std::env::var("PATH").unwrap_or_default())
+        run_real_bash_with_path(
+            login,
+            SystemProfile::Fixture(""),
+            files,
+            input,
+            &std::env::var("PATH").unwrap_or_default(),
+        )
+    }
+
+    /// The /etc/profile a login bash run by these tests reads.
+    #[cfg(unix)]
+    enum SystemProfile<'a> {
+        /// A file of the test's own in the fake HOME, holding this text —
+        /// nothing unless the test brings something. What the machine's
+        /// /etc/profile does is not the test's to depend on: on GitHub's
+        /// Ubuntu 26.04 runner it installs systemd's OSC 3008 prompt hook, an
+        /// array PROMPT_COMMAND and a PS0, and three of these tests failed
+        /// there and nowhere else. A non-login bash reads no /etc/profile, so
+        /// its text has to be empty.
+        Fixture(&'a str),
+        /// The machine's own, for the test that is about what it does — on
+        /// macOS only, where /etc/profile builds the PATH.
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        Machine,
     }
 
     #[cfg(unix)]
     fn run_real_bash_with_path(
         login: bool,
+        profile: SystemProfile,
         files: &[(&str, &str)],
         input: &str,
         path: &str,
@@ -1194,8 +1246,47 @@ mod tests {
             fs::write(home.join(name), body).unwrap();
         }
 
+        let mut args = integration.args;
+        if let SystemProfile::Fixture(text) = profile {
+            assert!(login || text.is_empty(), "a non-login bash reads no /etc/profile: {text:?}");
+            // The generated rcfile, as NexTerm wrote it, with the fixture read
+            // in place of /etc/profile: the same text and the same arguments
+            // otherwise.
+            assert_eq!(args.len(), 3, "bash integration args: {args:?}");
+            assert_eq!((args[0].as_str(), args[2].as_str()), ("--rcfile", "-i"), "{args:?}");
+            let generated = fs::read_to_string(&args[1]).unwrap();
+            assert_eq!(generated, bash_rcfile(login), "the rcfile NexTerm wrote");
+            let fixture = home.join("etc-profile");
+            fs::write(&fixture, text).unwrap();
+            let fixture = fixture.to_string_lossy().to_string();
+            assert!(!fixture.contains('\''), "setup: the fixture's path quotes as-is: {fixture}");
+            let quoted = format!("'{fixture}'");
+            let copy: String = generated
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.trim_start().starts_with('#') {
+                        line.to_string()
+                    } else {
+                        line.replace("/etc/profile", &quoted)
+                    }
+                })
+                .collect();
+            let reads_the_real_one =
+                |rc: &str| rc.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("/etc/profile"));
+            assert!(!reads_the_real_one(&copy), "the rcfile copy still reads /etc/profile:\n{copy}");
+            assert_eq!(
+                copy.contains(&format!("source {quoted}\n")),
+                login,
+                "login={login}: a login rcfile reads the fixture in place of /etc/profile, and only \
+                 a login one reads either:\n{copy}"
+            );
+            let rcfile = home.join("nexterm-rcfile");
+            fs::write(&rcfile, copy).unwrap();
+            args[1] = rcfile.to_string_lossy().to_string();
+        }
+
         let mut child = Command::new("bash")
-            .args(&integration.args)
+            .args(&args)
             .env_clear()
             .env("PATH", path)
             .env("HOME", &home)
@@ -1325,6 +1416,12 @@ PROMPT_COMMAND=(__first __second)
     /// and calls hook functions from two arrays. Ours join those arrays and
     /// leave both primitives to it. This stands in for it with the same
     /// contract.
+    ///
+    /// Without systemd's prompt hook (`SYSTEMD_PROMPT_HOOK`): bash-preexec
+    /// tells its own prompt command from the user's by `$PROMPT_COMMAND`,
+    /// which in an array is the first element only, so it takes another
+    /// element's command for one the user typed. That is between it and the
+    /// array; NexTerm, joined to its arrays, touches neither.
     #[cfg(unix)]
     #[test]
     fn real_bash_joins_bash_preexec_instead_of_replacing_it() {
@@ -1420,16 +1517,11 @@ PROMPT_COMMAND=precmd
         }
     }
 
-    /// ~/.bashrc read a second time — `source ~/.bashrc` after editing it —
-    /// runs every installer in it again. starship's, finding its hook gone
-    /// from PROMPT_COMMAND, keeps whatever is there and runs it from its own
-    /// hook; had ours run a saved copy of the user's PROMPT_COMMAND (which
-    /// holds starship's hook), each would have run the other forever. direnv's
-    /// only checks for `;_direnv_hook;`.
+    /// starship's and direnv's PROMPT_COMMAND installers, as a ~/.bashrc runs
+    /// them: each adds its hook unless it finds it there already — starship
+    /// in `$PROMPT_COMMAND`, direnv as `;_direnv_hook;` in all of it.
     #[cfg(unix)]
-    #[test]
-    fn real_bash_survives_bashrc_being_read_again() {
-        let bashrc = r#"
+    const STARSHIP_AND_DIRENV_BASHRC: &str = r#"
 starship_precmd() {
   local status=$?
   builtin printf 'starship-precmd:%s\n' "$status"
@@ -1448,6 +1540,17 @@ if [[ ";${PROMPT_COMMAND[*]:-};" != *";_direnv_hook;"* ]]; then
   PROMPT_COMMAND="_direnv_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi
 "#;
+
+    /// ~/.bashrc read a second time — `source ~/.bashrc` after editing it —
+    /// runs every installer in it again. starship's, finding its hook gone
+    /// from PROMPT_COMMAND, keeps whatever is there and runs it from its own
+    /// hook; had ours run a saved copy of the user's PROMPT_COMMAND (which
+    /// holds starship's hook), each would have run the other forever. direnv's
+    /// only checks for `;_direnv_hook;`.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_survives_bashrc_being_read_again() {
+        let bashrc = STARSHIP_AND_DIRENV_BASHRC;
         for login in [false, true] {
             let Some(combined) =
                 run_real_bash(login, &[(".bashrc", bashrc)], "source ~/.bashrc\nfalse\nexit\n")
@@ -1510,13 +1613,19 @@ fi
         }
     }
 
+    /// `PROMPT_COMMAND="$PROMPT_COMMAND; …"`, which leaves a `;` first when it
+    /// runs while PROMPT_COMMAND is empty.
+    #[cfg(unix)]
+    const LEADING_SEMICOLON_BASHRC: &str =
+        "PROMPT_COMMAND=\"$PROMPT_COMMAND; builtin printf 'user-prompt-command\\n'\"\n";
+
     /// `PROMPT_COMMAND="$PROMPT_COMMAND; …"` run while it was empty leaves a
     /// `;` first, which after ours made `;;` — a syntax error that cost every
     /// marker, and the user's command with them.
     #[cfg(unix)]
     #[test]
     fn real_bash_takes_a_prompt_command_that_starts_with_a_semicolon() {
-        let bashrc = "PROMPT_COMMAND=\"$PROMPT_COMMAND; builtin printf 'user-prompt-command\\n'\"\n";
+        let bashrc = LEADING_SEMICOLON_BASHRC;
         for login in [false, true] {
             let Some(combined) = run_real_bash(login, &[(".bashrc", bashrc)], "false\nexit\n") else {
                 eprintln!("bash not installed; skipping");
@@ -1528,6 +1637,215 @@ fi
             let prompts = combined.matches("\x1b]133;A\x07").count();
             assert_eq!(prompts, 2, "login={login}: startup, after `false`: {combined:?}");
             assert_eq!(combined.matches("user-prompt-command\n").count(), prompts, "login={login}: {combined:?}");
+        }
+    }
+
+    /// Stands in for systemd's /etc/profile.d/80-systemd-osc-context.sh (OSC
+    /// 3008), which Ubuntu 26.04 ships and every login bash on GitHub's
+    /// runner reads — and which a ~/.bashrc that reads /etc/profile.d, as
+    /// Fedora's does, brings to a non-login one. As there: PROMPT_COMMAND
+    /// becomes an array whose first element is left empty, for a ~/.bashrc
+    /// that assigns the variable as a string, with the hook after it; and PS0
+    /// runs a command substitution. Here the hook prints the status it saw,
+    /// and PS0 that it ran.
+    #[cfg(unix)]
+    const SYSTEMD_PROMPT_HOOK: &str = r#"
+__systemd_osc_context_precmdline() { builtin printf 'systemd-prompt-hook:%s\n' "$?"; }
+__systemd_osc_context_ps0() { builtin printf 'systemd-ps0;'; }
+[ -n "$(declare -p PROMPT_COMMAND 2>/dev/null)" ] || PROMPT_COMMAND+=('')
+PROMPT_COMMAND+=(__systemd_osc_context_precmdline)
+PS0='$(__systemd_osc_context_ps0)'"${PS0:-}"
+"#;
+
+    /// Whether the bash here runs every element of an array PROMPT_COMMAND,
+    /// as 5.1 and later do. When it does not, `test` is skipped, and says so
+    /// and which bash it found.
+    #[cfg(unix)]
+    fn bash_runs_every_prompt_command_element(test: &str) -> bool {
+        use std::process::Command;
+
+        let Ok(out) = Command::new("bash")
+            .args(["-c", "echo \"$(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] )) $BASH_VERSION\""])
+            .output()
+        else {
+            eprintln!("{test}: bash not installed; skipping");
+            return false;
+        };
+        let said = String::from_utf8_lossy(&out.stdout);
+        let (number, version) = said.trim().split_once(' ').expect("bash says its version");
+        if number.parse::<u32>().expect("bash says its version") < 501 {
+            eprintln!(
+                "{test}: skipping, bash {version} runs only the first element of an array \
+                 PROMPT_COMMAND; this needs bash 5.1 or later"
+            );
+            return false;
+        }
+        true
+    }
+
+    /// `run_real_bash` with systemd's prompt hook (`SYSTEMD_PROMPT_HOOK`) read
+    /// before the user's ~/.bashrc: from /etc/profile by a login shell, as on
+    /// the runner, and from the top of ~/.bashrc by a non-login one — once,
+    /// however often ~/.bashrc is read, as Fedora's /etc/bashrc reads
+    /// /etc/profile.d. (Read again, the hook would be added a second time,
+    /// after ours; NexTerm leaves elements added after it as they are.)
+    #[cfg(unix)]
+    fn run_real_bash_after_systemds_hook(login: bool, bashrc: &str, input: &str) -> String {
+        let (profile, bashrc) = if login {
+            (SYSTEMD_PROMPT_HOOK, bashrc.to_string())
+        } else {
+            ("", format!("if [ -z \"${{BASHRCSOURCED-}}\" ]; then\nBASHRCSOURCED=Y\n{SYSTEMD_PROMPT_HOOK}fi\n{bashrc}"))
+        };
+        run_real_bash_with_path(
+            login,
+            SystemProfile::Fixture(profile),
+            &[(".bashrc", &bashrc)],
+            input,
+            &std::env::var("PATH").unwrap_or_default(),
+        )
+        .expect("bash is installed")
+    }
+
+    /// What follows each `marker` in `text`, up to `end`, in order.
+    #[cfg(unix)]
+    fn each_after<'a>(text: &'a str, marker: &str, end: char) -> Vec<&'a str> {
+        text.split(marker).skip(1).map(|rest| rest.split(end).next().unwrap_or("")).collect()
+    }
+
+    /// systemd's prompt hook in PROMPT_COMMAND's array, after the first
+    /// element a ~/.bashrc then assigns. It runs once a prompt, with the
+    /// status of the command before, and so do the user's PROMPT_COMMAND and
+    /// DEBUG trap; each command typed starts once and ends with its status,
+    /// and each prompt starts once.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_keeps_systemds_prompt_hook_and_marks_each_command_once() {
+        if !bash_runs_every_prompt_command_element("real_bash_keeps_systemds_prompt_hook_and_marks_each_command_once") {
+            return;
+        }
+        for login in [false, true] {
+            let combined = run_real_bash_after_systemds_hook(login, USER_BASHRC, "false\necho x\nexit\n");
+
+            // Three commands typed; a prompt at startup, after `false` and after `echo x`.
+            assert_eq!(combined.matches("\x1b]133;C\x07").count(), 3, "login={login}: {combined:?}");
+            assert_eq!(combined.matches("\x1b]133;A\x07").count(), 3, "login={login}: {combined:?}");
+            assert_eq!(each_after(&combined, "\x1b]133;D;", '\x07'), ["0", "1", "0"], "login={login}: {combined:?}");
+            assert_eq!(
+                each_after(&combined, "systemd-prompt-hook:", '\n'),
+                ["0", "1", "0"],
+                "login={login}: systemd's hook, once a prompt with the status before it: {combined:?}"
+            );
+            assert_eq!(combined.matches("systemd-ps0;").count(), 3, "login={login}: PS0: {combined:?}");
+            assert_eq!(
+                each_after(&combined, "user-prompt-command:", '\n'),
+                ["0", "1", "0"],
+                "login={login}: the user's PROMPT_COMMAND: {combined:?}"
+            );
+            assert!(combined.contains("user-debug-trap:1\n"), "login={login}: the user's DEBUG trap: {combined:?}");
+        }
+    }
+
+    /// `real_bash_survives_bashrc_being_read_again` with systemd's prompt hook
+    /// making PROMPT_COMMAND an array. With ours an element of its own in
+    /// front, starship's check no longer found its hook in the first element,
+    /// nor direnv's `;_direnv_hook;`, and reading ~/.bashrc again ran both
+    /// twice a prompt.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_with_systemds_prompt_hook_survives_bashrc_being_read_again() {
+        if !bash_runs_every_prompt_command_element("real_bash_with_systemds_prompt_hook_survives_bashrc_being_read_again")
+        {
+            return;
+        }
+        for login in [false, true] {
+            let combined =
+                run_real_bash_after_systemds_hook(login, STARSHIP_AND_DIRENV_BASHRC, "source ~/.bashrc\nfalse\nexit\n");
+
+            assert!(combined.contains("\x1b]133;D;1\x07"), "login={login}: {combined:?}");
+            let prompts = combined.matches("\x1b]133;A\x07").count();
+            assert_eq!(prompts, 3, "login={login}: startup, after `source`, after `false`: {combined:?}");
+            assert_eq!(combined.matches("\x1b]133;C\x07").count(), 3, "login={login}: {combined:?}");
+            assert_eq!(combined.matches("direnv-hook\n").count(), prompts, "login={login}: {combined:?}");
+            assert_eq!(combined.matches("starship-precmd:").count(), prompts, "login={login}: {combined:?}");
+            assert!(combined.contains("starship-precmd:1\n"), "login={login}: {combined:?}");
+            assert_eq!(
+                each_after(&combined, "systemd-prompt-hook:", '\n'),
+                ["0", "0", "1"],
+                "login={login}: {combined:?}"
+            );
+        }
+    }
+
+    /// `real_bash_takes_a_prompt_command_that_starts_with_a_semicolon` with
+    /// systemd's prompt hook: the `;` the user's assignment leaves first is in
+    /// the array's first element, and is dropped there too.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_with_systemds_prompt_hook_takes_a_prompt_command_that_starts_with_a_semicolon() {
+        if !bash_runs_every_prompt_command_element(
+            "real_bash_with_systemds_prompt_hook_takes_a_prompt_command_that_starts_with_a_semicolon",
+        ) {
+            return;
+        }
+        for login in [false, true] {
+            let combined = run_real_bash_after_systemds_hook(login, LEADING_SEMICOLON_BASHRC, "false\nexit\n");
+
+            assert!(!combined.contains("syntax error"), "login={login}: {combined:?}");
+            assert!(combined.contains("\x1b]133;D;1\x07"), "login={login}: no D;1 marker: {combined:?}");
+            let prompts = combined.matches("\x1b]133;A\x07").count();
+            assert_eq!(prompts, 2, "login={login}: startup, after `false`: {combined:?}");
+            assert_eq!(combined.matches("\x1b]133;C\x07").count(), 2, "login={login}: {combined:?}");
+            assert_eq!(combined.matches("user-prompt-command\n").count(), prompts, "login={login}: {combined:?}");
+            assert_eq!(each_after(&combined, "systemd-prompt-hook:", '\n'), ["0", "1"], "login={login}: {combined:?}");
+        }
+    }
+
+    /// An array PROMPT_COMMAND is wrapped the way a string is: ours first in
+    /// the first element, then `;` and what the user had there without a
+    /// leading `;`, and ours last as the last element. The elements between
+    /// stay as they were, and the installed-already checks of starship
+    /// (`$PROMPT_COMMAND`, the first element) and direnv (`;_direnv_hook;`)
+    /// still find their hooks.
+    #[cfg(unix)]
+    #[test]
+    fn real_bash_wraps_an_array_prompt_command_as_it_wraps_a_string() {
+        if !bash_runs_every_prompt_command_element("real_bash_wraps_an_array_prompt_command_as_it_wraps_a_string") {
+            return;
+        }
+        const BEGIN: &str = r#"__nexterm_prompt_begin "$_" && __nexterm_return 0 "$_""#;
+        // The printf formats keep the typed lines, which bash echoes, from
+        // reading as what they print.
+        let input = "builtin declare -p PROMPT_COMMAND\n\
+                     for i in \"${!PROMPT_COMMAND[@]}\"; do builtin printf 'prompt-command[%d]=%s\\n' \"$i\" \"${PROMPT_COMMAND[i]}\"; done\n\
+                     [[ \"${PROMPT_COMMAND-}\" == *starship_precmd* ]] && builtin printf '%s-finds-its-hook\\n' starship\n\
+                     [[ \";${PROMPT_COMMAND[*]:-};\" == *\";_direnv_hook;\"* ]] && builtin printf '%s-finds-its-hook\\n' direnv\n\
+                     exit\n";
+        for (bashrc, users_first) in [
+            (STARSHIP_AND_DIRENV_BASHRC, "_direnv_hook;starship_precmd"),
+            (LEADING_SEMICOLON_BASHRC, "builtin printf 'user-prompt-command\\n'"),
+        ] {
+            for login in [false, true] {
+                let combined = run_real_bash_after_systemds_hook(login, bashrc, input);
+                let elements: Vec<(usize, &str)> = combined
+                    .split("prompt-command[")
+                    .skip(1)
+                    .filter_map(|rest| {
+                        let (index, value) = rest.split_once("]=")?;
+                        Some((index.parse().ok()?, value.split('\n').next().unwrap_or("")))
+                    })
+                    .collect();
+
+                let first = format!("{BEGIN};{users_first}");
+                assert_eq!(
+                    elements,
+                    [(0, first.as_str()), (1, "__systemd_osc_context_precmdline"), (2, "__nexterm_precmd")],
+                    "login={login}: {combined:?}"
+                );
+                if bashrc == STARSHIP_AND_DIRENV_BASHRC {
+                    assert!(combined.contains("starship-finds-its-hook\n"), "login={login}: {combined:?}");
+                    assert!(combined.contains("direnv-finds-its-hook\n"), "login={login}: {combined:?}");
+                }
+            }
         }
     }
 
@@ -1574,6 +1892,7 @@ fi
     fn real_bash_on_macos_gets_the_login_path() {
         let Some(combined) = run_real_bash_with_path(
             LOGIN_SHELLS,
+            SystemProfile::Machine,
             &[],
             "echo \"PATH=$PATH\"\nexit\n",
             "/usr/bin:/bin:/usr/sbin:/sbin",
