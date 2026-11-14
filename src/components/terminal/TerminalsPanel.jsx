@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   Archive,
   ArrowDownWideNarrow,
+  Bot,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -19,6 +20,9 @@ import {
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
+import { useAgentHistoryStore } from '../../stores/agentHistoryStore.js';
+import { clearAgentHistory } from '../../stores/agentHistoryPromptStore.js';
+import { historyDisplay } from '../../lib/agentHistory.js';
 import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
@@ -28,7 +32,9 @@ import { TabMarks } from './HiddenStrip.jsx';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import {
   LIST_MENUS,
+  agentSessionRowHandlers,
   keepUserOrderItems,
+  resumeAgentSessionWith,
   secondaryText,
   subjectExists,
   summaryWords,
@@ -50,6 +56,12 @@ const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default sele
 const INDENT = 10;
 
 /**
+ * How many AGENT SESSIONS rows the side bar draws before "Show all (N)…",
+ * which opens the palette's Resume Agent Session… on every entry.
+ */
+const AGENT_SESSIONS_SHOWN = 15;
+
+/**
  * A terminal row while any second-line item is on (S1): two lines in ONE
  * height for every terminal row, whatever each one holds — a row with no
  * agent, no branch and nothing said is as tall as one with all three. So no
@@ -68,6 +80,8 @@ const LINE_ONE = 'h-[20px] flex items-center gap-1.5 min-w-0';
  * appearing — does not push the title sideways.
  */
 const LINE_TWO_INDENT = 'pl-[32px]';
+/** An AGENT SESSIONS row's second line, under its title: the icon (14px) and a gap (6px). */
+const AGENT_LINE_TWO = 'h-[16px] flex items-center gap-1 min-w-0 pl-[20px] text-ui-sm text-vsc-muted';
 
 
 /**
@@ -208,6 +222,13 @@ export function TerminalsPanel() {
   const renameWorkspace = useTerminalStore((s) => s.renameWorkspace);
   const setStartupCommands = useTerminalStore((s) => s.setStartupCommands);
   const setWorkspaceStartupCommands = useTerminalStore((s) => s.setWorkspaceStartupCommands);
+  const resumeFromHistory = useTerminalStore((s) => s.resumeFromHistory);
+  const setPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
+  // The agent session history, newest first, and which of its entries a
+  // terminal of this window holds (agentHistoryStore.js) — the rows' badge.
+  const agentEntries = useAgentHistoryStore((s) => s.entries);
+  const agentHolders = useAgentHistoryStore((s) => s.holders);
+  const removeAgentEntry = useAgentHistoryStore((s) => s.remove);
 
   // Collapsed group ids AND pane ids share one set — pane ids are unique
   // across every group, so they cannot collide.
@@ -217,6 +238,9 @@ export function TerminalsPanel() {
   const [draft, setDraft] = useState(null); // { kind: 'group'|'tab'|'saved'|'workspace', id, value }
   // Selecting a saved group is deliberately inert — see the row's comment.
   const [selectedSavedId, setSelectedSavedId] = useState(null);
+  const [agentOpen, setAgentOpen] = useState(true);
+  // The same for an agent session: a click selects, a double-click resumes.
+  const [selectedAgentKey, setSelectedAgentKey] = useState(null);
   // "Edit Startup Commands…" open on a saved group or workspace: { kind: 'group'|'workspace', id }.
   const [startupEditor, setStartupEditor] = useState(null);
   const listRef = useRef(null);
@@ -266,6 +290,7 @@ export function TerminalsPanel() {
     pane: (id) => layout.some((entry) => entry.panes.some(({ pane }) => pane.id === id)),
     saved: (id) => savedGroups.some((entry) => entry.id === id),
     workspace: (id) => savedWorkspaces.some((entry) => entry.id === id),
+    agentSession: (key) => agentEntries.some((entry) => entry.key === key),
   };
   const liveMenu = menu && subjectExists(menu.kind, menu.id, has) ? menu : null;
   const liveDraft = draft && subjectExists(draft.kind, draft.id, has) ? draft : null;
@@ -587,6 +612,47 @@ export function TerminalsPanel() {
     { key: 'delete', label: 'Delete', danger: true, onSelect: () => deleteSavedGroup(entry.id) },
   ];
 
+  /** Resume an agent session: in a new terminal, or the one holding it shown (`resumeFromHistory`). */
+  const resumeAgentSession = (key) => {
+    resumeAgentSessionWith(key, { select: setSelectedAgentKey, resumeFromHistory });
+  };
+
+  /** "Resume Agent Session…": the palette's pick of every entry. */
+  const openAgentSessionsPalette = () => setPaletteOpen(true, 'agent-sessions');
+
+  const agentSessionItems = (entry) => [
+    {
+      key: 'resume',
+      label: agentHolders[entry.key] ? 'Show Its Terminal' : 'Resume in New Terminal',
+      icon: Play,
+      onSelect: () => resumeAgentSession(entry.key),
+    },
+    { type: 'separator', key: 's1' },
+    // From NexTerm's list only; the conversation stays with its agent. One
+    // still running is listed again at its next event.
+    { key: 'remove', label: 'Remove from List', onSelect: () => removeAgentEntry(entry.key) },
+    { key: 'clear', label: 'Clear Agent Session History…', danger: true, onSelect: () => clearAgentHistory() },
+  ];
+
+  /** The menu behind the AGENT SESSIONS header. */
+  const agentSessionsItems = () => [
+    {
+      key: 'resume-pick',
+      label: 'Resume Agent Session…',
+      disabled: agentEntries.length === 0,
+      disabledReason: agentEntries.length === 0 ? 'There are no agent sessions yet' : undefined,
+      onSelect: openAgentSessionsPalette,
+    },
+    {
+      key: 'clear',
+      label: 'Clear Agent Session History…',
+      danger: true,
+      disabled: agentEntries.length === 0,
+      disabledReason: agentEntries.length === 0 ? 'There are no agent sessions to clear' : undefined,
+      onSelect: () => clearAgentHistory(),
+    },
+  ];
+
   const workspaceItems = (entry) => [
     {
       key: 'restore',
@@ -720,6 +786,11 @@ export function TerminalsPanel() {
       const entry = savedGroups.find((x) => x.id === menu.id);
       return entry ? savedItems(entry) : [];
     }
+    if (menu.kind === 'agent-session') {
+      const entry = agentEntries.find((x) => x.key === menu.id);
+      return entry ? agentSessionItems(entry) : [];
+    }
+    if (menu.kind === 'agent-sessions') return agentSessionsItems();
     if (menu.kind === 'workspace-bar') return workspaceBarItems(at);
     if (menu.kind === 'workspace-list') return savedWorkspaceListItems(at);
     if (menu.kind === 'workspace-startup-list') return workspaceStartupListItems(at);
@@ -1291,6 +1362,104 @@ export function TerminalsPanel() {
                 </div>
               );
             })}
+        </div>
+
+        {/* ---- agent sessions: the conversations run here, to resume ---- */}
+        <div className="mt-2 border-t border-vsc-border pt-1" data-agent-sessions="">
+          <div
+            data-row
+            role="button"
+            tabIndex={0}
+            onClick={() => setAgentOpen((v) => !v)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') setAgentOpen((v) => !v);
+            }}
+            onContextMenu={(e) => openMenu(e, 'agent-sessions', null)}
+            style={{ paddingLeft: padFor(0) }}
+            className={cn(ROW, 'hover:bg-vsc-hover text-vsc-muted')}
+          >
+            <span className="shrink-0">{agentOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+            <Bot size={14} className="shrink-0" />
+            <span className="text-ui-sm uppercase tracking-wide font-semibold">Agent Sessions</span>
+            <span className="ml-auto text-ui-sm shrink-0" data-agent-sessions-count={agentEntries.length}>
+              {agentEntries.length}
+            </span>
+          </div>
+
+          {agentOpen && agentEntries.length === 0 && (
+            <p className="px-3 py-1 text-ui-sm text-vsc-muted">
+              Claude Code and OpenCode sessions run in these terminals are listed here, newest first.
+            </p>
+          )}
+
+          {agentOpen &&
+            agentEntries.slice(0, AGENT_SESSIONS_SHOWN).map((entry) => {
+              const shown = historyDisplay(entry);
+              const holder = agentHolders[entry.key] ?? null;
+              const selected = selectedAgentKey === entry.key;
+              const when = Number.isFinite(shown.lastUsedAt) ? relativeTime(shown.lastUsedAt) : '';
+              return (
+                <div
+                  key={entry.key}
+                  data-row
+                  data-agent-session={entry.key}
+                  role="button"
+                  tabIndex={0}
+                  // Single click selects; double-click or Enter resumes —
+                  // never one stray click away (`agentSessionRowHandlers`).
+                  {...agentSessionRowHandlers(entry.key, { select: setSelectedAgentKey, resume: resumeAgentSession, openMenu })}
+                  style={{ paddingLeft: padFor(1) }}
+                  title={`${shown.label}: ${shown.title}\n${shown.folderPath}\nLast used ${when}${
+                    holder ? `\n${holder.state === 'open' ? 'Open' : 'Offered for resuming'} in a terminal of this window` : ''
+                  }\n${holder ? 'Double-click to show its terminal' : 'Double-click to resume in a new terminal'} · right-click for more`}
+                  className={cn(
+                    TAB_ROW_TWO_LINE,
+                    'relative',
+                    selected ? 'bg-vsc-inactive-selection text-vsc-fg-bright' : 'hover:bg-vsc-hover text-vsc-fg'
+                  )}
+                >
+                  <IndentGuides level={1} />
+                  <span className={LINE_ONE}>
+                    <Bot size={14} className="shrink-0 text-vsc-muted" />
+                    <span className={cn('truncate', !shown.titled && 'italic')}>{shown.title}</span>
+                    <span className="ml-auto flex items-center gap-1 text-ui-sm text-vsc-muted shrink-0">
+                      {holder && (
+                        <span
+                          data-agent-holder={holder.state}
+                          className="px-1 rounded-sm border border-vsc-border text-vsc-fg leading-[14px]"
+                        >
+                          {holder.state}
+                        </span>
+                      )}
+                      {when}
+                    </span>
+                  </span>
+                  <span className={AGENT_LINE_TWO}>
+                    <span className="shrink-0">{shown.label}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="truncate">{shown.folder}</span>
+                  </span>
+                </div>
+              );
+            })}
+
+          {agentOpen && agentEntries.length > AGENT_SESSIONS_SHOWN && (
+            <div
+              data-row
+              data-agent-sessions-all=""
+              role="button"
+              tabIndex={0}
+              onClick={openAgentSessionsPalette}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') openAgentSessionsPalette();
+              }}
+              style={{ paddingLeft: padFor(1) }}
+              className={cn(ROW, 'relative hover:bg-vsc-hover text-vsc-muted')}
+            >
+              <IndentGuides level={1} />
+              <span className="truncate">{`Show all (${agentEntries.length})…`}</span>
+            </div>
+          )}
         </div>
       </div>
 

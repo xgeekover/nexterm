@@ -649,6 +649,110 @@ say which and no other OpenCode terminal is open, offered or resumed (and
 still open) in the same folder, a folder above it or one below it; if the list
 cannot be read at all, the offer shows OpenCode's own reason.
 
+#### Agent sessions: every conversation run here
+
+The offer above covers the terminals that were open when NexTerm quit. Every
+OpenCode and Claude Code conversation run in a NexTerm terminal is also kept
+in a list, so one from last week can be picked up too.
+
+**AGENT SESSIONS** sits in the TERMINALS panel, below SAVED, with its count in
+the header. Newest first, each row shows the conversation's title (the one
+OpenCode or Claude Code gave it; or the start of its id; or *most recent in
+folder* for one whose id was never known), which agent ran it, the folder (the
+full path is in the tooltip) and
+when it was last used. *open* or *offered* marks one that a terminal in this
+window has running or is offering to resume. The first 15 are listed; *Show
+all (N)…* opens the rest in the palette.
+
+- A click selects a row. A double-click or `Enter` resumes it in a **new
+  terminal** in the active pane, started in the entry's folder. Once the shell
+  shows its first prompt, NexTerm types `claude --resume <id>` or
+  `opencode -s <id>`. An entry without an id follows the rules of *Resume*
+  above, `opencode --continue` included.
+- Right-click a row for *Resume in New Terminal*, *Remove from List* and
+  *Clear Agent Session History…*, which asks first. Removing or clearing only
+  changes NexTerm's list. The conversation itself stays with its agent, and
+  one that is still running is listed again when it next does something.
+- In the command palette, *Resume Agent Session…* lists every entry. Type to
+  filter by agent, title, folder or the start of an id; `Enter` resumes. In the
+  ordinary palette, typing also shows up to five matching entries under
+  *agent sessions*. *Clear Agent Session History…* is a palette command too.
+
+**Already open: switch, don't open twice.** If a terminal in this window
+already has that conversation, running or offered, NexTerm switches to that
+terminal and says so instead of opening a second one into the same
+conversation. This also applies to an entry without an id when a terminal has
+the same agent, folder and title. When a folder no longer exists, nothing is
+opened, a notice says why, and the entry stays in the list. A terminal that
+cannot start in the entry's own folder is not opened somewhere else instead:
+nothing is typed, and a notice says so. Notices appear in the bottom corner of
+the window until you dismiss them. If the new terminal turns out to be asking
+for a password, nothing is typed into it and the offer to resume stays on
+screen (the entry is marked *offered*); the history records the conversation
+as ended again, not as running.
+
+**Claude Code titles.** A Claude Code entry is named the way Claude Code names
+the conversation in its own list: by the title Claude Code generated for it,
+or, before it has one, by the last prompt sent. NexTerm reads these from
+Claude Code's own transcript (`projects/<folder>/<id>.jsonl` in
+`CLAUDE_CONFIG_DIR` when NexTerm's own environment sets it, otherwise in
+`~/.claude`, `%USERPROFILE%\.claude` on Windows). It does so when the list is
+loaded (at start-up and when *Resume Agent Session…* opens) and when a Claude
+Code agent exits or its terminal closes. The transcript is only read, never
+changed, and only its last 256 KiB. A transcript or folder that is a link is
+not followed. Only the title is kept, masked like an OpenCode title (see
+*Privacy* below). Once kept, a title stays, even after the transcript is gone.
+
+**A Claude Code session that never saved a conversation.** Claude Code saves a
+conversation only once its first message is sent. A New Claude Code Terminal
+that was closed or quit before that has an id but no conversation, and
+`claude --resume <id>` would only print `No conversation found with session
+ID`. So before NexTerm types a resume, whether from this list or from a
+restored terminal's *Resume*, it checks Claude Code's transcripts:
+
+- If Claude Code's `projects` folder can be read, none of its folders holds
+  that conversation, and Claude Code's own `session-env/<id>` folder shows
+  that the session did start, NexTerm starts a **new** Claude Code
+  conversation in that terminal instead (`claude --session-id <new id>`, as
+  New Claude Code Terminal does), says so in the terminal (and, for a pick
+  from this list, in a notice), and drops the old entry from the list.
+- In every other case NexTerm cannot tell, and types `claude --resume <id>`
+  as before: no `projects` folder, no `session-env/<id>` folder (NexTerm may be
+  looking at another config folder than your shell's, for instance when
+  `CLAUDE_CONFIG_DIR` is set only in your shell profile), something unreadable
+  or a link, or no answer within about 2 seconds.
+
+When the list is loaded, an entry whose conversation was never saved, by the
+same test, is removed from it, unless a terminal in this window is running or
+offering it.
+
+**Where it is kept.** `agent-sessions.json` in NexTerm's local data folder:
+
+| Platform | Folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/com.nexterm.ide/` |
+| Windows | `%LOCALAPPDATA%\com.nexterm.ide\` (local, not the roaming profile: the conversations exist only on this machine) |
+| Linux | `$XDG_DATA_HOME/com.nexterm.ide/` (usually `~/.local/share/com.nexterm.ide/`) |
+
+It holds at most **200** entries; past that, the least recently used are
+dropped. The file is also kept under **1 MiB**, the most NexTerm will read, by
+dropping the least recently used entries, never the one just written.
+
+**When the file is lost or damaged.** If the file was deleted, the list starts
+empty again. If it cannot be read (not valid JSON, cut short, over 1 MiB), it
+is moved aside as `agent-sessions.json.bad-<time>` and a new, empty list is
+started. Only the three newest copies are kept. *Clear Agent Session History…*
+deletes those copies too. If a newer NexTerm wrote the file, this one reads it
+but changes nothing.
+
+**Privacy.** A title, OpenCode's or Claude Code's, is kept as one line of at
+most 200 characters, after the same secret masking as saved scrollback, so a
+token in a title is stored as `[hidden]`. Of Claude Code's transcript, NexTerm
+reads only the title records described above, and nothing else from it is
+kept, logged or shown. On macOS and Linux the file can be read only by you
+(`0600`). It holds folder paths, conversation ids, titles and times, and
+nothing from the terminal's output.
+
 #### Output after a restart
 
 Reopen NexTerm and every terminal of the session you closed starts with
@@ -826,6 +930,7 @@ in particular. Where to find each one:
 | paste an image (Windows) | `Alt+V` in Claude Code; a right-click in OpenCode — see [Keyboard shortcuts](#keyboard-shortcuts) |
 | have its hooks tell NexTerm things | [`nexterm-cli`](#control-nexterm-from-a-terminal) |
 | pick its conversation up after a restart | *Resume* — see [Sessions](#sessions-what-comes-back) |
+| go back to any conversation run here | AGENT SESSIONS in the TERMINALS panel, or *Resume Agent Session…* in the palette — see [Agent sessions](#agent-sessions-every-conversation-run-here) |
 | start several at once | a [layout template](#sessions-what-comes-back) with `opencode -c` or `claude` |
 | run several without freezing the window | [Many terminals printing at once](#many-terminals-printing-at-once) |
 | leave OpenCode with `Ctrl+C` in cmd | [Safety nets](#safety-nets) — cmd's *Terminate batch job* question is answered |

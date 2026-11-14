@@ -1,8 +1,12 @@
 //! The conversations an agent CLI keeps, for picking one back up in a
 //! terminal (src/lib/agents.js).
 //!
-//! Only opencode needs listing. claude's conversations are named by NexTerm
-//! itself (`--session-id`), while opencode chooses its own ids and only shows
+//! Claude Code's are not listed: they are named by NexTerm itself
+//! (`--session-id`), and `claude_conversations` below only reads, for the
+//! agent session history, the title Claude Code gave each and whether it was
+//! ever saved — from its own files, not its CLI (src/claude_conversations.rs).
+//!
+//! Only opencode needs listing. It chooses its own ids and only shows
 //! a conversation's TITLE, in the terminal's title (`OC | <title>`). Its CLI
 //! maps titles back to ids: `opencode session list --format json` (1.18.34)
 //! answers conversations with their id, title, directory and times — but
@@ -52,6 +56,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+use crate::claude_conversations::Conversation;
 
 /// One conversation, as the frontend reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -108,6 +114,21 @@ pub async fn agent_sessions(kind: String, cwd: String) -> Result<Vec<AgentSessio
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// For each of `ids` (Claude Code session ids, at most
+/// claude_conversations::MAX_IDS), whether Claude Code saved a conversation
+/// under it and the title it gave it: `{sessionId, saved, title}`, in order.
+/// Read-only, from Claude Code's config folder — `CLAUDE_CONFIG_DIR` from
+/// NexTerm's own environment, else `.claude` in the home folder — on the
+/// blocking pool. See src/claude_conversations.rs.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn claude_conversations(ids: Vec<String>) -> Result<Vec<Conversation>, String> {
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let config = crate::claude_conversations::config_dir(std::env::var_os("CLAUDE_CONFIG_DIR"), std::env::var_os(home));
+    tauri::async_runtime::spawn_blocking(move || crate::claude_conversations::look_up(config.as_deref(), &ids))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// The flags `session list` is run with that are a nicety, not the point:

@@ -20,6 +20,8 @@ import {
   FileWarning,
   FilePen,
   ScrollText,
+  Bot,
+  Trash2,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../../stores/settingsStore.js';
@@ -27,6 +29,8 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useProjectCommandsStore } from '../../stores/projectCommandsStore.js';
 import { useControlLogStore } from '../../stores/controlLogStore.js';
+import { useAgentHistoryStore } from '../../stores/agentHistoryStore.js';
+import { clearAgentHistory } from '../../stores/agentHistoryPromptStore.js';
 import { invoke, listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
@@ -71,6 +75,8 @@ function iconFor(item) {
   if (item.command === 'rename_terminal') return <Pencil size={16} />;
   if (item.command === 'close_terminal') return <X size={16} />;
   if (item.command === 'show_control_log') return <ScrollText size={16} />;
+  if (item.type === 'agent-session' || item.command === 'resume_agent_session') return <Bot size={16} />;
+  if (item.command === 'clear_agent_session_history') return <Trash2 size={16} />;
   if (item.type === 'pane') return <PanelTop size={16} />;
   return <Terminal size={16} />;
 }
@@ -211,6 +217,10 @@ export function CommandPalette() {
   const requestTabRename = useTerminalStore((s) => s.requestTabRename);
   const closeTab = useTerminalStore((s) => s.closeTab);
   const typingHiddenNow = useTerminalStore((s) => s.typingHiddenNow);
+  const resumeFromHistory = useTerminalStore((s) => s.resumeFromHistory);
+  // The agent session history, newest first (agentHistoryStore.js). It
+  // changes only when an agent in a terminal starts, is named or ends.
+  const agentSessions = useAgentHistoryStore((s) => s.entries);
 
   // The folder's commands and the user's (spec D10). Each of these changes
   // only when a read finds other bytes, trust is given or taken, or the
@@ -299,6 +309,13 @@ export function CommandPalette() {
     [isOpen, paletteMode]
   );
 
+  // "Resume Agent Session…": the list read again as it opens, so an entry
+  // another window added is there. Until the backend answers, the store's
+  // list stands.
+  useEffect(() => {
+    if (isOpen && paletteMode === 'agent-sessions') useAgentHistoryStore.getState().load?.();
+  }, [isOpen, paletteMode]);
+
   // Another mode while open — a row that opens a pick, a chord pressed over
   // the palette — starts its list from the top with nothing typed: what was
   // typed to find "Swap Pane With…" is not the name of a pane.
@@ -340,9 +357,10 @@ export function CommandPalette() {
             panes: swap?.panes ?? [],
             panesNote: swap?.note ?? null,
             projectCommands,
+            agentSessions,
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -375,6 +393,13 @@ export function CommandPalette() {
     if (item.type === 'file') {
       await openFile(item.path);
       setActiveView('editor');
+      return;
+    }
+    if (item.type === 'agent-session') {
+      // Resumed in a new terminal, or the terminal already holding it shown;
+      // anything else is said in a notice (AgentHistoryNotice.jsx).
+      setActiveView('terminal');
+      await resumeFromHistory?.(item.historyKey);
       return;
     }
     if (item.type === 'pane') {
@@ -446,6 +471,11 @@ export function CommandPalette() {
         // The dialog takes the keyboard, and gives it back to what had it
         // before the palette (`focusAfterPalette` says 'dialog').
         useControlLogStore.getState().setOpen(true);
+        return;
+      case 'clear_agent_session_history':
+        // Asks first ("Clear Agent Session History?"), which takes the
+        // keyboard and gives it back to what had it before the palette.
+        await clearAgentHistory();
         return;
       default:
         return;
@@ -559,7 +589,9 @@ export function CommandPalette() {
                     ? 'Swap the active pane with…'
                     : paletteMode === 'project-commands'
                       ? 'Run a project or user command…'
-                      : 'Type a command or search files…'
+                      : paletteMode === 'agent-sessions'
+                        ? 'Resume an agent session — agent, title, folder or id…'
+                        : 'Type a command or search files…'
               }
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-ui text-vsc-fg placeholder:text-vsc-placeholder"
             />

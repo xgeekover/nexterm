@@ -135,6 +135,16 @@ const STAND_INS = {
         return true;
       },
     }));`,
+  // The agent session history (Resume Agent Session…): empty, so it adds
+  // no row; the question before Clear is the real one, which asks this.
+  agentHistoryStore: `
+    import { create } from 'zustand';
+    export const useAgentHistoryStore = create(() => ({
+      entries: [],
+      holders: {},
+      load: async () => {},
+      clear: async () => null,
+    }));`,
   commandIndex: `
     export const historyEntries = [];
     export function commandHistory() {
@@ -165,14 +175,17 @@ const STAND_INS = {
     export const ShieldOff = icon('ShieldOff');
     export const FileWarning = icon('FileWarning');
     export const FilePen = icon('FilePen');
-    export const ScrollText = icon('ScrollText');`,
+    export const ScrollText = icon('ScrollText');
+    export const Bot = icon('Bot');
+    export const Trash2 = icon('Trash2');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */
 function standInFor(path) {
   if (path === 'stand-in:calls') return 'calls';
   if (path === 'lucide-react') return 'lucide';
-  const store = /\/stores\/(settings|editor|terminal|projectCommands)Store\.js$/.exec(path);
+  // Imported from a component (../../stores/x.js) or from another store (./x.js).
+  const store = /(?:\/stores\/|^\.\/)(settings|editor|terminal|projectCommands|agentHistory)Store\.js$/.exec(path);
   if (store) return `${store[1]}Store`;
   if (/\/lib\/ipc\.js$/.test(path)) return 'ipc';
   if (/\/lib\/commandIndex\.js$/.test(path)) return 'commandIndex';

@@ -57,8 +57,11 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         "Stop Trusting This Folder's Commands",
         // Stage 7: what programs in terminals asked of NexTerm through nexterm-cli.
         'Show Control Log',
+        // The agent session history (AGENT SESSIONS): the pick, and emptying it after asking.
+        'Resume Agent Session…',
+        'Clear Agent Session History…',
       ],
-      'The palette offers exactly the fourteen commands the app implements'
+      'The palette offers exactly the sixteen commands the app implements'
     );
   });
 

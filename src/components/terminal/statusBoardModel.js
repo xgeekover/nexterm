@@ -202,13 +202,13 @@ export function keepUserOrderItems(items, sorted) {
 }
 
 /** The menus opened from the list (not the workspace bar's), which hold a sorted order still while open. */
-export const LIST_MENUS = new Set(['group', 'pane', 'tab', 'saved', 'empty']);
+export const LIST_MENUS = new Set(['group', 'pane', 'tab', 'saved', 'empty', 'agent-session', 'agent-sessions']);
 
 /**
  * Whether the subject of a menu opened from the side bar, or of a name being
  * edited in it, still exists: `kind` and `id` as the panel keeps them, `has`
  * the panel's lookups `{ tab(id), group(id), pane(id), saved(id),
- * workspace(id) }`. Kinds with no subject (the list's empty space, the
+ * workspace(id), agentSession(key) }`. Kinds with no subject (the list's empty space, the
  * workspace bar and its lists, the workspace's own name) always do.
  *
  * WHY. Either one holds a sorted order still, and either one can lose its
@@ -229,9 +229,44 @@ export function subjectExists(kind, id, has) {
       return Boolean(has.saved(id));
     case 'workspace':
       return Boolean(has.workspace(id));
+    case 'agent-session':
+      return Boolean(has.agentSession?.(id));
     default:
       return true;
   }
+}
+
+/**
+ * Resume the agent session history's entry `key` from the side bar: the row
+ * selected, then the terminal store's `resumeFromHistory` — a new terminal
+ * in its folder, or the one holding it shown. Its answer, or undefined when
+ * there is no `resumeFromHistory` to ask.
+ */
+export function resumeAgentSessionWith(key, { select, resumeFromHistory }) {
+  select(key);
+  return resumeFromHistory?.(key);
+}
+
+/**
+ * What a row of AGENT SESSIONS does, for the entry `key`. Resuming opens a
+ * terminal and types into it, so it is never one stray click away — and, as
+ * for a saved group, not the click action at all: a double-click delivers
+ * two clicks first. A click selects (`select`); a double-click or Enter
+ * resumes (`resume`: the panel's, `resumeAgentSessionWith`); a right-click
+ * selects and opens the row's menu (`openMenu(event, 'agent-session', key)`).
+ */
+export function agentSessionRowHandlers(key, { select, resume, openMenu }) {
+  return {
+    onClick: () => select(key),
+    onDoubleClick: () => resume(key),
+    onContextMenu: (e) => {
+      select(key);
+      openMenu(e, 'agent-session', key);
+    },
+    onKeyDown: (e) => {
+      if (e.key === 'Enter') resume(key);
+    },
+  };
 }
 
 // ---- What a second line fits ----------------------------------------------------

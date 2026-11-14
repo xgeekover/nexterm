@@ -9,6 +9,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![deny(warnings)]
 
+pub mod agent_history;
+pub mod claude_conversations;
 pub mod commands;
 pub mod control;
 pub mod fs;
@@ -242,6 +244,11 @@ fn main() {
             commands::control::control_reply,
             commands::control::control_set_settings,
             commands::agent::agent_sessions,
+            commands::agent::claude_conversations,
+            commands::agent_history::agent_history_list,
+            commands::agent_history::agent_history_upsert,
+            commands::agent_history::agent_history_remove,
+            commands::agent_history::agent_history_clear,
             commands::app::app_set_unsaved,
             commands::app::app_set_pending_save,
             commands::app::app_close_ack,

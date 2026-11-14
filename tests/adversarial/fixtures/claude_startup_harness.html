@@ -128,6 +128,12 @@
 
       const utf8 = new TextEncoder();
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      // How long a wait for the page to be ready may take: `until` returns as
+      // soon as its check holds, so a generous bound costs a passing run
+      // nothing. One second was not enough under load: the fit of the pane
+      // (sizePane) missed it and the report said 198x57, the pane's size
+      // before it is fitted, in two of three full adversarial runs.
+      const READY_MS = 10000;
       async function until(check, ms) {
         const end = performance.now() + ms;
         while (performance.now() < end) {
@@ -201,7 +207,7 @@
           pane.style.height = `${Math.floor(box.height + (ROWS - dims.rows) * cellH + cellH / 2)}px`;
         }
         // TerminalView fits on its ResizeObserver, a frame later.
-        await until(() => entry.term.cols === COLS && entry.term.rows === ROWS, 1000);
+        await until(() => entry.term.cols === COLS && entry.term.rows === ROWS, READY_MS);
         return `${entry.term.cols}x${entry.term.rows}`;
       }
 
@@ -318,7 +324,7 @@
           // And the terminal still answers after it.
           const before = emitted.length;
           output('probe', '\x1b[c');
-          const probeParsed = await until(() => parsed.has(name('probe')), 1000);
+          const probeParsed = await until(() => parsed.has(name('probe')), READY_MS);
           report.probe = { parsed: probeParsed, replies: emitted.slice(before).map((e) => show(e.data)) };
           return report;
         } finally {

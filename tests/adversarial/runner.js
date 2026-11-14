@@ -143,6 +143,15 @@ import './control_keys.test.js';
 import './control_scope.test.js';
 import './control_dispatcher.test.js';
 import './claude_startup_headless.test.js';
+// Last: it puts the mock's agent session history and the page storage back (AH-99).
+import './agent_history_contract.test.js';
+// After it, each with its own teardown (AHR-99, AHS-99): the recorder, and resuming from the history.
+import './agent_history_recording.test.js';
+import './agent_history_resume.test.js';
+// The palette's pick and the question before Clear; its own teardown (AHP-99).
+import './agent_history_palette.test.js';
+// Claude Code's own titles and the never-saved rule; its own teardown (AHC-99).
+import './agent_history_claude_titles.test.js';
 
 async function run() {
   console.log('====================================================');

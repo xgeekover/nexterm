@@ -12,6 +12,7 @@ import { basename, isInside, relativeTo, stripTrailingSep, toPosix } from './pat
 import { isMac } from './platform.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
 import { COMMANDS_FILE } from './projectCommands.js';
+import { historyDisplay, historyMatches } from './agentHistory.js';
 
 /**
  * The most files the palette lists for one query. An empty query matches
@@ -21,6 +22,13 @@ import { COMMANDS_FILE } from './projectCommands.js';
  * through; the rest are counted (`more`) so the list can say so.
  */
 export const FILE_RESULT_LIMIT = 200;
+
+/**
+ * The most agent sessions the default palette lists for a query: a few, as
+ * a pointer to the entry the query names. Resume Agent Session… lists them
+ * all; the rest are counted (`more`).
+ */
+export const AGENT_SESSION_GROUP_LIMIT = 5;
 
 /**
  * Every file in an explorer tree, at any depth.
@@ -178,7 +186,56 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       // A dialog, which takes the keyboard as it opens (`focusAfterPalette`).
       opensDialog: true,
     },
+    // The agent session history (AGENT SESSIONS in the side bar): palette
+    // commands only, like the project commands.
+    {
+      type: 'command',
+      id: 'cmd-resume-agent-session',
+      command: 'resume_agent_session',
+      title: 'Resume Agent Session…',
+      subtitle: 'Pick a Claude Code or OpenCode conversation run in NexTerm and continue it in a new terminal',
+      // A pick of the entries, in the palette (mode 'agent-sessions').
+      opens: 'agent-sessions',
+    },
+    {
+      type: 'command',
+      id: 'cmd-clear-agent-session-history',
+      command: 'clear_agent_session_history',
+      title: 'Clear Agent Session History…',
+      subtitle: 'Empty the AGENT SESSIONS list after asking; the conversations themselves are not touched',
+      // "Clear Agent Session History?" takes the keyboard as it opens.
+      opensDialog: true,
+    },
   ];
+}
+
+/**
+ * `entries` of the agent session history (agentHistoryStore's, newest first
+ * as the backend lists them — sorted again here, so a caller's order cannot
+ * put an old one on top) that fit `query` (`historyMatches`: agent, title,
+ * folder, id prefix), as palette rows. Enter on one resumes it
+ * (`resumeFromHistory`, by `historyKey`).
+ */
+export function agentSessionRows(entries, query = '') {
+  const list = (Array.isArray(entries) ? entries : []).filter(
+    (entry) => entry && typeof entry.key === 'string' && entry.key
+  );
+  return list
+    .map((entry, at) => ({ entry, at }))
+    .sort((a, b) => (Number(b.entry.lastUsedAt) || 0) - (Number(a.entry.lastUsedAt) || 0) || a.at - b.at)
+    .map(({ entry }) => entry)
+    .filter((entry) => historyMatches(entry, query))
+    .map((entry) => {
+      const shown = historyDisplay(entry);
+      return {
+        type: 'agent-session',
+        id: `agent-session-${entry.key}`,
+        historyKey: entry.key,
+        title: shown.title,
+        subtitle: shown.folderPath,
+        hint: shown.label,
+      };
+    });
 }
 
 /** "1 command", "3 commands". */
@@ -300,6 +357,8 @@ function projectCommandGroup(projectCommands, q, mode) {
  */
 export function focusAfterPalette(item) {
   if (item?.type === 'history') return 'terminal';
+  // The terminal it opens, or the one already holding it.
+  if (item?.type === 'agent-session') return 'terminal';
   if (item?.type === 'file') return 'editor';
   // A project command's run dialog, or the review: the dialog takes the
   // keyboard as it opens, and gives it back to what had it before the
@@ -355,9 +414,28 @@ export function buildPaletteGroups({
   panes = [],
   panesNote = null,
   projectCommands = null,
+  agentSessions = [],
   limit = FILE_RESULT_LIMIT,
 } = {}) {
   const q = (query || '').toLowerCase().trim();
+
+  // "Resume Agent Session…" as a pick: every entry of the history, newest
+  // first, or a note saying how the list fills — an empty palette reading
+  // "No matching commands or files" would not say what it is for.
+  if (mode === 'agent-sessions') {
+    const rows = agentSessionRows(agentSessions, q);
+    if (rows.length > 0) return [{ label: 'agent sessions', items: rows }];
+    const none = (Array.isArray(agentSessions) ? agentSessions : []).length === 0;
+    return [
+      {
+        label: 'agent sessions',
+        items: [],
+        note: none
+          ? 'No agent sessions yet. Claude Code and OpenCode conversations run in a NexTerm terminal are listed here, newest first.'
+          : 'No agent session matches.',
+      },
+    ];
+  }
 
   // "Run Project Command…" as a pick: the folder's commands and the user's,
   // or the row that reviews them first, and nothing else to scroll past.
@@ -459,10 +537,23 @@ export function buildPaletteGroups({
     Boolean(q) &&
     projectGroup?.items.some((row) => row.type === 'project-command' && fuzzyMatch(q, row.title)) &&
     !commands.some((cmd) => fuzzyMatch(q, cmd.title));
+  // The entries a query names, after the commands, in a group of their own
+  // as the project commands are — and only once something is typed: with
+  // nothing typed every entry fits, and Resume Agent Session… lists them.
+  const agentRows = mode === 'files' || !q ? [] : agentSessionRows(agentSessions, q);
+  const agentGroup =
+    agentRows.length > 0
+      ? {
+          label: 'agent sessions',
+          items: agentRows.slice(0, AGENT_SESSION_GROUP_LIMIT),
+          more: Math.max(0, agentRows.length - AGENT_SESSION_GROUP_LIMIT),
+        }
+      : null;
 
   return [
     { label: 'files', items: fileRows, more: found.more, truncated: files ? filesTruncated === true : false },
     ...(projectFirst ? [projectGroup, commandGroup] : [commandGroup, ...(projectGroup ? [projectGroup] : [])]),
+    ...(agentGroup ? [agentGroup] : []),
     // A cut list keeps its group, rows or none, for the note that says it was
     // cut: with nothing matching, the note went with the group, and a file
     // past the cut read as no file at all. A group with a note keeps it too.

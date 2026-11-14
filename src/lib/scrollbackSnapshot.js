@@ -1007,6 +1007,27 @@ export function maskLine(line, pem = { inside: false, lines: 0, gap: 0, ppk: 0 }
 }
 
 /**
+ * `text` with its secrets hidden, each as HIDDEN — for a short piece of text
+ * that is not a terminal line: an agent conversation's title, kept in the
+ * agent session history (src/lib/agentHistory.js). A thin wrapper: the text
+ * goes to `maskLine` as a line of one run, with no key block above it, and
+ * nothing of `maskLine` or of the scrollback's masking changes for it.
+ *
+ * `cut`: the text was cut short at its end (a title cut to its length cap),
+ * so a token it ends in may be too short now to be recognised. As at a
+ * terminal's right margin (`cutTokenAtEnd`), what follows a known token
+ * prefix at its very end is hidden.
+ */
+export function maskSecretsInText(text, { cut = false } = {}) {
+  if (typeof text !== 'string' || text === '') return text;
+  const line = { runs: [{ sgr: '', text }] };
+  maskLine(line);
+  const masked = line.runs.map((run) => run.text).join('');
+  const tail = cut ? cutTokenAtEnd(masked) : null;
+  return tail && tail[1] > tail[0] ? `${masked.slice(0, tail[0])}${HIDDEN}${masked.slice(tail[1])}` : masked;
+}
+
+/**
  * Mask every line, oldest first. Returns how many were hidden in each line.
  *
  * Across lines, three things one line cannot see alone:
