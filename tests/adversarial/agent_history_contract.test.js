@@ -16,7 +16,8 @@
  * this build does not know, the deleted- and corrupt-file hooks, and
  * Tauri's own refusals. AH-20 checks the numbers and patterns against the
  * Rust source and src/lib/agents.js, and that the four commands are
- * registered. AH-99 puts the mock and the storage back.
+ * registered; AH-21 does the same on copies with a Windows checkout's CRLF
+ * line ends. AH-99 puts the mock and the storage back.
  */
 import { describe, test, assert, skip } from '../e2e/harness/testFramework.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -28,7 +29,16 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(here, '..', 'fixtures', 'agent-history.json');
 const available = existsSync(FIXTURE);
 const fixture = available ? JSON.parse(readFileSync(FIXTURE, 'utf8')) : null;
-const source = (relative) => readFileSync(path.join(here, relative), 'utf8');
+/**
+ * A file of the repo as the checks read it: with LF line ends. Windows checks
+ * the repo out with CRLF, and AH-20 looks for whole lines, so without this it
+ * found none of them there. `as` changes the text first; AH-21 gives it a
+ * Windows checkout's line ends.
+ */
+const source = (relative, as = (text) => text) =>
+  as(readFileSync(path.join(here, relative), 'utf8')).replace(/\r\n/g, '\n');
+/** Every line end as a Windows checkout has it. */
+const crlf = (text) => text.replace(/\r?\n/g, '\r\n');
 
 const KEY = 'nexterm.mock.agentHistory';
 const CLAUDE_A = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -394,9 +404,10 @@ describe('Agent session history: the mock alone', () => {
     });
   });
 
-  test('AH-20: the numbers, the id patterns and the commands are the backend’s', () => {
-    const rust = source('../../src-tauri/src/agent_history.rs');
-    const mock = source('../../src/lib/ipc.js');
+  /** AH-20's checks, on the five files as `read` gives them. */
+  const theBackendsOwn = (read) => {
+    const rust = read('../../src-tauri/src/agent_history.rs');
+    const mock = read('../../src/lib/ipc.js');
     for (const [rustLine, mockLine] of [
       ['pub const CAP: usize = 200;', 'const MOCK_AGENT_HISTORY_CAP = 200;'],
       ['pub const MAX_READ_BYTES: u64 = 1024 * 1024;', 'const MOCK_AGENT_HISTORY_MAX_READ_BYTES = 1024 * 1024;'],
@@ -416,7 +427,7 @@ describe('Agent session history: the mock alone', () => {
     }
     // The ids typed into a shell: the mock's patterns are agents.js's own,
     // and the backend's doc names those lines.
-    const agents = source('../../src/lib/agents.js');
+    const agents = read('../../src/lib/agents.js');
     for (const [name, kind] of [['CLAUDE_SESSION_ID', 'claude'], ['OPENCODE_SESSION_ID', 'opencode']]) {
       const pattern = new RegExp(`^const ${name} = (/.+/);$`, 'm').exec(agents)?.[1];
       assert.ok(pattern, `premise: agents.js has ${name}`);
@@ -424,9 +435,9 @@ describe('Agent session history: the mock alone', () => {
       assert.ok(rust.includes(`\`${name}\``), `the backend says it mirrors ${name}`);
     }
 
-    const main = source('../../src-tauri/src/main.rs');
+    const main = read('../../src-tauri/src/main.rs');
     const handler = main.slice(main.indexOf('generate_handler!['), main.indexOf('])', main.indexOf('generate_handler![')));
-    const commands = source('../../src-tauri/src/commands/agent_history.rs');
+    const commands = read('../../src-tauri/src/commands/agent_history.rs');
     const signatures = {
       agent_history_list: '(app: AppHandle) -> Result<Vec<Entry>, String>',
       agent_history_upsert: '(app: AppHandle, entry: Value, replaces: Option<String>) -> Result<Entry, String>',
@@ -442,6 +453,31 @@ describe('Agent session history: the mock alone', () => {
     }
     assert.equal((commands.match(/#\[tauri::command/g) ?? []).length, 4, 'no other command there');
     assert.ok(commands.includes('spawn_blocking'), 'the blocking pool');
+  };
+  const BACKEND_FILES = [
+    '../../src-tauri/src/agent_history.rs',
+    '../../src/lib/ipc.js',
+    '../../src/lib/agents.js',
+    '../../src-tauri/src/main.rs',
+    '../../src-tauri/src/commands/agent_history.rs',
+  ];
+
+  test('AH-20: the numbers, the id patterns and the commands are the backend’s', () => {
+    theBackendsOwn(source);
+  });
+
+  test('AH-21: the same on a Windows checkout, every line ending in CRLF', () => {
+    for (const relative of BACKEND_FILES) {
+      // Premise: the copy has Windows' line ends, and only those.
+      const copy = crlf(readFileSync(path.join(here, relative), 'utf8'));
+      assert.ok(copy.includes('\r\n'), `premise: ${relative} has CRLF`);
+      assert.ok(!/(^|[^\r])\n/.test(copy), `premise: ${relative} has no LF on its own`);
+    }
+    const read = (relative) => source(relative, crlf);
+    theBackendsOwn(read);
+    for (const relative of BACKEND_FILES) {
+      assert.equal(read(relative), source(relative), `${relative} reads as it does with LF`);
+    }
   });
 
   test('AH-99: teardown — the mock and the storage as they were', () => {
