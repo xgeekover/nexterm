@@ -221,6 +221,8 @@ export function CommandPalette() {
   // The agent session history, newest first (agentHistoryStore.js). It
   // changes only when an agent in a terminal starts, is named or ends.
   const agentSessions = useAgentHistoryStore((s) => s.entries);
+  // Its groups, for a row's subtitle and for a query naming a group (F28).
+  const agentGroups = useAgentHistoryStore((s) => s.groups);
 
   // The folder's commands and the user's (spec D10). Each of these changes
   // only when a read finds other bytes, trust is given or taken, or the
@@ -358,9 +360,10 @@ export function CommandPalette() {
             panesNote: swap?.note ?? null,
             projectCommands,
             agentSessions,
+            agentGroups: Array.isArray(agentGroups) ? agentGroups : [],
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions, agentGroups]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -590,7 +593,7 @@ export function CommandPalette() {
                     : paletteMode === 'project-commands'
                       ? 'Run a project or user command…'
                       : paletteMode === 'agent-sessions'
-                        ? 'Resume an agent session — agent, title, folder or id…'
+                        ? 'Resume an agent session — name, title, group, agent, folder or id…'
                         : 'Type a command or search files…'
               }
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-ui text-vsc-fg placeholder:text-vsc-placeholder"

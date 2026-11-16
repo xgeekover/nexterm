@@ -212,28 +212,40 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
 /**
  * `entries` of the agent session history (agentHistoryStore's, newest first
  * as the backend lists them — sorted again here, so a caller's order cannot
- * put an old one on top) that fit `query` (`historyMatches`: agent, title,
- * folder, id prefix), as palette rows. Enter on one resumes it
- * (`resumeFromHistory`, by `historyKey`).
+ * put an old one on top) that fit `query` (`historyMatches`: the user's
+ * name, the title, the agent, the folder, the name of its group among
+ * `groups` — the store's `{ id, name }` — and the id prefix), as palette rows
+ * (F28). Enter on one resumes it (`resumeFromHistory`, by `historyKey`).
+ *
+ * The entries that are not archived, pinned ones first, the hint saying so;
+ * with `archived`, only the archived ones, newest first. A grouped row's
+ * subtitle names its group after the folder.
  */
-export function agentSessionRows(entries, query = '') {
+export function agentSessionRows(entries, query = '', groups = null, { archived = false } = {}) {
   const list = (Array.isArray(entries) ? entries : []).filter(
-    (entry) => entry && typeof entry.key === 'string' && entry.key
+    (entry) => entry && typeof entry.key === 'string' && entry.key && (entry.archived === true) === archived
   );
+  const known = Array.isArray(groups) ? groups : [];
   return list
     .map((entry, at) => ({ entry, at }))
-    .sort((a, b) => (Number(b.entry.lastUsedAt) || 0) - (Number(a.entry.lastUsedAt) || 0) || a.at - b.at)
+    .sort(
+      (a, b) =>
+        (archived ? 0 : Number(b.entry.pinned === true) - Number(a.entry.pinned === true)) ||
+        (Number(b.entry.lastUsedAt) || 0) - (Number(a.entry.lastUsedAt) || 0) ||
+        a.at - b.at
+    )
     .map(({ entry }) => entry)
-    .filter((entry) => historyMatches(entry, query))
+    .filter((entry) => historyMatches(entry, query, known))
     .map((entry) => {
       const shown = historyDisplay(entry);
+      const group = shown.groupId ? known.find((g) => g?.id === shown.groupId) : null;
       return {
         type: 'agent-session',
         id: `agent-session-${entry.key}`,
         historyKey: entry.key,
         title: shown.title,
-        subtitle: shown.folderPath,
-        hint: shown.label,
+        subtitle: group?.name ? `${shown.folderPath} · ${group.name}` : shown.folderPath,
+        hint: shown.pinned && !archived ? `${shown.label} · pinned` : shown.label,
       };
     });
 }
@@ -415,16 +427,24 @@ export function buildPaletteGroups({
   panesNote = null,
   projectCommands = null,
   agentSessions = [],
+  agentGroups = [],
   limit = FILE_RESULT_LIMIT,
 } = {}) {
   const q = (query || '').toLowerCase().trim();
 
-  // "Resume Agent Session…" as a pick: every entry of the history, newest
-  // first, or a note saying how the list fills — an empty palette reading
-  // "No matching commands or files" would not say what it is for.
+  // "Resume Agent Session…" as a pick: every entry of the history, pinned
+  // first and then newest first, the archived ones in a group of their own
+  // after them (F28) — or a note saying how the list fills: an empty palette
+  // reading "No matching commands or files" would not say what it is for.
   if (mode === 'agent-sessions') {
-    const rows = agentSessionRows(agentSessions, q);
-    if (rows.length > 0) return [{ label: 'agent sessions', items: rows }];
+    const rows = agentSessionRows(agentSessions, q, agentGroups);
+    const archivedRows = agentSessionRows(agentSessions, q, agentGroups, { archived: true });
+    if (rows.length > 0 || archivedRows.length > 0) {
+      return [
+        ...(rows.length > 0 ? [{ label: 'agent sessions', items: rows }] : []),
+        ...(archivedRows.length > 0 ? [{ label: 'archived agent sessions', items: archivedRows }] : []),
+      ];
+    }
     const none = (Array.isArray(agentSessions) ? agentSessions : []).length === 0;
     return [
       {
@@ -540,7 +560,8 @@ export function buildPaletteGroups({
   // The entries a query names, after the commands, in a group of their own
   // as the project commands are — and only once something is typed: with
   // nothing typed every entry fits, and Resume Agent Session… lists them.
-  const agentRows = mode === 'files' || !q ? [] : agentSessionRows(agentSessions, q);
+  // Never an archived one: those are for Resume Agent Session… (F28).
+  const agentRows = mode === 'files' || !q ? [] : agentSessionRows(agentSessions, q, agentGroups);
   const agentGroup =
     agentRows.length > 0
       ? {

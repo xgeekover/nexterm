@@ -202,13 +202,15 @@ export function keepUserOrderItems(items, sorted) {
 }
 
 /** The menus opened from the list (not the workspace bar's), which hold a sorted order still while open. */
-export const LIST_MENUS = new Set(['group', 'pane', 'tab', 'saved', 'empty', 'agent-session', 'agent-sessions']);
+export const LIST_MENUS = new Set(['group', 'pane', 'tab', 'saved', 'empty', 'agent-session', 'agent-group', 'agent-sessions']);
 
 /**
  * Whether the subject of a menu opened from the side bar, or of a name being
  * edited in it, still exists: `kind` and `id` as the panel keeps them, `has`
  * the panel's lookups `{ tab(id), group(id), pane(id), saved(id),
- * workspace(id), agentSession(key) }`. Kinds with no subject (the list's empty space, the
+ * workspace(id), agentSession(key), agentGroup(id) }` — `agent-group` an
+ * AGENT SESSIONS group header's menu or its name being edited. Kinds with no
+ * subject (the list's empty space, the
  * workspace bar and its lists, the workspace's own name) always do.
  *
  * WHY. Either one holds a sorted order still, and either one can lose its
@@ -231,6 +233,8 @@ export function subjectExists(kind, id, has) {
       return Boolean(has.workspace(id));
     case 'agent-session':
       return Boolean(has.agentSession?.(id));
+    case 'agent-group':
+      return Boolean(has.agentGroup?.(id));
     default:
       return true;
   }

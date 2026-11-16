@@ -4547,6 +4547,168 @@ scenario(
   }
 );
 
+// ---- AGENT SESSIONS curated: pinned, groups, the rest, Archived (F25, AC37) -------
+
+/** Its group headers, each as `{ id, collapsed, count, text, at }`, in the order drawn. */
+function agentGroupHeadersIn(html) {
+  return [...html.matchAll(/<div\b[^>]*\sdata-agent-group="([^"]*)"[^>]*>[\s\S]*?<\/div>/g)].map((m) => ({
+    id: m[1],
+    collapsed: /\sdata-agent-group-collapsed="([^"]*)"/.exec(m[0])?.[1],
+    count: Number(/\sdata-agent-group-count="([^"]*)"/.exec(m[0])?.[1]),
+    text: visibleText(m[0]).replace(/\s+/g, ' ').trim(),
+    at: m.index,
+  }));
+}
+/** A row's place in the markup, its level and whether it carries the pin marker. */
+const rowFacts = (html, key) => {
+  const at = html.indexOf(`data-agent-session="${key}"`);
+  const tag = at === -1 ? '' : html.slice(html.lastIndexOf('<div', at), html.indexOf('>', at) + 1);
+  return { at, level: /\sdata-agent-level="(\d)"/.exec(tag)?.[1] ?? null, pinned: /\sdata-agent-pinned=""/.test(tag) };
+};
+
+const CURATED_GROUPS = [
+  { id: 'g-work', name: 'Work', collapsed: false },
+  { id: 'g-folded', name: 'Folded away', collapsed: true },
+  { id: 'g-empty', name: 'Nothing yet', collapsed: false },
+];
+const CURATED = [
+  historyEntry('k-archived-new', { title: 'Archived but newest', archived: true }, 1),
+  historyEntry('k-pinned', { title: 'Pinned in Work', pinned: true, groupId: 'g-work' }, 50),
+  historyEntry('k-member', { title: 'A Work member' }, 10),
+  historyEntry('k-folded', { title: 'Under a folded group', groupId: 'g-folded' }, 12),
+  historyEntry('k-renamed', { kind: 'claude', sessionId: CLAUDE_ID, cwd: '/work/web', title: 'What Claude Code called it', name: 'My own name' }, 20),
+  historyEntry('k-plain', { title: 'Plain and ungrouped' }, 30),
+  historyEntry('k-archived-old', { title: 'Archived long ago', archived: true, groupId: 'g-work' }, 900),
+];
+CURATED[2].groupId = 'g-work';
+
+scenario(
+  'RN-211',
+  'AGENT SESSIONS curated: pinned rows first with a pin, then each group with its count and its rows a level deeper, then the rest; Archived closed with its count; a renamed row by its name (AC37)',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: CURATED, groups: CURATED_GROUPS, loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    expectThat(section, 'no AGENT SESSIONS section');
+    expectThat(/data-agent-sessions-count="5"/.test(section), `the header counts the archived entries: ${/data-agent-sessions-count="(\d+)"/.exec(section)?.[1]}`);
+    const keys = agentSessionRowsIn(section).map((r) => r.key);
+    expectThat(JSON.stringify(keys) === JSON.stringify(['k-pinned', 'k-member', 'k-renamed', 'k-plain']), `rows drawn: ${JSON.stringify(keys)}`);
+    const headers = agentGroupHeadersIn(section);
+    expectThat(JSON.stringify(headers.map((h) => [h.id, h.collapsed, h.count])) === JSON.stringify([['g-work', 'false', 1], ['g-folded', 'true', 1], ['g-empty', 'false', 0]]), JSON.stringify(headers));
+    for (const [h, name] of [[headers[0], 'Work'], [headers[1], 'Folded away'], [headers[2], 'Nothing yet']]) expectThat(h.text.startsWith(name), `the header does not name its group: ${h.text}`);
+    const pinned = rowFacts(section, 'k-pinned');
+    expectThat(pinned.pinned && pinned.level === '1', `the pinned row: ${JSON.stringify(pinned)}`);
+    expectThat(pinned.at < headers[0].at, 'a pinned row comes after a group header');
+    const pinnedRow = agentSessionRowsIn(section).find((r) => r.key === 'k-pinned');
+    expectThat(/data-agent-session-group="g-work"/.test(pinnedRow.tag) && pinnedRow.text.includes('Work'), `the pinned row does not name its group: ${pinnedRow.text}`);
+    const member = rowFacts(section, 'k-member');
+    expectThat(member.level === '2' && !member.pinned && member.at > headers[0].at && member.at < headers[1].at, `the member is not under its header: ${JSON.stringify(member)}`);
+    expectThat(rowFacts(section, 'k-folded').at === -1, 'a collapsed group draws its rows');
+    for (const key of ['k-renamed', 'k-plain']) {
+      const row = rowFacts(section, key);
+      expectThat(row.level === '1' && !row.pinned && row.at > headers[2].at, `the ungrouped row ${key} is not after the groups: ${JSON.stringify(row)}`);
+    }
+    const renamed = agentSessionRowsIn(section).find((r) => r.key === 'k-renamed');
+    expectThat(renamed.text.includes('My own name') && !renamed.text.includes('What Claude Code called it'), `the renamed row: ${renamed.text}`);
+    expectThat(renamed.title.startsWith('Claude Code: My own name') && renamed.title.includes('Its own title: What Claude Code called it'), `its tooltip: ${renamed.title}`);
+    const archived = /<div\b[^>]*\sdata-agent-archived="([^"]*)"[^>]*>[\s\S]*?<\/div>/.exec(section);
+    expectThat(archived && archived[1] === 'closed', 'no closed Archived header');
+    expectThat(/data-agent-archived-count="2"/.test(archived[0]) && visibleText(archived[0]).includes('Archived'), `the Archived header: ${archived?.[0]}`);
+    expectThat(archived.index > rowFacts(section, 'k-plain').at, 'Archived is not last');
+    expectThat(!section.includes('data-agent-session="k-archived-new"') && !section.includes('data-agent-session="k-archived-old"'), 'archived rows drawn while closed');
+    expectThat(!visibleText(section).includes('are listed here, newest first'), 'the empty-state hint beside entries');
+  }
+);
+
+scenario(
+  'RN-212',
+  'AGENT SESSIONS with only archived entries: the hint, a count of 0 and Archived (n), no rows; a group alone keeps the hint away (AC37, F25)',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: [CURATED[0], CURATED[6]], groups: [], loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    expectThat(/data-agent-sessions-count="0"/.test(section), 'the header counts the archived entries');
+    expectText(section, 'Claude Code and OpenCode sessions run in these terminals are listed here, newest first.');
+    expectThat(/data-agent-archived="closed"/.test(section) && /data-agent-archived-count="2"/.test(section), 'no Archived (2)');
+    expectThat(agentSessionRowsIn(section).length === 0, 'rows drawn');
+    reset();
+    useAgentHistoryStore.setState({ entries: [], groups: [CURATED_GROUPS[2]], loaded: true, holders: {} });
+    const alone = agentSessionsSection(renderArranged());
+    expectThat(!visibleText(alone).includes('are listed here, newest first'), 'the hint beside a group');
+    expectThat(agentGroupHeadersIn(alone).map((h) => `${h.id}:${h.count}`).join() === 'g-empty:0', 'the empty group is not drawn with 0');
+    expectThat(!/data-agent-archived=/.test(alone), 'an Archived header with nothing archived');
+  }
+);
+
+scenario(
+  'RN-213',
+  "Resume Agent Session… curated: pinned first, then newest first, a grouped row's subtitle names its group, then 'archived agent sessions' (AC40)",
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: CURATED, groups: CURATED_GROUPS, loaded: true });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'agent-sessions' });
+  },
+  (html) => {
+    const live = paletteRows(paletteGroup(html, 'agent sessions') ?? '');
+    const archivedAt = html.indexOf('>archived agent sessions</div>');
+    expectThat(archivedAt !== -1, 'no archived agent sessions group');
+    const listed = live.filter((r) => html.indexOf(r.tag) < archivedAt).map((r) => [r.title, r.subtitle, r.hint]);
+    expectThat(
+      JSON.stringify(listed) ===
+        JSON.stringify([
+          ['Pinned in Work', '/work/app · Work', 'opencode · pinned'],
+          ['A Work member', '/work/app · Work', 'opencode'],
+          ['Under a folded group', '/work/app · Folded away', 'opencode'],
+          ['My own name', '/work/web', 'Claude Code'],
+          ['Plain and ungrouped', '/work/app', 'opencode'],
+        ]),
+      JSON.stringify(listed)
+    );
+    const archived = paletteRows(html.slice(archivedAt)).map((r) => [r.title, r.subtitle]);
+    expectThat(JSON.stringify(archived) === JSON.stringify([['Archived but newest', '/work/app'], ['Archived long ago', '/work/app · Work']]), JSON.stringify(archived));
+    expectThat(/placeholder="Resume an agent session — name, title, group/.test(html), 'the placeholder does not mention names and groups');
+  }
+);
+
+scenario(
+  'RN-214',
+  'a pin, rename, group or delete the history refused is an alert headed "Agent session not changed" (F30)',
+  () => {
+    reset();
+    useTerminalStore.getState().showAgentHistoryNotice('curationFailed', 'There can be at most 50 agent session groups');
+  },
+  (html) => {
+    const notice = /<div\b[^>]*\sdata-agent-history-notice="curationFailed"[^>]*>[\s\S]*?<\/button><\/div>/.exec(html)?.[0];
+    expectThat(notice, 'no notice drawn');
+    expectThat(/\srole="alert"/.test(notice), 'not announced as an alert');
+    expectText(notice, 'Agent session not changed');
+    expectText(notice, 'There can be at most 50 agent session groups');
+  }
+);
+
+scenario(
+  'RN-215',
+  'a newer NexTerm’s list draws the same sections; more than 15 ungrouped rows end in "Show all (N)…" with N every unarchived entry (F25, F30)',
+  () => {
+    reset();
+    const many = Array.from({ length: 17 }, (_, i) => historyEntry(`k-${i}`, { title: `Task ${i}` }, i + 1));
+    many.push(historyEntry('k-pin', { title: 'Pinned', pinned: true }, 100), historyEntry('k-arch', { title: 'Gone', archived: true }, 200));
+    useAgentHistoryStore.setState({ entries: many, groups: [], readOnly: true, version: 3, loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    const keys = agentSessionRowsIn(section).map((r) => r.key);
+    expectThat(keys.length === 16 && keys[0] === 'k-pin' && keys[15] === 'k-14', JSON.stringify(keys));
+    expectThat(/data-agent-sessions-count="18"/.test(section), 'the count');
+    expectText(section, 'Show all (18)…');
+    expectThat(/data-agent-archived-count="1"/.test(section), 'no Archived (1)');
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

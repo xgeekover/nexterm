@@ -656,27 +656,85 @@ OpenCode and Claude Code conversation run in a NexTerm terminal is also kept
 in a list, so one from last week can be picked up too.
 
 **AGENT SESSIONS** sits in the TERMINALS panel, below SAVED, with its count in
-the header. Newest first, each row shows the conversation's title (the one
-OpenCode or Claude Code gave it; or the start of its id; or *most recent in
-folder* for one whose id was never known), which agent ran it, the folder (the
-full path is in the tooltip) and
-when it was last used. *open* or *offered* marks one that a terminal in this
-window has running or is offering to resume. The first 15 are listed; *Show
-all (N)…* opens the rest in the palette.
+the header (archived entries are not counted). Each row shows the
+conversation's name (the one you gave it; else the title OpenCode or Claude
+Code gave it; else the start of its id; else *most recent in folder* for one
+whose id was never known), which agent ran it, the folder (the full path is in
+the tooltip) and when it was last used. *open* or *offered* marks one that a
+terminal in this window has running or is offering to resume. From top to
+bottom the section shows:
+
+1. **Pinned** entries, newest first, each with a pin. A pinned entry in a
+   group names its group on its second line.
+2. Each **group**, in the order they were made, as a header with its name and
+   the number of rows under it; a click folds or unfolds it, and NexTerm
+   remembers that across restarts. Under the header, one level deeper, are its
+   members that are neither pinned nor archived, newest first. An empty group
+   shows 0.
+3. The **other** entries, newest first. The first 15 are listed; *Show all
+   (N)…* opens every entry in the palette.
+4. **Archived (n)**, when anything is archived: closed each time the
+   TERMINALS view opens, which is when NexTerm starts and also when you go to
+   another side-bar view and come back; a click opens it and lists the
+   archived entries, newest first.
+
+The hint about how the list fills shows when there is no group and no entry
+outside *Archived*.
 
 - A click selects a row. A double-click or `Enter` resumes it in a **new
   terminal** in the active pane, started in the entry's folder. Once the shell
   shows its first prompt, NexTerm types `claude --resume <id>` or
   `opencode -s <id>`. An entry without an id follows the rules of *Resume*
   above, `opencode --continue` included.
-- Right-click a row for *Resume in New Terminal*, *Remove from List* and
-  *Clear Agent Session History…*, which asks first. Removing or clearing only
-  changes NexTerm's list. The conversation itself stays with its agent, and
-  one that is still running is listed again when it next does something.
-- In the command palette, *Resume Agent Session…* lists every entry. Type to
-  filter by agent, title, folder or the start of an id; `Enter` resumes. In the
-  ordinary palette, typing also shows up to five matching entries under
-  *agent sessions*. *Clear Agent Session History…* is a palette command too.
+- Right-click a row for its menu:
+  - *Resume in New Terminal*, or *Show Its Terminal* when a terminal in this
+    window has it — the same as a double-click.
+  - *Copy Session ID* copies exactly the conversation's id, ready for
+    `claude --resume <id>` or `opencode -s <id>` in any terminal. It is off for
+    an entry whose id NexTerm never learned.
+  - *Pin* / *Unpin* moves the entry into or out of the pinned area.
+  - *Rename…* edits its name in place: `Enter` or clicking away keeps it,
+    `Escape` leaves it as it was. Your name beats every title the agent
+    gives it; the agent's titles keep being recorded underneath (the tooltip
+    shows the agent's own), and renaming it to nothing brings back the newest
+    one. A name is kept the way a title is (see *Privacy*).
+  - *Move to Group ▸* lists every group with its count (the entry's own is
+    off), *New Group…* — a group named *New Group* (or *New Group 2*, …) with
+    the entry in it, its name ready to type — and *Remove from Group*.
+  - *Archive* hides the entry from the lists above and puts it under
+    *Archived*, keeping its name, pin and group; *Unarchive* puts it back as
+    it was. Resuming an archived entry — from the list, the palette or a
+    restored terminal's *Resume* — unarchives it, and so does the same
+    conversation starting again in a terminal (for an entry without an id, its
+    agent started again in its folder); a new title or the agent exiting does
+    not. Archiving alone does not keep a session: an archived session that is
+    not pinned, named or in a group leaves the list like any other once 200
+    newer sessions that are not pinned, named or in a group are listed (at the
+    next recorded session event), so pin it, name it or put it in a group to
+    keep it.
+  - *Delete…* asks, then removes the entry from NexTerm's list only. The
+    conversation stays with Claude Code or OpenCode, and NexTerm deletes none
+    of their files. It is off while a terminal in this window is running that
+    conversation, which would only list it again.
+- Right-click a group's header for *Rename Group…* (an empty name keeps the
+  old one) and *Delete Group…*, which asks, then deletes only the group: its
+  sessions go back to the list.
+- Right-click the AGENT SESSIONS header for *Resume Agent Session…*, *New
+  Group…* (an empty group, its name ready to type; at most 50 groups) and
+  *Clear Agent Session History…*, which asks first and empties the whole list,
+  archived entries and every group included. Clearing only changes NexTerm's
+  list, and a conversation that is still running is listed again when it next
+  does something.
+- In the command palette, *Resume Agent Session…* lists the pinned entries
+  first, then the rest newest first, then *archived agent sessions*. A grouped
+  row names its group after the folder. Type to filter by name, title, group,
+  agent, folder or the start of an id; `Enter` resumes. In the ordinary
+  palette, typing also shows up to five matching entries under *agent
+  sessions*, never an archived one. *Clear Agent Session History…* is a
+  palette command too.
+- When NexTerm cannot change the list (for instance a 201st entry pinned,
+  renamed or put in a group), a notice in the bottom corner says why, and the
+  list is read again.
 
 **Already open: switch, don't open twice.** If a terminal in this window
 already has that conversation, running or offered, NexTerm switches to that
@@ -693,7 +751,11 @@ as ended again, not as running.
 
 **Claude Code titles.** A Claude Code entry is named the way Claude Code names
 the conversation in its own list: by the title Claude Code generated for it,
-or, before it has one, by the last prompt sent. NexTerm reads these from
+or, before it has one, by the last prompt sent. While Claude Code runs in a
+NexTerm terminal, the row follows the title Claude Code puts in the terminal's
+title (`✳ <title>` while waiting, `◐ <title>` while working), as soon as that
+text changes and with no quit needed; its default *Claude Code* is not a
+title, and a working spinner writes nothing. NexTerm also reads titles from
 Claude Code's own transcript (`projects/<folder>/<id>.jsonl` in
 `CLAUDE_CONFIG_DIR` when NexTerm's own environment sets it, otherwise in
 `~/.claude`, `%USERPROFILE%\.claude` on Windows). It does so when the list is
@@ -724,7 +786,9 @@ restored terminal's *Resume*, it checks Claude Code's transcripts:
 
 When the list is loaded, an entry whose conversation was never saved, by the
 same test, is removed from it, unless a terminal in this window is running or
-offering it.
+offering it, or it is pinned, renamed or in a group. When a resume starts a
+new conversation in place of such an entry, the new one takes over its name,
+pin and group.
 
 **Where it is kept.** `agent-sessions.json` in NexTerm's local data folder:
 
@@ -734,20 +798,48 @@ offering it.
 | Windows | `%LOCALAPPDATA%\com.nexterm.ide\` (local, not the roaming profile: the conversations exist only on this machine) |
 | Linux | `$XDG_DATA_HOME/com.nexterm.ide/` (usually `~/.local/share/com.nexterm.ide/`) |
 
-It holds at most **200** entries; past that, the least recently used are
-dropped. The file is also kept under **1 MiB**, the most NexTerm will read, by
-dropping the least recently used entries, never the one just written.
+The list keeps the **200** most recently used sessions, plus up to **200** that
+are pinned, renamed or in a group, which are never dropped for the count. An
+older session that is unpinned, has its name cleared or is taken out of its
+group (also by *Delete Group…*) leaves the list the next time NexTerm records a
+session event, if it is then beyond the 200 most recent. Archiving does not
+count: an archived session that is not pinned, named or in a group leaves the
+list like any other once 200 newer sessions that are not pinned, named or in a
+group are listed (at the next recorded session event); pin it, name it or put
+it in a group to keep it. The file is also kept
+under **1 MiB**, the most NexTerm will read, by dropping the least recently
+used entries that are not pinned, renamed or grouped first, never the one just
+written.
+
+While there is no group and no entry is pinned, renamed, grouped or archived,
+the file has format version 1, exactly as NexTerm 0.26.0 writes it. Anything
+of these makes it version 2; once none is left (or after *Clear Agent Session
+History…*), it is version 1 again.
 
 **When the file is lost or damaged.** If the file was deleted, the list starts
 empty again. If it cannot be read (not valid JSON, cut short, over 1 MiB), it
 is moved aside as `agent-sessions.json.bad-<time>` and a new, empty list is
 started. Only the three newest copies are kept. *Clear Agent Session History…*
 deletes those copies too. If a newer NexTerm wrote the file, this one reads it
-but changes nothing.
+but changes nothing: the list is shown, and *Pin*, *Rename…*, *Move to Group
+▸*, *Archive*, *Delete…*, *New Group…*, *Rename Group…*, *Delete Group…* and
+*Clear Agent Session History…* are off and say why; the palette's *Clear Agent
+Session History…* then asks nothing and only shows a notice saying why. A click
+on a group header still folds or unfolds it, but only on screen: whenever the
+TERMINALS view opens again (as for *Archived* above), each group is shown as
+the file has it.
 
-**Privacy.** A title, OpenCode's or Claude Code's, is kept as one line of at
-most 200 characters, after the same secret masking as saved scrollback, so a
-token in a title is stored as `[hidden]`. Of Claude Code's transcript, NexTerm
+**Going back to an older NexTerm.** NexTerm 0.26.0 reads a version 2 file as
+one written by a newer NexTerm: it shows the newest 200 entries, without their
+names, pins, groups or archive; the others stay in the file, which it does not
+change. It records no new sessions until NexTerm is updated again, so nothing
+curated is lost. A list with nothing curated stays version 1 and keeps working
+in 0.26.0 as before.
+
+**Privacy.** A title, OpenCode's or Claude Code's, and a name you give an
+entry, is kept as one line of at most 200 characters (a group's name, at most
+100), after the same secret masking as saved scrollback, so a token in a title
+is stored as `[hidden]`. Of Claude Code's transcript, NexTerm
 reads only the title records described above, and nothing else from it is
 kept, logged or shown. On macOS and Linux the file can be read only by you
 (`0600`). It holds folder paths, conversation ids, titles and times, and

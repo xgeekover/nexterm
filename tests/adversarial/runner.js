@@ -111,6 +111,8 @@ import './paste_warning.test.js';
 import './batch_job_reply.test.js';
 import './explorer_trash.test.js';
 import './explorer_row_menu.test.js';
+// A context menu taller than the window: bounded, scrolling, open while it scrolls.
+import './context_menu_mounted.test.js';
 import './editor_session_restore.test.js';
 import './terminal_progress.test.js';
 import './attention.test.js';
@@ -152,6 +154,11 @@ import './agent_history_resume.test.js';
 import './agent_history_palette.test.js';
 // Claude Code's own titles and the never-saved rule; its own teardown (AHC-99).
 import './agent_history_claude_titles.test.js';
+// What the user curates: pin, rename, groups, archive, delete; its own teardown (AHG-99).
+import './agent_history_curation.test.js';
+// Live Claude Code titles from the terminal's title; its own teardown (AHT-99).
+import './agent_history_live_titles.test.js';
+import './agent_sessions_menus.test.js';
 
 async function run() {
   console.log('====================================================');

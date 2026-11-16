@@ -114,6 +114,13 @@ function mockUtf8Bytes(text) {
  * which replays what `cargo test` recorded the backend answering
  * (tests/fixtures/agent-history.json). Every constant is the backend's.
  *
+ * What the user curated is kept the same way: an entry's `name`, `pinned`,
+ * `archived` and `groupId`, after its nine fields and each only when it is
+ * not at its default, and the `groups` after the entries — written as
+ * format version 2 only once something is curated, and otherwise as the
+ * version 1 text NexTerm 0.26.0 writes (`mockHistoryText`). An upsert never
+ * reads them (`mockHistoryMerge`); the curation commands change them.
+ *
  * The mock keeps the file's TEXT under MOCK_AGENT_HISTORY_KEY in the page's
  * storage — a memory stand-in without one — so a suite can delete it or
  * write garbage into it (`agentHistoryDeleteFile`, `agentHistoryCorruptFile`)
@@ -136,8 +143,14 @@ function mockUtf8Bytes(text) {
  */
 const MOCK_AGENT_HISTORY_KEY = 'nexterm.mock.agentHistory';
 const MOCK_AGENT_HISTORY_FILE = 'agent-sessions.json';
-const MOCK_AGENT_HISTORY_VERSION = 1;
+const MOCK_AGENT_HISTORY_VERSION = 2;
+const MOCK_AGENT_HISTORY_UNCURATED_VERSION = 1;
 const MOCK_AGENT_HISTORY_CAP = 200;
+const MOCK_AGENT_HISTORY_MAX_CURATED = 200;
+const MOCK_AGENT_HISTORY_MAX_GROUPS = 50;
+const MOCK_AGENT_HISTORY_MAX_NAME_CHARS = 200;
+const MOCK_AGENT_HISTORY_MAX_GROUP_NAME_CHARS = 100;
+const MOCK_AGENT_HISTORY_MAX_GROUP_ID_CHARS = 64;
 const MOCK_AGENT_HISTORY_MAX_READ_BYTES = 1024 * 1024;
 const MOCK_AGENT_HISTORY_KEEP_BAD = 3;
 const MOCK_AGENT_HISTORY_MAX_CWD_BYTES = 4096;
@@ -146,6 +159,19 @@ const MOCK_AGENT_HISTORY_MAX_OTHER_ID_CHARS = 128;
 const MOCK_AGENT_HISTORY_NEWER = 'The agent session history was written by a newer NexTerm';
 const MOCK_AGENT_HISTORY_INVALID = 'Not a valid agent session';
 const MOCK_AGENT_HISTORY_COPIES_LEFT = 'The agent session history was emptied, but';
+const MOCK_AGENT_HISTORY_INVALID_GROUP = 'Not a valid agent session group';
+const MOCK_AGENT_HISTORY_TOO_MANY_GROUPS = 'There can be at most 50 agent session groups';
+const MOCK_AGENT_HISTORY_TOO_MANY_CURATED = 'At most 200 agent sessions can be pinned, renamed or in a group; unpin one, clear its name or take it out of its group first';
+/** `is_group_id`: ASCII, no `u` flag needed. */
+const MOCK_AGENT_GROUP_ID = new RegExp(`^[0-9A-Za-z_-]{1,${MOCK_AGENT_HISTORY_MAX_GROUP_ID_CHARS}}$`);
+// Why a curated field, a group, or a change to one, is refused: the backend's words.
+const MOCK_HISTORY_BAD_NAME = `its name is not one line of at most ${MOCK_AGENT_HISTORY_MAX_NAME_CHARS} characters`;
+const MOCK_HISTORY_BAD_PINNED = 'its pinned is neither true nor false';
+const MOCK_HISTORY_BAD_ARCHIVED = 'its archived is neither true nor false';
+const MOCK_HISTORY_BAD_GROUP_ID = "its groupId is not a group's id";
+const MOCK_HISTORY_BAD_ID = `its id is not 1 to ${MOCK_AGENT_HISTORY_MAX_GROUP_ID_CHARS} ASCII letters, digits, - and _`;
+const MOCK_HISTORY_BAD_GROUP_NAME = `its name is not one line of at most ${MOCK_AGENT_HISTORY_MAX_GROUP_NAME_CHARS} characters`;
+const MOCK_HISTORY_BAD_COLLAPSED = 'its collapsed is neither true nor false';
 /** `BAD_AHEAD_MS`: a name moved aside further ahead of the clock than this orders nothing. */
 const MOCK_AGENT_HISTORY_BAD_AHEAD_MS = 24 * 60 * 60 * 1000;
 /** serde_json's recursion limit: arrays and objects inside each other, the file's object included. */
@@ -272,37 +298,185 @@ function mockHistoryEntry(value) {
   };
 }
 
+/**
+ * An entry as the backend keeps and answers it (`Entry`): its nine fields in
+ * their order, then each curated one only when it is not at its default.
+ */
+function mockHistoryStored(e) {
+  const out = {
+    key: e.key, kind: e.kind, sessionId: e.sessionId, cwd: e.cwd, title: e.title,
+    startedAt: e.startedAt, lastUsedAt: e.lastUsedAt, endedAt: e.endedAt, endReason: e.endReason,
+  };
+  if (e.name != null) out.name = e.name;
+  if (e.pinned === true) out.pinned = true;
+  if (e.archived === true) out.archived = true;
+  if (e.groupId != null) out.groupId = e.groupId;
+  return out;
+}
+
+/** `Entry::is_protected`: pinned, renamed or in a group — archived alone is not. */
+const mockHistoryProtected = (e) => e.pinned === true || e.name != null || e.groupId != null;
+/** `Entry::is_curated`: anything curated, archived included — what makes the file version 2. */
+const mockHistoryCurated = (e) => mockHistoryProtected(e) || e.archived === true;
+
+/** `is_name` and `is_group_name`: one line of 1 to `max` characters. */
+function mockHistoryLine(text, max) {
+  if (typeof text !== 'string') return false;
+  const chars = Array.from(text).length;
+  return chars >= 1 && chars <= max && !MOCK_AGENT_REFUSED_CHAR.test(text);
+}
+
+const mockHistoryObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const mockHistoryHas = (v, name) => Object.prototype.hasOwnProperty.call(v, name);
+
+/**
+ * `stored_entry_from`: an entry of the file — `mockHistoryEntry`'s, and what
+ * the user curated, each field of its shape (missing and null its default)
+ * — as `{ entry }`, or `{ why }`.
+ */
+function mockHistoryStoredEntry(value) {
+  const read = mockHistoryEntry(value);
+  if (read.why) return read;
+  const field = (name) => mockHistoryField(value, name);
+  const name = field('name');
+  if (name !== null && !mockHistoryLine(name, MOCK_AGENT_HISTORY_MAX_NAME_CHARS)) return { why: MOCK_HISTORY_BAD_NAME };
+  const pinned = field('pinned');
+  if (pinned !== null && typeof pinned !== 'boolean') return { why: MOCK_HISTORY_BAD_PINNED };
+  const archived = field('archived');
+  if (archived !== null && typeof archived !== 'boolean') return { why: MOCK_HISTORY_BAD_ARCHIVED };
+  const groupId = field('groupId');
+  if (groupId !== null && (typeof groupId !== 'string' || !MOCK_AGENT_GROUP_ID.test(groupId))) {
+    return { why: MOCK_HISTORY_BAD_GROUP_ID };
+  }
+  return { entry: mockHistoryStored({ ...read.entry, name, pinned, archived, groupId }) };
+}
+
+/** `changes_from`: `{ changes }` for an update, or `{ why }` — the same questions in the same order. */
+function mockHistoryChanges(value) {
+  if (!mockHistoryObject(value)) return { why: 'the changes are not an object' };
+  if (Object.keys(value).some((field) => !['name', 'pinned', 'archived', 'groupId'].includes(field))) {
+    return { why: 'a change names something other than name, pinned, archived and groupId' };
+  }
+  const changes = {};
+  if (mockHistoryHas(value, 'name')) {
+    if (value.name === null || value.name === '') changes.name = null;
+    else if (mockHistoryLine(value.name, MOCK_AGENT_HISTORY_MAX_NAME_CHARS)) changes.name = value.name;
+    else return { why: MOCK_HISTORY_BAD_NAME };
+  }
+  if (mockHistoryHas(value, 'pinned')) {
+    if (typeof value.pinned !== 'boolean') return { why: MOCK_HISTORY_BAD_PINNED };
+    changes.pinned = value.pinned;
+  }
+  if (mockHistoryHas(value, 'archived')) {
+    if (typeof value.archived !== 'boolean') return { why: MOCK_HISTORY_BAD_ARCHIVED };
+    changes.archived = value.archived;
+  }
+  if (mockHistoryHas(value, 'groupId')) {
+    if (value.groupId === null) changes.groupId = null;
+    else if (typeof value.groupId === 'string' && MOCK_AGENT_GROUP_ID.test(value.groupId)) changes.groupId = value.groupId;
+    else return { why: MOCK_HISTORY_BAD_GROUP_ID };
+  }
+  return { changes };
+}
+
+/** `new_group_from`: the page's new group `{ id, name }` as `{ group }`, not folded, or `{ why }`. */
+function mockHistoryNewGroup(value) {
+  if (!mockHistoryObject(value)) return { why: 'it is not an object' };
+  const id = mockHistoryField(value, 'id');
+  if (typeof id !== 'string' || !MOCK_AGENT_GROUP_ID.test(id)) return { why: MOCK_HISTORY_BAD_ID };
+  const name = mockHistoryField(value, 'name');
+  if (!mockHistoryLine(name, MOCK_AGENT_HISTORY_MAX_GROUP_NAME_CHARS)) return { why: MOCK_HISTORY_BAD_GROUP_NAME };
+  return { group: { id, name, collapsed: false } };
+}
+
+/** `valid_groups`: a file's `groups`, each that is not one dropped, as is one with an id seen before and any past MAX_GROUPS. */
+function mockHistoryGroups(value) {
+  const groups = [];
+  for (const v of Array.isArray(value) ? value : []) {
+    if (groups.length === MOCK_AGENT_HISTORY_MAX_GROUPS) break;
+    const { group } = mockHistoryNewGroup(v);
+    if (!group) continue;
+    const collapsed = mockHistoryField(v, 'collapsed');
+    if (collapsed !== null && typeof collapsed !== 'boolean') continue;
+    if (!groups.some((g) => g.id === group.id)) groups.push({ ...group, collapsed: collapsed === true });
+  }
+  return groups;
+}
+
+/** `group_changes_from`: `{ changes }` for a group, or `{ why }`. */
+function mockHistoryGroupChanges(value) {
+  if (!mockHistoryObject(value)) return { why: 'the changes are not an object' };
+  if (Object.keys(value).some((field) => field !== 'name' && field !== 'collapsed')) {
+    return { why: 'a change names something other than name and collapsed' };
+  }
+  const changes = {};
+  if (mockHistoryHas(value, 'name')) {
+    if (!mockHistoryLine(value.name, MOCK_AGENT_HISTORY_MAX_GROUP_NAME_CHARS)) return { why: MOCK_HISTORY_BAD_GROUP_NAME };
+    changes.name = value.name;
+  }
+  if (mockHistoryHas(value, 'collapsed')) {
+    if (typeof value.collapsed !== 'boolean') return { why: MOCK_HISTORY_BAD_COLLAPSED };
+    changes.collapsed = value.collapsed;
+  }
+  return { changes };
+}
+
 /** Most recently used first; stable, as the backend's sort is. */
 function mockHistorySort(entries) {
   return entries.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
 }
 
-/** `merge`: `incoming`, then the entry under its key, then the one it replaces. */
-function mockHistoryMerge(incoming, others) {
+/**
+ * `merge`: `incoming`, then the entry under its key, then the one it
+ * replaces. What the user curated comes from `others` only — the incoming
+ * entry has none — and `unarchive` clears archived.
+ */
+function mockHistoryMerge(incoming, others, unarchive = false) {
   const all = [incoming, ...others];
   const newestFirst = mockHistorySort([...all]);
   const newest = newestFirst[0];
   const title = incoming.sessionId !== null
     ? (newestFirst.find((e) => e.title !== null)?.title ?? null)
     : incoming.title;
-  return {
+  return mockHistoryStored({
     ...incoming,
     title,
     startedAt: Math.min(...all.map((e) => e.startedAt)),
     lastUsedAt: newest.lastUsedAt,
     endedAt: newest.endedAt,
     endReason: newest.endReason,
-  };
+    name: others.find((e) => e.name != null)?.name ?? null,
+    pinned: others.some((e) => e.pinned === true),
+    archived: !unarchive && others[0]?.archived === true,
+    groupId: others.find((e) => e.groupId != null)?.groupId ?? null,
+  });
 }
 
-/** `valid_entries`. */
-function mockHistoryValid(values) {
+/** `within_bounds`: newest first, the newest MAX_CURATED protected, and CAP + MAX_CURATED in all. */
+function mockHistoryWithinBounds(entries) {
+  const kept = [];
+  let protectedKept = 0;
+  for (const e of entries) {
+    if (kept.length === MOCK_AGENT_HISTORY_CAP + MOCK_AGENT_HISTORY_MAX_CURATED) break;
+    if (mockHistoryProtected(e)) {
+      if (protectedKept === MOCK_AGENT_HISTORY_MAX_CURATED) continue;
+      protectedKept += 1;
+    }
+    kept.push(e);
+  }
+  return kept;
+}
+
+/** `valid_entries`: one in a group that is not among `groups` is in none. */
+function mockHistoryValid(values, groups = []) {
   const entries = [];
   for (const value of values) {
-    const { entry } = mockHistoryEntry(value);
-    if (entry && !entries.some((e) => e.key === entry.key)) entries.push(entry);
+    const { entry } = mockHistoryStoredEntry(value);
+    if (!entry || entries.some((e) => e.key === entry.key)) continue;
+    const grouped = entry.groupId == null || groups.some((g) => g.id === entry.groupId);
+    entries.push(grouped ? entry : mockHistoryStored({ ...entry, groupId: null }));
   }
-  return mockHistorySort(entries).slice(0, MOCK_AGENT_HISTORY_CAP);
+  return mockHistoryWithinBounds(mockHistorySort(entries));
 }
 
 /**
@@ -346,24 +520,35 @@ function mockHistoryParse(text) {
   const version = mockHistoryField(doc, 'version');
   if (!Number.isSafeInteger(version) || version < 1) return { why: 'it has no format version' };
   const entries = mockHistoryField(doc, 'entries');
-  if (version === MOCK_AGENT_HISTORY_VERSION && !Array.isArray(entries)) return { why: 'it has no list of entries' };
-  return { version, entries: mockHistoryValid(Array.isArray(entries) ? entries : []) };
+  if (version <= MOCK_AGENT_HISTORY_VERSION && !Array.isArray(entries)) return { why: 'it has no list of entries' };
+  const groups = mockHistoryGroups(mockHistoryField(doc, 'groups'));
+  return { version, entries: mockHistoryValid(Array.isArray(entries) ? entries : [], groups), groups };
 }
 
-/** The file's text for `entries`, byte for byte as the backend writes it (`document_text`). */
-function mockHistoryText(entries) {
-  return `${JSON.stringify({ version: MOCK_AGENT_HISTORY_VERSION, entries }, null, 2)}\n`;
+/**
+ * The file's text for `entries` and `groups`, byte for byte as the backend
+ * writes it (`document_text`): version 1 without groups while nothing is
+ * curated, else version 2 with them.
+ */
+function mockHistoryText(entries, groups = []) {
+  const document = groups.length === 0 && !entries.some(mockHistoryCurated)
+    ? { version: MOCK_AGENT_HISTORY_UNCURATED_VERSION, entries }
+    : { version: MOCK_AGENT_HISTORY_VERSION, entries, groups };
+  return `${JSON.stringify(document, null, 2)}\n`;
 }
 
 /**
  * `fitted_text`: `{ entries, text }` with the least recently used dropped —
- * never the one keyed `written` — until the text is within the read cap.
- * The fewest that make it fit, as the backend finds them.
+ * never the one keyed `written`, the unprotected first and a protected one
+ * only once no other is left — until the text is within the read cap. The
+ * fewest that make it fit, as the backend finds them.
  */
-function mockHistoryFitted(entries, written) {
-  const fits = (list) => mockUtf8Bytes(mockHistoryText(list)) <= MOCK_AGENT_HISTORY_MAX_READ_BYTES;
-  const droppable = entries.map((e, at) => (e.key === written ? -1 : at)).filter((at) => at !== -1).reverse();
-  if (fits(entries) || droppable.length === 0) return { entries, text: mockHistoryText(entries) };
+function mockHistoryFitted(entries, groups, written) {
+  const fits = (list) => mockUtf8Bytes(mockHistoryText(list, groups)) <= MOCK_AGENT_HISTORY_MAX_READ_BYTES;
+  const mayGo = entries.map((e, at) => (e.key === written ? -1 : at)).filter((at) => at !== -1).reverse();
+  const unprotected = mayGo.filter((at) => !mockHistoryProtected(entries[at]));
+  const droppable = [...unprotected, ...mayGo.filter((at) => mockHistoryProtected(entries[at]))];
+  if (fits(entries) || droppable.length === 0) return { entries, text: mockHistoryText(entries, groups) };
   const without = (n) => {
     const gone = new Set(droppable.slice(0, n));
     return entries.filter((_, at) => !gone.has(at));
@@ -375,8 +560,11 @@ function mockHistoryFitted(entries, written) {
     if (fits(without(middle))) high = middle;
     else low = middle + 1;
   }
+  if (low > unprotected.length) {
+    console.warn(`[IPC Mock] The agent session history would not fit in ${MOCK_AGENT_HISTORY_MAX_READ_BYTES} bytes: ${low - unprotected.length} pinned, renamed or grouped entries, the least recently used, were dropped from it`);
+  }
   const kept = without(low);
-  return { entries: kept, text: mockHistoryText(kept) };
+  return { entries: kept, text: mockHistoryText(kept, groups) };
 }
 
 /** The time in the name of a file moved aside (`bad_ms`): none past the largest safe integer. */
@@ -393,19 +581,32 @@ function mockHistoryCopiesLeft(left) {
 }
 
 /**
- * What Tauri hands the command as `entry`: what survives the trip as JSON,
- * or its refusal — missing, or a string with a lone surrogate, which
- * serde_json refuses before any command runs.
+ * What Tauri hands the command as its JSON argument `key` (`entry`, a
+ * `group`, `changes`): what survives the trip as JSON, or its refusal —
+ * missing, or a string with a lone surrogate, which serde_json refuses
+ * before any command runs.
  */
-function mockHistoryWireEntry(command, args) {
-  if (args?.entry === undefined) throw mockInvalidArgs(command, 'entry', `command ${command} missing required key entry`);
+function mockHistoryWire(command, args, key) {
+  if (args?.[key] === undefined) throw mockInvalidArgs(command, key, `command ${command} missing required key ${key}`);
   const wellFormed = (v) => {
     if (typeof v === 'string') return typeof v.isWellFormed !== 'function' || v.isWellFormed();
     if (v === null || typeof v !== 'object') return true;
     return Object.entries(v).every(([k, inner]) => wellFormed(k) && wellFormed(inner));
   };
-  if (!wellFormed(args.entry)) throw mockInvalidArgs(command, 'entry', 'unexpected end of hex escape (a lone surrogate)');
-  return JSON.parse(JSON.stringify(args.entry));
+  if (!wellFormed(args[key])) throw mockInvalidArgs(command, key, 'unexpected end of hex escape (a lone surrogate)');
+  return JSON.parse(JSON.stringify(args[key]));
+}
+
+/** An `Option<bool>` argument as Tauri reads it: missing and null are none, anything else but a boolean refused. */
+function mockOptionalBoolArg(command, args, key) {
+  const value = args?.[key] ?? null;
+  if (value !== null && typeof value !== 'boolean') throw mockInvalidArgs(command, key, 'invalid type: expected a boolean');
+  return value === true;
+}
+
+/** An `Option<String>` argument as Tauri reads it: missing and null are none. */
+function mockOptionalStringArg(command, args, key) {
+  return (args?.[key] ?? null) === null ? null : mockStringArg(command, args, key);
 }
 
 /**
@@ -826,32 +1027,42 @@ class BrowserMockBridge {
   }
 
   /**
-   * `load`: `{ version, entries, kept }` — the file made when it is missing,
-   * moved aside and started again when it cannot be read.
+   * `load`: `{ version, entries, groups, kept }` — the file made when it is
+   * missing, moved aside and started again when it cannot be read; either
+   * way a version 1 empty history.
    */
   agentHistoryLoad() {
     const { text, kept } = this.agentHistoryRead();
+    const empty = { version: MOCK_AGENT_HISTORY_UNCURATED_VERSION, entries: [], groups: [], kept };
     if (text === null) {
       this.agentHistoryWriteText(mockHistoryText([]), kept);
-      return { version: MOCK_AGENT_HISTORY_VERSION, entries: [], kept };
+      return empty;
     }
     const parsed = mockHistoryParse(text);
     if (parsed.why) {
       this.agentHistorySetAside(text, parsed.why, kept);
-      return { version: MOCK_AGENT_HISTORY_VERSION, entries: [], kept };
+      return empty;
     }
     return { ...parsed, kept };
   }
 
-  /** `writable`: the entries to change, or the refusal of a newer file, logged once. */
-  agentHistoryWritable({ version, entries }) {
-    if (version === MOCK_AGENT_HISTORY_VERSION) return entries;
+  /** `writable`: `{ entries, groups }` to change, or the refusal of a newer file, logged once. */
+  agentHistoryWritable({ version, entries, groups }) {
+    if (version <= MOCK_AGENT_HISTORY_VERSION) return { entries, groups };
     const why = `${MOCK_AGENT_HISTORY_NEWER} (format version ${version}); this one reads it and changes nothing in it`;
     if (!this.agentHistoryNewerSaid) {
       this.agentHistoryNewerSaid = true;
       console.warn(`[IPC Mock] ${why}`);
     }
     throw new Error(why);
+  }
+
+  /** `room_to_protect`: refused when `after`, in place of `before`, would be one protected entry past MAX_CURATED. */
+  agentHistoryRoomToProtect(entries, before, after) {
+    if (mockHistoryProtected(after) && !mockHistoryProtected(before)
+      && entries.filter(mockHistoryProtected).length >= MOCK_AGENT_HISTORY_MAX_CURATED) {
+      throw new Error(MOCK_AGENT_HISTORY_TOO_MANY_CURATED);
+    }
   }
 
   /**
@@ -1959,29 +2170,37 @@ class BrowserMockBridge {
         return count;
       }
 
-      // 24. agent_history_list / agent_history_upsert / agent_history_remove /
-      // agent_history_clear — the agent session history, one file in the
-      // app's local data folder (src-tauri/src/agent_history.rs). The mock
-      // keeps the file's text (MOCK_AGENT_HISTORY_KEY) with the backend's
-      // rules: made by the first operation that finds it missing, moved
-      // aside when it cannot be read, read only when newer; an entry
-      // checked field by field and keyed from its fields; merged per key and
-      // with the provisional entry `replaces` names; 200 at most, and never
-      // more than the 1 MiB it may be read back at, never the one just
-      // written going. An invalid entry is refused before the file is
-      // touched. Each answer is a copy: nothing the page holds is the
-      // mock's own.
+      // 24. agent_history_list / agent_history_groups / agent_history_upsert /
+      // agent_history_update / agent_history_group_create /
+      // agent_history_group_update / agent_history_group_delete /
+      // agent_history_remove / agent_history_clear — the agent session
+      // history, one file in the app's local data folder
+      // (src-tauri/src/agent_history.rs). The mock keeps the file's text
+      // (MOCK_AGENT_HISTORY_KEY) with the backend's rules: made by the first
+      // operation that finds it missing, moved aside when it cannot be read,
+      // read only when newer; an entry checked field by field and keyed from
+      // its fields; merged per key and with the provisional entry `replaces`
+      // names, what the user curated kept; 200 unprotected at most after an
+      // upsert, at most 200 pinned, renamed or grouped, and never more than
+      // the 1 MiB it may be read back at, never the one just written going;
+      // version 2 only while something is curated. Invalid input is refused
+      // before the file is touched. Each answer is a copy: nothing the page
+      // holds is the mock's own.
       case 'agent_history_list': {
         return this.agentHistoryLoad().entries.map((e) => ({ ...e }));
       }
+      case 'agent_history_groups': {
+        const { version, groups } = this.agentHistoryLoad();
+        return { version, readOnly: version > MOCK_AGENT_HISTORY_VERSION, groups: groups.map((g) => ({ ...g })) };
+      }
       case 'agent_history_upsert': {
-        const wire = mockHistoryWireEntry(command, args);
-        const replaces = args?.replaces ?? null;
-        if (replaces !== null) mockStringArg(command, args, 'replaces');
+        const wire = mockHistoryWire(command, args, 'entry');
+        const replaces = mockOptionalStringArg(command, args, 'replaces');
+        const unarchive = mockOptionalBoolArg(command, args, 'unarchive');
         const { entry: incoming, why } = mockHistoryEntry(wire);
         if (why) throw new Error(`${MOCK_AGENT_HISTORY_INVALID}: ${why}`);
         const loaded = this.agentHistoryLoad();
-        const entries = this.agentHistoryWritable(loaded);
+        const { entries, groups } = this.agentHistoryWritable(loaded);
         const take = (pick) => {
           const at = entries.findIndex(pick);
           return at === -1 ? [] : entries.splice(at, 1);
@@ -1990,33 +2209,105 @@ class BrowserMockBridge {
         if (replaces !== null && replaces !== incoming.key) {
           others.push(...take((e) => e.key === replaces && e.sessionId === null && e.kind === incoming.kind));
         }
-        const merged = mockHistoryMerge(incoming, others);
+        const merged = mockHistoryMerge(incoming, others, unarchive);
         entries.unshift(merged);
         mockHistorySort(entries);
-        while (entries.length > MOCK_AGENT_HISTORY_CAP) {
-          const at = entries.findLastIndex((e) => e.key !== merged.key);
+        // `keep_cap`: never a protected entry, never the one just written.
+        let unprotected = entries.filter((e) => !mockHistoryProtected(e)).length;
+        while (unprotected > MOCK_AGENT_HISTORY_CAP) {
+          const at = entries.findLastIndex((e) => !mockHistoryProtected(e) && e.key !== merged.key);
           if (at === -1) break;
           entries.splice(at, 1);
+          unprotected -= 1;
         }
-        this.agentHistoryWriteText(mockHistoryFitted(entries, merged.key).text, loaded.kept);
+        this.agentHistoryWriteText(mockHistoryFitted(entries, groups, merged.key).text, loaded.kept);
         return { ...merged };
+      }
+      case 'agent_history_update': {
+        const key = mockStringArg(command, args, 'key');
+        const { changes, why } = mockHistoryChanges(mockHistoryWire(command, args, 'changes'));
+        if (why) throw new Error(`${MOCK_AGENT_HISTORY_INVALID}: ${why}`);
+        const loaded = this.agentHistoryLoad();
+        const { entries, groups } = this.agentHistoryWritable(loaded);
+        const at = entries.findIndex((e) => e.key === key);
+        if (at === -1) return null;
+        if (typeof changes.groupId === 'string' && !groups.some((g) => g.id === changes.groupId)) {
+          throw new Error(`${MOCK_AGENT_HISTORY_INVALID}: its groupId names no group`);
+        }
+        const entry = mockHistoryStored({ ...entries[at], ...changes });
+        this.agentHistoryRoomToProtect(entries, entries[at], entry);
+        entries[at] = entry;
+        this.agentHistoryWriteText(mockHistoryFitted(entries, groups, key).text, loaded.kept);
+        return { ...entry };
+      }
+      case 'agent_history_group_create': {
+        const wire = mockHistoryWire(command, args, 'group');
+        const moveKey = mockOptionalStringArg(command, args, 'move_key');
+        const { group, why } = mockHistoryNewGroup(wire);
+        if (why) throw new Error(`${MOCK_AGENT_HISTORY_INVALID_GROUP}: ${why}`);
+        const loaded = this.agentHistoryLoad();
+        const { entries, groups } = this.agentHistoryWritable(loaded);
+        if (groups.some((g) => g.id === group.id)) throw new Error(`${MOCK_AGENT_HISTORY_INVALID_GROUP}: another group has its id`);
+        if (groups.length >= MOCK_AGENT_HISTORY_MAX_GROUPS) throw new Error(MOCK_AGENT_HISTORY_TOO_MANY_GROUPS);
+        const at = moveKey === null ? -1 : entries.findIndex((e) => e.key === moveKey);
+        if (at !== -1) {
+          const entry = mockHistoryStored({ ...entries[at], groupId: group.id });
+          this.agentHistoryRoomToProtect(entries, entries[at], entry);
+          entries[at] = entry;
+        }
+        groups.push(group);
+        this.agentHistoryWriteText(mockHistoryFitted(entries, groups, at === -1 ? null : entries[at].key).text, loaded.kept);
+        return { ...group };
+      }
+      case 'agent_history_group_update': {
+        const id = mockStringArg(command, args, 'id');
+        const wire = mockHistoryWire(command, args, 'changes');
+        if (!MOCK_AGENT_GROUP_ID.test(id)) throw new Error(`${MOCK_AGENT_HISTORY_INVALID_GROUP}: ${MOCK_HISTORY_BAD_ID}`);
+        const { changes, why } = mockHistoryGroupChanges(wire);
+        if (why) throw new Error(`${MOCK_AGENT_HISTORY_INVALID_GROUP}: ${why}`);
+        const loaded = this.agentHistoryLoad();
+        const { entries, groups } = this.agentHistoryWritable(loaded);
+        const group = groups.find((g) => g.id === id);
+        if (!group) return null;
+        if (changes.name !== undefined) group.name = changes.name;
+        if (changes.collapsed !== undefined) group.collapsed = changes.collapsed;
+        this.agentHistoryWriteText(mockHistoryFitted(entries, groups, null).text, loaded.kept);
+        return { ...group };
+      }
+      case 'agent_history_group_delete': {
+        const id = mockStringArg(command, args, 'id');
+        if (!MOCK_AGENT_GROUP_ID.test(id)) throw new Error(`${MOCK_AGENT_HISTORY_INVALID_GROUP}: ${MOCK_HISTORY_BAD_ID}`);
+        const loaded = this.agentHistoryLoad();
+        const { entries, groups } = this.agentHistoryWritable(loaded);
+        const at = groups.findIndex((g) => g.id === id);
+        if (at === -1) return null;
+        groups.splice(at, 1);
+        let ungrouped = 0;
+        for (let i = 0; i < entries.length; i += 1) {
+          if (entries[i].groupId !== id) continue;
+          entries[i] = mockHistoryStored({ ...entries[i], groupId: null });
+          ungrouped += 1;
+        }
+        this.agentHistoryWriteText(mockHistoryFitted(entries, groups, null).text, loaded.kept);
+        return ungrouped;
       }
       case 'agent_history_remove': {
         const key = mockStringArg(command, args, 'key');
         const loaded = this.agentHistoryLoad();
-        const entries = this.agentHistoryWritable(loaded);
+        const { entries, groups } = this.agentHistoryWritable(loaded);
         const at = entries.findIndex((e) => e.key === key);
         if (at === -1) return false;
         entries.splice(at, 1);
-        this.agentHistoryWriteText(mockHistoryFitted(entries, null).text, loaded.kept);
+        this.agentHistoryWriteText(mockHistoryFitted(entries, groups, null).text, loaded.kept);
         return true;
       }
       case 'agent_history_clear': {
-        // The files moved aside go too: a cleared history leaves no copies.
-        // A refused clear (a newer file) touches neither. One held open
+        // The files moved aside go too: a cleared history leaves no copies,
+        // and no groups — the version 1 empty history. A refused clear (a
+        // newer file) touches neither. One held open
         // (`agentHistoryHoldAsides`) stays, and the clear says so.
         const loaded = this.agentHistoryLoad();
-        const entries = this.agentHistoryWritable(loaded);
+        const { entries } = this.agentHistoryWritable(loaded);
         this.agentHistoryWriteText(mockHistoryText([]), loaded.kept);
         this.agentHistoryBad = this.agentHistoryBad.filter((b) => b.heldOpen === true);
         if (this.agentHistoryBad.length > 0) throw new Error(mockHistoryCopiesLeft(this.agentHistoryBad.length));

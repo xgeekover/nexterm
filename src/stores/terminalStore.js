@@ -45,6 +45,7 @@ import {
 import {
   agentFromCommandLine,
   agentLabel,
+  claudeTitleOf,
   cleanAgentTitle,
   isKnownAgent,
   isSessionIdFor,
@@ -1196,6 +1197,39 @@ export function onAgentConversationReplaced(listener) {
   };
 }
 
+/**
+ * Who wants to hear the conversation title a Claude Code terminal shows
+ * (`onAgentTitleShown`) — the agent session history, which keeps it as the
+ * entry's title while the agent runs (F23).
+ */
+const agentTitleShownListeners = new Set();
+
+/**
+ * Call `listener({ tabId, kind, sessionId, title })` each time a Claude Code
+ * terminal shows a conversation title other than the last one it showed
+ * (`noteAgentTitle`, `claudeTitleOf`): only for a record with a valid id,
+ * started or taken up here, not one only offered back. `title` is as Claude
+ * Code set it, trimmed — not cleaned or masked. The terminal's record is not
+ * changed by it. Returns what stops it.
+ */
+export function onAgentTitleShown(listener) {
+  if (typeof listener !== 'function') return () => {};
+  agentTitleShownListeners.add(listener);
+  return () => {
+    agentTitleShownListeners.delete(listener);
+  };
+}
+
+function agentTitleShown(event) {
+  for (const listener of [...agentTitleShownListeners]) {
+    try {
+      listener(event);
+    } catch (err) {
+      console.warn('[TerminalStore] a title-shown listener failed:', err);
+    }
+  }
+}
+
 function conversationReplaced(event) {
   for (const listener of [...conversationReplacedListeners]) {
     try {
@@ -1311,6 +1345,13 @@ function holdsTypedText(keys) {
  * up; kept out of the store because only the lookup reads it.
  */
 const shownTitles = new Map();
+
+/**
+ * tab id -> the conversation title its Claude Code shows now (`claudeTitleOf`):
+ * what `onAgentTitleShown` was last told for it, so its spinner's frames
+ * (◐, ◑ with the same text) are not told again.
+ */
+const claudeShownTitles = new Map();
 
 /** tab id -> the pending lookup of its opencode conversation. */
 const resolveTimers = new Map();
@@ -2384,6 +2425,7 @@ export const useTerminalStore = create((set, get, api) => {
   const recordAgent = (tabId, agent, atPrompt) => {
     // A new record has seen no title yet (`noteAgentTitle`).
     shownTitles.delete(tabId);
+    claudeShownTitles.delete(tabId);
     resolveMisses.delete(tabId);
     idHints.delete(tabId);
     set((state) => ({
@@ -2826,6 +2868,7 @@ export const useTerminalStore = create((set, get, api) => {
   /** Forget a terminal's conversation bookkeeping: it closed, or its agent ended. */
   const forgetAgentTitle = (tabId) => {
     shownTitles.delete(tabId);
+    claudeShownTitles.delete(tabId);
     resolveMisses.delete(tabId);
     idHints.delete(tabId);
     clearTimeout(resolveTimers.get(tabId));
@@ -5661,7 +5704,11 @@ export const useTerminalStore = create((set, get, api) => {
 
     /**
      * Put up a notice about the agent session history that no pick made —
-     * a clear that failed (agentHistoryStore.js, kind 'clearFailed').
+     * a clear that failed or that this build cannot do (agentHistoryStore.js
+     * and agentHistoryPromptStore.js, kind 'clearFailed'), or a pin, rename,
+     * archive, group change or delete the backend refused or that failed
+     * (kind 'curationFailed', `text` the backend's own words) or whose entry
+     * was no longer listed (`text` the store's).
      */
     showAgentHistoryNotice: (kind, text) =>
       set({ agentHistoryNotice: { kind, text: String(text ?? ''), key: null, tabId: null, seq: (noticeSeq += 1) } }),
@@ -5840,11 +5887,29 @@ export const useTerminalStore = create((set, get, api) => {
      * title is looked up (`resolveAgentSession`) once it has held still for
      * AGENT_RESOLVE_DELAY_MS. Its home screen's `OpenCode` and the '' it
      * sets as it quits say nothing and change nothing.
+     *
+     * Claude Code shows its conversation's title too (`✳ <title>`, a
+     * spinner glyph while it works; `claudeTitleOf`). For a record with a
+     * valid id that is not only offered back, a title whose text is not the
+     * last one this terminal showed is told to `onAgentTitleShown`'s
+     * listeners. The record does not change: a Claude Code record names no
+     * conversation (`title: null`), so the session saved is what it was.
      */
     noteAgentTitle: (tabId, windowTitle) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       const agent = tab?.agent;
-      if (!agent || agent.kind !== 'opencode' || tab.agentResumeOffered) return;
+      if (!agent || tab.agentResumeOffered) return;
+      if (agent.kind === 'claude') {
+        // A `claude` typed by hand with no id would change its entry's key
+        // with every title: only the conversation NexTerm knows by its id.
+        if (!isSessionIdFor('claude', agent.sessionId)) return;
+        const title = claudeTitleOf(windowTitle);
+        if (!title || claudeShownTitles.get(tabId) === title) return;
+        claudeShownTitles.set(tabId, title);
+        agentTitleShown({ tabId, kind: 'claude', sessionId: agent.sessionId, title });
+        return;
+      }
+      if (agent.kind !== 'opencode') return;
       const shown = opencodeTitleOf(windowTitle);
       // opencode sends the same title again as it redraws; this record has
       // already made of it whatever there was to make.

@@ -2,6 +2,9 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '../../lib/utils.js';
 
+/** How far the menu keeps from the window's edges. */
+const EDGE_MARGIN = 4;
+
 /**
  * Generic VS Code-style popup menu, positioned at an arbitrary viewport
  * point (typically a right-click's clientX/clientY). It deliberately knows
@@ -27,6 +30,21 @@ import { cn } from '../../lib/utils.js';
  * itself does not: whoever was typing somewhere else keeps typing there,
  * and the menu waits for a click, or for focus to come to it or to
  * `keysWithin`.
+ *
+ * A menu with more items than the window has room for (Move to Group ▸ with
+ * many groups) is no taller than the window less EDGE_MARGIN on each side,
+ * and scrolls: a scroll inside it does not close it, and one that reaches
+ * its end does not go on to what is behind it. A key that moves the active
+ * item brings that item into view; the pointer moving onto one does not.
+ *
+ * The pointer makes an item active only by really moving over it: a
+ * `mousemove` at another point than the last one seen over the menu. The
+ * list scrolling under a pointer that rests (a key's scroll, the wheel) has
+ * the engine send the row now under it a `mouseover`, and some engines a
+ * `mousemove` at the same point; neither changes the active item, nor does
+ * the first move after the menu opens, which only notes where the pointer
+ * is. An active item that the menu's own scroll takes wholly out of its box
+ * is active no more, so Enter never picks a row out of sight.
  */
 export function ContextMenu({
   open,
@@ -47,6 +65,13 @@ export function ContextMenu({
   // picked twice.
   const activeRef = useRef(-1);
   activeRef.current = activeIndex;
+  // Each item's element, by its index in `items`, and how many times a key
+  // has moved the active item: the item is scrolled into view after each.
+  const itemEls = useRef([]);
+  const [keyMoves, setKeyMoves] = useState(0);
+  // Where the pointer was last seen moving over the menu: null until its
+  // first move after the menu opens.
+  const pointerAt = useRef(null);
 
   const selectableIndexes = items.reduce((acc, item, idx) => {
     if (item.type !== 'separator' && !item.disabled) acc.push(idx);
@@ -58,6 +83,7 @@ export function ContextMenu({
     if (!open) return;
     setPlacement({ left: x, top: y, ready: false });
     setActiveIndex(-1);
+    pointerAt.current = null;
   }, [open, x, y]);
 
   // Flip inward once we know the rendered size, so the menu never runs off
@@ -67,7 +93,7 @@ export function ContextMenu({
     const el = menuRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const margin = 4;
+    const margin = EDGE_MARGIN;
     let left = x;
     let top = y;
     if (left + rect.width > window.innerWidth - margin) {
@@ -79,12 +105,19 @@ export function ContextMenu({
     setPlacement({ left, top, ready: true });
   }, [open, placement.ready, x, y]);
 
+  // The item a key made active, into view at the nearest edge.
+  useEffect(() => {
+    if (keyMoves === 0) return;
+    itemEls.current[activeRef.current]?.scrollIntoView({ block: 'nearest' });
+  }, [keyMoves]);
+
   useEffect(() => {
     if (!open) return undefined;
     if (takeFocus) menuRef.current?.focus();
 
     const moveActive = (dir) => {
       if (selectableIndexes.length === 0) return;
+      setKeyMoves((n) => n + 1);
       setActiveIndex((current) => {
         const at = selectableIndexes.indexOf(current);
         const nextAt =
@@ -133,17 +166,49 @@ export function ContextMenu({
 
     const handleDismiss = () => onClose?.();
 
+    // The menu's own list scrolling leaves it open; any other scroll closes
+    // it. A target that is no node (the window) is not inside it. After its
+    // own scroll, an active item wholly outside the menu's box is active no
+    // more; a box with no height (nothing laid out) is not looked at.
+    const handleScroll = (e) => {
+      const target = e?.target;
+      if (target?.nodeType && menuRef.current?.contains(target)) {
+        const row = itemEls.current[activeRef.current];
+        const box = menuRef.current.getBoundingClientRect();
+        if (row && box.bottom > box.top) {
+          const at = row.getBoundingClientRect();
+          if (at.bottom <= box.top || at.top >= box.bottom) setActiveIndex(-1);
+        }
+        return;
+      }
+      onClose?.();
+    };
+
     window.addEventListener('keydown', handleKeyDown, true);
     window.addEventListener('mousedown', handlePointerDown, true);
-    window.addEventListener('scroll', handleDismiss, true);
+    window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('resize', handleDismiss);
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('mousedown', handlePointerDown, true);
-      window.removeEventListener('scroll', handleDismiss, true);
+      window.removeEventListener('scroll', handleScroll, true);
       window.removeEventListener('resize', handleDismiss);
     };
   }, [open, items, onClose, selectableIndexes, focusedKeys, keysWithin, takeFocus]);
+
+  // A move at another point than the last one seen makes the item under the
+  // pointer active (none for one that is off); over a separator or the
+  // padding it leaves the active item as it is.
+  const handleMouseMove = (e) => {
+    const seen = pointerAt.current;
+    pointerAt.current = { x: e.clientX, y: e.clientY };
+    if (!seen || (seen.x === e.clientX && seen.y === e.clientY)) return;
+    let idx = -1;
+    for (let n = e.target; n && n !== e.currentTarget && idx === -1; n = n.parentNode) {
+      idx = itemEls.current.indexOf(n);
+    }
+    if (idx !== -1) setActiveIndex(items[idx]?.disabled ? -1 : idx);
+  };
 
   if (!open) return null;
 
@@ -166,11 +231,18 @@ export function ContextMenu({
       data-opened-by-itself={takeFocus ? undefined : ''}
       tabIndex={-1}
       onContextMenu={(e) => e.preventDefault()}
+      onMouseMove={handleMouseMove}
       style={{
         position: 'fixed',
         left: placement.left,
         top: placement.top,
         visibility: placement.ready ? 'visible' : 'hidden',
+        // Never taller than the window: the placement above then keeps all
+        // of it inside, and a longer list scrolls.
+        maxHeight: `calc(100vh - ${2 * EDGE_MARGIN}px)`,
+        overflowX: 'hidden',
+        overflowY: 'auto',
+        overscrollBehavior: 'contain',
       }}
       className="z-[70] min-w-[220px] py-1 rounded-[6px] bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none"
     >
@@ -185,10 +257,12 @@ export function ContextMenu({
         return (
           <div
             key={item.key}
+            ref={(el) => {
+              itemEls.current[idx] = el;
+            }}
             role="menuitem"
             aria-disabled={item.disabled ? 'true' : undefined}
             title={item.disabled ? item.disabledReason : undefined}
-            onMouseEnter={() => setActiveIndex(item.disabled ? -1 : idx)}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               if (item.disabled) return;

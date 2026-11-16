@@ -143,9 +143,15 @@ describe('Agent session history in the palette: what it lists', () => {
     assert.ok(LIST_MENUS.has('agent-session') && LIST_MENUS.has('agent-sessions'));
     const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.match(panel, /agentSession: \(key\) => agentEntries\.some\(\(entry\) => entry\.key === key\)/);
-    // Remove and Clear in its menu, the clear through the question.
-    assert.match(panel, /key: 'remove', label: 'Remove from List', onSelect: \(\) => removeAgentEntry\(entry\.key\)/);
-    assert.match(panel, /key: 'clear', label: 'Clear Agent Session History…', danger: true, onSelect: \(\) => clearAgentHistory\(\)/);
+    // Delete… in its menu (agentSessionsModel.js builds it), through the
+    // question; 'Remove from List' is gone. Clear is the header's, through
+    // the question too (F26, F27).
+    const model = readFileSync(new URL('../../src/components/terminal/agentSessionsModel.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(model, /key: 'delete', label: 'Delete…', danger: true, onSelect: \(\) => on\.remove\?\.\(key\)/);
+    assert.match(panel, /remove: \(key\) => deleteAgentSession\(key\),/);
+    assert.doesNotMatch(panel + model, /Remove from List|removeAgentEntry/);
+    assert.match(model, /key: 'clear', label: 'Clear Agent Session History…', danger: true, onSelect: \(\) => on\.clear\?\.\(\)/);
+    assert.match(panel, /clear: \(\) => clearAgentHistory\(\)/);
   });
 
   test("AHP-06: a side bar row — a click selects, a double-click or Enter resumes through resumeFromHistory, a right-click opens its menu (B-R5)", async () => {
@@ -190,7 +196,7 @@ describe('Agent session history in the palette: what it lists', () => {
       'on the agent session row itself'
     );
     assert.doesNotMatch(panel, /data-agent-session=\{entry\.key\}[^>]*\bon(Click|DoubleClick|KeyDown|ContextMenu)=/, 'and no handler of its own beside them');
-    assert.match(panel, /onSelect: \(\) => resumeAgentSession\(entry\.key\)/, 'its menu resumes the same way');
+    assert.match(panel, /resume: \(key\) => resumeAgentSession\(key\),/, 'its menu resumes the same way');
   });
 });
 

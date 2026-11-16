@@ -416,6 +416,31 @@ export function opencodeTitleOf(windowTitle) {
   return match ? match[1] : null;
 }
 
+// ---- Which Claude Code conversation a terminal shows --------------------------
+
+/**
+ * A terminal title Claude Code set: one status glyph — ✳ (U+2733) waiting,
+ * ◐ ◑ ◒ ◓ (U+25D0-U+25D3) working, either maybe followed by U+FE0F — one
+ * space, then the conversation's title (as Claude Code 2.1.323 sets it).
+ */
+const CLAUDE_WINDOW_TITLE = /^[\u2733\u25d0-\u25d3]\ufe0f? (.+)$/s;
+/** What Claude Code shows before its conversation has a title of its own. */
+const CLAUDE_DEFAULT_TITLE = 'Claude Code';
+
+/**
+ * The conversation title in a terminal title Claude Code set (`✳ <title>`,
+ * `◐ <title>`), trimmed, or null: for its default `Claude Code`, and for
+ * any other title — no glyph, empty, a glyph only, opencode's `OC | …`, or
+ * another program's. Not cleaned or masked: the history does that
+ * (`historyTitle`).
+ */
+export function claudeTitleOf(windowTitle) {
+  if (typeof windowTitle !== 'string') return null;
+  const match = CLAUDE_WINDOW_TITLE.exec(windowTitle);
+  const title = match ? match[1].trim() : '';
+  return title && title !== CLAUDE_DEFAULT_TITLE ? title : null;
+}
+
 /**
  * Whether `full`, a conversation's title, is what opencode would show as
  * `shown`: the same text up to 40 characters, and past that its first 37

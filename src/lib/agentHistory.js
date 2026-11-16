@@ -288,9 +288,14 @@ function foldedEntry(older, newer) {
  * - one queued for the same key takes `op` in — unless a later one
  *   replaces that key, or the two replace different keys, when `op` waits
  *   its turn.
+ *
+ * `unarchive: true` (a started or resumed event, F19/F29) survives a fold:
+ * the write two ops became unarchives when either did. An op without it has
+ * none, so a queue that never unarchives looks as it always did.
  */
 export function queueUpsert(queue, op) {
   const pending = [...queue];
+  const unarchived = (a, b, folded) => (a?.unarchive === true || b?.unarchive === true ? { ...folded, unarchive: true } : folded);
   let next = { ...op };
   const replaced = next.replaces
     ? pending.findIndex(
@@ -299,7 +304,7 @@ export function queueUpsert(queue, op) {
     : -1;
   if (replaced !== -1) {
     const [older] = pending.splice(replaced, 1);
-    next = { ...next, entry: foldedEntry(older.entry, next.entry), replaces: older.replaces };
+    next = unarchived(older, next, { ...next, entry: foldedEntry(older.entry, next.entry), replaces: older.replaces });
   }
   const same = pending.findIndex((q) => q.key === next.key);
   const free =
@@ -308,7 +313,11 @@ export function queueUpsert(queue, op) {
     (!next.replaces || !pending[same].replaces || next.replaces === pending[same].replaces);
   if (free) {
     const older = pending[same];
-    pending[same] = { ...next, entry: foldedEntry(older.entry, next.entry), replaces: older.replaces ?? next.replaces };
+    pending[same] = unarchived(older, next, {
+      ...next,
+      entry: foldedEntry(older.entry, next.entry),
+      replaces: older.replaces ?? next.replaces,
+    });
   } else {
     pending.push(next);
   }
@@ -373,7 +382,9 @@ export function claudeHistoryChanges(entries, answers, held = new Set()) {
     const answer = answers instanceof Map ? answers.get(entry.sessionId) : undefined;
     if (!answer) continue;
     if (answer.saved === false) {
-      if (!held.has(entry.sessionId)) removed.push(entry.key);
+      // One the user pinned, named or grouped stays (F22): resuming it starts
+      // a new conversation, which takes its name, pin and group over.
+      if (!held.has(entry.sessionId) && !isProtectedEntry(entry)) removed.push(entry.key);
       continue;
     }
     const title = claudeHistoryTitle(answer.title);
@@ -433,37 +444,205 @@ export function shortSessionId(sessionId) {
 
 /**
  * What a row of the AGENT SESSIONS list shows for `entry`, as text:
- * `label` the agent, `title` its title or a short id — or, with neither,
- * that it is the folder's most recent — `folder` the folder's name and
- * `folderPath` the folder (for a tooltip), `certainty` `resumeCertainty`'s,
- * `lastUsedAt` and `endReason` as stored. Titles are text only.
+ * `label` the agent, `title` what the row is called — the user's name for
+ * it, else its automatic title, else a short id, else that it is the
+ * folder's most recent (F24) — `titled` whether it has a name or a title
+ * (a row without either is drawn in italics), `name` the user's name or
+ * null, `autoTitle` the automatic title (the agent's own, for the tooltip
+ * of a renamed row) or null, `folder` the folder's name and `folderPath`
+ * the folder (for a tooltip), `certainty` `resumeCertainty`'s, `lastUsedAt`
+ * and `endReason` as stored, and `pinned`, `archived`, `groupId` as the
+ * entry has them (false, false, null when not set). Titles are text only.
  */
 export function historyDisplay(entry) {
   const agent = { kind: entry?.kind, sessionId: entry?.sessionId ?? null };
   const shortId = shortSessionId(entry?.sessionId);
+  const name = entryName(entry);
+  const autoTitle = typeof entry?.title === 'string' && entry.title ? entry.title : null;
   return {
     key: entry?.key ?? null,
     label: agentLabel(entry?.kind),
-    title: entry?.title || shortId || 'most recent in folder',
-    titled: Boolean(entry?.title),
+    title: name || autoTitle || shortId || 'most recent in folder',
+    titled: Boolean(name || autoTitle),
+    name,
+    autoTitle,
     shortId,
     folder: folderName(entry?.cwd),
     folderPath: entry?.cwd ?? '',
     certainty: resumeCertainty(agent),
     lastUsedAt: entry?.lastUsedAt ?? null,
     endReason: entry?.endReason ?? null,
+    pinned: entry?.pinned === true,
+    archived: entry?.archived === true,
+    groupId: entryGroupId(entry),
   };
 }
 
 /**
  * Whether `entry` fits what was typed in the palette: every word of `query`
- * found, case aside, in the agent's label, the title, the folder, or at the
- * start of the id.
+ * found, case aside, in the agent's label, the user's name for it, its
+ * title, the folder, the name of its group (looked up in `groups`, the
+ * store's `{ id, name }` list; none given, none matched), or at the start of
+ * the id.
  */
-export function historyMatches(entry, query) {
+export function historyMatches(entry, query, groups = null) {
   const words = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return true;
-  const text = [agentLabel(entry?.kind), entry?.kind, entry?.title, entry?.cwd].filter(Boolean).join('\n').toLowerCase();
+  const groupId = entryGroupId(entry);
+  const group = groupId && Array.isArray(groups) ? groups.find((g) => g?.id === groupId) : null;
+  const text = [agentLabel(entry?.kind), entry?.kind, entryName(entry), entry?.title, entry?.cwd, group?.name]
+    .filter((t) => typeof t === 'string' && t)
+    .join('\n')
+    .toLowerCase();
   const id = String(entry?.sessionId ?? '').toLowerCase();
   return words.every((w) => text.includes(w) || (id !== '' && id.startsWith(w)));
+}
+
+// ---- What the user curated: names, pins, archive, groups (F18-F30) -----------
+
+/** The backend's caps: unprotected entries kept (`CAP`), group names (`MAX_GROUP_NAME_CHARS`), groups (`MAX_GROUPS`). */
+export const HISTORY_CAP = 200;
+export const HISTORY_GROUP_NAME_MAX = 100;
+export const HISTORY_MAX_GROUPS = 50;
+/** The name a new group gets (`nextGroupName`). */
+export const DEFAULT_GROUP_NAME = 'New Group';
+
+/** The user's name for `entry`, or null. Listed entries carry `name` only when one is set. */
+export function entryName(entry) {
+  return typeof entry?.name === 'string' && entry.name ? entry.name : null;
+}
+
+/** The id of the group `entry` is in, or null. */
+export function entryGroupId(entry) {
+  return typeof entry?.groupId === 'string' && entry.groupId ? entry.groupId : null;
+}
+
+/**
+ * Whether the backend's cap never drops `entry`: pinned, named, or in a
+ * group (F21). Archived alone does not protect it.
+ */
+export function isProtectedEntry(entry) {
+  return entry?.pinned === true || entryName(entry) !== null || entryGroupId(entry) !== null;
+}
+
+/**
+ * What of `entry`'s curation goes with it to another entry (F22: a Resume
+ * that started a new conversation in place of one never saved): the
+ * `agent_history_update` changes for its name, pin and group — only those
+ * set — or null when it has none of them.
+ */
+export function carriedCuration(entry) {
+  if (!isProtectedEntry(entry)) return null;
+  const changes = {};
+  if (entryName(entry) !== null) changes.name = entry.name;
+  if (entry.pinned === true) changes.pinned = true;
+  if (entryGroupId(entry) !== null) changes.groupId = entry.groupId;
+  return changes;
+}
+
+/**
+ * The change Rename… makes to `entry` (F26), or null when it changes
+ * nothing. `text` is trimmed and cleaned and masked as a title is
+ * (`historyTitle`). Empty clears the name (`{ name: null }`); the text of
+ * the automatic title while no name is set, or the name it has, changes
+ * nothing; anything else is the new name (`{ name }`).
+ */
+export function renameChange(entry, text) {
+  const name = historyTitle(typeof text === 'string' ? text.trim() : '');
+  const current = entryName(entry);
+  if (name === null) return current === null ? null : { name: null };
+  if (name === current) return null;
+  if (current === null && name === (entry?.title ?? null)) return null;
+  return { name };
+}
+
+/**
+ * A group name as the history keeps it, or null for one that is empty once
+ * cleaned (an empty name keeps the old one: nothing is sent). Trimmed,
+ * cleaned and masked as a title is (`historyTitle`), and cut to 100
+ * characters — never through a `[hidden]`.
+ */
+export function historyGroupName(text) {
+  const name = historyTitle(typeof text === 'string' ? text.trim() : '');
+  if (!name) return null;
+  const chars = Array.from(name);
+  if (chars.length <= HISTORY_GROUP_NAME_MAX) return name;
+  let cut = chars.slice(0, HISTORY_GROUP_NAME_MAX).join('');
+  const at = name.lastIndexOf(HIDDEN, cut.length - 1);
+  if (at !== -1 && at + HIDDEN.length > cut.length) {
+    cut = `${Array.from(name.slice(0, at)).slice(0, HISTORY_GROUP_NAME_MAX - HIDDEN.length).join('')}${HIDDEN}`;
+  }
+  return cleanAgentTitle(cut);
+}
+
+/** The first free default group name: 'New Group', else 'New Group 2', 'New Group 3', … (F26). */
+export function nextGroupName(groups) {
+  const taken = new Set((Array.isArray(groups) ? groups : []).map((g) => g?.name).filter((n) => typeof n === 'string'));
+  if (!taken.has(DEFAULT_GROUP_NAME)) return DEFAULT_GROUP_NAME;
+  for (let n = 2; ; n += 1) {
+    const name = `${DEFAULT_GROUP_NAME} ${n}`;
+    if (!taken.has(name)) return name;
+  }
+}
+
+/**
+ * The AGENT SESSIONS lists (F25), from the store's `entries` and `groups`:
+ *
+ * - `pinned`, the pinned entries that are not archived, in any group or
+ *   none, newest first;
+ * - `groups`, one `{ group, entries }` per group in stored order, `entries`
+ *   its members neither pinned nor archived, newest first (an empty group
+ *   has none);
+ * - `ungrouped`, the entries neither pinned, grouped nor archived, newest
+ *   first;
+ * - `archived`, the archived entries, newest first;
+ * - `count`, the entries that are not archived (the header's count).
+ *
+ * An entry whose `groupId` names no group read counts as ungrouped.
+ * Newest first is by `lastUsedAt`; entries used at the same time keep the
+ * order they came in.
+ */
+export function agentSessionSections(entries, groups = []) {
+  const known = (Array.isArray(groups) ? groups : []).filter((g) => g && typeof g.id === 'string');
+  const ids = new Set(known.map((g) => g.id));
+  const list = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && typeof e === 'object')
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => (Number(b.e.lastUsedAt) || 0) - (Number(a.e.lastUsedAt) || 0) || a.i - b.i)
+    .map(({ e }) => e);
+  const pinned = [];
+  const ungrouped = [];
+  const archived = [];
+  const members = new Map(known.map((g) => [g.id, []]));
+  for (const e of list) {
+    const groupId = entryGroupId(e);
+    if (e.archived === true) archived.push(e);
+    else if (e.pinned === true) pinned.push(e);
+    else if (groupId !== null && ids.has(groupId)) members.get(groupId).push(e);
+    else ungrouped.push(e);
+  }
+  return {
+    pinned,
+    groups: known.map((group) => ({ group, entries: members.get(group.id) })),
+    ungrouped,
+    archived,
+    count: list.length - archived.length,
+  };
+}
+
+/**
+ * How many entries the cap could drop (unprotected ones) once the members
+ * of group `groupId` are ungrouped (Delete Group): the unprotected entries
+ * now, and the members neither pinned nor named. More than HISTORY_CAP, and
+ * the oldest beyond the 200 most recent leave the list at the next recorded
+ * session event (the Queen's decision 1; `deleteAgentGroupQuestion`).
+ */
+export function unprotectedAfterUngrouping(entries, groupId) {
+  let n = 0;
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (!e || typeof e !== 'object') continue;
+    if (!isProtectedEntry(e)) n += 1;
+    else if (entryGroupId(e) === groupId && e.pinned !== true && entryName(e) === null) n += 1;
+  }
+  return n;
 }

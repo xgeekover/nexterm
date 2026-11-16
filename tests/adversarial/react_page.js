@@ -6,6 +6,9 @@
  * The same idea as the page inside confirm_dialog.test.js, with what the
  * command palette needs on top: CSS selectors of the simple kind
  * (`[data-x="y"] .cls`, `textarea`), and the pointer arriving on a row.
+ * Nothing is laid out, so nothing scrolls: an element's `scrollIntoView`,
+ * which a browser always has, only notes the call in the document's
+ * `scrolledIntoView`.
  *
  * Typing into a field is not something it can do. react-dom is loaded before
  * any page exists (it reads `navigator` when it finds a DOM, which Node 20
@@ -141,6 +144,9 @@ class PageElement extends PageNode {
   blur() {
     if (this.ownerDocument.focused === this) this.ownerDocument.focused = null;
   }
+  scrollIntoView(options) {
+    this.ownerDocument.scrolledIntoView.push({ element: this, options });
+  }
 }
 
 class PageDocument extends PageNode {
@@ -149,6 +155,8 @@ class PageDocument extends PageNode {
     this.documentElement = this.appendChild(this.createElement('html'));
     this.body = this.documentElement.appendChild(this.createElement('body'));
     this.focused = null;
+    /** Every `scrollIntoView` asked of an element of this page, in order: `{ element, options }`. */
+    this.scrolledIntoView = [];
   }
   /** What has focus — the page itself once that element has left it, as in a browser. */
   get activeElement() {
@@ -309,6 +317,16 @@ export function makePage() {
      */
     async hover(node) {
       const event = dispatch(window, node, { type: 'mouseover', relatedTarget: null });
+      await letItRun();
+      return event;
+    },
+    /**
+     * The pointer moving over `node`, to (`clientX`, `clientY`) — React's
+     * `onMouseMove`. A boundary event (`hover`) does not come with it. As a
+     * pointer move is not a discrete event, this waits as `hover` does.
+     */
+    async move(node, clientX, clientY) {
+      const event = dispatch(window, node, { type: 'mousemove', clientX, clientY, buttons: 0 });
       await letItRun();
       return event;
     },
