@@ -45,9 +45,10 @@ const EDGE_MARGIN = 4;
  * the engine send the row now under it a `mouseover`, and some engines a
  * `mousemove` at the same point; neither changes the active item, nor does
  * the first move after the menu opens, which only notes where the pointer
- * is. An active item that the menu's own scroll takes wholly out of the
- * area that shows its rows (inside its border) is active no more, so Enter
- * never picks a row out of sight.
+ * is. An active item that the menu's own scroll leaves with less than half
+ * of its height in the area that shows its rows (inside its border) is
+ * active no more, so Enter never picks a row out of sight or one of which
+ * only a sliver shows.
  */
 export function ContextMenu({
   open,
@@ -195,10 +196,12 @@ export function ContextMenu({
 
     // The menu's own list scrolling leaves it open; any other scroll closes
     // it. A target that is no node (the window) is not inside it. After its
-    // own scroll, an active item wholly outside the area that shows the rows
-    // is active no more. That area is the menu's scrollport, inside its 1 px
-    // border: a row clipped there shows nothing even where it still overlaps
-    // the border. A menu with no client height (nothing laid out) is not
+    // own scroll, an active item stays active only while at least half of
+    // its height shows in the area that shows the rows; with less, a sliver
+    // the user can hardly see or read, it is active no more. That area is
+    // the menu's scrollport, inside its 1 px border: a row clipped there
+    // shows nothing even where it still overlaps the border. A menu with no
+    // client height, or a row with no height (nothing laid out), is not
     // looked at.
     const handleScroll = (e) => {
       const target = e?.target;
@@ -209,7 +212,9 @@ export function ContextMenu({
           const top = menu.getBoundingClientRect().top + (menu.clientTop || 0);
           const bottom = top + menu.clientHeight;
           const at = row.getBoundingClientRect();
-          if (at.bottom <= top || at.top >= bottom) setActiveIndex(-1);
+          const height = at.bottom - at.top;
+          const shown = Math.min(at.bottom, bottom) - Math.max(at.top, top);
+          if (height > 0 && shown < height / 2) setActiveIndex(-1);
         }
         return;
       }

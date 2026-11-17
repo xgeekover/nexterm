@@ -13,9 +13,10 @@
  *
  * Since a key move scrolls the list, the pointer makes an item active only by
  * really moving (FX-8, cycle 3): CXM-04 to CXM-07. A row counts as out of
- * sight once it is wholly outside the area inside the menu's border (D-01):
- * CXM-07. A list that scrolls beside a scroll bar taking width makes the
- * menu wider by the bar (C-05): CXM-08.
+ * sight once less than half of its height shows in the area inside the
+ * menu's border (D-01; A13 of the v0.28.0 trial): CXM-07. A list that
+ * scrolls beside a scroll bar taking width makes the menu wider by the bar
+ * (C-05): CXM-08.
  *
  * What effects and listeners do is out of reach of `renderToString`, so the
  * menu is rendered with real React on the hand-written page of
@@ -453,7 +454,7 @@ describe('The pointer makes an item active only by really moving (FX-8)', () => 
     });
   });
 
-  test('CXM-07: a scroll of the menu’s own list makes no row active; one that takes the active item wholly out of the menu’s box leaves the menu open and nothing active, and Enter picks nothing; partly inside, it stays active', async () => {
+  test('CXM-07: a scroll of the menu’s own list makes no row active; one that leaves less than half of the active item inside the menu’s box leaves the menu open and nothing active, and Enter picks nothing; with at least half inside, it stays active', async () => {
     const { ContextMenu } = await loadMenu();
     await onPage(async (p) => {
       remember(p);
@@ -480,7 +481,7 @@ describe('The pointer makes an item active only by really moving (FX-8)', () => 
         measure(rows[5], 90, 112);
         scrollInside();
         assert.equal(activeOf(rows), 5, 'partly inside, across its top edge: still active');
-        measure(rows[5], 490, 512);
+        measure(rows[5], 480, 502);
         scrollInside();
         assert.equal(activeOf(rows), 5, 'partly inside, across its bottom edge: still active');
 
@@ -518,12 +519,21 @@ describe('The pointer makes an item active only by really moving (FX-8)', () => 
     // 1 px inside its box at the top and at the bottom. A row that overlaps
     // the box only in that band shows nothing: it is active no more. Measured
     // 100..500, with `clientTop` 1 and `clientHeight` 398, the rows show
-    // between 101 and 499.
+    // between 101 and 499. A row stays active only while at least half of its
+    // 22 px, 11 px, shows there (A13 of the v0.28.0 trial: with 1 px of a row
+    // showing, Enter picked it).
     const bands = [
       ['its bottom 1 px below the menu’s top, inside the top border', 79, 101, false],
       ['its top 1 px above the menu’s bottom, inside the bottom border', 499, 521, false],
-      ['1 px of it inside the area that shows the rows, at the top', 80, 102, true],
-      ['1 px of it inside the area that shows the rows, at the bottom', 498, 520, true],
+      ['1 px of it inside the area that shows the rows, at the top', 80, 102, false],
+      ['1 px of it inside the area that shows the rows, at the bottom', 498, 520, false],
+      ['half of it, 11 px, inside the area that shows the rows, at the top', 90, 112, true],
+      ['half of it, 11 px, inside the area that shows the rows, at the bottom', 488, 510, true],
+      ['10 px of it inside the area that shows the rows, at the top', 89, 111, false],
+      ['10 px of it inside the area that shows the rows, at the bottom', 489, 511, false],
+      // A row with no height has nothing laid out: it is not looked at, even
+      // above the area that shows the rows.
+      ['a row with no height, above the area that shows the rows', 40, 40, true],
     ];
     for (const [where, top, bottom, staysActive] of bands) {
       await onPage(async (p) => {
