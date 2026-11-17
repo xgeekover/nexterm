@@ -116,6 +116,7 @@ describe('Terminal status: one state per terminal (S2)', () => {
       working: terminalStatus(tab(), { progress: bar('indeterminate') }),
       running: terminalStatus(tab({ running: true })),
       failed: terminalStatus(tab({ lastExitCode: 3 })),
+      idle: terminalStatus(tab({ agent: { kind: 'claude' }, sessionId: 's1', agentTyped: { sessionId: 's1' } }), { activity: { state: 'idle' } }),
     };
     const words = Object.values(shown).map((s) => s.word);
     const glyphs = Object.values(shown).map((s) => s.glyph);
@@ -604,6 +605,65 @@ describe('Terminal status: an agent typed after one that could not be watched (S
       assert.equal(tabNow(opened.id).agent?.kind, 'opencode', 'typing an agent takes the offer’s place');
       assert.equal(tabNow(opened.id).agentResumeOffered, false);
     });
+  });
+});
+
+describe("Terminal status: Claude Code's working and idle state (F5, AC6)", () => {
+  /** A tab whose Claude Code is believed to run (`agentRuns`). */
+  const claude = (over = {}) => tab({ agent: { kind: 'claude', sessionId: null }, sessionId: 's1', agentTyped: { sessionId: 's1' }, ...over });
+  const working = { state: 'working', since: 1 };
+  const idle = { state: 'idle', since: 2 };
+
+  test('TS-30: exited > waiting > error/progress/paused > activity > indeterminate > running > failed > none', () => {
+    const all = { running: true, lastExitCode: 1 };
+    assert.equal(stateOf(claude({ ...all, exited: { code: 0 } }), { unread: 1, progress: bar('error'), activity: idle }), 'exited');
+    assert.equal(stateOf(claude(all), { unread: 1, progress: bar('error'), activity: idle }), 'waiting', 'an unread entry is the only waiting');
+    assert.equal(stateOf(claude(all), { progress: bar('error', 5), activity: idle }), 'error');
+    assert.equal(stateOf(claude(all), { progress: bar('normal', 5), activity: working }), 'progress');
+    assert.equal(terminalStatus(claude(all), { progress: bar('warning', 5), activity: idle }).word, 'Paused');
+    assert.equal(stateOf(claude(all), { progress: bar('indeterminate'), activity: idle }), 'idle', 'the title outranks a busy bar');
+    assert.equal(stateOf(claude(all), { activity: working }), 'working');
+    assert.equal(stateOf(claude(all), { activity: idle }), 'idle', 'outranks running and failed');
+    assert.equal(stateOf(claude(all), { progress: bar('indeterminate') }), 'working', 'no title yet: as today');
+    assert.equal(stateOf(claude(all)), 'running');
+    assert.equal(stateOf(claude({ lastExitCode: 1 })), 'failed');
+    assert.equal(stateOf(claude()), 'none');
+    assert.equal(stateOf(claude(), { activity: null }), 'none', 'unknown');
+    assert.equal(stateOf(claude(), { activity: { state: 'toString' } }), 'none', 'not a state');
+  });
+
+  test('TS-31: WORKING and IDLE are one frozen object each; IDLE is ○ "Idle"', () => {
+    const a = terminalStatus(claude(), { activity: idle });
+    assert.deepEqual({ ...a }, { state: 'idle', word: 'Idle', glyph: '\u{25CB}' });
+    assert.equal(STATUS_GLYPHS.idle, '\u{25CB}');
+    assert.equal(Object.isFrozen(a), true);
+    assert.equal(terminalStatus(claude({ running: true }), { activity: { state: 'idle', since: 9 } }), a, 'the same object');
+    const w = terminalStatus(claude(), { activity: working });
+    assert.equal(w, terminalStatus(tab(), { progress: bar('indeterminate') }), "the bar's WORKING itself");
+    assert.equal(Object.isFrozen(w), true);
+    assert.equal(statusText(a), 'Idle');
+  });
+
+  test('TS-32: ignored for opencode, an offered record, an agent not watched, and an exited shell', () => {
+    assert.equal(stateOf(claude({ agent: { kind: 'opencode' }, running: true }), { activity: idle }), 'running');
+    assert.equal(stateOf(claude({ agentResumeOffered: true }), { activity: working }), 'none');
+    assert.equal(stateOf(claude({ agentTyped: null, running: true }), { activity: idle }), 'running', 'agentRuns false: as today');
+    assert.equal(stateOf(claude({ agentTyped: { sessionId: 'other' } }), { activity: working }), 'none');
+    assert.equal(stateOf(tab({ running: true }), { activity: idle }), 'running', 'no agent');
+    assert.equal(agentRuns(claude()), true, 'premise');
+  });
+
+  test('TS-33: an idle Claude Code counts nowhere in a group and ranks as none; a working one counts as running', () => {
+    const tabs = [claude({ id: 'a', running: true }), tab({ id: 'b' })];
+    assert.equal(groupStatus(tabs, {}, {}, { a: idle }).running, 0, 'idle is not running');
+    assert.equal(groupStatus(tabs, {}, {}, { a: working }).running, 1);
+    assert.equal(groupStatus(tabs, {}, {}).running, 1, 'no map: running, as today');
+    assert.deepEqual(groupStatus(tabs, {}, {}, { a: idle }), { waiting: 0, running: 0, failed: 0, progress: aggregateProgress([]) });
+    assert.equal(attentionRank('idle'), attentionRank('none'));
+    assert.equal(attentionRank(terminalStatus(claude(), { activity: idle })), attentionRank('none'));
+    assert.equal(groupAttentionRank(tabs, {}, {}, { a: idle }), attentionRank('none'));
+    assert.equal(groupAttentionRank(tabs, {}, {}, { a: working }), attentionRank('working'));
+    assert.equal(groupAttentionRank(tabs, {}, {}), attentionRank('running'), 'no map: as today');
   });
 });
 

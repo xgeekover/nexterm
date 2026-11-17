@@ -38,6 +38,7 @@ export const STATUS_GLYPHS = Object.freeze({
   progress: '\u{25D1}',
   paused: '\u{2016}',
   working: '\u{25CC}',
+  idle: '\u{25CB}',
   running: '\u{25B8}',
   failed: '\u{2715}',
 });
@@ -53,6 +54,7 @@ const ERROR = status('error', 'Error', STATUS_GLYPHS.error);
 const PROGRESS = status('progress', 'In progress', STATUS_GLYPHS.progress);
 const PAUSED = status('progress', 'Paused', STATUS_GLYPHS.paused, { paused: true });
 const WORKING = status('working', 'Working', STATUS_GLYPHS.working);
+const IDLE = status('idle', 'Idle', STATUS_GLYPHS.idle);
 const RUNNING = status('running', 'Running', STATUS_GLYPHS.running);
 const FAILED = status('failed', 'Failed', STATUS_GLYPHS.failed);
 
@@ -76,7 +78,9 @@ function withValue(base, value) {
  *             nothing else ever means waiting
  *   error     its program's bar says error (with the amount it got to)
  *   progress  its program's bar, with its amount — "Paused" for a warning
- *   working   its program says it is busy, with no amount
+ *   working   Claude Code's title says it is working (◐ ◑ ◒ ◓)
+ *   idle      Claude Code's title says it is idle (✳): it waits for you
+ *   working   its program's bar is busy, with no amount
  *   running   OSC 133 says a command is running
  *   failed    the last command exited with a code that is not 0
  *   none      a prompt
@@ -85,16 +89,23 @@ function withValue(base, value) {
  * everything a terminal can say about itself, which is why the side bar is
  * looked at at all; what the program says outranks what the shell knows, as
  * it is the more particular; and a command running again outranks the last
- * one's verdict, as on the tab strip (tabActivity.js).
+ * one's verdict, as on the tab strip (tabActivity.js). Claude Code's own
+ * title outranks a busy bar and the shell's "running" — the agent IS the
+ * running command — but only while the agent is believed to run
+ * (`agentRuns`), and only for Claude Code: no other agent's title says it.
+ * Idle is not waiting: only an unread entry is (a finished turn's entry,
+ * terminalStore's `agentDone`, is what makes one wait).
  *
  * `unread` is the tab's unread count, `progress` its bar (`{ state, value }`,
- * or null). Returns `{ state, word, glyph }`, plus `value` (0–100) when a bar
+ * or null), `activity` its entry in the store's `agentActivity` map
+ * (`{ state: 'working'|'idle', since }`, or null for unknown). Returns `{ state, word, glyph }`, plus `value` (0–100) when a bar
  * has an amount and `paused: true` for a warning. Frozen.
  */
 export function terminalStatus(tab, options) {
   if (!tab) return NONE;
   const unread = options?.unread ?? 0;
   const progress = options?.progress ?? null;
+  const activity = options?.activity?.state ?? null;
   if (tab.exited) return EXITED;
   if (typeof unread === 'number' && unread > 0) return WAITING;
   switch (progress?.state) {
@@ -104,11 +115,13 @@ export function terminalStatus(tab, options) {
       return withValue(PROGRESS, progress.value);
     case 'warning':
       return withValue(PAUSED, progress.value);
-    case 'indeterminate':
-      return WORKING;
     default:
       break;
   }
+  if ((activity === 'working' || activity === 'idle') && tab.agent?.kind === 'claude' && agentRuns(tab)) {
+    return activity === 'working' ? WORKING : IDLE;
+  }
+  if (progress?.state === 'indeterminate') return WORKING;
   if (tab.running) return RUNNING;
   if (isFailure(tab.lastExitCode)) return FAILED;
   return NONE;
@@ -269,11 +282,13 @@ export function noteTooltip(entry, now = Date.now()) {
  * have failed — a command's code, or a program's bar in error — each terminal
  * counted once, by its own state (`terminalStatus`); and all of their bars as
  * one, by stage 1's rule (`aggregateProgress`). An exited terminal counts
- * nowhere: a group of dead shells is not an alarm.
+ * nowhere: a group of dead shells is not an alarm, and neither does an idle
+ * Claude Code — it is not running anything; a working one counts as running.
  *
- * `unreadCounts` is `unreadCountByTab`'s, `progress` the store's map.
+ * `unreadCounts` is `unreadCountByTab`'s, `progress` and `activity` the
+ * store's maps (`agentActivity`).
  */
-export function groupStatus(tabs, unreadCounts, progress) {
+export function groupStatus(tabs, unreadCounts, progress, activity) {
   let waiting = 0;
   let running = 0;
   let failed = 0;
@@ -282,7 +297,7 @@ export function groupStatus(tabs, unreadCounts, progress) {
     if (!tab) continue;
     const bar = progress?.[tab.id] ?? null;
     if (bar) bars.push(bar);
-    const { state } = terminalStatus(tab, { unread: unreadCounts?.[tab.id] ?? 0, progress: bar });
+    const { state } = terminalStatus(tab, { unread: unreadCounts?.[tab.id] ?? 0, progress: bar, activity: activity?.[tab.id] ?? null });
     if (state === 'waiting') waiting += 1;
     else if (state === 'running' || state === 'progress' || state === 'working') running += 1;
     else if (state === 'failed' || state === 'error') failed += 1;
@@ -320,9 +335,10 @@ export function groupSummaryLabel(summary) {
 /**
  * Where each state goes when the side bar is sorted by attention: what is
  * waiting for you first, then what went wrong, then what is still going,
- * then the idle ones, and the dead shells last.
+ * then the idle ones — a prompt, and an idle Claude Code — and the dead
+ * shells last.
  */
-const RANK = Object.freeze({ waiting: 0, error: 1, failed: 1, running: 2, progress: 2, working: 2, none: 3, exited: 4 });
+const RANK = Object.freeze({ waiting: 0, error: 1, failed: 1, running: 2, progress: 2, working: 2, none: 3, idle: 3, exited: 4 });
 const IDLE_RANK = RANK.none;
 
 /** The rank of a status (`terminalStatus`'s) or of a state by name; idle for anything else. */
@@ -331,12 +347,14 @@ export function attentionRank(s) {
   return typeof state === 'string' && Object.prototype.hasOwnProperty.call(RANK, state) ? RANK[state] : IDLE_RANK;
 }
 
-/** The rank of a group: that of its most urgent terminal; idle when it has none. */
-export function groupAttentionRank(tabs, unreadCounts, progress) {
+/** The rank of a group: that of its most urgent terminal; idle when it has none. `activity` as for `groupStatus`. */
+export function groupAttentionRank(tabs, unreadCounts, progress, activity) {
   let best = null;
   for (const tab of Array.isArray(tabs) ? tabs : []) {
     if (!tab) continue;
-    const rank = attentionRank(terminalStatus(tab, { unread: unreadCounts?.[tab.id] ?? 0, progress: progress?.[tab.id] ?? null }));
+    const rank = attentionRank(
+      terminalStatus(tab, { unread: unreadCounts?.[tab.id] ?? 0, progress: progress?.[tab.id] ?? null, activity: activity?.[tab.id] ?? null })
+    );
     if (best === null || rank < best) best = rank;
   }
   return best ?? IDLE_RANK;

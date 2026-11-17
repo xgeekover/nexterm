@@ -45,6 +45,7 @@ import {
 import {
   agentFromCommandLine,
   agentLabel,
+  claudeActivityOf,
   claudeTitleOf,
   cleanAgentTitle,
   isKnownAgent,
@@ -59,6 +60,16 @@ import {
   startCommand,
 } from '../lib/agents.js';
 import { historyKeyOfTab, historyRecord } from '../lib/agentHistory.js';
+import {
+  AGENT_IDLE_SETTLE_MS,
+  NO_AGENT_ACTIVITY,
+  agentDoneBody,
+  agentDoneDecision,
+  inAgentPeriod,
+  nextAgentActivity,
+  settleAgentActivity,
+  withAgentSignal,
+} from '../lib/agentActivity.js';
 import { claudeConversationSaved } from '../lib/claudeConversations.js';
 import { stripTrailingSep, toPosix } from '../lib/paths.js';
 import { equalizeAll, equalizeLineOf, swapChoices } from '../components/terminal/splitLayout.js';
@@ -1767,6 +1778,87 @@ export function __setAttentionSource(source) {
 
 const monotonicNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
+// ---- Whether Claude Code is working or idle (src/lib/agentActivity.js) -----
+
+/**
+ * The clocks of Claude Code's working and idle state: `now` monotonic, for a
+ * turn's length and the shared rate limit; `wall` the `Date.now()` clock of
+ * `since`, of an entry's `at` and of an idle period's start, which a kept
+ * note's `keptAt` (terminalRegistry.js) is compared with; `schedule(fn, ms)`
+ * the settle timer, returning what cancels it. The suites put their own in
+ * (`__setAgentActivityClocks`).
+ */
+const realAgentSchedule = (fn, ms) => {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
+};
+let agentNow = () => monotonicNow();
+let agentWall = () => Date.now();
+let agentSchedule = realAgentSchedule;
+
+/** For the suites: the clocks and timer of the agent's state. Returns the previous ones. */
+export function __setAgentActivityClocks({ now, wall, schedule } = {}) {
+  const previous = { now: agentNow, wall: agentWall, schedule: agentSchedule };
+  agentNow = typeof now === 'function' ? now : () => monotonicNow();
+  agentWall = typeof wall === 'function' ? wall : () => Date.now();
+  agentSchedule = typeof schedule === 'function' ? schedule : realAgentSchedule;
+  return previous;
+}
+
+/** tab id -> its Claude Code's record (`nextAgentActivity`): kept out of the store, as a spinner frame changes it. */
+const agentTurns = new Map();
+/** tab id -> what cancels its settle timer: one per terminal at most. */
+const agentSettles = new Map();
+/** tab id -> the last title its Claude Code set, for the conversation's name in a finished turn's entry. */
+const agentLastTitles = new Map();
+/**
+ * tab id -> the idle period of a finished turn that listed an entry,
+ * `{ from, entryId }`: until the next working title or the agent's or the
+ * terminal's end, what Claude Code sends itself is that same moment, and is
+ * folded into the entry rather than listed again (F11).
+ */
+const agentDonePeriods = new Map();
+/**
+ * tab id -> the idle periods of its earlier turns that listed an entry, each
+ * ended by the next working title: `{ from, to, entryId }`, frozen, oldest
+ * first, AGENT_PAST_PERIODS at most. A note kept from output nobody had shown
+ * yet, read only now with its `keptAt` in one of them, is still that turn's
+ * moment: folded into its entry, never listed again (F11).
+ */
+const agentPastPeriods = new Map();
+/** How many ended idle periods a terminal keeps (`agentPastPeriods`). */
+const AGENT_PAST_PERIODS = 4;
+
+/** Forget `tabId`'s turn, its settle timer and its idle periods: no completion comes of them. */
+function dropAgentTurn(tabId) {
+  agentSettles.get(tabId)?.();
+  agentSettles.delete(tabId);
+  agentTurns.delete(tabId);
+  agentLastTitles.delete(tabId);
+  agentDonePeriods.delete(tabId);
+  agentPastPeriods.delete(tabId);
+}
+
+/**
+ * `tabId`'s open idle period, when its turn listed an entry, ends at wall
+ * time `to` (the next working title): kept among its past ones, the oldest
+ * let go beyond AGENT_PAST_PERIODS.
+ */
+function endAgentDonePeriod(tabId, to) {
+  const current = agentDonePeriods.get(tabId);
+  if (!current) return;
+  agentDonePeriods.delete(tabId);
+  const ended = Object.freeze({ from: current.from, to, entryId: current.entryId });
+  agentPastPeriods.set(tabId, [...(agentPastPeriods.get(tabId) ?? []), ended].slice(-AGENT_PAST_PERIODS));
+}
+
+/** The ended idle period of `tabId` that wall time `at` (a kept note's `keptAt`) lies in, from its start up to its end, or null. */
+function pastAgentPeriodAt(tabId, at) {
+  const past = agentPastPeriods.get(tabId);
+  if (!past || typeof at !== 'number' || !Number.isFinite(at)) return null;
+  return past.find((period) => at >= period.from && at < period.to) ?? null;
+}
+
 /**
  * How long a pane's ring flashes when a notification or a bell is aimed at
  * the terminal being typed into and `terminalAttentionFlashFocused` is on:
@@ -2428,6 +2520,8 @@ export const useTerminalStore = create((set, get, api) => {
     claudeShownTitles.delete(tabId);
     resolveMisses.delete(tabId);
     idHints.delete(tabId);
+    // Nor a state: the last agent's turn is not this one's.
+    dropAgentTurn(tabId);
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === tabId
@@ -2440,6 +2534,7 @@ export const useTerminalStore = create((set, get, api) => {
             }
           : t
       ),
+      agentActivity: withoutTabs(state.agentActivity, [tabId]),
     }));
   };
 
@@ -2873,6 +2968,138 @@ export const useTerminalStore = create((set, get, api) => {
     idHints.delete(tabId);
     clearTimeout(resolveTimers.get(tabId));
     resolveTimers.delete(tabId);
+    forgetAgentActivity(tabId);
+  };
+
+  /** Forget whether `tabId`'s Claude Code works or waits, with its turn and timer: it ended, or its terminal did. */
+  const forgetAgentActivity = (tabId) => {
+    dropAgentTurn(tabId);
+    if (get().agentActivity?.[tabId] === undefined) return;
+    set((state) => ({ agentActivity: withoutTabs(state.agentActivity, [tabId]) }));
+  };
+
+  /**
+   * The settle time of `tabId`'s idle title is up, with no working title
+   * since: Idle, and the turn's end (`agentDone`).
+   */
+  const settleAgentIdle = (tabId) => {
+    agentSettles.delete(tabId);
+    const prev = agentTurns.get(tabId);
+    if (!prev) return;
+    const { record, changed, done } = settleAgentActivity(prev);
+    if (record === NO_AGENT_ACTIVITY) agentTurns.delete(tabId);
+    else agentTurns.set(tabId, record);
+    if (changed) set((state) => ({ agentActivity: { ...state.agentActivity, [tabId]: Object.freeze({ state: record.shown, since: record.since }) } }));
+    if (done) agentDone(tabId, done);
+  };
+
+  /**
+   * Claude Code in `tabId` finished a turn (`done`: its length, the start of
+   * its idle period and what it sent itself in it), and now waits for you.
+   *
+   * Told only for a turn of at least `terminalAgentDoneAfterSeconds` (0 is
+   * off), read now, and only while the terminal still holds a Claude Code
+   * believed to run — the record the turn began under: a new one drops the
+   * turn (`recordAgent`). Routed as a program note with kitty's 'always'
+   * occasion (`programRoute`): an entry unless this is the terminal being
+   * typed into, which flashes instead with the setting on; a desktop
+   * notification while the window is not focused and the desktop gate
+   * allows. Nothing, or no entry, when Claude Code said it itself in the
+   * idle period (`agentDoneDecision`). Counted against the terminal's one
+   * allowance (`allowProgramNote`), after all of that. Returns what was
+   * shown, or null.
+   */
+  const agentDone = (tabId, done) => {
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.agent?.kind !== 'claude' || !agentRuns(tab)) return null;
+    const settings = useSettingsStore.getState();
+    const seconds = settings.terminalAgentDoneAfterSeconds;
+    const thresholdMs = typeof seconds === 'number' && Number.isFinite(seconds) ? seconds * 1000 : 0;
+    const attention = currentAttention();
+    const decision = agentDoneDecision({
+      durationMs: done.durationMs,
+      thresholdMs,
+      signals: done.signals,
+      route: programRoute(state, tabId, 'always', attention),
+      flashFocused: settings.terminalAttentionFlashFocused === true,
+    });
+    if (!decision.list && !decision.desktop && !decision.flash) return null;
+    if (!get().allowProgramNote(tabId, agentNow())) return null;
+    const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
+    const body = agentDoneBody(done.durationMs, claudeTitleOf(agentLastTitles.get(tabId)));
+    const at = agentWall();
+    let entryId = null;
+    const shown = deliverProgramNote(tabId, { inApp: decision.list, desktop: decision.desktop }, {
+      makeEntry: () => {
+        programNoteCounter += 1;
+        entryId = `agent-${tabId}-${at}-${programNoteCounter}`;
+        return {
+          id: entryId,
+          kind: 'program',
+          origin: 'agent-done',
+          agent: 'claude',
+          tabId,
+          tabTitle,
+          title: 'Claude Code',
+          body,
+          durationMs: done.durationMs,
+          at,
+          read: false,
+        };
+      },
+      flash: decision.flash,
+      desktop: { title: `Claude Code in ${tabTitle}`, body },
+    });
+    if (entryId) agentDonePeriods.set(tabId, { from: done.from, entryId });
+    return shown;
+  };
+
+  /**
+   * Where a program's note for `tabId` goes (`routeProgramNotification`), by
+   * kitty's `occasion` and the window's `attention`; a note read from kept
+   * output (`fromHistory`) is listed unless this is the terminal being typed
+   * into, and never shown on the desktop. The desktop gate is not asked here
+   * (`deliverProgramNote`).
+   */
+  const programRoute = (state, tabId, occasion, attention, fromHistory = false) => {
+    if (fromHistory) return { inApp: !(state.activeTabId === tabId && Boolean(attention?.focused)), desktop: false };
+    return routeProgramNotification({
+      occasion,
+      activeTab: state.activeTabId === tabId,
+      onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
+      focused: Boolean(attention?.focused),
+    });
+  };
+
+  /**
+   * Show a program's note for `tabId` where `route` says: the desktop gate
+   * asked first (`allowDesktop`, else `programDesktopGate`), only for a
+   * route with desktop; the entry `makeEntry()` builds listed for one in the
+   * app, else the pane flashed when `flash`; the desktop notification
+   * (`desktop`'s title and body); and, with `signal`, the program heard from
+   * (`programSignalled`). Returns the route as shown.
+   */
+  const deliverProgramNote = (tabId, route, { makeEntry, flash = false, desktop, allowDesktop, signal = true }) => {
+    let shown = route;
+    const desktopAllowed =
+      typeof allowDesktop === 'function' ? allowDesktop : programDesktopGate ? () => programDesktopGate(tabId) !== false : null;
+    if (shown.desktop && desktopAllowed && !desktopAllowed()) shown = { ...shown, desktop: false };
+    if (shown.inApp) {
+      const entry = makeEntry();
+      set((s) => ({ notifications: capNotifications(insertNewestFirst(s.notifications, entry), NOTIFICATION_LIMIT) }));
+    } else if (flash) {
+      flashTerminal(tabId);
+    }
+    if (shown.desktop) {
+      const { title, body } = desktop;
+      // Denied by the OS is an answer, not an error: the backend says false.
+      invoke('show_desktop_notification', { title, body }).catch((err) => {
+        console.warn('[TerminalStore] could not show a desktop notification:', err);
+      });
+    }
+    if (signal) programSignalled(tabId);
+    return shown;
   };
 
   /**
@@ -3475,6 +3702,15 @@ export const useTerminalStore = create((set, get, api) => {
         onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
         focused: Boolean(attention?.focused),
       });
+      if (route.inApp) {
+        // Claude Code's own ring as it finishes a turn (F11): inside the idle
+        // period of a turn that listed its entry, that entry says it already;
+        // before the turn's end is decided, it is the news, and the turn's
+        // end lists no second entry (`agentDone`).
+        if (agentDonePeriods.has(tabId)) return { inApp: false, flash: false };
+        const turn = agentTurns.get(tabId);
+        if (turn?.turn) agentTurns.set(tabId, withAgentSignal(turn, 'bell'));
+      }
       const flash = !route.inApp && settings.terminalAttentionFlashFocused === true;
       if (!route.inApp && !flash) return { inApp: false, flash: false };
       // Counted only for a ring that would show, and a flash against an
@@ -3574,6 +3810,50 @@ export const useTerminalStore = create((set, get, api) => {
     // every pane, chip and the side bar redraw for. Gone with `null`, with
     // the shell (its exit, a restart) and with the terminal (`pruneAttention`).
     reportedStatus: {},
+
+    // ---- Whether Claude Code is working or idle ---------------------------
+    //
+    // tab id -> `{ state: 'working'|'idle', since }`, frozen, from the title
+    // Claude Code sets (`noteAgentActivity`); no key is unknown. Its own map,
+    // as `progress` is: a change redraws the rows and ranks that read it,
+    // never `tabs`. Never kept across launches. Gone with the agent, the
+    // shell and the terminal (`forgetAgentActivity`, `pruneAttention`).
+    agentActivity: {},
+
+    /**
+     * A window title `windowTitle` arrived for `tabId`: what it says its
+     * Claude Code is doing (`claudeActivityOf`, `nextAgentActivity`). Read
+     * for a Claude Code record that is not only offered back, with or without
+     * an id. A store write only when the shown state changes — a spinner's
+     * next frame costs the parse — and one settle timer per terminal at most.
+     */
+    noteAgentActivity: (tabId, windowTitle) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab?.agent || tab.agent.kind !== 'claude' || tab.agentResumeOffered) return;
+      const kind = claudeActivityOf(windowTitle);
+      const prev = agentTurns.get(tabId) ?? NO_AGENT_ACTIVITY;
+      const now = agentNow();
+      const wall = agentWall();
+      const { record, changed, settle, periodEnds } = nextAgentActivity(prev, kind, now, wall);
+      if (kind) agentLastTitles.set(tabId, windowTitle);
+      if (periodEnds) endAgentDonePeriod(tabId, wall);
+      if (settle) {
+        agentSettles.get(tabId)?.();
+        agentSettles.delete(tabId);
+      }
+      if (settle === 'start') {
+        agentSettles.set(tabId, agentSchedule(() => settleAgentIdle(tabId), AGENT_IDLE_SETTLE_MS));
+      }
+      if (record === NO_AGENT_ACTIVITY) agentTurns.delete(tabId);
+      else agentTurns.set(tabId, record);
+      if (!changed) return;
+      set((state) => ({
+        agentActivity:
+          record.shown === null
+            ? withoutTabs(state.agentActivity, [tabId])
+            : { ...state.agentActivity, [tabId]: Object.freeze({ state: record.shown, since: record.since }) },
+      }));
+    },
 
     /**
      * Set `tabId`'s reported status (`{ text, tone }`), or clear it (`null`).
@@ -3763,43 +4043,57 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab || !note) return null;
       const fromHistory = typeof keptAt === 'number' && Number.isFinite(keptAt);
-      const typingInto = state.activeTabId === tabId && Boolean(attention?.focused);
-      let route = fromHistory
-        ? { inApp: !typingInto, desktop: false }
-        : routeProgramNotification({
-            occasion: note.occasion,
-            activeTab: state.activeTabId === tabId,
-            onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
-            focused: Boolean(attention?.focused),
-          });
-      const desktopAllowed =
-        typeof allowDesktop === 'function' ? allowDesktop : programDesktopGate ? () => programDesktopGate(tabId) !== false : null;
-      if (route.desktop && desktopAllowed && !desktopAllowed()) route = { ...route, desktop: false };
       const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
       const title = note.title || tabTitle;
       const body = note.body || '';
-      if (route.inApp) {
-        const at = fromHistory ? keptAt : Date.now();
-        programNoteCounter += 1;
-        const entry = { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at, read: false };
-        set((s) => ({ notifications: capNotifications(insertNewestFirst(s.notifications, entry), NOTIFICATION_LIMIT) }));
-      } else if (
+      // Claude Code's own note in the idle period of a turn whose end listed
+      // its entry (F11): the same moment, said better — it takes the entry's
+      // words, keeping its place and whether it was read; nothing new. The
+      // same for a kept note printed in such a period that has ended since,
+      // read only now: folded into its entry if that is still listed, else
+      // nothing — never a second entry.
+      const period = agentDonePeriods.get(tabId);
+      const inCurrent = Boolean(period) && (!fromHistory || keptAt >= period.from);
+      const past = inCurrent || !fromHistory ? null : pastAgentPeriodAt(tabId, keptAt);
+      if (inCurrent || past) {
+        const entryId = (inCurrent ? period : past).entryId;
+        set((s) => {
+          const at = s.notifications.findIndex((n) => n?.id === entryId);
+          if (at === -1) return s;
+          const notifications = s.notifications.slice();
+          notifications[at] = { ...notifications[at], title, body };
+          return { notifications };
+        });
+        if (!fromHistory) programSignalled(tabId);
+        return { inApp: false, desktop: false };
+      }
+      const route = programRoute(state, tabId, note.occasion, attention, fromHistory);
+      const flash =
         !fromHistory &&
         (note.occasion ?? 'always') === 'always' &&
         state.activeTabId === tabId &&
         Boolean(attention?.focused) &&
-        useSettingsStore.getState().terminalAttentionFlashFocused === true
-      ) {
-        flashTerminal(tabId);
+        useSettingsStore.getState().terminalAttentionFlashFocused === true;
+      const shown = deliverProgramNote(tabId, route, {
+        makeEntry: () => {
+          const at = fromHistory ? keptAt : Date.now();
+          programNoteCounter += 1;
+          return { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at, read: false };
+        },
+        flash,
+        desktop: { title, body },
+        allowDesktop,
+        signal: !fromHistory,
+      });
+      // Before the turn's end is decided, it is the news (`agentDone`) — if
+      // it was heard: listed, or shown on the desktop (F11(a)). A note that
+      // went nowhere (kitty's 'unfocused' about the terminal being typed
+      // into, 'invisible' about one on screen) leaves the turn's end to say it.
+      const turn = agentTurns.get(tabId);
+      if ((shown.inApp || shown.desktop) && turn?.turn && (!fromHistory || inAgentPeriod(turn, keptAt))) {
+        agentTurns.set(tabId, withAgentSignal(turn, 'note'));
       }
-      if (route.desktop) {
-        // Denied by the OS is an answer, not an error: the backend says false.
-        invoke('show_desktop_notification', { title, body }).catch((err) => {
-          console.warn('[TerminalStore] could not show a desktop notification:', err);
-        });
-      }
-      if (!fromHistory) programSignalled(tabId);
-      return route;
+      return shown;
     },
 
     // ---- Find in the terminal ------------------------------------------
@@ -5088,12 +5382,15 @@ export const useTerminalStore = create((set, get, api) => {
         // down behind the shell's last output, as at a command's end.
         const gone = get().tabs.filter((t) => t.sessionId === session_id).map((t) => t.id);
         dropProgressAfterOutput(gone);
+        for (const id of gone) dropAgentTurn(id);
         set((state) => ({
           // Nothing is asking for a password in a shell that has ended.
           secretInput: secretInputFor(state.tabs, withoutSecret(state.secretInput, gone)),
           // Nor doing what a program in it said it was (`set-status`): the
           // program is gone, and its line would describe a dead shell.
           reportedStatus: withoutTabs(state.reportedStatus, gone),
+          // Nor working or waiting: its Claude Code went with it.
+          agentActivity: withoutTabs(state.agentActivity, gone),
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember that this shell is gone. Without it the tab looked
@@ -5136,13 +5433,19 @@ export const useTerminalStore = create((set, get, api) => {
         });
       }));
       // A window title a program set (OSC 0 / 2), read by the backend whether
-      // or not the terminal has been shown. Only an opencode terminal's means
-      // anything here: the conversation it shows (`noteAgentTitle`).
+      // or not the terminal has been shown. Read only for a terminal that runs
+      // an agent: for Claude Code's working and idle state
+      // (`noteAgentActivity`), and for the conversation the agent shows
+      // (`noteAgentTitle`).
       unlisteners.push(await listen('pty-title', (payload) => {
         const { session_id, title } = payload || {};
         if (!session_id || typeof title !== 'string') return;
         const tab = get().tabs.find((t) => t.sessionId === session_id);
-        if (tab?.agent) get().noteAgentTitle(tab.id, title);
+        if (!tab?.agent) return;
+        // Whether Claude Code works or waits (`noteAgentActivity`), then the
+        // conversation it shows.
+        get().noteAgentActivity(tab.id, title);
+        get().noteAgentTitle(tab.id, title);
       }));
     },
 
@@ -6203,7 +6506,9 @@ export const useTerminalStore = create((set, get, api) => {
             // An exit as `pty-exit` would have said it: no program's status
             // outlives its shell.
             reportedStatus: first ? withoutTabs(state.reportedStatus, [targetId]) : state.reportedStatus,
+            agentActivity: first ? withoutTabs(state.agentActivity, [targetId]) : state.agentActivity,
           }));
+          if (first) dropAgentTurn(targetId);
           if (first && !notifyTerminal(targetId, 'The shell in this terminal has stopped. Press Enter to start a new one.')) {
             console.error('[TerminalStore] Raw write failed:', err);
           }
@@ -6516,6 +6821,9 @@ function pruneAttention(state) {
     clearTimeout(timer);
     controlledTimers.delete(id);
   }
+  for (const id of new Set([...agentTurns.keys(), ...agentSettles.keys(), ...agentDonePeriods.keys(), ...agentPastPeriods.keys(), ...agentLastTitles.keys()])) {
+    if (!live.has(id)) dropAgentTurn(id);
+  }
   const notifications = state.notifications.some((n) => !live.has(n?.tabId))
     ? state.notifications.filter((n) => live.has(n?.tabId))
     : state.notifications;
@@ -6529,17 +6837,20 @@ function pruneAttention(state) {
   // program controlled it (stage 7): gone with the terminal.
   const reportedStatus = keepLive(state.reportedStatus, live);
   const controlled = keepLive(state.controlled, live);
+  // Whether its Claude Code works or waits: gone with the terminal.
+  const agentActivity = keepLive(state.agentActivity, live);
   if (
     notifications === state.notifications &&
     progress === state.progress &&
     attentionFlash === state.attentionFlash &&
     secretInput === state.secretInput &&
     reportedStatus === state.reportedStatus &&
-    controlled === state.controlled
+    controlled === state.controlled &&
+    agentActivity === state.agentActivity
   ) {
     return;
   }
-  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled });
+  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled, agentActivity });
 }
 
 // Attention upkeep, on every change to the store:

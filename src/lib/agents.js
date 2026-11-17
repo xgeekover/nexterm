@@ -441,6 +441,24 @@ export function claudeTitleOf(windowTitle) {
   return title && title !== CLAUDE_DEFAULT_TITLE ? title : null;
 }
 
+/** Claude Code's working glyphs, ◐ ◑ ◒ ◓ (U+25D0-U+25D3), and its idle one, ✳ (U+2733). */
+const CLAUDE_IDLE_GLYPH = '\u2733';
+
+/**
+ * What a terminal title Claude Code set says the agent is doing: 'working'
+ * for a spinner glyph (◐ ◑ ◒ ◓), 'idle' for ✳ — its default `✳ Claude Code`
+ * too — in the shape `claudeTitleOf` reads (one glyph, maybe U+FE0F, one
+ * space, then text that is not blank). Null for anything else: not a
+ * string, empty, a glyph alone or not followed by a space, a glyph and
+ * blanks, opencode's `OC | …`, a shell's title, another program's spinner.
+ */
+export function claudeActivityOf(windowTitle) {
+  if (typeof windowTitle !== 'string') return null;
+  const match = CLAUDE_WINDOW_TITLE.exec(windowTitle);
+  if (!match || !match[1].trim()) return null;
+  return windowTitle.startsWith(CLAUDE_IDLE_GLYPH) ? 'idle' : 'working';
+}
+
 /**
  * Whether `full`, a conversation's title, is what opencode would show as
  * `shown`: the same text up to 40 characters, and past that its first 37

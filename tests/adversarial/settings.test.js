@@ -61,6 +61,7 @@ const SETTINGS_KEYS = [
   'terminalHideSingleTabStrip',
   'terminalEqualizeOnSplit',
   'terminalNotifyAfterSeconds',
+  'terminalAgentDoneAfterSeconds',
   'terminalProgramNotifications',
   'terminalAttentionFlashFocused',
   'terminalBellAttention',
@@ -231,6 +232,17 @@ describe('Settings survive a restart', () => {
     const next = await relaunch();
     assert.equal(next.useSettingsStore.getState().terminalTheme, 'dracula');
     assert.equal(next.useSettingsStore.getState().terminalFontSize, 16);
+  });
+
+  test('ST-23: Notify When an Agent Is Done is written and read back, 0 included (AC13)', async () => {
+    const first = await relaunch();
+    assert.equal(first.useSettingsStore.getState().terminalAgentDoneAfterSeconds, 10, 'the default is 10 s');
+    first.useSettingsStore.getState().setSetting('terminalAgentDoneAfterSeconds', 45);
+    let next = await relaunch();
+    assert.equal(next.useSettingsStore.getState().terminalAgentDoneAfterSeconds, 45);
+    next.useSettingsStore.getState().setSetting('terminalAgentDoneAfterSeconds', 0);
+    next = await relaunch();
+    assert.equal(next.useSettingsStore.getState().terminalAgentDoneAfterSeconds, 0, 'off survives a launch');
   });
 
   test('ST-21: resetting is remembered too', async () => {

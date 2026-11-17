@@ -4709,6 +4709,179 @@ scenario(
   }
 );
 
+// ---- Claude Code working or idle, from its title (T-20261117-135439-4164) --------
+
+/** Three Claude Code terminals — working, idle, idle with an unread entry — and a plain one. */
+function arrangeClaudeStates() {
+  reset();
+  useTerminalStore.setState({
+    tabs: [
+      tab('cc-w', { title: 'busy', ...running('cc-w', 'claude') }),
+      tab('cc-i', { title: 'done', ...running('cc-i', 'claude'), running: true }),
+      tab('cc-u', { title: 'told', ...running('cc-u', 'claude') }),
+      tab('cc-p', { title: 'plain' }),
+    ],
+    activeTabId: 'cc-p',
+    groups: [groupOf('group-1', ['cc-w', 'cc-i', 'cc-u', 'cc-p'])],
+    agentActivity: {
+      'cc-w': Object.freeze({ state: 'working', since: 1 }),
+      'cc-i': Object.freeze({ state: 'idle', since: 2 }),
+      'cc-u': Object.freeze({ state: 'idle', since: 3 }),
+    },
+    notifications: [
+      { id: 'agent-cc-u-1-1', kind: 'program', origin: 'agent-done', agent: 'claude', tabId: 'cc-u', tabTitle: 'told', title: 'Claude Code', body: 'Waiting for you after 12s of work', durationMs: 12000, at: Date.now(), read: false },
+    ],
+  });
+}
+
+scenario(
+  'RN-216',
+  'TERMINALS: a working Claude Code draws Working with the loader, an idle one Idle with a ring (even while its shell runs it), an unread entry Waiting (AC12)',
+  arrangeClaudeStates,
+  (html) => {
+    const working = statusIn(terminalRow(html, 'cc-w'));
+    expectThat(working?.state === 'working' && working.words === 'Working' && working.icon === 'loader-circle', `working: ${JSON.stringify(working)}`);
+    const idle = statusIn(terminalRow(html, 'cc-i'));
+    expectThat(idle?.state === 'idle' && idle.words === 'Idle' && idle.icon === 'circle', `idle: ${JSON.stringify(idle)}`);
+    expectThat(!/text-vsc-info|text-vsc-attention|text-vsc-error/.test(idle.iconTag), `the idle ring is coloured as news: ${idle.iconTag}`);
+    const told = statusIn(terminalRow(html, 'cc-u'));
+    expectThat(told?.state === 'waiting' && told.words === 'Waiting', `an unread entry: ${JSON.stringify(told)}`);
+    expectThat(statusIn(terminalRow(html, 'cc-p')) === null, 'the plain terminal says something');
+  }
+);
+
+scenario(
+  'RN-217',
+  "AGENT SESSIONS: a row held open says its terminal's state with the same word; an offered row says offered; a held row whose terminal says nothing says open (AC12, F7)",
+  () => {
+    arrangeClaudeStates();
+    useAgentHistoryStore.setState({
+      entries: HISTORY,
+      loaded: true,
+      holders: {
+        'k-open': { tabId: 'cc-i', state: 'open' },
+        'k-claude': { tabId: 'cc-w', state: 'offered' },
+        'k-free': { tabId: 'cc-p', state: 'open' },
+      },
+    });
+  },
+  (html) => {
+    const rows = agentSessionRowsIn(agentSessionsSection(html) ?? '');
+    const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
+    const held = byKey['k-open'];
+    const badge = tagWith(held?.tag, 'data-agent-state');
+    expectThat(badge && attrOf(badge, 'data-agent-holder') === 'open' && attrOf(badge, 'data-agent-state') === 'idle', `the held badge: ${badge}`);
+    const termWords = statusIn(terminalRow(html, 'cc-i'))?.words;
+    expectThat(termWords === 'Idle' && held.text.includes(termWords), `the held row does not say its terminal's ${termWords}: ${held?.text}`);
+    expectThat(/lucide-circle\b/.test(held.tag), 'the held badge has no icon');
+    // The row's tooltip says it is open, as in v0.27.0; the live state is the
+    // badge's and its own title's (F7 as amended).
+    const tipLines = (row) => row.title.split('\n').map((line) => line.trim());
+    expectThat(tipLines(held).includes('Open in a terminal of this window') && !/Open in a terminal of this window:/.test(held.title), `its tooltip: ${held.title}`);
+    expectThat(attrOf(badge, 'title') === 'Open in a terminal of this window: Idle', `the held badge's title: ${badge}`);
+    const offered = byKey['k-claude'];
+    expectThat(/data-agent-holder="offered"/.test(offered?.tag ?? '') && !/data-agent-state=/.test(offered.tag) && offered.text.includes('offered'), `the offered row: ${offered?.tag}`);
+    expectThat(offered.title.includes('Offered for resuming in a terminal of this window'), `the offered tooltip: ${offered.title}`);
+    const quiet = byKey['k-free'];
+    const quietBadge = tagWith(quiet?.tag, 'data-agent-state');
+    expectThat(attrOf(quietBadge, 'data-agent-state') === 'none' && attrOf(quietBadge, 'data-agent-holder') === 'open', `the quiet badge: ${quietBadge}`);
+    expectThat(/>open<\/span>/.test(quiet.tag), `the quiet row does not say open: ${quiet.tag}`);
+    expectThat(tipLines(quiet).includes('Open in a terminal of this window') && !/Open in a terminal of this window:/.test(quiet.title), `the quiet tooltip: ${quiet.title}`);
+    expectThat(attrOf(quietBadge, 'title') === 'Open in a terminal of this window: open', `the quiet badge's title: ${quietBadge}`);
+  }
+);
+
+scenario(
+  'RN-218',
+  "the bell list draws a finished Claude Code turn as a program's entry (AC12, F10)",
+  () => reset(),
+  () => {
+    const html = renderToString(
+      React.createElement(NotificationList, {
+        notifications: [
+          { id: 'agent-t1-1-1', kind: 'program', origin: 'agent-done', agent: 'claude', tabId: 't1', tabTitle: 't1', title: 'Claude Code', body: 'Waiting for you after 12s of work \u{2014} Fix it', durationMs: 12000, at: Date.now(), read: false },
+        ],
+        onGo() {},
+        onDismiss() {},
+      })
+    );
+    const kinds = [...html.matchAll(/\sdata-notification-entry="([^"]+)"/g)].map((m) => m[1]);
+    expectThat(JSON.stringify(kinds) === '["program"]', `drawn as ${JSON.stringify(kinds)}`);
+    expectText(html, 'Waiting for you after 12s of work');
+  }
+);
+
+scenario(
+  'RN-219',
+  'the settings window offers Notify When an Agent Is Done as a number, 10 by default, right after Notify After (AC13)',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const after = html.indexOf('terminal.integrated.notifyAfterSeconds');
+    const at = html.indexOf('terminal.integrated.agentDoneAfterSeconds');
+    const before = html.indexOf('terminal.integrated.programNotifications');
+    expectThat(after !== -1 && at !== -1 && before !== -1 && after < at && at < before, `not between Notify After and Notifications from Programs: ${after} ${at} ${before}`);
+    const keys = [...html.matchAll(/font-mono text-ui-sm text-vsc-muted">([^<]+)</g)].map((m) => m[1]);
+    const n = keys.indexOf('terminal.integrated.notifyAfterSeconds');
+    expectThat(
+      n !== -1 && keys[n + 1] === 'terminal.integrated.agentDoneAfterSeconds' && keys[n + 2] === 'terminal.integrated.programNotifications',
+      `not directly after Notify After: ${keys.slice(Math.max(0, n), n + 3)}`
+    );
+    expectText(html, 'Notify When an Agent Is Done');
+    expectText(html, 'Needs no Claude Code setting.');
+    const input = /<input\b[^>]*type="number"[^>]*>/.exec(html.slice(at, before))?.[0] ?? '';
+    expectThat(/\svalue="10"/.test(input), `not a number input at 10: ${input}`);
+  }
+);
+
+scenario(
+  'RN-220',
+  "the README says where Claude Code's state and its completion come from, in each section that tells of them (AC14, F13)",
+  () => reset(),
+  () => {
+    const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    /** The text of the section headed `heading`, to the next heading of its level or higher. */
+    const section = (heading) => {
+      const at = readme.indexOf(heading);
+      expectThat(at !== -1, `no section ${heading}`);
+      const level = /^#+/.exec(heading)[0].length;
+      const rest = readme.slice(at + heading.length);
+      const end = rest.search(new RegExp(`\\n#{1,${level}} `));
+      return (end === -1 ? rest : rest.slice(0, end)).replace(/\s+/g, ' ');
+    };
+    const say = (text, words, where) => {
+      for (const w of words) expectThat(text.includes(w), `${where} does not say ${JSON.stringify(w)}`);
+    };
+    say(section('### Knowing what every terminal is doing'), ['Notify When an Agent Is Done', 'needs no Claude Code setting', 'one entry for that moment, not two'], 'Knowing what every terminal is doing');
+    say(section('#### Notifications from programs'), ['no longer needed', 'one entry', 'Notify When an Agent Is Done'], 'Notifications from programs');
+    say(section('#### The TERMINALS panel as a status board'), ['Idle', 'Working', '✳', 'not running'], 'The TERMINALS panel as a status board');
+    say(section('#### Agent sessions: every conversation run here'), ['Idle', 'Working', 'open'], 'Agent sessions');
+    say(readme.replace(/\s+/g, ' '), ['`idle`', '`working`'], 'the control section');
+  }
+);
+
+check('RN-221', "a change of Claude Code's state redraws its own line, never the whole TERMINALS panel (non-functional: cost)", () => {
+  // As for the bars (RN-114): the panel reading the activity map would
+  // redraw every row on each state change; the second line reads its own
+  // terminal's entry and nothing else of the map.
+  const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8');
+  const board = readFileSync(new URL('../../src/components/terminal/StatusBoard.jsx', import.meta.url), 'utf8');
+  expectThat(!/\bs\.agentActivity\b/.test(panel), 'the TERMINALS panel subscribes to the activity map');
+  expectThat(!/\.agentActivity\b/.test(panel), 'the TERMINALS panel reads the activity map');
+  const start = board.search(/^export const TerminalStatusLine = memo\(function TerminalStatusLine\(/m);
+  expectThat(start !== -1, 'the second line is not a memoised module-level component');
+  const rest = board.slice(start);
+  const end = rest.search(/^\}\);/m);
+  // The component's code, its comments left out.
+  const line = (end === -1 ? rest : rest.slice(0, end)).replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
+  const own = /useTerminalStore\(\(s\) => \(showAgent \? s\.agentActivity\?\.\[tabId\] \?\? null : null\)\)/;
+  expectThat(own.test(line), 'the second line does not subscribe to its own terminal\'s entry');
+  const reads = (line.match(/\bagentActivity\b/g) || []).length;
+  expectThat(reads === 1, `the second line reads the activity map ${reads} times, not once for its own entry`);
+});
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

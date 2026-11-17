@@ -395,6 +395,23 @@ terminal. Nothing is said about a command you watched finish, and nothing is
 said about a quick one; the threshold is Settings ▸ Terminal ▸ Notify After,
 and 0 turns it off.
 
+**Be told when Claude Code is done.** Claude Code puts a spinner (◐ ◑ ◒ ◓) in
+front of its terminal's title while it works and ✳ while it waits for you.
+When a turn of at least ten seconds ends in a terminal you are NOT typing
+into, NexTerm puts one entry in the bell — *Waiting for you after 2m 5s of
+work*, and the conversation's title — and, while NexTerm is in the
+background, shows a desktop notification. It reads the title, so it needs no
+Claude Code setting. The turn has to stay idle for one and a half seconds
+before it counts, so a stray ✳ between two frames is not taken for the end.
+When Claude Code also notifies or rings the bell itself as it finishes, you
+still get one entry for that moment, not two. Until Claude Code starts working
+again, NexTerm's entry also takes what that terminal says next: a further
+note from it — Claude Code's own, a hook's or any other program's — updates
+that entry instead of adding one or a desktop notification, and an entry you
+have read stays read; a ring there is not listed. Once that entry is gone
+from the bell, such a note shows nothing. The threshold is Settings ▸
+Terminal ▸ *Notify When an Agent Is Done*, and 0 turns it off.
+
 #### Notifications from programs
 
 A program can ask its terminal to tell you something: OpenCode when a session
@@ -428,6 +445,13 @@ Neither program does this until you tell it to:
   terminal for your attention (see below) and never makes a desktop
   notification.
 
+  This channel is no longer needed to hear that Claude Code is done: NexTerm
+  reads that from its title (*Notify When an Agent Is Done*, above), with no
+  Claude Code setting. It is still how Claude Code says it needs permission
+  in the middle of a turn. With both on, a turn's end makes one entry: what
+  Claude Code sent itself, or NexTerm's own entry taking Claude Code's words
+  when they arrive after it.
+
 A desktop notification needs the operating system to allow it — on macOS
 System Settings ▸ Notifications, on Windows Settings ▸ System ▸ Notifications,
 on Linux a running notification service. On Windows, toasts are for the
@@ -458,8 +482,9 @@ command palette too, and both can be given other keys in Settings ▸ Keyboard S
 On Linux the input method (IBus) may take `Ctrl+Shift+U` for itself; bind
 another key if it does nothing.
 
-Three things make an entry: a long command finishing (see *Be told when
-something finishes*), a program's notification (above), and the terminal bell
+Four things make an entry: a long command finishing (see *Be told when
+something finishes*), a Claude Code turn ending (see *Be told when Claude
+Code is done*), a program's notification (above), and the terminal bell
 — the `BEL` character a program prints, which Claude Code's *Terminal Bell*
 channel sends. Repeated bells from one terminal add up in one entry, and a bell
 is never a desktop notification. Settings ▸ Terminal ▸ *Terminal Bell* turns
@@ -487,7 +512,12 @@ printf '\033]9;4;1;40\033\\'; sleep 5
 One limit applies to all of this: a terminal is read only once it has been on
 screen. A background tab of a restored session that you have not opened since
 launch raises nothing until you first show it, and what it printed before that
-is replayed as history, without bells or progress.
+is replayed as history, without bells or progress. Claude Code's *Working* and
+*Idle* and its completion entry are the exception, as they come from the
+terminal's title, which NexTerm reads even before the terminal is first shown;
+what Claude Code itself printed while it waited after a turn is still read
+only when you show the terminal, and then goes into that turn's entry instead
+of being listed a second time.
 
 #### The TERMINALS panel as a status board
 
@@ -501,14 +531,22 @@ what it is doing right now:
   nothing is guessed), *Error*, *In progress 40%*, *Paused 40%* and *Working*
   from the program's progress report, *Running* while a command runs,
   *Failed* when the last one exited with an error, *Exited* when the shell is
-  gone.
+  gone. For Claude Code, its own title says more than *Running*: *Working*
+  while it shows a spinner (◐ ◑ ◒ ◓) and *Idle* (○) once it shows ✳ and waits
+  for you. Until its title says either, the row shows what it would for any
+  command. *Waiting* still comes first, then a progress report's *Error*,
+  *In progress* or *Paused*, then Claude Code's *Working* or *Idle*, then the
+  rest. An idle Claude Code is not *Waiting*: a finished turn's entry in the
+  bell is what makes it wait, until you have seen it.
 - **The git branch of its folder**, or *detached* and the commit when the head
   is detached.
 - **The last notification**, dimmed once read. Hover it for the whole text
   and how long ago it came.
 
 Each group's row counts its terminals that are waiting, running and failed,
-and a group chip says the same when you hover it.
+and a group chip says the same when you hover it. A working Claude Code counts
+as running; an idle one is not running and counts nowhere, and sorts with the
+quiet terminals.
 
 The branch is read from the folder's `.git/HEAD` file. No git program runs
 for it, so nothing a repository configures can run, and there is no process
@@ -660,8 +698,11 @@ the header (archived entries are not counted). Each row shows the
 conversation's name (the one you gave it; else the title OpenCode or Claude
 Code gave it; else the start of its id; else *most recent in folder* for one
 whose id was never known), which agent ran it, the folder (the full path is in
-the tooltip) and when it was last used. *open* or *offered* marks one that a
-terminal in this window has running or is offering to resume. From top to
+the tooltip) and when it was last used. *offered* marks one that a terminal in
+this window is offering to resume. One that a terminal in this window has
+open says what that terminal's row in TERMINALS says — *Working*, *Idle*,
+*Waiting*, *Running* and so on, with the same symbol — or *open* when that
+says nothing. From top to
 bottom the section shows:
 
 1. **Pinned** entries, newest first, each with a pin. A pinned entry in a
@@ -1054,6 +1095,12 @@ A Claude Code hook that says when it is done, in `.claude/settings.json`:
 { "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "nexterm-cli notify 'Claude Code' 'Done'" }] }] } }
 ```
 
+NexTerm now tells you when Claude Code is done without any hook (see *Be told
+when Claude Code is done*). A hook like this one that runs more than 1.5
+seconds after Claude Code shows ✳ can be refused as rate-limited, because
+NexTerm's own completion entry used that terminal's allowance first (see
+`notify` below).
+
 `nexterm-cli help <command>` explains each one; `--json` prints NexTerm's
 answer for scripts. It exits 0 when done, 2 for wrong usage (found by the
 tool or by NexTerm — nothing was done), 3 outside a NexTerm terminal, 4 when
@@ -1061,6 +1108,17 @@ refused (not allowed, no such terminal), 5 when NexTerm is busy (a rate
 limit), not running, not answering, or has its control turned off — try
 again later.
 
+- `notify` counts against the one allowance a terminal's notes have, which
+  what its programs print uses too: once every 2 seconds, 10 times a minute.
+  NexTerm telling you that Claude Code is done there uses it as well, so a
+  `notify` from that terminal within 2 seconds of that completion is refused
+  as rate-limited (exit 5). One that gets through later, before Claude Code
+  works again, only updates NexTerm's entry for that completion, if it listed
+  one.
+- `list` gives each terminal's `status`, the state its TERMINALS row shows:
+  `exited`, `waiting`, `error`, `progress`, `working`, `idle`, `running`,
+  `failed` or `none`. A Claude Code terminal reports `working` or `idle`
+  once its title says which, where it used to report `running`.
 - A new split opens beside the terminal that asked, in its folder and shell,
   and the keyboard stays where you are. At most 8 open at a time per
   terminal, 32 in all, 10 a minute.
@@ -1363,7 +1421,9 @@ build (`setup.exe` or `.msi`); the portable `NexTerm.exe` may never show one.
 
 **A background tab never said anything.** A terminal is read only once it has
 been on screen: a tab of the restored session that you have not opened since
-launch stays quiet until you first show it.
+launch stays quiet until you first show it. Claude Code's *Working* and *Idle*
+and its completion entry are the exception: they come from the terminal's
+title, which NexTerm reads even before the terminal is first shown.
 
 **`Ctrl+Shift+U` does nothing (Linux).** IBus takes it. Bind *Go to Latest
 Unread Notification* to another key in Settings ▸ Keyboard Shortcuts.

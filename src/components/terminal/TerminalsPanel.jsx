@@ -29,7 +29,7 @@ import { cwdLabel } from '../../lib/statusInfo.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { ActivityDot } from './ActivityDot.jsx';
 import { UnreadPill } from './AttentionIndicators.jsx';
-import { GroupSummary, ProgramStatus, TerminalStatusLine } from './StatusBoard.jsx';
+import { AgentSessionState, GroupSummary, ProgramStatus, TerminalStatusLine } from './StatusBoard.jsx';
 import { TabMarks } from './HiddenStrip.jsx';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import {
@@ -946,10 +946,14 @@ export function TerminalsPanel() {
           {editing ? renameInput : <span className={cn('truncate', !shown.titled && 'italic')}>{shown.title}</span>}
           {pinnedArea && <Pin size={12} aria-label="Pinned" className="shrink-0 text-vsc-muted" />}
           <span className="ml-auto flex items-center gap-1 text-ui-sm text-vsc-muted shrink-0">
-            {holder && (
-              <span data-agent-holder={holder.state} className="px-1 rounded-sm border border-vsc-border text-vsc-fg leading-[14px]">
-                {holder.state}
-              </span>
+            {holder?.state === 'open' ? (
+              <AgentSessionState tabId={holder.tabId} />
+            ) : (
+              holder && (
+                <span data-agent-holder={holder.state} className="px-1 rounded-sm border border-vsc-border text-vsc-fg leading-[14px]">
+                  {holder.state}
+                </span>
+              )
             )}
             {when}
           </span>

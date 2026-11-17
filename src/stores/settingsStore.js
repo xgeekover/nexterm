@@ -165,6 +165,15 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalNotifyAfterSeconds: 10,
   /**
+   * Tell me when Claude Code in a terminal I am not looking at stops working
+   * and waits for me, once it has worked at least this long — read from the
+   * title Claude Code sets, so it needs no Claude Code setting. 0 turns it off.
+   * Its own setting rather than Notify After's: turning finished commands off
+   * must not silence the agent, nor the reverse. Ten seconds for Notify
+   * After's reason: below it, you are most likely still watching.
+   */
+  terminalAgentDoneAfterSeconds: 10,
+  /**
    * Show what a program in a terminal asks to tell you — OpenCode's "Session
    * done" or "Permission needs input", Claude Code waiting for you — in the
    * status bar's bell, and as a desktop notification while NexTerm is in the

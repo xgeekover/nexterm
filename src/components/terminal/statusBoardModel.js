@@ -89,7 +89,7 @@ function tabsIn(s, tabIds) {
  * a count does.
  */
 export function summaryCounts(s, tabIds) {
-  const { waiting, running, failed } = groupStatus(tabsIn(s, tabIds), unreadCountByTab(s.notifications), s.progress);
+  const { waiting, running, failed } = groupStatus(tabsIn(s, tabIds), unreadCountByTab(s.notifications), s.progress, s.agentActivity);
   return { waiting, running, failed };
 }
 
@@ -112,7 +112,13 @@ function tabRanksOf(s) {
   const ranks = {};
   for (const tab of s.tabs || []) {
     if (!tab) continue;
-    ranks[tab.id] = attentionRank(terminalStatus(tab, { unread: counts[tab.id] ?? 0, progress: s.progress?.[tab.id] ?? null }));
+    ranks[tab.id] = attentionRank(
+      terminalStatus(tab, {
+        unread: counts[tab.id] ?? 0,
+        progress: s.progress?.[tab.id] ?? null,
+        activity: s.agentActivity?.[tab.id] ?? null,
+      })
+    );
   }
   return ranks;
 }
@@ -137,7 +143,7 @@ export function useGroupRanks(enabled, entries) {
       const counts = unreadCountByTab(s.notifications);
       const ranks = {};
       for (const { group, tabIds } of entries) {
-        ranks[group.id] = groupAttentionRank(tabsIn(s, tabIds), counts, s.progress);
+        ranks[group.id] = groupAttentionRank(tabsIn(s, tabIds), counts, s.progress, s.agentActivity);
       }
       return ranks;
     })
@@ -170,6 +176,21 @@ export function useRanksHeldWhile(hold, ranks) {
  * selection's own white being the louder.
  */
 export const secondaryText = (active) => (active ? 'text-vsc-fg' : 'text-vsc-muted');
+
+/**
+ * What terminal `tabId` is doing in state `s`, as its TERMINALS row says it
+ * (`terminalStatus`, with its unread count, its bar and its Claude Code's
+ * state), or NONE's empty word for a terminal that is not there.
+ */
+export function terminalStatusIn(s, tabId) {
+  const tab = (s.tabs || []).find((t) => t?.id === tabId);
+  if (!tab) return terminalStatus(null);
+  return terminalStatus(tab, {
+    unread: unreadCountByTab(s.notifications)[tabId] ?? 0,
+    progress: s.progress?.[tabId] ?? null,
+    activity: s.agentActivity?.[tabId] ?? null,
+  });
+}
 
 /**
  * The summary in words as a group's row says it: what it counts is

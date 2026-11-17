@@ -422,6 +422,19 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       step: 5,
     },
     {
+      id: 'terminalAgentDoneAfterSeconds',
+      section: 'terminal',
+      key: 'terminalAgentDoneAfterSeconds',
+      settingKey: 'terminal.integrated.agentDoneAfterSeconds',
+      title: 'Notify When an Agent Is Done',
+      description:
+        'Tell me when Claude Code in a terminal I am not looking at stops working and waits for me, once it has worked at least this many seconds. 0 turns it off. Needs no Claude Code setting.',
+      control: 'number',
+      min: 0,
+      max: 600,
+      step: 5,
+    },
+    {
       id: 'terminalProgramNotifications',
       section: 'terminal',
       key: 'terminalProgramNotifications',
@@ -867,6 +880,7 @@ export function SettingsWindow() {
   const terminalUserCommands = useSettingsStore((s) => s.terminalUserCommands);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
+  const terminalAgentDoneAfterSeconds = useSettingsStore((s) => s.terminalAgentDoneAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
   const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
   const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
@@ -911,6 +925,7 @@ export function SettingsWindow() {
     terminalUserCommands,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
+    terminalAgentDoneAfterSeconds,
     terminalProgramNotifications,
     terminalBellAttention,
     terminalAttentionFlashFocused,
