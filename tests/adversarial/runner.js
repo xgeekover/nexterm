@@ -113,6 +113,8 @@ import './explorer_trash.test.js';
 import './explorer_row_menu.test.js';
 // A context menu taller than the window: bounded, scrolling, open while it scrolls.
 import './context_menu_mounted.test.js';
+// The AGENT SESSIONS inline editor, mounted with its own stores and mock (C-03).
+import './agent_sessions_rename_mounted.test.js';
 import './editor_session_restore.test.js';
 import './terminal_progress.test.js';
 import './attention.test.js';

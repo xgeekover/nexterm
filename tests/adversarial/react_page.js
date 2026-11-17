@@ -10,10 +10,14 @@
  * which a browser always has, only notes the call in the document's
  * `scrolledIntoView`.
  *
- * Typing into a field is not something it can do. react-dom is loaded before
- * any page exists (it reads `navigator` when it finds a DOM, which Node 20
- * lacks), so it takes text input to be IE's and listens for that, through
- * `attachEvent`. An input here has no `type`, so React leaves it alone.
+ * Typing into a field is not something it does by default. react-dom is
+ * loaded before any page exists (it reads `navigator` when it finds a DOM,
+ * which Node 20 lacks), so it takes text input to be IE's and listens for
+ * that, through `attachEvent`. An input here has no `type`, so React leaves
+ * it alone. A case that types opts in (`onPage(fn, { typing: true })`): its
+ * page's inputs say they are 'text' and have `attachEvent`, and `p.type`
+ * plays react-dom 18.3's legacy path — a `focusin` arms its watch, the value
+ * is set, and a `keyup` has it read the value and call `onChange`.
  *
  * Nothing is installed process-wide: `onPage` makes `window` and `document`
  * this page for one case and puts back whatever was there after it.
@@ -163,7 +167,9 @@ class PageDocument extends PageNode {
     return this.focused && this.contains(this.focused) ? this.focused : this.body;
   }
   createElement(tag) {
-    return new PageElement(this, tag);
+    const el = new PageElement(this, tag);
+    if (this.typing && el.tagName === 'INPUT') typeable(el);
+    return el;
   }
   createElementNS(namespaceURI, tag) {
     return new PageElement(this, tag, namespaceURI);
@@ -171,6 +177,32 @@ class PageDocument extends PageNode {
   createTextNode(text) {
     return new PageText(this, text);
   }
+}
+
+/**
+ * An input of a page that types (`makePage({ typing: true })`), as react-dom's
+ * legacy text input path needs it: its `type` 'text' unless it says another,
+ * IE's `attachEvent` and `detachEvent`, whose listeners are only kept, and a
+ * selection, which react-dom keeps across a commit for a text input that has
+ * the focus (as the page's textarea has one).
+ */
+function typeable(input) {
+  let type = null;
+  Object.defineProperty(input, 'type', {
+    configurable: true,
+    get: () => type ?? input.getAttribute('type') ?? 'text',
+    set: (value) => {
+      type = String(value);
+    },
+  });
+  input.ieListeners = [];
+  input.attachEvent = (name, fn) => {
+    input.ieListeners.push({ name, fn });
+  };
+  input.detachEvent = (name, fn) => {
+    input.ieListeners = input.ieListeners.filter((l) => !(l.name === name && l.fn === fn));
+  };
+  Object.assign(input, { value: '', selectionStart: 0, selectionEnd: 0 });
 }
 
 /**
@@ -270,9 +302,14 @@ export function dispatch(window, target, fields) {
   return event;
 }
 
-/** A page with an empty body and a React root ready to render into. */
-export function makePage() {
+/**
+ * A page with an empty body and a React root ready to render into. With
+ * `typing`, its inputs can be typed into (`type`), as react-dom's legacy
+ * path takes text input.
+ */
+export function makePage({ typing = false } = {}) {
   const document = new PageDocument();
+  document.typing = typing === true;
   const window = Object.assign(new Target(), { document, HTMLIFrameElement: class {} });
   document.defaultView = window;
   const container = document.createElement('div');
@@ -333,6 +370,18 @@ export function makePage() {
     click(node) {
       return page.settled(() => dispatch(window, node, { type: 'click', detail: 1 }));
     },
+    /**
+     * `text` typed into `input`, as react-dom 18.3 sees it on a page where
+     * text input is IE's: a `focusin` arms its watch on the input, its value
+     * changes, and the `keyup` has react-dom read it and call `onChange`. Only
+     * on a page that types (`onPage(fn, { typing: true })`).
+     */
+    type(input, text) {
+      assert.ok(document.typing, 'typing is opt-in: onPage(fn, { typing: true })');
+      page.settled(() => dispatch(window, input, { type: 'focusin', relatedTarget: null }));
+      input.value = String(text);
+      return page.settled(() => dispatch(window, input, { type: 'keyup', key: 'Unidentified' }));
+    },
   };
   return page;
 }
@@ -346,9 +395,10 @@ export async function letItRun(ms = 0) {
 /**
  * Run `fn` on a fresh page installed as `window` and `document`, then take it
  * down and put back whatever was there. React's warnings fail the case.
+ * `options` are `makePage`'s.
  */
-export async function onPage(fn) {
-  const page = makePage();
+export async function onPage(fn, options = {}) {
+  const page = makePage(options);
   const had = { window: Object.hasOwn(globalThis, 'window'), document: Object.hasOwn(globalThis, 'document') };
   const before = { window: globalThis.window, document: globalThis.document };
   const errors = [];

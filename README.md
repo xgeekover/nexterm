@@ -698,6 +698,10 @@ outside *Archived*.
     gives it; the agent's titles keep being recorded underneath (the tooltip
     shows the agent's own), and renaming it to nothing brings back the newest
     one. A name is kept the way a title is (see *Privacy*).
+    If the session leaves the list or its row is hidden while you type (an
+    OpenCode session learning its id, or another NexTerm changing the list),
+    the editor closes without saving and a notice in the bottom corner shows
+    the name that was not saved.
   - *Move to Group ▸* lists every group with its count (the entry's own is
     off), *New Group…* — a group named *New Group* (or *New Group 2*, …) with
     the entry in it, its name ready to type — and *Remove from Group*.

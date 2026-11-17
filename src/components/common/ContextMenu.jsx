@@ -34,8 +34,10 @@ const EDGE_MARGIN = 4;
  * A menu with more items than the window has room for (Move to Group ▸ with
  * many groups) is no taller than the window less EDGE_MARGIN on each side,
  * and scrolls: a scroll inside it does not close it, and one that reaches
- * its end does not go on to what is behind it. A key that moves the active
- * item brings that item into view; the pointer moving onto one does not.
+ * its end does not go on to what is behind it. Where its scroll bar takes
+ * width, the menu is wider by the bar, so labels are not cut sooner than in
+ * a menu that fits. A key that moves the active item brings that item into
+ * view; the pointer moving onto one does not.
  *
  * The pointer makes an item active only by really moving over it: a
  * `mousemove` at another point than the last one seen over the menu. The
@@ -43,8 +45,9 @@ const EDGE_MARGIN = 4;
  * the engine send the row now under it a `mouseover`, and some engines a
  * `mousemove` at the same point; neither changes the active item, nor does
  * the first move after the menu opens, which only notes where the pointer
- * is. An active item that the menu's own scroll takes wholly out of its box
- * is active no more, so Enter never picks a row out of sight.
+ * is. An active item that the menu's own scroll takes wholly out of the
+ * area that shows its rows (inside its border) is active no more, so Enter
+ * never picks a row out of sight.
  */
 export function ContextMenu({
   open,
@@ -79,6 +82,8 @@ export function ContextMenu({
   }, []);
 
   // Reset position/selection every time the menu (re)opens at a new spot.
+  // A width the last opening set is dropped with it, so the menu is measured
+  // again at its own size.
   useLayoutEffect(() => {
     if (!open) return;
     setPlacement({ left: x, top: y, ready: false });
@@ -88,21 +93,43 @@ export function ContextMenu({
 
   // Flip inward once we know the rendered size, so the menu never runs off
   // the right or bottom edge of the window.
+  //
+  // A list that scrolls, where the scroll bar takes width inside the menu
+  // (macOS set to always show scroll bars, Windows), would leave its labels
+  // that much less room than in a menu that fits. Such a menu is made wider
+  // by the bar, no wider than the window less its margins. Its own width is
+  // measured with the list briefly not scrolling, so the result is the same
+  // whether or not the engine already counts the bar in that width. A menu
+  // that fits, or whose scroll bars take no width, keeps its size.
   useLayoutEffect(() => {
     if (!open || placement.ready) return;
     const el = menuRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const margin = EDGE_MARGIN;
+    let width;
+    const bar = el.offsetWidth - el.clientWidth - 2 * el.clientLeft;
+    if (el.scrollHeight > el.clientHeight && bar > 0) {
+      const scrolling = el.style.overflowY;
+      el.style.overflowY = 'hidden';
+      // `offsetWidth` is rounded: a label's fraction of a pixel, rounded
+      // away, would cut the widest label after all.
+      const natural = Math.max(el.offsetWidth, Math.ceil(el.getBoundingClientRect().width) || 0);
+      el.style.overflowY = scrolling;
+      width = Math.min(natural + bar, window.innerWidth - 2 * margin);
+      // Nothing laid out (no width to read): no width of its own.
+      if (!(width > 0)) width = undefined;
+    }
+    const wide = width ?? rect.width;
     let left = x;
     let top = y;
-    if (left + rect.width > window.innerWidth - margin) {
-      left = Math.max(margin, x - rect.width);
+    if (left + wide > window.innerWidth - margin) {
+      left = Math.max(margin, x - wide);
     }
     if (top + rect.height > window.innerHeight - margin) {
       top = Math.max(margin, y - rect.height);
     }
-    setPlacement({ left, top, ready: true });
+    setPlacement({ left, top, ready: true, ...(width ? { width } : {}) });
   }, [open, placement.ready, x, y]);
 
   // The item a key made active, into view at the nearest edge.
@@ -168,16 +195,21 @@ export function ContextMenu({
 
     // The menu's own list scrolling leaves it open; any other scroll closes
     // it. A target that is no node (the window) is not inside it. After its
-    // own scroll, an active item wholly outside the menu's box is active no
-    // more; a box with no height (nothing laid out) is not looked at.
+    // own scroll, an active item wholly outside the area that shows the rows
+    // is active no more. That area is the menu's scrollport, inside its 1 px
+    // border: a row clipped there shows nothing even where it still overlaps
+    // the border. A menu with no client height (nothing laid out) is not
+    // looked at.
     const handleScroll = (e) => {
       const target = e?.target;
       if (target?.nodeType && menuRef.current?.contains(target)) {
+        const menu = menuRef.current;
         const row = itemEls.current[activeRef.current];
-        const box = menuRef.current.getBoundingClientRect();
-        if (row && box.bottom > box.top) {
+        if (row && menu.clientHeight > 0) {
+          const top = menu.getBoundingClientRect().top + (menu.clientTop || 0);
+          const bottom = top + menu.clientHeight;
           const at = row.getBoundingClientRect();
-          if (at.bottom <= box.top || at.top >= box.bottom) setActiveIndex(-1);
+          if (at.bottom <= top || at.top >= bottom) setActiveIndex(-1);
         }
         return;
       }
@@ -236,6 +268,8 @@ export function ContextMenu({
         position: 'fixed',
         left: placement.left,
         top: placement.top,
+        // Set only for a list that scrolls beside a scroll bar taking width.
+        ...(placement.width ? { width: placement.width } : {}),
         visibility: placement.ready ? 'visible' : 'hidden',
         // Never taller than the window: the placement above then keeps all
         // of it inside, and a longer list scrolls.

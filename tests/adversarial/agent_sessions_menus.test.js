@@ -28,7 +28,7 @@ import {
 import { mockBridge } from '../../src/lib/ipc.js';
 import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
 import { copyText } from '../../src/lib/copyText.js';
-import { historyDisplay, renameChange } from '../../src/lib/agentHistory.js';
+import { historyDisplay, historyTitle, renameChange } from '../../src/lib/agentHistory.js';
 import { agentSessionRows, buildPaletteGroups } from '../../src/lib/paletteItems.js';
 import { LIST_MENUS, resumeAgentSessionWith, subjectExists } from '../../src/components/terminal/statusBoardModel.js';
 import {
@@ -46,8 +46,11 @@ import {
   agentSessionRowItems,
   agentSessionsHeaderItems,
   agentSessionsView,
+  drawnAgentSessionKeys,
+  droppedRenameNotice,
   groupOfEntry,
   isRunningHere,
+  renameNotSavedText,
   renamePrefill,
 } from '../../src/components/terminal/agentSessionsModel.js';
 
@@ -603,6 +606,110 @@ describe('AGENT SESSIONS menus: items, reasons, questions, palette (F25-F30)', (
       assert.equal(await again, null);
     });
     assert.match(source('../../src/components/terminal/AgentHistoryNotice.jsx'), /clearFailed: 'Agent session history not cleared',/);
+  });
+
+  // ---- C-03: an agent session's name being edited counts only while its row is drawn ----
+
+  test('ASM-15: the drawn rows — the pinned entries, the rows of unfolded groups (none of a folded one, also folded through the read-only map), the first 15 ungrouped (not the 16th), the archived only while Archived is open; none with the section closed (C-03)', () => {
+    const at = (n) => ({ kind: 'opencode', lastUsedAt: 1000 - n });
+    const pinned = { key: 'p', ...at(0), pinned: true };
+    const open = { key: 'm-open', ...at(1), groupId: 'g-open' };
+    const shut = { key: 'm-shut', ...at(2), groupId: 'g-shut' };
+    const foldedHere = { key: 'm-folded', ...at(3), groupId: 'g-folded' };
+    const ungrouped = Array.from({ length: 16 }, (_, i) => ({ key: `u${i}`, ...at(10 + i) }));
+    const archived = [{ key: 'a0', ...at(40), archived: true }, { key: 'a1', ...at(41), archived: true, groupId: 'g-open' }];
+    const entries = [pinned, open, shut, foldedHere, ...ungrouped, ...archived];
+    const groups = [
+      { id: 'g-open', name: 'Open', collapsed: false },
+      { id: 'g-shut', name: 'Shut', collapsed: true },
+      { id: 'g-folded', name: 'Folded here', collapsed: false },
+    ];
+    const sorted = (set) => [...set].sort();
+    const firstFifteen = ungrouped.slice(0, 15).map((e) => e.key);
+    // The read-only map folds 'g-folded' on screen (F30): its own `collapsed` is false.
+    const view = agentSessionsView(entries, groups, { folded: { 'g-folded': true } });
+    assert.deepEqual(sorted(drawnAgentSessionKeys(view, true)), ['m-open', 'p', ...firstFifteen].sort());
+    const keys = drawnAgentSessionKeys(view, true);
+    assert.equal(keys.has('m-shut'), false, 'a folded group draws none of its rows');
+    assert.equal(keys.has('m-folded'), false, 'nor one folded through the read-only map');
+    assert.equal(keys.has('u14'), true, 'the 15th ungrouped is drawn');
+    assert.equal(keys.has('u15'), false, 'the 16th is past "Show all (N)…"');
+    assert.equal(keys.has('a0'), false, 'Archived closed: no archived row');
+    const archivedOpen = agentSessionsView(entries, groups, { archivedOpen: true, folded: { 'g-folded': true } });
+    assert.deepEqual(sorted(drawnAgentSessionKeys(archivedOpen, true)), ['a0', 'a1', 'm-open', 'p', ...firstFifteen].sort(), 'Archived open: its rows too');
+    const unfolded = agentSessionsView(entries, groups, { folded: { 'g-shut': false } });
+    assert.equal(drawnAgentSessionKeys(unfolded, true).has('m-shut'), true, 'unfolded through the map: drawn');
+    assert.equal(drawnAgentSessionKeys(unfolded, true).has('m-folded'), true, 'and the map no longer folding the other');
+    assert.deepEqual(sorted(drawnAgentSessionKeys(archivedOpen, false)), [], 'the section closed: no row is drawn');
+    assert.deepEqual(sorted(drawnAgentSessionKeys(null, true)), [], 'no view: none');
+  });
+
+  test('ASM-16: the notice for a rename not saved quotes the typed name as the list keeps it — cleaned, a secret masked — or quotes nothing when nothing of it is kept; both say to rename it again if the session is still listed (C-03)', () => {
+    const again = 'If the session is still listed, rename it again.';
+    const plain = renameNotSavedText('  QA lost ');
+    assert.equal(plain, `The list changed while this session was being renamed, and the name “QA lost” was not saved. ${again}`);
+    const typed = `Rotate \u0007${TOKEN}\u202e now`;
+    const masked = renameNotSavedText(typed);
+    const kept = historyTitle(typed.trim());
+    assert.ok(kept && !kept.includes(TOKEN) && /\[hidden\]/.test(kept), `premise: historyTitle masks it: ${kept}`);
+    assert.ok(masked.includes(`“${kept}”`), masked);
+    assert.ok(!masked.includes(TOKEN), 'the secret is not shown');
+    assert.ok(!/[\u0000-\u001f\u202a-\u202e]/.test(masked), 'nor the control characters');
+    assert.ok(masked.endsWith(again));
+    const cleared = renameNotSavedText('   ');
+    assert.equal(cleared, `The list changed while this session was being renamed, and clearing its name was not saved. ${again}`);
+    const nothingKept = renameNotSavedText('\u0007\u202e');
+    assert.equal(historyTitle('\u0007\u202e'), null, 'premise: nothing of it is kept');
+    assert.equal(nothingKept, `The list changed while this session was being renamed, and the new name was not saved. ${again}`);
+    for (const text of [cleared, nothingKept]) assert.ok(!/[“”]/.test(text), `no quoted name: ${text}`);
+    assert.equal(renameNotSavedText(undefined), cleared, 'no text at all: as cleared');
+  });
+
+  test('ASM-17: the drop rule — an agent session’s editor whose row is not drawn, its text changed, gets the notice; unchanged, drawn, or of another kind, none; the panel drops such an editor by the rows drawn and says the notice as it drops it (C-03)', () => {
+    const drawn = new Set(['shown']);
+    const draft = (over) => ({ kind: 'agent-session', id: 'gone', value: 'QA lost', initial: 'Auto', ...over });
+    const notice = droppedRenameNotice(draft(), drawn);
+    assert.ok(notice.includes('“QA lost”'), notice);
+    assert.equal(notice, renameNotSavedText('QA lost'));
+    assert.equal(droppedRenameNotice(draft({ id: 'shown' }), drawn), null, 'its row is drawn: not dropped');
+    assert.equal(droppedRenameNotice(draft({ value: ' Auto  ' }), drawn), null, 'unchanged but for spaces: dropped silently');
+    assert.equal(droppedRenameNotice(draft({ value: '', initial: '' }), drawn), null, 'opened empty and left empty: silently');
+    assert.ok(droppedRenameNotice(draft({ value: '', initial: 'Mine' }), drawn).includes('clearing its name'), 'a name cleared and not saved: said');
+    for (const kind of ['tab', 'group', 'saved', 'workspace', 'workspace-name', 'agent-group']) {
+      assert.equal(droppedRenameNotice(draft({ kind }), drawn), null, `${kind}: not this rule's`);
+    }
+    assert.equal(droppedRenameNotice(null, drawn), null);
+
+    const panel = source('../../src/components/terminal/TerminalsPanel.jsx');
+    // The view is worked out before `has`, and the editor of an agent session is judged by the rows it draws.
+    assert.ok(panel.indexOf('const agentView = agentSessionsView(') < panel.indexOf('const has = {'), 'agentView before has');
+    assert.equal(panel.match(/const agentView = /g).length, 1, 'worked out once');
+    // Its subject gone, any editor goes, as before (RN-116); listed with no row drawn, an agent session's too.
+    assert.match(panel, /const liveDraft = draft && subjectExists\(draft\.kind, draft\.id, has\) \? draft : null;/);
+    assert.match(panel, /const drawnAgentKeys = drawnAgentSessionKeys\(agentView, agentOpen\);/);
+    assert.match(panel, /const agentDraftHidden = liveDraft\?\.kind === 'agent-session' && !drawnAgentKeys\.has\(liveDraft\.id\);/);
+    assert.match(panel, /const lostRename = droppedRenameNotice\(draft, drawnAgentKeys\);/);
+    // Dropped: no editor, and the notice with that text, in the same effect; nothing is renamed.
+    assert.match(
+      panel,
+      /if \(draft && !liveDraft\) setDraft\(null\);\n\s*else if \(agentDraftHidden\) setDraft\(null\);\n\s*if \(lostRename\) useTerminalStore\.getState\(\)\.showAgentHistoryNotice\?\.\('curationFailed', lostRename\);\n\s*\}, \[menu, liveMenu, draft, liveDraft, agentDraftHidden, lostRename\]\);/
+    );
+    // What the editor opened with, kept for every kind.
+    assert.match(panel, /const startRename = \(kind, id, current\) => setDraft\(\{ kind, id, value: current \|\| '', initial: current \|\| '' \}\);/);
+    // The row's editor is the live one's.
+    assert.match(panel, /const editing = liveDraft\?\.kind === 'agent-session' && liveDraft\.id === entry\.key;/);
+  });
+
+  test('ASM-18: renaming otherwise as in v0.27.0 — `holding` counts only tab and group drafts, the menus go by `has` (all entries), the commit routes as before (C-03)', () => {
+    const panel = source('../../src/components/terminal/TerminalsPanel.jsx');
+    assert.match(panel, /const holding = aiming \|\| listMenuOpen \|\| liveDraft\?\.kind === 'tab' \|\| liveDraft\?\.kind === 'group';/);
+    assert.match(panel, /const liveMenu = menu && subjectExists\(menu\.kind, menu\.id, has\) \? menu : null;/);
+    assert.match(panel, /agentSession: \(key\) => agentEntries\.some\(\(entry\) => entry\.key === key\),/);
+    assert.match(panel, /else if \(draft\.kind === 'agent-session'\) agentHistory\(\)\.rename\(draft\.id, value\);/);
+    assert.match(panel, /\} else if \(e\.key === 'Escape'\) \{\n\s*e\.preventDefault\(\);\n\s*setDraft\(null\);/, 'Escape drops the editor silently');
+    assert.match(panel, /onBlur=\{commitDraft\}/, 'a blur commits');
+    // The store's own words for a commit that reaches it with the old key (FX-4) stay its own.
+    assert.doesNotMatch(panel, /ENTRY_GONE_TEXT/);
   });
 
   test('ASM-99: teardown — the stores, the storage and the mock as the next suite expects', async () => {

@@ -52,6 +52,8 @@ import {
   agentSessionRowItems,
   agentSessionsHeaderItems,
   agentSessionsView,
+  drawnAgentSessionKeys,
+  droppedRenameNotice,
   groupOfEntry,
   renamePrefill,
 } from './agentSessionsModel.js';
@@ -249,7 +251,7 @@ export function TerminalsPanel() {
   const [collapsed, setCollapsed] = useState(() => new Set());
   const [savedOpen, setSavedOpen] = useState(true);
   const [menu, setMenu] = useState(null); // { x, y, kind, id, view? }
-  const [draft, setDraft] = useState(null); // { kind: 'group'|'tab'|'saved'|'workspace', id, value }
+  const [draft, setDraft] = useState(null); // { kind: 'group'|'tab'|'saved'|'workspace'|…, id, value, initial }
   // Selecting a saved group is deliberately inert — see the row's comment.
   const [selectedSavedId, setSelectedSavedId] = useState(null);
   const [agentOpen, setAgentOpen] = useState(true);
@@ -298,11 +300,25 @@ export function TerminalsPanel() {
   const liveTabRanks = useTabRanks(sorted);
   const liveGroupRanks = useGroupRanks(sorted, layout);
 
+  /** What AGENT SESSIONS draws: pinned, the groups, the rest, Archived (agentSessionsModel.js). */
+  const agentView = agentSessionsView(agentEntries, agentGroups, {
+    archivedOpen: agentArchivedOpen,
+    folded: agentReadOnly ? agentFolded : null,
+  });
+
   // A menu, or a name being edited, whose subject is gone is no menu and no
   // edit: ⌘W closing the terminal being renamed unmounts the input without a
   // blur, and a menu whose terminal closed under it drew empty — and either
   // held the sorted order for the rest of the session. They count for
   // nothing from the render the subject goes in, and are dropped (below).
+  //
+  // An agent session's name being edited counts only while its row is drawn
+  // (C-03). Its input goes without a blur when the entry leaves the list (an
+  // OpenCode session re-keyed as it learns its id, one another NexTerm
+  // removes) or its row is no longer drawn (archived with Archived closed, a
+  // folded group, past the rows shown, the section closed): the text is not
+  // saved, and the editor does not come back with it when the row does. Text
+  // the user changed is named in the notice; the menus still go by `has`.
   const has = {
     tab: (id) => tabById.has(id) && layout.some((entry) => entry.tabIds.includes(id)),
     group: (id) => layout.some((entry) => entry.group.id === id),
@@ -314,10 +330,17 @@ export function TerminalsPanel() {
   };
   const liveMenu = menu && subjectExists(menu.kind, menu.id, has) ? menu : null;
   const liveDraft = draft && subjectExists(draft.kind, draft.id, has) ? draft : null;
+  // Listed but with no row drawn, an agent session's editor goes too; with
+  // text the user changed, the notice says what was not saved.
+  const drawnAgentKeys = drawnAgentSessionKeys(agentView, agentOpen);
+  const agentDraftHidden = liveDraft?.kind === 'agent-session' && !drawnAgentKeys.has(liveDraft.id);
+  const lostRename = droppedRenameNotice(draft, drawnAgentKeys);
   useEffect(() => {
     if (menu && !liveMenu) setMenu(null);
     if (draft && !liveDraft) setDraft(null);
-  }, [menu, liveMenu, draft, liveDraft]);
+    else if (agentDraftHidden) setDraft(null);
+    if (lostRename) useTerminalStore.getState().showAgentHistoryNotice?.('curationFailed', lostRename);
+  }, [menu, liveMenu, draft, liveDraft, agentDraftHidden, lostRename]);
   const listMenuOpen = Boolean(liveMenu) && LIST_MENUS.has(liveMenu.kind);
 
   // The drawn order holds still while it is aimed at (S7, revised): the
@@ -410,7 +433,9 @@ export function TerminalsPanel() {
     setDraft(null);
   };
 
-  const startRename = (kind, id, current) => setDraft({ kind, id, value: current || '' });
+  // `initial`, what the editor opened with: an agent session's editor dropped
+  // with other text in it says so (above).
+  const startRename = (kind, id, current) => setDraft({ kind, id, value: current || '', initial: current || '' });
 
   const renameInput = (
     <input
@@ -646,12 +671,6 @@ export function TerminalsPanel() {
 
   /** "Resume Agent Session…": the palette's pick of every entry. */
   const openAgentSessionsPalette = () => setPaletteOpen(true, 'agent-sessions');
-
-  /** What AGENT SESSIONS draws: pinned, the groups, the rest, Archived (agentSessionsModel.js). */
-  const agentView = agentSessionsView(agentEntries, agentGroups, {
-    archivedOpen: agentArchivedOpen,
-    folded: agentReadOnly ? agentFolded : null,
-  });
 
   /**
    * A new group — empty, or with the entry `moveKey` in it, in one write —

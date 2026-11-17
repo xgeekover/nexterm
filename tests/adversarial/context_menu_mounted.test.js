@@ -12,7 +12,10 @@
  * into view, which the pointer moving onto one does not.
  *
  * Since a key move scrolls the list, the pointer makes an item active only by
- * really moving (FX-8, cycle 3): CXM-04 to CXM-07.
+ * really moving (FX-8, cycle 3): CXM-04 to CXM-07. A row counts as out of
+ * sight once it is wholly outside the area inside the menu's border (D-01):
+ * CXM-07. A list that scrolls beside a scroll bar taking width makes the
+ * menu wider by the bar (C-05): CXM-08.
  *
  * What effects and listeners do is out of reach of `renderToString`, so the
  * menu is rendered with real React on the hand-written page of
@@ -107,16 +110,24 @@ const itemsOf = (p) => p.document.querySelectorAll('[role="menuitem"]');
 const scrolledSince = (p, mark) =>
   p.document.scrolledIntoView.slice(mark).map(({ element, options }) => [element.textContent, options]);
 
-/** `getBoundingClientRect` as it was on the page's elements before a case set it. */
+/** What a laid-out element reports of its size, which the page's elements do not (CXM-08 gives them some). */
+const LAID_OUT = ['scrollHeight', 'clientHeight', 'offsetWidth', 'clientWidth', 'clientLeft'];
+
+/** `getBoundingClientRect` and the `LAID_OUT` sizes as they were on the page's elements before a case set them. */
 let measured = null;
 function remember(p) {
   const proto = Object.getPrototypeOf(p.document.createElement('div'));
-  measured ??= { proto, had: Object.getOwnPropertyDescriptor(proto, 'getBoundingClientRect') };
+  measured ??= {
+    proto,
+    had: Object.fromEntries(['getBoundingClientRect', ...LAID_OUT].map((name) => [name, Object.getOwnPropertyDescriptor(proto, name)])),
+  };
 }
 function putBack() {
   if (!measured) return;
-  if (measured.had) Object.defineProperty(measured.proto, 'getBoundingClientRect', measured.had);
-  else delete measured.proto.getBoundingClientRect;
+  for (const [name, had] of Object.entries(measured.had)) {
+    if (had) Object.defineProperty(measured.proto, name, had);
+    else delete measured.proto[name];
+  }
   measured = null;
 }
 
@@ -250,6 +261,27 @@ describe('A context menu taller than the window fits it and scrolls (FX-1)', () 
 
 /** The index among `rows` of the row drawn active, or -1: the same means CXM-03 uses. */
 const activeOf = (rows) => rows.findIndex((r) => (r.getAttribute('class') ?? '').includes('bg-vsc-selection'));
+
+/**
+ * `el` measured `top`..`bottom` (240 wide), and, for each of `clientTop` and
+ * `clientHeight` that `port` gives, reporting it. The page lays nothing out,
+ * so it reports neither by itself. `seen` collects the element for
+ * `unmeasure`, which takes all of it back.
+ */
+function scrollport(seen, el, top, bottom, port = {}) {
+  el.getBoundingClientRect = () => ({ left: 0, top, right: 240, bottom, width: 240, height: bottom - top });
+  for (const name of ['clientTop', 'clientHeight']) {
+    if (name in port) Object.defineProperty(el, name, { value: port[name], configurable: true, writable: true });
+  }
+  seen.add(el);
+}
+function unmeasure(seen) {
+  for (const el of seen) {
+    delete el.getBoundingClientRect;
+    delete el.clientTop;
+    delete el.clientHeight;
+  }
+}
 
 /** A row, a separator and a row. */
 function twoWithASeparator(picks) {
@@ -426,12 +458,11 @@ describe('The pointer makes an item active only by really moving (FX-8)', () => 
     await onPage(async (p) => {
       remember(p);
       // The page lays nothing out: the menu and the rows this case looks at
-      // get boxes of their own, which `finally` takes back.
+      // get boxes of their own, and the area inside the border that shows
+      // the rows (`clientTop`, `clientHeight`: here no border), which
+      // `finally` takes back.
       const measuredHere = new Set();
-      const measure = (el, top, bottom) => {
-        el.getBoundingClientRect = () => ({ left: 0, top, right: 240, bottom, width: 240, height: bottom - top });
-        measuredHere.add(el);
-      };
+      const measure = (el, top, bottom) => scrollport(measuredHere, el, top, bottom, { clientTop: 0, clientHeight: bottom - top });
       try {
         const picks = [];
         const closes = await mounted(p, ContextMenu, sixty(picks));
@@ -478,7 +509,252 @@ describe('The pointer makes an item active only by really moving (FX-8)', () => 
         assert.equal(closes.length, 1);
         p.unmount();
       } finally {
-        for (const el of measuredHere) delete el.getBoundingClientRect;
+        unmeasure(measuredHere);
+        putBack();
+      }
+    });
+
+    // D-01: the menu scrolls inside its 1 px border, so its rows are clipped
+    // 1 px inside its box at the top and at the bottom. A row that overlaps
+    // the box only in that band shows nothing: it is active no more. Measured
+    // 100..500, with `clientTop` 1 and `clientHeight` 398, the rows show
+    // between 101 and 499.
+    const bands = [
+      ['its bottom 1 px below the menu’s top, inside the top border', 79, 101, false],
+      ['its top 1 px above the menu’s bottom, inside the bottom border', 499, 521, false],
+      ['1 px of it inside the area that shows the rows, at the top', 80, 102, true],
+      ['1 px of it inside the area that shows the rows, at the bottom', 498, 520, true],
+    ];
+    for (const [where, top, bottom, staysActive] of bands) {
+      await onPage(async (p) => {
+        remember(p);
+        const measuredHere = new Set();
+        try {
+          const picks = [];
+          const closes = await mounted(p, ContextMenu, sixty(picks));
+          const rows = itemsOf(p);
+          const menu = menuOf(p);
+          scrollport(measuredHere, menu, 100, 500, { clientTop: 1, clientHeight: 398 });
+          await p.move(rows[5], 120, 200);
+          await p.move(rows[5], 120, 203);
+          assert.equal(activeOf(rows), 5, `${where}: premise: a real move made row 5 active`);
+          scrollport(measuredHere, rows[5], top, bottom);
+          p.settled(() => dispatch(p.window, menu, { type: 'scroll' }));
+          assert.deepEqual(closes, [], `${where}: its own list scrolling leaves it open`);
+          p.keydown('Enter');
+          if (staysActive) {
+            assert.deepEqual(picks, [5], `${where}: it stays active, and Enter picks it`);
+            assert.equal(closes.length, 1);
+          } else {
+            assert.equal(activeOf(rows), -1, `${where}: active no more`);
+            assert.deepEqual(picks, [], `${where}: Enter picks nothing`);
+            assert.deepEqual(closes, [], `${where}: and the menu stays open`);
+          }
+          p.unmount();
+        } finally {
+          unmeasure(measuredHere);
+          putBack();
+        }
+      });
+    }
+
+    // A menu that reports no client height, or 0, has nothing laid out: its
+    // own scroll leaves the active row active, even one wholly outside its box.
+    for (const [what, port] of [['no client height', {}], ['a client height of 0', { clientTop: 0, clientHeight: 0 }]]) {
+      await onPage(async (p) => {
+        remember(p);
+        const measuredHere = new Set();
+        try {
+          const picks = [];
+          const closes = await mounted(p, ContextMenu, sixty(picks));
+          const rows = itemsOf(p);
+          const menu = menuOf(p);
+          scrollport(measuredHere, menu, 100, 500, port);
+          await p.move(rows[5], 120, 200);
+          await p.move(rows[5], 120, 203);
+          scrollport(measuredHere, rows[5], 40, 62);
+          p.settled(() => dispatch(p.window, menu, { type: 'scroll' }));
+          assert.equal(activeOf(rows), 5, `${what}: the row stays active`);
+          assert.deepEqual(closes, [], `${what}: and the menu open`);
+          p.keydown('Enter');
+          assert.deepEqual(picks, [5], `${what}: Enter picks it`);
+          p.unmount();
+        } finally {
+          unmeasure(measuredHere);
+          putBack();
+        }
+      });
+    }
+  });
+});
+
+/**
+ * The menu laid out as an engine lays out a list that scrolls, for the
+ * placement pass to read; every other element reports nothing, as on the
+ * page. The menu is 400 high with a `border` px border on each side, and its
+ * list `overflows` (1320 of rows) or fits (300). With `overflowY` 'hidden'
+ * no scroll bar is drawn and the menu is `natural` wide; otherwise the bar,
+ * `bar` wide (0: overlay scroll bars), is drawn inside the border. A
+ * WebKit-like `engine` keeps the menu `natural` wide and takes the bar from
+ * its content; a Blink-like one makes the menu wider by the bar. `reads`
+ * notes each `offsetWidth` read: the menu's `overflowY` and `width` then.
+ */
+function layOut(p, { natural, bar, border = 1, overflows = true, engine }) {
+  const proto = Object.getPrototypeOf(p.document.createElement('div'));
+  const reads = [];
+  const menuOnly = (fn) => ({
+    configurable: true,
+    get() {
+      return this.getAttribute?.('role') === 'menu' ? fn(this) : undefined;
+    },
+  });
+  const barShown = (el) => (el.style.overflowY === 'hidden' ? 0 : bar);
+  const offsetWidth = (el) => natural + (engine === 'blink' ? barShown(el) : 0);
+  Object.defineProperties(proto, {
+    scrollHeight: menuOnly(() => (overflows ? 1320 : 300)),
+    clientHeight: menuOnly(() => 400 - 2 * border),
+    clientLeft: menuOnly(() => border),
+    clientWidth: menuOnly((el) => offsetWidth(el) - 2 * border - barShown(el)),
+    offsetWidth: menuOnly((el) => {
+      reads.push({ overflowY: el.style.overflowY, width: el.style.width });
+      return offsetWidth(el);
+    }),
+  });
+  return reads;
+}
+
+/** The menu's class string and inline style keys as v0.27.0 drew them. */
+const V027_CLASS = 'z-[70] min-w-[220px] py-1 rounded-[6px] bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none';
+const V027_STYLE = ['position', 'left', 'top', 'visibility', 'maxHeight', 'overflowX', 'overflowY', 'overscrollBehavior'];
+
+/** As v0.27.0 drew it: CXM-01's style, the same class string and no other inline style. */
+function asInV027(menu, what) {
+  assert.equal(menu.style.position, 'fixed', `${what}: fixed`);
+  assert.equal(menu.style.maxHeight, 'calc(100vh - 8px)', `${what}: bounded at the window`);
+  assert.equal(menu.style.overflowX, 'hidden', `${what}: overflowX`);
+  assert.equal(menu.style.overflowY, 'auto', `${what}: overflowY`);
+  assert.equal(menu.style.overscrollBehavior, 'contain', `${what}: overscrollBehavior`);
+  assert.equal(menu.getAttribute('class'), V027_CLASS, `${what}: the class string`);
+  assert.deepEqual(Object.keys(menu.style).filter((k) => menu.style[k] !== '').sort(), [...V027_STYLE].sort(), `${what}: no other inline style, no width`);
+  assert.equal(menu.style.width, undefined, `${what}: no width`);
+}
+
+/**
+ * C-05: a list that scrolls beside a scroll bar that takes width (macOS with
+ * scroll bars always shown, Windows) gave its labels that much less room. The
+ * menu is made wider by the bar, measured so that the result is the same
+ * whether or not the engine counts the bar in the menu's width; one that
+ * fits, or whose scroll bars take no width, is drawn as in v0.27.0.
+ */
+describe('A menu that scrolls beside a scroll bar taking width is wider by the bar (C-05)', () => {
+  test('CXM-08: natural 300, bar 15, border 1 — 315 px wide on a WebKit-like and a Blink-like engine, overflowY back to auto; a list that fits or overlay scroll bars get no width; capped at the window less 8 px, and placed by that width; a fractional width rounded up; dropped when it opens again', async () => {
+    const { ContextMenu } = await loadMenu();
+    for (const engine of ['webkit', 'blink']) {
+      await onPage(async (p) => {
+        remember(p);
+        try {
+          const reads = layOut(p, { natural: 300, bar: 15, engine });
+          const closes = await mounted(p, ContextMenu, sixty([]));
+          const menu = menuOf(p);
+          assert.equal(menu.style.width, '315px', `${engine}: the natural 300 and the bar's 15`);
+          assert.equal(menu.style.overflowY, 'auto', `${engine}: overflowY put back as it was`);
+          assert.ok(reads.some((r) => r.overflowY === 'hidden'), `${engine}: its own width read with the list briefly not scrolling`);
+          assert.equal(reads[0].overflowY, 'auto', `${engine}: the bar read first, with the list scrolling`);
+          assert.equal(menu.style.left, '100px', `${engine}: 100 + 315 fits the window: not flipped`);
+          assert.equal(menu.style.visibility, 'visible', `${engine}: placed`);
+          assert.equal(menu.getAttribute('class'), V027_CLASS, `${engine}: the class string unchanged`);
+          assert.deepEqual(closes, []);
+          p.unmount();
+        } finally {
+          putBack();
+        }
+      });
+    }
+
+    // Drawn as in v0.27.0: a list that fits, though a 15 px bar is reported;
+    // a list that overflows beside overlay scroll bars (they take no width).
+    const unchanged = [
+      ['a list that fits', { natural: 300, bar: 15, overflows: false }],
+      ['overlay scroll bars', { natural: 300, bar: 0 }],
+    ];
+    for (const engine of ['webkit', 'blink']) {
+      for (const [what, model] of unchanged) {
+        await onPage(async (p) => {
+          remember(p);
+          try {
+            layOut(p, { ...model, engine });
+            await mounted(p, ContextMenu, sixty([]));
+            asInV027(menuOf(p), `${engine}, ${what}`);
+            p.unmount();
+          } finally {
+            putBack();
+          }
+        });
+      }
+    }
+
+    // Natural 1590 and a 15 px bar in a 1600 px window: capped at 1600 - 8,
+    // and the flip off the right edge goes by that width (the box the page
+    // measures is 240 wide, which would fit at 100).
+    for (const engine of ['webkit', 'blink']) {
+      await onPage(async (p) => {
+        remember(p);
+        try {
+          layOut(p, { natural: 1590, bar: 15, engine });
+          await mounted(p, ContextMenu, sixty([]));
+          const menu = menuOf(p);
+          assert.equal(menu.style.width, '1592px', `${engine}: no wider than the window less 4 px on each side`);
+          assert.equal(menu.style.left, '4px', `${engine}: opened at 100, flipped by 1592: Math.max(4, 100 - 1592)`);
+          p.unmount();
+        } finally {
+          putBack();
+        }
+      });
+    }
+
+    // A natural width with a fraction of a pixel (300.4), which `offsetWidth`
+    // rounds to 300: rounded up instead, so the widest label is not cut.
+    for (const engine of ['webkit', 'blink']) {
+      await onPage(async (p) => {
+        remember(p);
+        try {
+          layOut(p, { natural: 300, bar: 15, engine });
+          const proto = Object.getPrototypeOf(p.document.createElement('div'));
+          proto.getBoundingClientRect = function () {
+            const width = this.getAttribute?.('role') === 'menu' && this.style.overflowY === 'hidden' ? 300.4 : 240;
+            return { left: 0, top: 0, right: width, bottom: 892, width, height: 892 };
+          };
+          Object.assign(p.window, { innerWidth: 1600, innerHeight: 900 });
+          p.render(h(ContextMenu, { open: true, x: 100, y: 100, items: sixty([]), onClose: () => {} }));
+          await letItRun();
+          assert.equal(menuOf(p).style.width, '316px', `${engine}: 300.4 rounded up to 301, and the bar's 15`);
+          assert.equal(menuOf(p).style.overflowY, 'auto');
+          p.unmount();
+        } finally {
+          putBack();
+        }
+      });
+    }
+
+    // Opened again at a new point, the width set last time is dropped before
+    // the menu is measured again.
+    await onPage(async (p) => {
+      remember(p);
+      try {
+        const closes = [];
+        const reads = layOut(p, { natural: 300, bar: 15, engine: 'blink' });
+        const openAt = reopenable(p, ContextMenu, sixty([]), closes);
+        await openAt(100, 100);
+        assert.equal(menuOf(p).style.width, '315px', 'premise: widened');
+        const mark = reads.length;
+        await openAt(300, 200);
+        assert.ok(reads.length > mark, 'measured again');
+        assert.ok(reads.slice(mark).every((r) => !r.width), 'with no width of its own while it is measured');
+        assert.equal(menuOf(p).style.width, '315px', 'and widened again');
+        assert.equal(menuOf(p).style.left, '300px');
+        assert.deepEqual(closes, []);
+        p.unmount();
+      } finally {
         putBack();
       }
     });

@@ -11,7 +11,7 @@
  * key }`. What an item does comes in `on`, one callback per action, so the
  * builders can be exercised without React or a store.
  */
-import { HISTORY_MAX_GROUPS, agentSessionSections, entryGroupId, historyDisplay } from '../../lib/agentHistory.js';
+import { HISTORY_MAX_GROUPS, agentSessionSections, entryGroupId, historyDisplay, historyTitle } from '../../lib/agentHistory.js';
 
 /**
  * How many rows the ungrouped list, and the Archived sub-list, draw before
@@ -106,6 +106,60 @@ export function agentSessionsView(entries, groups, { archivedOpen = false, folde
     },
     empty: s.count === 0 && s.groups.length === 0,
   };
+}
+
+/**
+ * The keys of the entries AGENT SESSIONS draws a row for, from
+ * `agentSessionsView`'s result and whether the section is open (`open`): the
+ * pinned entries, the rows of each group that is not folded, the ungrouped
+ * rows shown (not those past "Show all (N)…") and the archived rows while
+ * Archived is open. None while the section is closed.
+ */
+export function drawnAgentSessionKeys(view, open) {
+  const keys = new Set();
+  if (!open || !view) return keys;
+  const add = (rows) => {
+    if (!Array.isArray(rows)) return;
+    for (const entry of rows) if (typeof entry?.key === 'string') keys.add(entry.key);
+  };
+  add(view.pinned);
+  if (Array.isArray(view.groups)) for (const group of view.groups) add(group?.rows);
+  add(view.ungrouped);
+  add(view.archived?.rows);
+  return keys;
+}
+
+/**
+ * The 'curationFailed' notice's words for a rename whose editor closed
+ * because its session left the list, or its row was no longer drawn, while
+ * it was being typed (C-03). `value` is what was typed: quoted as the list
+ * would keep it as a name (`historyTitle`: cleaned, secrets masked), or, when
+ * nothing of it would be kept, not quoted at all.
+ */
+export function renameNotSavedText(value) {
+  const typed = typeof value === 'string' ? value.trim() : '';
+  const name = typed ? historyTitle(typed) : null;
+  const lost = name
+    ? `the name “${name}” was not saved`
+    : typed
+      ? 'the new name was not saved'
+      : 'clearing its name was not saved';
+  return `The list changed while this session was being renamed, and ${lost}. If the session is still listed, rename it again.`;
+}
+
+/**
+ * What the panel says as it drops `draft` (its inline editor: `{ kind, id,
+ * value, initial }`) for a row no longer drawn: an agent session's editor
+ * whose key is not among `drawn` (`drawnAgentSessionKeys`), its text changed
+ * from what the editor opened with, gets the notice's text. Anything else
+ * gets null: an editor of another kind, one whose row is drawn, and one
+ * dropped unchanged, which loses nothing.
+ */
+export function droppedRenameNotice(draft, drawn) {
+  if (draft?.kind !== 'agent-session' || drawn?.has?.(draft.id)) return null;
+  const typed = typeof draft.value === 'string' ? draft.value.trim() : '';
+  const opened = typeof draft.initial === 'string' ? draft.initial.trim() : '';
+  return typed === opened ? null : renameNotSavedText(draft.value);
 }
 
 /**
