@@ -1,0 +1,271 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/editor_models_headless.test.js.
+
+  The app's own EditorPanel (src/components/editor/EditorPanel.jsx), with the
+  app's own editor store, REAL Monaco and the app's stylesheet, mounted under
+  React.StrictMode as src/main.jsx mounts the app. The page is not inside
+  Tauri, so the files come from the browser mock (src/lib/ipc.js): the
+  harness puts its own under /workspace/models and a second folder at /other.
+
+  Everything is driven through `window.__m`:
+
+    open(path)            opens a file the way the Explorer does; the tab id
+    act(name, ...args)    any editor-store action, awaited
+    setTree(tree)         an editor split tree put in the store as it is
+    state()               the tabs and the split tree
+    settled()             true once every group showing a tab has a live
+                          Monaco editor holding that tab's file
+    hold(path)            remembers the model of `path` (`probe().same`)
+    probe(path)           that model: whether it is the one held, its text,
+                          its line ending, canUndo, and the caret and scroll
+                          of the editor showing it
+    type / undo / redo    an edit, as the keyboard makes one, in an undo
+                          step of its own, in the editor showing `path`
+                          (`undo`/`redo` fall back to the model when none
+                          shows it)
+    hidePanel / showPanel the editor region unmounted and mounted again, as
+                          PanelLayout does when it hides and shows it
+    models()              the URI of every model Monaco holds
+    uri(path)             the URI Monaco names `path` by (`Uri.file`, as
+                          src/lib/editorModels.js does)
+    reopenAtOnce(id, text) the tab closed and a new tab on its path, holding
+                          `text`, shown in its group, in one synchronous
+                          batch: one render sees both
+    disk(path)            what the browser mock holds for `path`
+
+  Not part of the app's own routes; loaded only by that test, over the vite
+  dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; }
+      #root { position: fixed; left: 0; top: 0; width: 1100px; height: 700px; display: flex; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import * as monaco from 'monaco-editor';
+      import '../../../src/styles/index.css';
+      import { mockBridge } from '../../../src/lib/ipc.js';
+      import { useEditorStore } from '../../../src/stores/editorStore.js';
+      import { EditorPanel } from '../../../src/components/editor/EditorPanel.jsx';
+
+      const S = useEditorStore;
+      const DIR = '/workspace/models';
+      // A file long enough to scroll, so that scrolling has something to keep.
+      const LONG = Array.from({ length: 300 }, (_, i) => `const line${i + 1} = ${i + 1};`).join('\n') + '\n';
+      const FILES = {
+        [`${DIR}/a.js`]: LONG,
+        [`${DIR}/b.js`]: 'export const b = 2;\n',
+        [`${DIR}/c.js`]: 'export const c = 3;\n',
+        [`${DIR}/d.js`]: 'export const d = 4;\n',
+        '/other/x.js': 'export const x = 0;\n',
+        '/other/y.js': 'export const y = 0;\n',
+        // Line endings as Windows leaves them: mixed (two CRLF, one LF), and all CRLF.
+        '/other/mixed.js': 'const one = 1;\r\nconst two = 2;\nconst three = 3;\r\n',
+        '/other/crlf.js': 'const one = 1;\r\nconst two = 2;\r\n',
+        // A UTF-8 BOM, which the backend keeps in the text and Monaco does not: with CRLF, and with LF.
+        '/other/bom-crlf.js': '\uFEFFconst one = 1;\r\nconst two = 2;\r\n',
+        '/other/bom-lf.js': '\uFEFFexport const bom = 1;\n',
+        // All CRLF, converted outside the app to LF and back (Reload From Disk).
+        '/other/eol.js': 'const one = 1;\r\nconst two = 2;\r\n',
+        // All LF and all CRLF, reloaded with other lines in the other line ending (MM-22).
+        '/other/combined-lf.js': 'const a = 1;\nconst b = 2;\n',
+        '/other/combined-crlf.js': 'const a = 1;\r\nconst b = 2;\r\n',
+        // Two names that differ only by a literal %20 and the space it decodes to.
+        '/other/a%20b.js': 'export const encoded = 1;\n',
+        '/other/a b.js': 'export const spaced = 2;\n',
+        '/other/bg.js': 'export const bg = 0;\n',
+        '/other/dir/m1.js': 'export const m1 = 1;\n',
+        '/other/dir/m2.js': 'export const m2 = 2;\n',
+        '/other/p.js': 'export const p = 1;\n',
+        '/other/q.js': 'export const q = 1;\n',
+      };
+      for (const [path, content] of Object.entries(FILES)) mockBridge.files.set(path, content);
+      mockBridge.directories.add(DIR);
+      mockBridge.directories.add(`${DIR}/sub`);
+      mockBridge.directories.add('/other');
+      mockBridge.directories.add('/other/dir');
+
+      const root = createRoot(document.getElementById('root'));
+      let shown = true;
+      const render = () =>
+        root.render(React.createElement(React.StrictMode, null, shown ? React.createElement(EditorPanel) : null));
+
+      const uriOf = (path) => monaco.Uri.file(path);
+      const modelOf = (path) => monaco.editor.getModel(uriOf(path));
+      const live = () => monaco.editor.getEditors().filter((e) => e.getContainerDomNode().isConnected);
+      const paneOf = (editor) =>
+        editor.getContainerDomNode().closest('[data-editor-pane-body]')?.getAttribute('data-editor-pane-body') ?? null;
+      const showing = (path, paneId = null) =>
+        live().find(
+          (e) => e.getModel()?.uri.toString() === uriOf(path).toString() && (paneId == null || paneOf(e) === paneId)
+        ) ?? null;
+      const leaves = (node = S.getState().editorSplitTree, acc = []) => {
+        if (!node) return acc;
+        if (node.type === 'leaf') acc.push(node);
+        else node.children.forEach((child) => leaves(child, acc));
+        return acc;
+      };
+      const withLeaf = (node, id, change) =>
+        node.type === 'leaf'
+          ? node.id === id ? change(node) : node
+          : { ...node, children: node.children.map((child) => withLeaf(child, id, change)) };
+      const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const held = new Map();
+
+      window.__m = {
+        ready: false,
+
+        async open(path) {
+          const tab = await S.getState().openFile(path);
+          return tab.id;
+        },
+        async act(name, ...args) {
+          await S.getState()[name](...args);
+          return null;
+        },
+        setTree(tree) {
+          S.setState({ editorSplitTree: tree });
+          return null;
+        },
+        state() {
+          const { tabs, editorSplitTree, activeEditorPaneId, activeTabId, rootPath, pendingReveal, pendingClose } = S.getState();
+          return {
+            tabs: tabs.map(({ id, filePath, content, isDirty }) => ({ id, filePath, content, isDirty })),
+            leaves: leaves(editorSplitTree).map(({ id, tabIds, activeTabId: shownId }) => ({ id, tabIds, activeTabId: shownId })),
+            tree: editorSplitTree,
+            activeEditorPaneId,
+            activeTabId,
+            rootPath,
+            pendingReveal,
+            pendingClose: pendingClose?.kind ?? null,
+          };
+        },
+        async settled() {
+          await frame();
+          const { tabs } = S.getState();
+          return leaves().every((leaf) => {
+            const tab = tabs.find((t) => t.id === (leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0]));
+            if (!tab) return true;
+            return showing(tab.filePath, leaf.id) !== null;
+          });
+        },
+        hold(path) {
+          held.set(path, modelOf(path));
+          return held.get(path) != null;
+        },
+        probe(path, paneId = null) {
+          const model = modelOf(path);
+          const editor = showing(path, paneId);
+          return {
+            exists: model != null,
+            same: model != null && model === held.get(path),
+            value: model?.getValue() ?? null,
+            eol: model?.getEOL() ?? null,
+            canUndo: model?.canUndo() ?? false,
+            position: editor ? { ...editor.getPosition() } : null,
+            scrollTop: editor ? editor.getScrollTop() : null,
+            pane: editor ? paneOf(editor) : null,
+            editors: live().filter((e) => e.getModel() === model && model != null).length,
+          };
+        },
+        // The caret put at (lineNumber, column), scrolled to the middle at
+        // once: typing there then does not scroll, smoothly, while a probe
+        // reads where the scroll has got to.
+        place(path, lineNumber, column) {
+          const editor = showing(path);
+          editor.setPosition({ lineNumber, column });
+          editor.revealPositionInCenter({ lineNumber, column }, monaco.editor.ScrollType.Immediate);
+          return { position: { ...editor.getPosition() }, scrollTop: editor.getScrollTop() };
+        },
+        type(path, text, paneId = null) {
+          const editor = showing(path, paneId);
+          editor.focus();
+          // Its own undo step, as typing after a pause or a caret move is:
+          // typing straight after a redo would otherwise join the step redone.
+          editor.pushUndoStop();
+          editor.trigger('keyboard', 'type', { text });
+          return editor.getModel().getValue();
+        },
+        undo(path) {
+          const editor = showing(path);
+          // Undo and redo act on the editor with the keyboard, as Ctrl+Z does.
+          if (editor) {
+            editor.focus();
+            editor.trigger('keyboard', 'undo', null);
+          } else modelOf(path).undo();
+          return modelOf(path).getValue();
+        },
+        redo(path) {
+          const editor = showing(path);
+          // Undo and redo act on the editor with the keyboard, as Ctrl+Z does.
+          if (editor) {
+            editor.focus();
+            editor.trigger('keyboard', 'redo', null);
+          } else modelOf(path).redo();
+          return modelOf(path).getValue();
+        },
+        hidePanel() {
+          shown = false;
+          render();
+          return null;
+        },
+        showPanel() {
+          shown = true;
+          render();
+          return null;
+        },
+        editorCount() {
+          return live().length;
+        },
+        models() {
+          return monaco.editor.getModels().map((m) => m.uri.toString());
+        },
+        uri(path) {
+          return uriOf(path).toString();
+        },
+        setDisk(path, content) {
+          mockBridge.files.set(path, content);
+          return null;
+        },
+        disk(path) {
+          return mockBridge.files.get(path) ?? null;
+        },
+        reopenAtOnce(tabId, text) {
+          const tab = S.getState().tabs.find((t) => t.id === tabId);
+          const leaf = leaves().find((l) => l.tabIds.includes(tabId));
+          S.getState().closeTab(tabId);
+          const fresh = { ...tab, id: `${tabId}-again`, content: text, savedContent: text, isDirty: false };
+          S.setState((state) => ({
+            tabs: [...state.tabs, fresh],
+            activeTabId: fresh.id,
+            editorSplitTree: withLeaf(state.editorSplitTree, leaf.id, (l) => ({
+              ...l,
+              tabIds: [...l.tabIds, fresh.id],
+              activeTabId: fresh.id,
+            })),
+          }));
+          return fresh.id;
+        },
+      };
+
+      S.setState({
+        rootPath: '/workspace',
+        rootResolved: true,
+        tabs: [],
+        activeTabId: null,
+        editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
+        activeEditorPaneId: 'editor-pane-root',
+      });
+      render();
+      window.__m.ready = true;
+    </script>
+  </body>
+</html>

@@ -14,6 +14,7 @@ import {
 } from '../lib/paths.js';
 import { findNode, frontierOf, placeUnder, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
+import { replaceModelText } from '../lib/editorModels.js';
 import {
   normalizeSessions,
   restoredLayout,
@@ -1770,11 +1771,21 @@ export const useEditorStore = create((set, get) => ({
     await get().saveFile(pending.tabId, { force: true });
   },
 
-  /** Throw away the buffer and take what is on disk instead. */
+  /**
+   * Throw away the buffer and take what is on disk instead.
+   *
+   * Through the file's Monaco model when it has one, as one edit of it
+   * (src/lib/editorModels.js): undo then brings the buffer back, as it would
+   * after any other edit. The model holds the new text before the tab takes
+   * it, so the editor finds nothing left to replace.
+   */
   reloadFromDisk: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
     const content = await invoke('fs_read_file', { path: tab.filePath });
+    // Where the tab is now: it may have been renamed while the file was read.
+    const now = get().tabs.find((t) => t.id === tabId);
+    if (now) replaceModelText(now.filePath, content);
     set((state) => ({
       pendingOverwrite: null,
       tabs: state.tabs.map((t) =>

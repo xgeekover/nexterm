@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Panel, Group, Separator } from 'react-resizable-panels';
 import Editor from '@monaco-editor/react';
@@ -7,6 +7,7 @@ import Editor from '@monaco-editor/react';
 // launch loaded before anyone had opened a file. PanelLayout loads this module
 // lazily.
 import '../../lib/monaco.js';
+import { Uri } from 'monaco-editor';
 import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
@@ -15,6 +16,15 @@ import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
 import { segmentsBelow } from '../../lib/paths.js';
 import { focusWorkspace } from '../../lib/workspaceFocus.js';
+import {
+  bufferText,
+  editorValue,
+  modelPath,
+  saveViewState,
+  showFile,
+  trackEditor,
+  watchEditorModels,
+} from '../../lib/editorModels.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 
 // The app is dark-only (light mode was removed from settingsStore), so the
@@ -375,18 +385,26 @@ function DragPreview({ drag }) {
 /**
  * Keep `editor`, a group's Monaco editor, in `ref` for as long as it lives.
  *
- * Each tab a group shows gets an editor of its own (the `key` on <Editor>
- * below), and the one before is disposed. Left in the ref, it was handed the
- * next request meant for the new one — Go to File asking for the keyboard, a
- * terminal link's line — before the new one had mounted: a disposed editor
- * moves no caret and takes no focus, and the request was spent on it.
- * Let go, the request waits for the new editor's `onMount`.
+ * A group keeps one editor for all the tabs it shows, but not for ever: it
+ * is disposed when the group is left with no tab, and when the group itself
+ * unmounts — a split or a closed neighbour draws it somewhere else in the
+ * tree, and hiding the editor region unmounts them all — and the next one
+ * mounts asynchronously, Monaco loading first. Left in the ref, a disposed
+ * editor was handed the next request meant for the new one — Go to File
+ * asking for the keyboard, a terminal link's line: a disposed editor moves
+ * no caret and takes no focus, and the request was spent on it. Let go, the
+ * request waits for the new editor's `onMount`.
  */
 export function holdEditor(ref, editor) {
   ref.current = editor;
   editor.onDidDispose?.(() => {
     if (ref.current === editor) ref.current = null;
   });
+}
+
+/** The caret and scroll of the file the editor in `ref` shows, kept (src/lib/editorModels.js). */
+function saveHeldViewState(ref) {
+  saveViewState(ref.current);
 }
 
 /**
@@ -476,6 +494,10 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const pendingReveal = useEditorStore((s) => s.pendingReveal);
   const clearReveal = useEditorStore((s) => s.clearReveal);
   const editorRef = useRef(null);
+  // The tab this group shows, for what runs outside a render: `onMount` is
+  // called with the closure of the render that MADE the editor, and the tab
+  // may have changed while Monaco loaded.
+  const shownTabRef = useRef(null);
 
   const { drag } = useContext(EditorDragContext);
 
@@ -520,9 +542,37 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
 
   const segments = activeTab ? segmentsBelow(rootPath, activeTab.filePath) : [];
+  const language = activeTab?.language || 'javascript';
+  shownTabRef.current = activeTab ? { filePath: activeTab.filePath, content: activeTab.content, language } : null;
+  const shownId = activeTab?.id ?? null;
+  const shownPath = activeTab?.filePath ?? null;
+  const shownContent = activeTab?.content ?? '';
+  // The file's text as the library is handed it (`editorValue`): the tab's,
+  // unless only its line endings or a BOM differ from what the model holds.
+  // Worked out again only when the file or its text changes.
+  const shownValue = useMemo(
+    () => (shownPath === null ? undefined : editorValue(shownPath, shownContent)),
+    [shownPath, shownContent]
+  );
 
-  // Clicking a second link into a file that is already open remounts nothing,
-  // so `onMount` never fires again and this is the only thing that moves.
+  // The caret and scroll of the file shown, saved before anything takes them
+  // away: the library swaps the model, and disposes an unmounting editor, in
+  // effects of its own, which run after every layout effect of the commit.
+  // Saved any later, a group taking this tab from this one could restore
+  // them before they were saved: which goes first is only the order the
+  // groups are drawn in.
+  useLayoutEffect(() => () => saveHeldViewState(editorRef), [shownId, shownPath]);
+
+  // Once the library has swapped the model (an effect of <Editor>, which runs
+  // before this group's), the caret and scroll the file had.
+  useEffect(() => {
+    showFile(editorRef.current, shownTabRef.current, shownTabRef.current?.language);
+  }, [shownId, shownPath]);
+
+  // Neither a tab switch nor a second link into the file already shown
+  // remounts the editor, so `onMount` does not fire again and this is what
+  // moves the caret. Declared after the effect above: the file's own caret
+  // first, then the line asked for.
   useEffect(() => {
     if (!pendingReveal || !activeTab) return;
     applyPendingReveal(editorRef.current, activeTab.filePath);
@@ -568,24 +618,42 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
             )}
           </div>
 
-          {/* Monaco Editor — one instance per visible group, keyed by that
-              group's active tab path. Remounting on tab switch is cheap and
-              lossless: @monaco-editor/react caches text models by `path` at
-              module scope, so moving a tab between groups (or switching back
-              to it) reuses its model — undo history, scroll position, and
-              all — instead of losing it. */}
+          {/* Monaco Editor — one instance per group, NOT keyed by the tab:
+              a tab switch is a change of `path`, on which the library swaps
+              the editor's model. Each open file has one model, holding its
+              text and its undo and redo history, and `keepCurrentModel`
+              keeps it when the editor moves on or unmounts — a switch, a tab
+              dragged to another group, a split (the group remounts), the
+              region hidden. Keyed by path, as it was, every switch remounted
+              the editor and the library disposed the model with it: undo,
+              caret and scroll were lost, and one file in two groups lost its
+              model under the other when either closed. Models are disposed
+              in src/lib/editorModels.js once no tab is open on their file,
+              and the caret and scroll are kept there too (the library's own
+              view-state map, `saveViewState`, saves under the wrong path).
+              `path` is the URI that module names the model by (`modelPath`),
+              and `value` the text as `editorValue` gives it: a new model is
+              made from `defaultValue`, the tab's text. An edit goes to the
+              store with the BOM the tab's text starts with (`bufferText`):
+              Monaco keeps a file's BOM out of the text it hands over. */}
           <div data-editor-pane-body={paneId} className="relative flex-1 overflow-hidden">
             <Editor
-              key={activeTab.filePath}
-              path={activeTab.filePath}
+              path={modelPath(Uri, activeTab.filePath)}
+              keepCurrentModel
+              saveViewState={false}
               height="100%"
-              language={activeTab.language || 'javascript'}
+              language={language}
               theme={MONACO_THEME}
-              value={activeTab.content}
-              onChange={(value) => editBuffer(activeTab.id, value ?? '')}
+              defaultValue={activeTab.content}
+              value={shownValue}
+              onChange={(value) => editBuffer(activeTab.id, bufferText(activeTab.content, value ?? ''))}
+              beforeMount={(monaco) => watchEditorModels(monaco, useEditorStore)}
               onMount={(editor) => {
                 holdEditor(editorRef, editor);
-                applyPendingReveal(editor, activeTab.filePath);
+                trackEditor(editor);
+                const tab = shownTabRef.current;
+                showFile(editor, tab, tab?.language);
+                applyPendingReveal(editor, tab?.filePath);
               }}
               options={monacoOptions}
             />

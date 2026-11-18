@@ -166,6 +166,9 @@ import './agent_sessions_menus.test.js';
 // Prompt marks on the terminal's scrollbar: the tracker against xterm headless, then the real ruler in a browser.
 import './prompt_marks.test.js';
 import './prompt_marks_headless.test.js';
+// One Monaco model per open file: the rules against the store, then the real editor in a browser.
+import './editor_models.test.js';
+import './editor_models_headless.test.js';
 
 async function run() {
   console.log('====================================================');

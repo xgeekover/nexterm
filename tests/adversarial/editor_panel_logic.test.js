@@ -104,10 +104,14 @@ describe('EditorPanel: the editor a group holds', () => {
     holdEditor(ref, first);
     assert.equal(held(ref), 'a.js');
 
-    // b.js picked in Go to File: a.js's editor goes first...
+    // A tab switch keeps the group's editor now (one editor per group, its
+    // models kept in src/lib/editorModels.js), but the editor still goes when
+    // the group is left with no tab or remounts — a split, a closed
+    // neighbour, the editor region hidden — and Go to File can ask for the
+    // keyboard before the next one exists. The editor showing a.js goes...
     first.dispose();
     assert.equal(held(ref), null, 'a disposed editor held: the request for the keyboard was spent on it');
-    // ...and b.js's arrives once Monaco has made it.
+    // ...and the group's next one, on b.js, is held once Monaco has made it.
     const second = fakeEditor('b.js');
     holdEditor(ref, second);
     assert.equal(held(ref), 'b.js');
