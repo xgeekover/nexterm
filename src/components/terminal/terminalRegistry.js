@@ -52,6 +52,8 @@ import {
 } from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { setTerminalOutputBarrier, useTerminalStore } from '../../stores/terminalStore.js';
+// NexTerm's own agent start and resume lines, for the message marks' floor.
+import { setAgentLaunchObserver } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { createKindLookup } from '../../lib/outputPaths.js';
@@ -60,7 +62,10 @@ import { createModifierTracker, installRevealLinks } from '../../lib/revealLinks
 import { shellKindFor } from '../../lib/dropPaths.js';
 import { shellPathOf } from '../../lib/terminalFileDrop.js';
 import { trackCommandMarks } from '../../lib/stickyCommand.js';
-import { listenForPrompts, trackPromptMarks } from '../../lib/promptMarks.js';
+import { listenForPrompts, mergeMarks, promptJumpLine, trackPromptMarks } from '../../lib/promptMarks.js';
+import { createScanScheduler, noteTerminalInput, trackAgentMessageMarks } from '../../lib/agentMessageMarks.js';
+import { agentRuns } from '../../lib/terminalStatus.js';
+import { submitsLine } from '../../lib/tabActivity.js';
 import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
@@ -670,7 +675,10 @@ function ensureSettingsSubscriptionStarted() {
     // Prompt Marks on Scrollbar: only the decorations come and go. The marks
     // are kept, and the scrollbar stays 10px, so no terminal reflows.
     if (state.terminalPromptMarks !== prevState.terminalPromptMarks) {
-      for (const entry of instances.values()) entry.promptMarks?.setVisible(promptMarksShown(state));
+      for (const entry of instances.values()) {
+        entry.promptMarks?.setVisible(promptMarksShown(state));
+        entry.messageMarks?.setVisible(promptMarksShown(state));
+      }
     }
     // Restore Scrollback turned back on: what every terminal shows now is
     // saved, not only what they print from here on — turning it off deleted
@@ -986,6 +994,8 @@ function bindSession(entry, sessionId) {
  */
 function writeOutput(entry, data, read = null) {
   const { tabId, term } = entry;
+  // Output, for the message marks' scans: only this asks for one once parsed.
+  entry.messageScans?.wrote();
   // Performance mode only (src/lib/perf/): what it may want told once xterm
   // has read this chunk. Null otherwise.
   const timed = writeObserver ? writeObserver(tabId, data) : null;
@@ -1361,7 +1371,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   installScrollbackWheel(term);
   // A press on a prompt mark on the scrollbar's track jumps to that prompt;
   // see `installPromptMarkClicks`. On `term.element`, hence after `open`.
-  const promptMarkClicks = installPromptMarkClicks(term, () => instances.get(tabId)?.promptMarks);
+  const promptMarkClicks = installPromptMarkClicks(term, () => allMarks(instances.get(tabId)));
 
   // ---- Korean inline IME (macOS only) — see src/lib/hangulInlineIme.js ----
   // WebKit composes Hangul by rewriting the textarea in place, which xterm
@@ -1406,6 +1416,18 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     withdraw: () => usePastePromptStore.getState().withdraw(tabId),
   });
   // ---- end multi-line paste ----------------------------------------------------
+
+  // ---- Messages sent to Claude Code, on the scrollbar — src/lib/agentMessageMarks.js ----
+  // Ahead of the view's own listener (`onData`), so the Enter that starts
+  // Claude Code is still a shell's: the store has not heard of it yet.
+  const messageInput = term.onData((data) => noteMessageInput(tabId, data));
+  // After a parsed write with the shell's output in it (`writeOutput`): a
+  // scan, soon, while Claude Code runs on the normal screen (`messageScans`),
+  // and nothing at all otherwise — not for a scan's own empty write.
+  const messageParsed = term.onWriteParsed(() => instances.get(tabId)?.messageScans?.parsed());
+  // ---- end messages sent to Claude Code -----------------------------------------
+  // The alternate screen hides the scrollbar (index.css), as it always did.
+  const bufferChange = term.buffer.onBufferChange?.((buffer) => showAlternateScreen(term, buffer?.type === 'alternate'));
 
   const dataDisposable = onData ? term.onData(onData) : null;
 
@@ -1477,9 +1499,28 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
       decorate: promptMarkDecorator(term),
       visible: promptMarksShown(settingsState),
       color: promptMarkColour(),
+      // Terminal: Clear (`clearTerminal`) takes every message mark as well;
+      // Claude Code's rows start below the cursor from then on.
+      onClear: () => instances.get(tabId)?.messageMarks?.afterClear(),
     }),
     promptMarkClicks,
+    // Where each message sent to Claude Code is, on the same ruler, in its
+    // own colour: found on screen once Claude Code has drawn it, matched to
+    // what its box held at Enter (`noteMessageInput`, `messageScans`). Kept
+    // apart from the prompt marks, with a limit of its own; merged with them
+    // for the click and the keys (`allMarks`). See agentMessageMarks.js.
+    messageMarks: trackAgentMessageMarks(term, {
+      decorate: promptMarkDecorator(term),
+      visible: promptMarksShown(settingsState),
+      color: messageMarkColour(),
+    }),
+    messageScans: null,
+    claudeRan: false,
+    messageInput,
+    messageParsed,
+    bufferChange,
   };
+  entry.messageScans = messageScanner(entry);
   const drawn = entry;
   entry.renderDisposable = term.onRender(() => {
     drawn.lastDrawnAt = clock();
@@ -1736,11 +1777,26 @@ function promptMarkColour() {
   return value || '#8B5CF6';
 }
 
+/**
+ * What a mark of a message sent to Claude Code is drawn in: --vsc-info, or
+ * LinkText in forced colours, so it is told apart from a prompt mark
+ * (--vsc-accent, Highlight). The literal is the token's own value.
+ */
+function messageMarkColour() {
+  if (forcedColours()) return systemColour('LinkText');
+  const value = getComputedStyle(document.documentElement).getPropertyValue('--vsc-info').trim();
+  return value || '#3794ff';
+}
+
 /** Every terminal's marks in the colour of now: a theme repaint, a light/dark flip, forced colours on or off. */
 function refreshPromptMarkColour() {
   if (instances.size === 0) return;
   const colour = promptMarkColour();
-  for (const entry of instances.values()) entry.promptMarks?.setColor(colour);
+  const messageColour = messageMarkColour();
+  for (const entry of instances.values()) {
+    entry.promptMarks?.setColor(colour);
+    entry.messageMarks?.setColor(messageColour);
+  }
 }
 
 let forcedColoursWatched = false;
@@ -1771,8 +1827,9 @@ function promptMarkDecorator(term) {
 }
 
 /**
- * A press on the scrollbar's track within 4px of a drawn prompt mark scrolls
- * that prompt to the top of the view, and nothing else happens: xterm's own
+ * A press on the scrollbar's track within 4px of a drawn mark — a shell
+ * prompt or a message sent to Claude Code (`allMarks`) — scrolls that row to
+ * the top of the view, and nothing else happens: xterm's own
  * jump to the press is not run as well. Everywhere else the scrollbar is
  * xterm's: a press on the track away from the marks centres the slider
  * there, a press on the slider drags it, even over a mark, and the wheel is
@@ -1834,21 +1891,82 @@ function ensurePromptMarksListening() {
 }
 ensurePromptMarksListening();
 
+/** Both kinds of marks of `entry`'s terminal as one, for the click and the keys (promptMarks.js `mergeMarks`). */
+function allMarks(entry) {
+  if (!entry || entry.disposed) return null;
+  return mergeMarks(entry.promptMarks, entry.messageMarks);
+}
+
+/** Whether NexTerm believes Claude Code runs in `tabId`'s terminal (`agentRuns`, the agent record agentDone goes by). */
+function claudeRunsIn(tabId) {
+  const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
+  return Boolean(tab) && tab.agent?.kind === 'claude' && agentRuns(tab);
+}
+
+/**
+ * What the user sends `tabId`'s terminal, for the message marks
+ * (agentMessageMarks.js `noteTerminalInput`): an Enter while Claude Code runs
+ * reads its box now, before Claude Code has the key, and a scan follows; an
+ * Enter at a shell is the floor below which a later Claude Code draws; what
+ * is typed is noted, and xterm's own reports and escape keys are not. Never
+ * throws.
+ */
+function noteMessageInput(tabId, data) {
+  const entry = instances.get(tabId);
+  const marks = entry?.messageMarks;
+  if (!marks || entry.disposed) return;
+  try {
+    const kind = noteTerminalInput(marks, data, { submits: submitsLine, agentRuns: () => claudeRunsIn(tabId) });
+    if (kind === 'submit') entry.messageScans?.poke();
+  } catch (err) {
+    console.warn('[Terminal] could not note a sent message:', err);
+  }
+}
+
+/**
+ * When `entry`'s message marks are looked for: after parsed output, once it
+ * has settled (about 150 ms) and at most 4 times a second while it keeps
+ * coming (`createScanScheduler`), only while Claude Code runs there on the
+ * normal screen; once it is idle, not at all. Once it stops, what was waiting for an echo goes and the
+ * marks stay with their lines. Each scan reads the screen as the output left
+ * it (`afterOutputSoFar`).
+ */
+function messageScanner(entry) {
+  const wanted = () => {
+    if (entry.disposed) return false;
+    const runs = claudeRunsIn(entry.tabId);
+    if (!runs && entry.claudeRan) entry.messageMarks?.stop();
+    entry.claudeRan = runs;
+    return runs && entry.term.buffer.active.type === 'normal';
+  };
+  return createScanScheduler({
+    wanted,
+    scan: () => afterOutputSoFar(entry, (e) => e.messageMarks?.scan()),
+  });
+}
+
+/**
+ * The scrollbar is always shown on the normal screen and hidden on the
+ * alternate one (index.css, "The terminal minimap"): a full-screen program
+ * has nothing to scroll back to, and xterm hides the ruler there.
+ */
+function showAlternateScreen(term, alternate) {
+  term.element?.classList?.toggle('xterm-alternate-screen', Boolean(alternate));
+}
+
 /**
  * Terminal: Go to Previous Prompt / Next Prompt (keybindings.js) on `tabId`'s
- * terminal: the newest prompt above the top row, or the first one below it
- * — past the newest, the bottom — scrolled to the top, at once. False, and
- * nothing done, where there is nowhere to go, no terminal, or the alternate
- * screen is up. Works whether or not the marks are shown.
+ * terminal: the newest mark above the top row, or the first one below it
+ * — past the newest, the bottom — scrolled to the top, at once; a shell
+ * prompt or a message sent to Claude Code, whichever is nearer (`allMarks`).
+ * False, and nothing done, where there is nowhere to go, no terminal, or the
+ * alternate screen is up. Works whether or not the marks are shown.
  */
 export function jumpToPrompt(tabId, direction) {
   const entry = instances.get(tabId);
   if (!entry || entry.disposed || !entry.promptMarks) return false;
-  const buffer = entry.term.buffer.active;
-  if (buffer.type === 'alternate') return false;
-  const line = direction === 'previous'
-    ? entry.promptMarks.previous(buffer.viewportY)
-    : entry.promptMarks.next(buffer.viewportY, buffer.baseY);
+  // Shell prompts and messages sent to Claude Code, in buffer order.
+  const line = promptJumpLine(entry.term.buffer.active, allMarks(entry), direction);
   if (line === null) return false;
   entry.term.scrollToLine(line);
   return true;
@@ -1860,9 +1978,29 @@ export function terminalShowsNormalBuffer(tabId) {
   return Boolean(entry && !entry.disposed && entry.term.buffer.active.type === 'normal');
 }
 
+/**
+ * Whether Terminal: Go to Previous / Next Prompt take their key over the
+ * focused terminal `tabId` (keybindings.js, `promptKeysClaimed`): today, while
+ * it shows its normal buffer, where the marks are. On the alternate screen a
+ * full-screen program keeps the key. The one place to decide it, so a later
+ * mode for a program on the alternate screen (OpenCode's own previous/next
+ * message commands) can claim the keys there.
+ */
+export function terminalClaimsMarkKeys(tabId) {
+  return terminalShowsNormalBuffer(tabId);
+}
+
 // Let the store reach the screen without importing this module (it runs in
 // Node under the test suites, and xterm brings a stylesheet with it).
 setTerminalNoticeSink(writeNotice);
+
+// NexTerm types an agent's start or resume line itself (`startAgent`,
+// `resumeAgent`), so no Enter of the user's comes through `noteMessageInput`
+// for it: the floor of the message marks goes to the row it is typed at once
+// xterm has read everything before it (the prompt), ahead of the line's echo.
+setAgentLaunchObserver((tabId) => {
+  afterOutputSoFar(instances.get(tabId), (entry) => entry.messageMarks?.noteShellSubmit());
+});
 
 // What the store waits for before taking a progress bar down at a command's
 // end: everything the shell printed before it, read. xterm runs a write's
@@ -2026,6 +2164,11 @@ export function disposeTerminal(tabId) {
   entry.commandMarks.dispose();
   entry.promptMarkClicks?.();
   entry.promptMarks.dispose();
+  entry.messageInput?.dispose();
+  entry.messageParsed?.dispose();
+  entry.bufferChange?.dispose?.();
+  entry.messageScans?.dispose();
+  entry.messageMarks?.dispose();
   // Its file is the store's to delete, with the tab (`forgetScrollback`).
   entry.scrollbackWatch?.dispose();
   entry.term.dispose();

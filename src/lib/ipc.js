@@ -1253,6 +1253,10 @@ class BrowserMockBridge {
       // 1. pty_spawn
       case 'pty_spawn': {
         const { cols = 80, rows = 24, shell = '/bin/zsh' } = args;
+        // `claude_normal_screen` (optional, absent = on) is the backend's to
+        // turn into CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; the mock keeps what
+        // it was asked, for the suites.
+        this.lastClaudeNormalScreen = args.claude_normal_screen ?? null;
         // `strict_cwd`: that directory or no terminal at all, as the
         // backend's `Workspace::strict_spawn_dir` — no fallback.
         if (args.strict_cwd === true && !this.canStartIn(args.cwd)) {

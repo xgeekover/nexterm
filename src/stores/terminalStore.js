@@ -2169,10 +2169,42 @@ export function holdSpawnsUntil(ready, maxMs = SPAWN_GATE_MAX_MS) {
   return previous;
 }
 
-/** `pty_spawn`, once the gate is open (`holdSpawnsUntil`): the one way a shell is started. */
+/**
+ * `pty_spawn`, once the gate is open (`holdSpawnsUntil`): the one way a shell
+ * is started. Every shell is told whether to ask Claude Code for the normal
+ * screen (`claude_normal_screen`, Settings ▸ Terminal ▸ Claude Code on the
+ * Normal Screen; src-tauri/src/pty/manager.rs), as the setting is when it
+ * starts.
+ */
 async function spawnPty(args) {
   if (spawnGate) await spawnGate;
-  return invoke('pty_spawn', args);
+  return invoke('pty_spawn', withClaudeNormalScreen(args));
+}
+
+/** `args` with `claude_normal_screen` as the setting is now (`spawnPty`). */
+function withClaudeNormalScreen(args) {
+  return { ...args, claude_normal_screen: useSettingsStore.getState().terminalClaudeNormalScreen !== false };
+}
+
+/**
+ * Told `tabId` right before NexTerm types an agent's start or resume line
+ * into its terminal (`startAgent`, `resumeAgent`): the registry's message
+ * marks set their floor there (src/lib/agentMessageMarks.js), as they do on
+ * an Enter typed at a shell. Returns the previous one, for the suites.
+ */
+let agentLaunchObserver = null;
+export function setAgentLaunchObserver(observer) {
+  const previous = agentLaunchObserver;
+  agentLaunchObserver = typeof observer === 'function' ? observer : null;
+  return previous;
+}
+
+function noteAgentLaunch(tabId) {
+  try {
+    agentLaunchObserver?.(tabId);
+  } catch (err) {
+    console.warn('[TerminalStore] could not note an agent launch:', err);
+  }
 }
 
 /**
@@ -5902,6 +5934,7 @@ export const useTerminalStore = create((set, get, api) => {
         return null;
       }
       recordAgent(targetId, started.agent, readiness === 'ready');
+      noteAgentLaunch(targetId);
       await get().writeRaw(targetId, `${started.command}\r`);
       return started.agent;
     },
@@ -6008,6 +6041,7 @@ export const useTerminalStore = create((set, get, api) => {
       if (fresh && !notifyTerminal(targetId, NEVER_SAVED_NOTE)) console.warn(`[TerminalStore] ${NEVER_SAVED_NOTE}`);
       if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
       recordAgent(targetId, typed.agent, readiness === 'ready');
+      noteAgentLaunch(targetId);
       await get().writeRaw(targetId, `${typed.command}\r`);
       if (fresh) {
         conversationReplaced({

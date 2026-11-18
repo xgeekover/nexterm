@@ -1567,7 +1567,10 @@ describe('The first shells wait for the backend to know the settings', () => {
   test('CD-35: every pty_spawn goes through the gate — a fresh start, a restore, a new terminal, a split and a restart alike — and a backend that never answers costs a bounded wait', async () => {
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.equal((store.match(/invoke\('pty_spawn'/g) || []).length, 1, 'a pty_spawn that does not wait for the settings');
-    assert.match(store, /async function spawnPty\(args\) \{\n\s*if \(spawnGate\) await spawnGate;\n\s*return invoke\('pty_spawn', args\);/);
+    // The args go out with the Claude Code normal-screen flag added
+    // (`withClaudeNormalScreen`, Settings ▸ Terminal ▸ Claude Code on the
+    // Normal Screen); the gate is still waited for first.
+    assert.match(store, /async function spawnPty\(args\) \{\n\s*if \(spawnGate\) await spawnGate;\n\s*return invoke\('pty_spawn', withClaudeNormalScreen\(args\)\);/);
     assert.ok((store.match(/spawnPty\(\{/g) || []).length >= 5, 'the five places a shell is started');
     const bridge = readFileSync(new URL('../../src/lib/controlBridge.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.match(bridge, /const stopReporting = reportControlSettings\(\);\n\s*holdSpawnsUntil\(controlSettingsReported\(\)\);/);

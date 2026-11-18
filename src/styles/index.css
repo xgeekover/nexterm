@@ -31,11 +31,15 @@
      (terminalRegistry.js), with xterm's overview ruler under it. Its
      slider — the translucent box for the part on screen — is
      --vsc-scrollbar, and --vsc-scrollbar-hover while hovered or dragged,
-     handed to xterm in the terminal theme; it shows on hover and while
-     scrolling. Prompt marks are --vsc-accent (4.49:1 on the terminal); in
-     forced colours they are Highlight and the slider keeps a CanvasText
-     outline, inside the existing forced-colours block; the slider's fade
-     stops under both reduced-motion paths.
+     handed to xterm in the terminal theme. On the normal screen it is
+     always shown, faint, also with nothing to scroll and with the pointer
+     elsewhere ("Always visible" below); on the alternate screen, where a
+     full-screen program has no scrollback, it stays hidden. Prompt marks
+     are --vsc-accent (4.49:1 on the terminal) and the marks of messages
+     sent to Claude Code --vsc-info; in forced colours they are Highlight
+     and LinkText and the slider keeps a CanvasText outline, inside the
+     existing forced-colours block; nothing fades under either
+     reduced-motion path.
    - An editor pane among the terminals marks itself active as a terminal
      pane does: ring-1 ring-inset ring-vsc-accent.
    --------------------------------------------------------------------------- */
@@ -538,13 +542,45 @@ code, kbd, pre, .font-mono {
   }
 }
 
+/* The terminal's scrollbar, always visible on the normal screen. xterm
+   (VS Code's scrollable element) makes it `invisible` — opacity 0, no
+   pointer events — with nothing to scroll and whenever the pointer is
+   elsewhere and nothing scrolls, and fades it there over 800ms. Here that
+   state is shown as it is, at once: the slider in --vsc-scrollbar over the
+   marks, a press on a mark taken without a hover first. Its width is the
+   10px of `overviewRuler.width`, so no terminal's columns change. On the
+   alternate screen (`xterm-alternate-screen`, set by terminalRegistry.js as
+   the buffer changes) it is hidden in every state, as before. Nothing fades
+   in either: shown or hidden is a step. In front of the screen and the ruler
+   canvas as xterm puts it while `visible` (z-index 11), so the press reaches
+   it. And visible: Tailwind's own `invisible` utility (visibility: hidden),
+   generated because the word is in the sources, lands on xterm's class of
+   the same name — found in the browser suite, a press went straight
+   through. Outside every layer, and more specific than xterm.css. */
+.xterm .xterm-scrollable-element > .scrollbar.vertical.visible,
+.xterm .xterm-scrollable-element > .scrollbar.vertical.invisible {
+  transition-property: none;
+}
+.xterm .xterm-scrollable-element > .scrollbar.vertical.invisible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 11;
+}
+.xterm.xterm-alternate-screen .xterm-scrollable-element > .scrollbar.vertical {
+  opacity: 0;
+  pointer-events: none;
+  transition-property: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
   /* xterm's scrollbar fades in over 100ms and out over 800ms (xterm.css):
-     it shows and goes at once instead. */
+     it shows and goes at once instead (on the normal screen it is always
+     shown anyway, with no transition). */
   .xterm .xterm-scrollable-element > .scrollbar {
     transition-property: none !important;
   }

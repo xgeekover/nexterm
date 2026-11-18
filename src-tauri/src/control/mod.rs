@@ -441,6 +441,15 @@ pub const WSLENV_NAMES: [&str; 2] = [ENV_ADDRESS, ENV_TOKEN];
 /// without flags, in any case.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn wslenv_with(existing: Option<&str>) -> String {
+    wslenv_with_names(existing, &WSLENV_NAMES)
+}
+
+/// `WSLENV` with each of `names` in it, the same way: what was there kept as
+/// it was, each name added once, in any case and with or without flags. Also
+/// for a variable that is not the control API's (the pty manager's
+/// `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn wslenv_with_names(existing: Option<&str>, names: &[&str]) -> String {
     let existing = existing.unwrap_or("");
     let has = |name: &str| {
         existing
@@ -448,7 +457,7 @@ pub fn wslenv_with(existing: Option<&str>) -> String {
             .any(|entry| entry.split('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name)))
     };
     let mut value = existing.trim_end_matches(':').to_string();
-    for name in WSLENV_NAMES {
+    for name in names {
         if !has(name) {
             if !value.is_empty() {
                 value.push(':');
@@ -546,6 +555,17 @@ pub(crate) mod tests {
             wslenv_with(Some("NEXTERM_CONTROL_X")),
             "NEXTERM_CONTROL_X:NEXTERM_CONTROL:NEXTERM_CONTROL_TOKEN"
         );
+    }
+
+    #[test]
+    fn wslenv_gains_any_other_name_once_the_same_way() {
+        let names = ["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"];
+        assert_eq!(wslenv_with_names(None, &names), "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN");
+        assert_eq!(wslenv_with_names(Some("A:B/p:"), &names), "A:B/p:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN");
+        let once = wslenv_with_names(Some("A"), &names);
+        assert_eq!(wslenv_with_names(Some(&once), &names), once);
+        assert_eq!(wslenv_with_names(Some("claude_code_disable_alternate_screen/u"), &names), "claude_code_disable_alternate_screen/u");
+        assert_eq!(wslenv_with_names(Some("X"), &[]), "X");
     }
 
     #[test]

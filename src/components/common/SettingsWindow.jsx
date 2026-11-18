@@ -270,7 +270,17 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       settingKey: 'terminal.integrated.promptMarksOnScrollbar',
       title: 'Prompt Marks on Scrollbar',
       description:
-        'Mark every shell prompt on the terminal\'s scrollbar; click a mark to scroll that prompt to the top. Needs a shell that reports its prompts (cmd, PowerShell, zsh, bash). Ctrl+Shift+Up and Down (Cmd on macOS) go to the previous and next prompt either way.',
+        'Mark every shell prompt, and every message you sent to Claude Code, on the terminal\'s scrollbar; click a mark to scroll that row to the top. Shell prompts need a shell that reports them (cmd, PowerShell, zsh, bash); messages need Claude Code on the normal screen. Ctrl+Shift+Up and Down (Cmd on macOS) go to the previous and next mark of either kind either way.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalClaudeNormalScreen',
+      section: 'terminal',
+      key: 'terminalClaudeNormalScreen',
+      settingKey: 'terminal.integrated.claudeCodeNormalScreen',
+      title: 'Claude Code on the Normal Screen',
+      description:
+        'Start terminals with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1, unless it is set already, so Claude Code draws on the normal screen: its conversation scrolls with the scrollbar and every message you send gets a mark. Off, Claude Code uses its fullscreen renderer (less flicker, its own mouse scrolling), with no scrollback and no marks. Applies to terminals started or restarted afterwards.',
       control: 'checkbox',
     },
     {
@@ -883,6 +893,7 @@ export function SettingsWindow() {
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
   const terminalPromptMarks = useSettingsStore((s) => s.terminalPromptMarks);
+  const terminalClaudeNormalScreen = useSettingsStore((s) => s.terminalClaudeNormalScreen);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
@@ -929,6 +940,7 @@ export function SettingsWindow() {
     terminalSuggestions,
     terminalStickyHeader,
     terminalPromptMarks,
+    terminalClaudeNormalScreen,
     terminalCopyOnSelect,
     terminalMouseReporting,
     terminalRightClick,

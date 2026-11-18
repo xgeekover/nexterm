@@ -31,10 +31,12 @@ import {
   MAX_PROMPT_MARKS,
   hitPromptMark,
   listenForPrompts,
+  mergeMarks,
   nextPromptLine,
   previousPromptLine,
   trackPromptMarks,
 } from '../../src/lib/promptMarks.js';
+import { trackAgentMessageMarks } from '../../src/lib/agentMessageMarks.js';
 
 const { Terminal: HeadlessTerminal } = headless;
 
@@ -524,7 +526,7 @@ describe('Prompt marks: the previous/next commands (F11)', () => {
       const ctx = {
         isMod: true,
         isInTerminal: true,
-        terminalShowsNormalBuffer: () => normal,
+        terminalClaimsMarkKeys: () => normal,
         jumpToPrompt: (direction) => jumps.push(direction),
       };
       const up = press('ArrowUp', mods);
@@ -544,7 +546,7 @@ describe('Prompt marks: the previous/next commands (F11)', () => {
       assert.deepEqual(jumps, ['previous', 'next']);
 
       const outside = press('ArrowDown', mods);
-      assert.equal(dispatchKeydown(outside.e, { ...ctx, isInTerminal: false, terminalShowsNormalBuffer: () => true }), 'pass:terminal-next-prompt');
+      assert.equal(dispatchKeydown(outside.e, { ...ctx, isInTerminal: false, terminalClaimsMarkKeys: () => true }), 'pass:terminal-next-prompt');
       assert.deepEqual(outside.calls, [], `${platform}: outside a terminal the key is the field's`);
     }
   });
@@ -586,10 +588,161 @@ describe('Prompt marks: the setting (F12)', () => {
     assert.match(row.slice(0, row.indexOf('},')), /section: 'terminal',\s*key: 'terminalPromptMarks',\s*settingKey: 'terminal\.integrated\.promptMarksOnScrollbar',\s*title: 'Prompt Marks on Scrollbar',/);
     assert.ok(settings.indexOf("id: 'terminalPromptMarks',") > settings.indexOf("id: 'terminalStickyHeader',"), 'next to the sticky header row');
     const registry = read('../../src/components/terminal/terminalRegistry.js');
-    assert.match(registry, /if \(state\.terminalPromptMarks !== prevState\.terminalPromptMarks\) \{\s*for \(const entry of instances\.values\(\)\) entry\.promptMarks\?\.setVisible\(promptMarksShown\(state\)\);/);
+    // Both kinds: the shell prompts and the messages sent to Claude Code.
+    assert.match(registry, /if \(state\.terminalPromptMarks !== prevState\.terminalPromptMarks\) \{\s*for \(const entry of instances\.values\(\)\) \{\s*entry\.promptMarks\?\.setVisible\(promptMarksShown\(state\)\);\s*entry\.messageMarks\?\.setVisible\(promptMarksShown\(state\)\);/);
     const live = /const LIVE_TERMINAL_SETTINGS_KEYS = \[([\s\S]*?)\];/.exec(registry)?.[1] ?? '';
     assert.ok(!live.includes('terminalPromptMarks'), 'turning it on or off refits the terminals');
     assert.match(registry, /visible: promptMarksShown\(settingsState\),/);
+  });
+});
+
+describe('Prompt marks and the messages sent to Claude Code, together (F11, F12, F14 of the agent task)', () => {
+  const registry = read('../../src/components/terminal/terminalRegistry.js');
+  const body = (name) => {
+    const from = registry.slice(registry.indexOf(name));
+    return from.slice(0, from.indexOf('\n}\n'));
+  };
+
+  test('PRM-28: the click and the keys use both kinds, merged by line; the keys are claimed through one registry function', () => {
+    assert.match(registry, /const promptMarkClicks = installPromptMarkClicks\(term, \(\) => allMarks\(instances\.get\(tabId\)\)\);/);
+    assert.match(body('function allMarks('), /return mergeMarks\(entry\.promptMarks, entry\.messageMarks\);/);
+    assert.match(body('export function jumpToPrompt('), /const line = promptJumpLine\(entry\.term\.buffer\.active, allMarks\(entry\), direction\);/);
+    assert.match(body('export function terminalClaimsMarkKeys('), /return terminalShowsNormalBuffer\(tabId\);/);
+    const hook = read('../../src/hooks/useKeybindings.js');
+    assert.match(hook, /import \{ jumpToPrompt, terminalClaimsMarkKeys \} from '\.\.\/components\/terminal\/terminalRegistry\.js';/);
+    assert.match(hook, /terminalClaimsMarkKeys: \(\) => terminalClaimsMarkKeys\(useTerminalStore\.getState\(\)\.activeTabId\),/);
+    assert.doesNotMatch(hook, /terminalShowsNormalBuffer/);
+    assert.match(read('../../src/lib/keybindings.js'), /function promptKeysClaimed\(ctx\) \{\s*return Boolean\(ctx\?\.isInTerminal\) && Boolean\(ctx\?\.terminalClaimsMarkKeys\?\.\(\)\);/);
+    // The message marks' own listener comes before the view's, and both go with the terminal.
+    const create = registry.slice(registry.indexOf('export function getOrCreateTerminal('));
+    assert.ok(create.indexOf('const messageInput = term.onData(') < create.indexOf('const dataDisposable = onData ? term.onData(onData) : null;'));
+    const dispose = body('export function disposeTerminal(');
+    for (const part of ['entry.messageInput?.dispose();', 'entry.messageParsed?.dispose();', 'entry.messageScans?.dispose();', 'entry.messageMarks?.dispose();']) {
+      assert.ok(dispose.includes(part) && dispose.indexOf(part) < dispose.indexOf('entry.term.dispose();'), part);
+    }
+    // Terminal: Clear takes the message marks through the prompt marks' hook; clearTerminal keeps its shape.
+    assert.match(registry, /onClear: \(\) => instances\.get\(tabId\)\?\.messageMarks\?\.afterClear\(\),/);
+    assert.doesNotMatch(body('export function clearTerminal('), /messageMarks/);
+    // NexTerm's own start and resume lines set the floor (setAgentLaunchObserver).
+    assert.match(registry, /setAgentLaunchObserver\(\(tabId\) => \{\s*afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => entry\.messageMarks\?\.noteShellSubmit\(\)\);/);
+    const store = read('../../src/stores/terminalStore.js');
+    assert.equal((store.match(/noteAgentLaunch\(targetId\);\n\s*await get\(\)\.writeRaw\(targetId, /g) ?? []).length, 2, 'startAgent and resumeAgent tell it right before they type');
+  });
+
+  test('PRM-29: the message marks are --vsc-info, LinkText in forced colours, and recoloured with the prompt marks', () => {
+    const colour = body('function messageMarkColour(');
+    assert.match(colour, /if \(forcedColours\(\)\) return systemColour\('LinkText'\);/);
+    assert.match(colour, /getPropertyValue\('--vsc-info'\)/);
+    assert.match(colour, /return value \|\| '#3794ff';/);
+    assert.match(read('../../src/styles/index.css'), /--vsc-info:\s+#3794ff;/, 'the literal is the token');
+    const refresh = body('function refreshPromptMarkColour(');
+    assert.match(refresh, /entry\.promptMarks\?\.setColor\(colour\);\s*entry\.messageMarks\?\.setColor\(messageColour\);/);
+    assert.match(registry, /messageMarks: trackAgentMessageMarks\(term, \{\s*decorate: promptMarkDecorator\(term\),\s*visible: promptMarksShown\(settingsState\),\s*color: messageMarkColour\(\),/);
+  });
+
+  test('PRM-30: with the setting off neither kind is drawn or takes a press, the keys still go to both; on, both are drawn again', async () => {
+    const term = makeTerm({ cols: 60, rows: 20 });
+    const decorations = fakeDecorations();
+    const prompts = trackPromptMarks(term, { decorate: decorations.decorate, color: '#8B5CF6' });
+    const messages = trackAgentMessageMarks(term, { decorate: decorations.decorate, color: '#3794ff' });
+    await prompt(term, prompts, 'PS C:\\> ');
+    await write(term, 'claude');
+    messages.noteShellSubmit();
+    const rule = '\u2500'.repeat(60);
+    // Claude Code's box (rows 2 to 4) holds the message at Enter; then the echo goes above it.
+    await write(term, `\r\n${rule}\r\n❯\u00A0hello there\r\n${rule}\r\n  status`);
+    messages.noteTyped();
+    assert.deepEqual(messages.noteSubmit(), { positional: false, text: 'hellothere' });
+    await write(term, `\x1b[2;1H\x1b[J❯ hello there\r\n\r\n⏺ ok\r\n\r\n${rule}\r\n❯\u00A0\r\n${rule}\r\n  status`);
+    messages.scan();
+    assert.equal(messages.lines.length, 1, 'the message is marked');
+    const both = () => mergeMarks(prompts, messages);
+    const at = (line) => ({ offsetY: (line / term.buffer.active.length) * 200, rulerHeight: 200, bufferLength: term.buffer.active.length });
+    assert.equal(both().hit(at(messages.lines[0])), messages.lines[0]);
+    assert.deepEqual(decorations.live().map((d) => d.color).sort(), ['#3794ff', '#8B5CF6']);
+    for (const tracker of [prompts, messages]) tracker.setVisible(false);
+    assert.equal(decorations.live().length, 0, 'no decoration of either kind');
+    assert.equal(both().hit(at(messages.lines[0])), null, 'the track is xterm\'s');
+    assert.equal(both().hit(at(prompts.lines[0])), null);
+    assert.equal(both().previous(term.buffer.active.length), messages.lines[0], 'the keys still reach a message');
+    assert.equal(both().previous(messages.lines[0]), prompts.lines[0], 'and a prompt');
+    for (const tracker of [prompts, messages]) tracker.setVisible(true);
+    assert.deepEqual(decorations.live().map((d) => d.color).sort(), ['#3794ff', '#8B5CF6'], 'both drawn again');
+    prompts.dispose();
+    messages.dispose();
+  });
+
+  test('PRM-31: scans only while Claude Code runs on the normal screen, after parsed output, through afterOutputSoFar', () => {
+    // Parsed output asks for a scan only if the shell's output came (`writeOutput`), never a scan's own empty write (U-01, AMM-24).
+    assert.match(registry, /const messageParsed = term\.onWriteParsed\(\(\) => instances\.get\(tabId\)\?\.messageScans\?\.parsed\(\)\);/);
+    assert.doesNotMatch(registry, /onWriteParsed\([^\n]*\.poke\(\)/);
+    assert.match(body('function writeOutput('), /^function writeOutput\(entry, data, read = null\) \{\s*const \{ tabId, term \} = entry;\s*\/\/[^\n]*\n\s*entry\.messageScans\?\.wrote\(\);/);
+    const scanner = body('function messageScanner(');
+    assert.match(scanner, /return runs && entry\.term\.buffer\.active\.type === 'normal';/);
+    assert.match(scanner, /if \(!runs && entry\.claudeRan\) entry\.messageMarks\?\.stop\(\);/);
+    assert.match(scanner, /scan: \(\) => afterOutputSoFar\(entry, \(e\) => e\.messageMarks\?\.scan\(\)\),/);
+    assert.match(body('function claudeRunsIn('), /return Boolean\(tab\) && tab\.agent\?\.kind === 'claude' && agentRuns\(tab\);/);
+    // Input through agentMessageMarks.js `noteTerminalInput` (AMM-25: reports and escape keys are not typing, U-03); a submit to Claude Code pokes a scan.
+    const input = body('function noteMessageInput(');
+    assert.match(input, /const kind = noteTerminalInput\(marks, data, \{ submits: submitsLine, agentRuns: \(\) => claudeRunsIn\(tabId\) \}\);\s*if \(kind === 'submit'\) entry\.messageScans\?\.poke\(\);/);
+    assert.doesNotMatch(input, /noteTyped|noteSubmit|noteShellSubmit/);
+  });
+});
+
+describe('The scrollbar at rest, and the documents of the agent task (F13, F15)', () => {
+  test('PRM-32: the scrollbar is shown at rest on the normal screen and hidden on the alternate one; forced colours and reduced motion untouched', () => {
+    const css = read('../../src/styles/index.css');
+    const block = (selector) => {
+      const at = css.indexOf(selector);
+      assert.ok(at !== -1, `no ${selector}`);
+      const from = css.slice(at);
+      return from.slice(0, from.indexOf('}') + 1);
+    };
+    const idle = block('.xterm .xterm-scrollable-element > .scrollbar.vertical.invisible {\n  opacity: 1;');
+    assert.match(idle, /opacity: 1;\s*visibility: visible;\s*pointer-events: auto;\s*z-index: 11;/);
+    assert.doesNotMatch(idle, /forced-color|outline|transition: opacity/);
+    assert.match(css, /\.xterm \.xterm-scrollable-element > \.scrollbar\.vertical\.visible,\s*\.xterm \.xterm-scrollable-element > \.scrollbar\.vertical\.invisible \{\s*transition-property: none;\s*\}/, 'no fade at all');
+    const alternate = block('.xterm.xterm-alternate-screen .xterm-scrollable-element > .scrollbar.vertical {');
+    assert.match(alternate, /opacity: 0;\s*pointer-events: none;\s*transition-property: none;/);
+    // Outside every @media and @layer block: at the top level, before the reduced-motion block.
+    const at = css.indexOf('.xterm .xterm-scrollable-element > .scrollbar.vertical.invisible {\n  opacity: 1;');
+    const before = css.slice(0, at);
+    const opened = (before.match(/\{/g) ?? []).length;
+    const closed = (before.match(/\}/g) ?? []).length;
+    assert.equal(opened, closed, 'the idle rule is at the top level');
+    // The forced-colours slider rule and both reduced-motion rules are still there (PRM-22 reads them too).
+    assert.match(css, /@media \(forced-colors: active\) \{[\s\S]*?\.xterm \.xterm-scrollable-element > \.scrollbar > \.slider \{\s*forced-color-adjust: none;\s*outline: 1px solid CanvasText;/);
+    assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.xterm \.xterm-scrollable-element > \.scrollbar \{\s*transition-property: none !important;/);
+    assert.match(css, /:root\.reduce-motion \.xterm \.xterm-scrollable-element > \.scrollbar \{\s*transition-property: none !important;/);
+    const registry = read('../../src/components/terminal/terminalRegistry.js');
+    assert.match(registry, /const bufferChange = term\.buffer\.onBufferChange\?\.\(\(buffer\) => showAlternateScreen\(term, buffer\?\.type === 'alternate'\)\);/);
+    assert.match(registry, /term\.element\?\.classList\?\.toggle\('xterm-alternate-screen', Boolean\(alternate\)\);/);
+  });
+
+  test('PRM-33: the README says what is marked for Claude Code, the variable, the setting, fullscreen and OpenCode; V49 lists C1 to C13', () => {
+    const readme = read('../../README.md');
+    const terminal = readme.slice(readme.indexOf('### Working in a terminal'));
+    const section = terminal.slice(0, terminal.indexOf('\n### ', 5));
+    assert.match(section, /\*\*Claude Code's messages on the scrollbar\.\*\*/);
+    assert.match(section, /`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`/);
+    assert.match(section, /\*Claude Code on\s+the Normal Screen\*/);
+    assert.match(section, /Fullscreen\s+Claude Code has no marks/);
+    assert.match(section, /The\s+thin scrollbar and its box are always visible on a terminal's normal screen/);
+    assert.match(section, /OpenCode is not\s+yet marked/);
+    assert.match(section, /The input box at the\s+bottom never has one/);
+    const settings = readme.slice(readme.indexOf('### Settings and themes'));
+    assert.match(settings.slice(0, 1200), /\*Claude Code on the Normal Screen\*/);
+    assert.match(readme, /nor do the marks of messages sent to Claude\s+Code/);
+    assert.match(readme, /\| `⌘⇧↑` \| Scroll the active terminal to the previous prompt or message sent to Claude Code/);
+    const doc = read('../../WINDOWS_VERIFICATION.md');
+    const v49 = doc.slice(doc.indexOf('### V49 — '));
+    assert.ok(v49.length > 30, 'no V49');
+    const body = v49.slice(0, v49.indexOf('\n## '));
+    for (let i = 1; i <= 13; i += 1) assert.match(body, new RegExp(`\\*\\*C${i} `), `V49 has no C${i}`);
+    assert.match(body, /On macOS: C1 to C6 with `⌘⇧↑` \/ `⌘⇧↓`, and the box at rest in WKWebView\./);
+    const v48 = doc.slice(doc.indexOf('### V48 — '), doc.indexOf('### V49 — '));
+    assert.match(v48, /\*\*H5 Claude Code\.\*\* The prompt Claude Code was launched from has a mark, and\s+so has each message sent to it/);
+    assert.match(v48, /the box visible with its outline at rest/);
   });
 });
 

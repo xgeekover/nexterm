@@ -46,6 +46,31 @@ const TRANSPARENT = 'rgba(0, 0, 0, 0)';
 
 const alive = (marker) => Boolean(marker) && !marker.isDisposed && marker.line >= 0;
 
+// Made transparent before it is disposed. xterm keeps its decorations in a
+// list sorted by line and finds one to delete by its line; a decoration
+// whose marker died first sits there with line -1 (the find bar's leave
+// one after every search), the order is broken, and a later delete can
+// miss — found in the browser suite: a mark stayed on the ruler after the
+// setting turned the marks off. One that is missed draws nothing.
+//
+// A known leak, recorded and not fixed: xterm 6's DecorationService can
+// fail to delete a decoration whose marker is already disposed (line -1).
+// Such a decoration, made transparent here, stays in xterm's list for the
+// life of the terminal, and every ruler redraw still visits it. Their count
+// grows only with what the user does: turning the marks off and on, a
+// recolour, and, after a find, marks lost to a trim or to the limit.
+//
+// Shared with the message marks (agentMessageMarks.js): `mark` is
+// `{ decoration }`, and loses it here.
+export function undecorate(mark) {
+  const decoration = mark.decoration;
+  mark.decoration = null;
+  if (!decoration || decoration.isDisposed) return;
+  const ruler = decoration.options?.overviewRulerOptions;
+  if (ruler) ruler.color = TRANSPARENT;
+  decoration.dispose?.();
+}
+
 const sortedLines = (lines) =>
   (Array.isArray(lines) ? lines : [])
     .filter((line) => Number.isInteger(line) && line >= 0)
@@ -133,7 +158,8 @@ export function hitPromptMark({
  *     only comes above an older one when the screen was redrawn over them.
  *   - `cursorOnNewestMark()` before Terminal: Clear and `afterClear(was)`
  *     after it: every mark goes with the text it was on, and the prompt the
- *     cursor is on, when it had a mark, gets one again on its new row.
+ *     cursor is on, when it had a mark, gets one again on its new row; then
+ *     `onClear()`, for marks kept elsewhere (agentMessageMarks.js).
  *   - `setVisible(false)` takes every decoration off the ruler and keeps the
  *     marks; `setVisible(true)` puts them back. `setColor(css)` redraws them
  *     in another colour.
@@ -142,35 +168,13 @@ export function hitPromptMark({
  *     with the setting off every press on the track is xterm's own.
  *   - `dispose()` with the terminal: every marker and decoration goes.
  */
-export function trackPromptMarks(term, { limit = MAX_PROMPT_MARKS, decorate = null, visible = true, color = null } = {}) {
+export function trackPromptMarks(term, { limit = MAX_PROMPT_MARKS, decorate = null, visible = true, color = null, onClear = null } = {}) {
   let marks = [];
   let shown = visible !== false;
   let colour = color;
   let disposed = false;
 
   const alternate = () => term?.buffer?.active?.type === 'alternate';
-
-  // Made transparent before it is disposed. xterm keeps its decorations in a
-  // list sorted by line and finds one to delete by its line; a decoration
-  // whose marker died first sits there with line -1 (the find bar's leave
-  // one after every search), the order is broken, and a later delete can
-  // miss — found in the browser suite: a mark stayed on the ruler after the
-  // setting turned the marks off. One that is missed draws nothing.
-  //
-  // A known leak, recorded and not fixed: xterm 6's DecorationService can
-  // fail to delete a decoration whose marker is already disposed (line -1).
-  // Such a decoration, made transparent here, stays in xterm's list for the
-  // life of the terminal, and every ruler redraw still visits it. Their count
-  // grows only with what the user does: turning the marks off and on, a
-  // recolour, and, after a find, marks lost to a trim or to the limit.
-  const undecorate = (mark) => {
-    const decoration = mark.decoration;
-    mark.decoration = null;
-    if (!decoration || decoration.isDisposed) return;
-    const ruler = decoration.options?.overviewRulerOptions;
-    if (ruler) ruler.color = TRANSPARENT;
-    decoration.dispose?.();
-  };
 
   const decorateMark = (mark) => {
     if (!shown || typeof decorate !== 'function' || mark.decoration || !alive(mark.marker)) return;
@@ -236,6 +240,8 @@ export function trackPromptMarks(term, { limit = MAX_PROMPT_MARKS, decorate = nu
       marks = [];
       for (const mark of all) drop(mark);
       if (cursorWasMarked) this.mark();
+      // What else goes with a clear: the registry's message marks.
+      if (typeof onClear === 'function') onClear();
     },
     setVisible(next) {
       if (disposed) return;
@@ -289,6 +295,51 @@ export function trackPromptMarks(term, { limit = MAX_PROMPT_MARKS, decorate = nu
 }
 
 /**
+ * Several kinds of marks as one (F12): the shell prompts and the messages
+ * sent to Claude Code (agentMessageMarks.js), each a tracker with `lines`
+ * and `visible`. Previous, next and the click go to the nearest of either
+ * kind, in buffer order; the click only to marks that are drawn, so with the
+ * setting off every press on the track is xterm's. Empty sources are fine.
+ */
+export function mergeMarks(...sources) {
+  const live = () => sources.filter((s) => s && typeof s === 'object');
+  const merged = (onlyShown) => {
+    const all = new Set();
+    for (const source of live()) {
+      if (onlyShown && source.visible === false) continue;
+      for (const line of source.lines ?? []) all.add(line);
+    }
+    return [...all].sort((a, b) => a - b);
+  };
+  return {
+    get lines() {
+      return merged(false);
+    },
+    previous(viewportY) {
+      return previousPromptLine(merged(false), viewportY);
+    },
+    next(viewportY, baseY) {
+      return nextPromptLine(merged(false), viewportY, baseY);
+    },
+    hit(args) {
+      const lines = merged(true);
+      return lines.length ? hitPromptMark({ ...args, lines }) : null;
+    },
+  };
+}
+
+/**
+ * Where Terminal: Go to Previous / Next Prompt scrolls `buffer` (xterm's
+ * active buffer) to, from `marks` (`mergeMarks`): null on the alternate
+ * screen, where a full-screen program keeps the key and there is no
+ * scrollback to go to, and where there is nowhere to go.
+ */
+export function promptJumpLine(buffer, marks, direction) {
+  if (!buffer || !marks || buffer.type === 'alternate') return null;
+  return direction === 'previous' ? marks.previous(buffer.viewportY) : marks.next(buffer.viewportY, buffer.baseY);
+}
+
+/**
  * The one app-level listener for prompts: every `pty-command-done` marks
  * every live terminal bound to that session (`entries()` yields the
  * registry's entries; `mark(entry)` marks one once its output is read). Kept
@@ -320,5 +371,8 @@ export default {
   nextPromptLine,
   hitPromptMark,
   trackPromptMarks,
+  mergeMarks,
+  promptJumpLine,
+  undecorate,
   listenForPrompts,
 };

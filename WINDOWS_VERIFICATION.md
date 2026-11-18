@@ -1365,17 +1365,21 @@ Windows with cmd first:
 - **H3 PowerShell.** As H1 and H2 in powershell.exe and pwsh, then
   `1..20000 | % { "line $_" }` (more than the scrollback): prompts that left
   the top have no mark, and every mark left lands on its prompt when clicked.
-- **H4 OpenCode from cmd.** While OpenCode is up the marks are hidden; after
-  it exits the old marks are back and the new prompt has one.
-- **H5 Claude Code.** The prompt Claude Code was launched from has a mark; none
-  of its messages do; the prompt after it exits has one.
+- **H4 OpenCode from cmd.** While OpenCode is up the marks and the scrollbar
+  are hidden; after it exits the old marks are back, the scrollbar shows at
+  rest again, and the new prompt has one.
+- **H5 Claude Code.** The prompt Claude Code was launched from has a mark, and
+  so has each message sent to it (blue; V49); the prompt after it exits has
+  one.
 - **H6 resize.** Drag a separator to make a cmd pane narrower, then wider, and
   click a mark each time: it lands on its prompt. Write down any drift, in
   rows (Windows 10 ConPTY repaints after a resize).
-- **H7 High Contrast** (Night sky and Desert): marks in the Highlight colour,
-  the box visible with its outline when the pointer is over the terminal.
+- **H7 High Contrast** (Night sky and Desert): prompt marks in the Highlight
+  colour, message marks in LinkText, the box visible with its outline at rest
+  as well as with the pointer over the terminal.
 - **H8 motion.** With Windows' *Animation effects* off, and with NexTerm's
-  reduced-motion setting: the box shows and goes at once, no fade.
+  reduced-motion setting: the box is shown at rest and nothing fades; on a
+  full-screen program it is hidden at once.
 - **H9 the keys.** `Ctrl+Shift+↑` / `Ctrl+Shift+↓` step through the prompts in
   cmd and in PowerShell (PSReadLine keeps its own keys otherwise); in OpenCode
   the keys reach OpenCode. Rebind one in Settings ▸ Keyboard and try again.
@@ -1391,8 +1395,64 @@ On macOS with zsh: H1, H2 and H9 with `⌘⇧↑` / `⌘⇧↓`; a two-line prom
 starship or powerlevel10k: write down which line of it each mark is on, over a
 few prompts (the first line, or the empty line above it, when the prompt is
 drawn after the signal; the line you type on when both come together;
-prompt_marks.test.js PRM-26); and how the box shows and fades in WKWebView (on
-hover and while scrolling, gone a moment after).
+prompt_marks.test.js PRM-26); and that the box shows at rest in WKWebView,
+brighter on hover.
+
+### V49 — Claude Code's messages on the scrollbar, and the scrollbar at rest
+
+The rules were built from Claude Code 2.1.327 recorded in a pty
+(tests/adversarial/fixtures/claude_code/, replayed in
+agent_message_marks.test.js) and checked in headless Chromium
+(prompt_marks_headless.test.js PMB-14 to PMB-21); no real Claude Code ran in
+a NexTerm build. On a release build with real Claude Code, Windows first
+(cmd and PowerShell), then macOS:
+
+- **C1 the variable.** In a new terminal, `echo %CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN%`
+  (cmd) or `$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` (PowerShell) prints
+  `1`. `claude` starts on the normal screen, and its conversation scrolls with
+  the wheel and with the slider.
+- **C2 the marks.** Send a short message, a Korean message long enough to
+  wrap, and a pasted multi-line block: each has a blue mark on its `❯` row,
+  the input box never has one, a click on each puts that message on the top
+  row, and `Ctrl+Shift+↑` / `Ctrl+Shift+↓` step through the messages and the
+  launch prompt in order.
+- **C3 while it works.** A message sent while Claude Code is still working,
+  with a todo list or tool progress visible above the box, is marked when it
+  shows in the transcript, with no stray mark. Write down any such message
+  that gets no mark.
+- **C4 commands.** `/model`, `/help` and an empty Enter: write down what is
+  marked.
+- **C5 redraws.** Make the pane narrower and wider, maximise the window,
+  `Ctrl+O` and back, `/compact`, `/clear`: write down whether the marks still
+  land on their messages, and any duplicates or drift. Then resize the pane
+  while a message waits for its echo (sent while Claude Code works, not yet in
+  the transcript): write down whether it gets its mark once it shows.
+- **C6 exit.** `/exit`: the marks stay, the next shell prompt has its mark,
+  and a second `claude` run is marked as well.
+- **C7 the setting.** Settings ▸ Terminal ▸ *Claude Code on the Normal Screen*
+  off: in a new terminal the variable is absent, Claude Code runs fullscreen,
+  and there are no marks. With the setting on and the variable set to `0` by
+  you before NexTerm starts: write down what Claude Code does.
+- **C8 /tui.** `/tui fullscreen` with the setting on: write down the result.
+- **C9 flicker.** A long streamed answer, compared with fullscreen: acceptable
+  or not.
+- **C10 restore.** Restart with Restore Scrollback on: the restored text has
+  no marks, and new messages do.
+- **C11 WSL.** `wsl`, then `claude` there: the variable arrives (`echo
+  $CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`) and the scrollback works; no marks
+  are expected.
+- **C12 OpenCode** as in v0.30.0: the keys reach it, and the scrollbar is
+  hidden while it is up.
+- **C13 High Contrast and motion.** The box is visible at rest with its
+  outline, and the two kinds of marks can be told apart; with reduced motion
+  nothing fades.
+- **The right-hand strip.** The scrollbar now takes the pointer in the right
+  10 px of a terminal on the normal screen at all times: start a selection
+  drag there, and click there in a program that reports the mouse on the
+  normal screen (for example `fzf --height=40%`): write down whether the drag
+  selects text and the click reaches the program, or the scrollbar takes them.
+
+On macOS: C1 to C6 with `⌘⇧↑` / `⌘⇧↓`, and the box at rest in WKWebView.
 
 ## What the first run found
 

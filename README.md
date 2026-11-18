@@ -337,14 +337,19 @@ like vim or htop. Settings ▸ Terminal ▸ *Sticky Command Header* turns it off
 it covers the top row, which is occasionally the row you scrolled up to read.
 
 **Prompt marks on the scrollbar.** The terminal's scrollbar is a map of the
-scrollback: a violet mark at every shell prompt and a translucent box for the
-part on screen, which shows while the pointer is over the terminal or it
-scrolls, and fades otherwise. The marks stay. Click a mark and that prompt
-scrolls to the top of the pane; a click anywhere else on the scrollbar, and
-dragging the box, work as before. `Ctrl+Shift+↑` / `Ctrl+Shift+↓` (`⌘⇧↑` /
-`⌘⇧↓` on macOS), or *Terminal: Go to Previous Prompt* / *Go to Next Prompt* in
-the palette, step through them; past the last prompt, next goes to the bottom.
-On a terminal's normal screen these keys belong to NexTerm, also where there
+scrollback: a violet mark at every shell prompt, a blue mark at every message
+you sent to Claude Code, and a translucent box for the part on screen. The
+thin scrollbar and its box are always visible on a terminal's normal screen,
+faintly, also with the pointer elsewhere and with nothing to scroll yet (then
+the box fills the track); over the box it is a little brighter. A full-screen
+program (vim, less, OpenCode, Claude Code in fullscreen) has no scrollback,
+so there the scrollbar stays hidden, as before. The marks stay. Click a mark
+of either kind and that row scrolls to the top of the pane, without
+hovering first; a click anywhere else on the scrollbar, and dragging the box,
+work as before. `Ctrl+Shift+↑` / `Ctrl+Shift+↓` (`⌘⇧↑` / `⌘⇧↓` on macOS), or
+*Terminal: Go to Previous Prompt* / *Go to Next Prompt* in the palette, step
+through both kinds in buffer order; past the last mark, next goes to the
+bottom. On a terminal's normal screen these keys belong to NexTerm, also where there
 are no marks (fish, ssh, WSL), so the shell does not get them; they can be
 given other keys in Settings ▸ Keyboard Shortcuts. A mark comes from the "a
 prompt is here" signal (OSC 133 D) the shell integration prints in front of
@@ -363,18 +368,58 @@ on. A one-line prompt is marked on its row either way. A batch file run with
 A shell or program that sends no such signal — fish without its own OSC 133,
 sh, nushell, WSL, a shell on the far end of ssh — shows the box and no marks:
 the only other clue, the line where Enter was pressed, cannot tell a prompt
-from a REPL, a password prompt or an agent's input box. **Claude Code** and **OpenCode**:
-the prompt you started them from is marked and their own messages are not;
-OpenCode, like vim or less, draws on the alternate screen, where the map is
-hidden and the keys go to the program. Marks leave with their text — the
-oldest lines leaving a full scrollback, `clear` / `cls` / Ctrl+L, and
-*Clear Terminal*, after which the prompt you are at keeps its mark. At most
-500 per terminal. A tab never shown has no marks for what it printed before it
-first appeared. Settings ▸ Terminal ▸ *Prompt Marks on Scrollbar* turns the
-marks off without changing the terminal's width; a click on the scrollbar is
-then the scrollbar's own everywhere, and the keys work either way. In
-Windows High Contrast the marks are drawn in the Highlight colour and the box
-keeps an outline; with reduced motion the box does not fade.
+from a REPL, a password prompt or an agent's input box.
+
+**Claude Code's messages on the scrollbar.** Every message you send to
+Claude Code gets a blue mark on its `❯` row in the conversation: a short one,
+one that wraps over several rows (Korean included), a pasted block, and a
+slash command that Claude Code echoes as a `❯ /…` row. The input box at the
+bottom never has one, nor has an empty Enter. NexTerm reads what the box
+holds when you press Enter and marks the row once Claude Code has drawn that
+text above the box, so a message you send while Claude Code is still working
+is marked when it shows in the transcript. For that Claude Code must draw on
+the normal screen, where its conversation goes into the scrollback: every
+terminal NexTerm starts gets `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, unless
+the variable is already set (any value you set wins, also one exported in a
+shell rc file), and on Windows its name is added to `WSLENV`. Per Claude
+Code's documentation the variable wins over `CLAUDE_CODE_NO_FLICKER` and its
+`tui` setting, so `/tui fullscreen` and `tui: fullscreen` do not bring the
+fullscreen renderer back in NexTerm's terminals. The trade: the classic
+renderer may flicker a little more in long streamed answers and has no mouse
+scrolling of its own, and in return the conversation scrolls with the wheel
+and the scrollbar and has its marks. Settings ▸ Terminal ▸ *Claude Code on
+the Normal Screen* (on by default) turns this off for terminals started or
+restarted afterwards; so does setting the variable yourself. Fullscreen
+Claude Code has no marks: with the setting off, background sessions (agent
+view, `claude attach`), Claude Code over ssh or on another machine, or a
+version that ignores the variable, it draws on the alternate screen, where
+there is no scrollback, the map is hidden and the keys go to Claude Code.
+Marks also need NexTerm to know Claude Code runs there: started or resumed
+from NexTerm, or `claude` typed at an integrated shell prompt (cmd,
+PowerShell, zsh, bash). `npx`, an alias, a path to the binary, a shell
+without the prompt signal (fish, sh, WSL) and ssh get no message marks.
+Conversation history that a resumed Claude Code prints is not marked. The
+rules were measured on Claude Code 2.1.327; a later version that draws its
+messages differently gets no marks rather than wrong ones. A message may also
+go without a mark, never with a wrong one, when it is sent while a todo list
+or tool progress shows above the box, or when the pane is resized while it
+waits for its echo. OpenCode is not
+yet marked: it draws on the alternate screen, and how NexTerm can find and
+reach its messages is still being researched; its keys and screen behave as
+before.
+
+Marks leave with their text — the
+oldest lines leaving a full scrollback, `clear` / `cls` / Ctrl+L, a redraw of
+Claude Code's screen, and *Clear Terminal*, after which the prompt you are at
+keeps its mark and every message mark goes. When Claude Code exits its marks
+stay. At most 500 of each kind per terminal, kept apart, so neither pushes the
+other out. A tab never shown has no marks for what it printed before it
+first appeared. Settings ▸ Terminal ▸ *Prompt Marks on Scrollbar* turns both
+kinds of marks off without changing the terminal's width; a click on the
+scrollbar is then the scrollbar's own everywhere, and the keys work either
+way. In Windows High Contrast prompt marks are drawn in the Highlight colour
+and message marks in the LinkText colour, and the box keeps an outline,
+also at rest; with reduced motion nothing fades.
 
 **Run something again.** `⌘⇧H` opens the command history: every command line
 this machine has run, newest first, with the directory it ran in. Typing
@@ -963,8 +1008,9 @@ what it printed last time, under a dim line:
   `Ctrl+F` finds in it, and file names and URLs in it can be clicked
   (resolved from the terminal's folder). Links a program sent as OSC 8,
   command marks, the sticky command line and the prompt marks on the
-  scrollbar do not come back; marks start again at the new shell's first
-  prompt, below the separator. Each restart
+  scrollbar do not come back, nor do the marks of messages sent to Claude
+  Code; marks start again at the new shell's first prompt, below the
+  separator, and new messages are marked again. Each restart
   adds its own separator; the oldest lines leave as the scrollback fills.
 - **Only the session's own terminals.** Opening a saved group, a layout
   template or a workspace, a new tab or a split starts empty.
@@ -1281,8 +1327,11 @@ and only until you type something else. Settings ▸ Terminal turns it off.
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
 scrollback, colour theme, command suggestions, copy on select, what a
-right-click does, mouse reporting, and *Prompt Marks on Scrollbar* (the marks
-at each shell prompt on the terminal's scrollbar; on by default).
+right-click does, mouse reporting, *Prompt Marks on Scrollbar* (the marks
+at each shell prompt and each message sent to Claude Code on the terminal's
+scrollbar; on by default), and *Claude Code on the Normal Screen* (starts
+terminals with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` unless it is set
+already; on by default).
 
 **The colours.** NexTerm has one dark palette, ActionMacro's bluish greys with
 a violet accent: the side bars, the terminal and the title and status bars are
@@ -1336,8 +1385,8 @@ when there are any.
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
 | `⌘F` | Find in the active terminal's scrollback |
-| `⌘⇧↑` | Scroll the active terminal to the previous prompt (`Ctrl+Shift+↑` off macOS) |
-| `⌘⇧↓` | Scroll the active terminal to the next prompt, or the bottom past the last (`Ctrl+Shift+↓` off macOS) |
+| `⌘⇧↑` | Scroll the active terminal to the previous prompt or message sent to Claude Code (`Ctrl+Shift+↑` off macOS) |
+| `⌘⇧↓` | Scroll the active terminal to the next prompt or message sent to Claude Code, or the bottom past the last (`Ctrl+Shift+↓` off macOS) |
 | `⌘⇧H` | Command history |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / default text |
 | `⌘S` | Save the active editor file |

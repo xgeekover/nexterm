@@ -58,12 +58,24 @@ export const SETTINGS_DEFAULTS = {
   /**
    * Draw a mark on each terminal's scrollbar at every shell prompt, the row
    * the next command is typed on, from the OSC 133 "D" every integrated shell
-   * prints in front of its prompt (src/lib/promptMarks.js). A click on a mark
-   * scrolls that prompt to the top. Off, only the marks go: they are still
-   * tracked, so they come back at once, and the scrollbar stays 10px wide, so
-   * no terminal reflows. The previous/next prompt commands work either way.
+   * prints in front of its prompt (src/lib/promptMarks.js), and at every
+   * message sent to Claude Code, on its echoed `❯` row
+   * (src/lib/agentMessageMarks.js). A click on a mark scrolls that row to the
+   * top. Off, only the marks go: they are still tracked, so they come back at
+   * once, and the scrollbar stays 10px wide, so no terminal reflows. The
+   * previous/next prompt commands step through both kinds either way.
    */
   terminalPromptMarks: true,
+  /**
+   * Start every shell with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 unless it
+   * inherits that variable already (src-tauri/src/pty/manager.rs), so Claude
+   * Code draws on the normal screen: its conversation goes to the scrollback,
+   * scrolls with the scrollbar, and each message sent gets a mark. The trade:
+   * no fullscreen renderer (a little more flicker, no mouse scrolling of its
+   * own). Read when a shell starts, so a change applies to terminals started
+   * or restarted afterwards.
+   */
+  terminalClaudeNormalScreen: true,
   /**
    * Copy a selection to the clipboard the moment the mouse makes it — a drag,
    * a double- or triple-click. Warp's default, and the reason a selection can

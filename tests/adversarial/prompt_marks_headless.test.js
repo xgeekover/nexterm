@@ -39,6 +39,9 @@ function needHarness() {
 
 const ACCENT = [139, 92, 246];
 const isAccent = (rgba) => rgba[3] > 200 && rgba.slice(0, 3).every((c, i) => Math.abs(c - ACCENT[i]) <= 3);
+// --vsc-info, the marks of messages sent to Claude Code.
+const INFO = [55, 148, 255];
+const isInfo = (rgba) => rgba[3] > 200 && rgba.slice(0, 3).every((c, i) => Math.abs(c - INFO[i]) <= 3);
 const PROMPT = 'C:\\work>';
 
 /** Where xterm draws line `line`'s mark, in device pixels from the ruler's top, and in viewport CSS pixels. */
@@ -258,6 +261,145 @@ describe('Prompt marks: xterm 6\'s ruler under headless Chromium (CDP)', () => {
     } finally {
       await call('setMarks', true);
     }
+  });
+
+  test('PMB-14: nothing to scroll: the scrollbar is shown at rest and its slider fills the track', async () => {
+    needHarness();
+    await call('reset');
+    await mouse('mouseMoved', 5, 5);
+    await call('mouseAwayIdle', 1100);
+    const info = await call('info');
+    assert.equal(info.baseY, 0, 'nothing in the scrollback');
+    assert.equal(info.track.opacity, '1', `track ${JSON.stringify(info.track)}`);
+    assert.ok(info.slider && info.slider.height > 0, `slider ${JSON.stringify(info.slider)}`);
+    assert.ok(Math.abs(info.slider.height - info.track.height) <= 2, `slider ${info.slider.height}px of a ${info.track.height}px track`);
+    assert.match(info.slider.background, /rgba\(155, 163, 175, 0\.28\)/);
+  });
+
+  test('PMB-15: at rest, the pointer away for over a second, the scrollbar is shown and takes presses; the slider is --vsc-scrollbar; the columns are v0.30.0\'s', async () => {
+    needHarness();
+    await fill();
+    await mouse('mouseMoved', 5, 5);
+    await call('mouseAwayIdle', 1100);
+    const info = await call('info');
+    assert.match(info.track.className, /\binvisible\b/, `xterm calls it invisible: ${info.track.className}`);
+    assert.equal(info.track.opacity, '1');
+    assert.equal(info.track.pointerEvents, 'auto');
+    assert.equal(info.track.visibility, 'visible', 'not hidden by Tailwind\'s `invisible` utility');
+    assert.match(info.track.transition, /^(all|opacity) 0s$|^none/, `no fade: ${info.track.transition}`);
+    assert.match(info.slider.background, /rgba\(155, 163, 175, 0\.28\)/);
+    assert.equal(Math.round(info.track.width), 10);
+    // FitAddon takes the 10px ruler off the pane, as in v0.30.0.
+    const cell = info.screen.width / info.cols;
+    assert.ok(info.screen.width + 10 <= info.paneWidth + 0.5 && info.screen.width + cell + 10 > info.paneWidth, `${info.cols} columns of ${cell}px in ${info.paneWidth}px`);
+  });
+
+  test('PMB-16: hovered, the slider is --vsc-scrollbar-hover', async () => {
+    needHarness();
+    const info = await call('info');
+    const x = info.track.left + info.track.width / 2;
+    const y = info.slider.top + info.slider.height / 2;
+    await mouse('mouseMoved', info.screen.left + 50, info.screen.top + 50);
+    await sleep(60);
+    await mouse('mouseMoved', x, y);
+    await sleep(200);
+    const hovered = await call('info');
+    assert.match(hovered.slider.background, /rgba\(155, 163, 175, 0\.45\)/, `${hovered.slider.background} at ${y} on ${await call('hitAt', x, y)}`);
+    await mouse('mouseMoved', 5, 5);
+  });
+
+  test('PMB-17: on the alternate screen the scrollbar is hidden in every state, as before', async () => {
+    needHarness();
+    await call('write', '\x1b[?1049h\x1b[Hless');
+    let info = await call('info');
+    assert.equal(info.alternateClass, true);
+    assert.equal(info.track.opacity, '0');
+    assert.equal(info.track.pointerEvents, 'none');
+    await call('write', '\x1b[?1049l');
+    info = await call('info');
+    assert.equal(info.alternateClass, false);
+    assert.equal(info.track.opacity, '1');
+  });
+
+  test('PMB-18: messages sent to Claude Code are marked in --vsc-info at their rows; the shell marks stay --vsc-accent', async () => {
+    needHarness();
+    await call('beginClaude');
+    for (const text of ['first message to claude', 'second message to claude', 'third message to claude']) {
+      await call('sendMessage', text, 30);
+    }
+    const info = await call('info');
+    assert.equal(info.messageMarks.length, 3, `message marks ${JSON.stringify(info.messageMarks)}`);
+    for (const line of info.messageMarks) {
+      assert.ok((await call('lineText', line)).startsWith('\u276F '), `mark at ${line}`);
+    }
+    assert.equal(info.marks.length, 6, 'the shell marks are as they were');
+    const rows = await call('rulerRows');
+    for (const line of info.messageMarks) {
+      const y = markY(info, line).device;
+      const near = rows.filter((r) => Math.abs(r.y - y) <= 2);
+      assert.ok(near.some((r) => isInfo(r.rgba)), `no --vsc-info at line ${line} (${y}): ${JSON.stringify(near)}`);
+    }
+    const y = markY(info, info.marks[1]).device;
+    assert.ok(rows.filter((r) => Math.abs(r.y - y) <= 2).some((r) => isAccent(r.rgba)), 'a shell mark still paints the accent');
+    assert.equal(info.messageDecorations, 3);
+  });
+
+  test('PMB-19: at rest, a press on a message mark with no hover first scrolls that message to the top', async () => {
+    needHarness();
+    await call('scrollToLine', (await call('info')).baseY);
+    await mouse('mouseMoved', 5, 5);
+    await call('mouseAwayIdle', 1100);
+    const info = await call('info');
+    // The second message: the first is one line below the `claude` prompt's mark, too close to tell apart at this scale.
+    const target = info.messageMarks[1];
+    const y = markY(info, target).client;
+    assert.ok(y < info.slider.top || y > info.slider.top + info.slider.height, 'the press is on the track, not the slider');
+    const x = info.track.left + info.track.width / 2;
+    const landsOn = await call('hitAt', x, y);
+    assert.match(landsOn, /^div\.(in)?visible\.scrollbar\.vertical/, `the press at ${x},${y} lands on ${landsOn}; ${JSON.stringify({ track: info.track, slider: info.slider, ruler: info.ruler })}`);
+    await mouse('mousePressed', x, y, 1);
+    await mouse('mouseReleased', x, y, 0);
+    await sleep(150);
+    assert.equal((await call('info')).viewportY, target, `pressed at ${y} on ${landsOn}; info ${JSON.stringify({ track: info.track, slider: info.slider, ruler: info.ruler, length: info.length, marks: info.messageMarks })}`);
+  });
+
+  test('PMB-20: the keys step through both kinds in buffer order', async () => {
+    needHarness();
+    const info = await call('info');
+    await call('scrollToLine', info.baseY);
+    const all = [...info.marks, ...info.messageMarks].sort((a, b) => a - b);
+    const seen = [];
+    for (let i = 0; i < all.length; i += 1) {
+      const { moved, viewportY } = await call('jump', 'previous');
+      if (!moved) break;
+      seen.push(viewportY);
+    }
+    const expected = all.filter((line) => line < info.baseY).reverse();
+    assert.deepEqual(seen.slice(0, expected.length), expected);
+  });
+
+  test('PMB-21: the setting off takes both kinds off the ruler, the keys still go to both, the columns unchanged; on, both come back', async () => {
+    needHarness();
+    const info = await call('info');
+    const off = await call('setMarks', false);
+    try {
+      assert.equal(off.decorations, 0);
+      assert.equal(off.messageDecorations, 0);
+      assert.equal(off.cols, info.cols);
+      const left = (await call('rulerRows')).filter((r) => isAccent(r.rgba) || isInfo(r.rgba));
+      assert.equal(left.length, 0, `marks still drawn while off: ${JSON.stringify(left)}`);
+      await call('scrollToLine', info.baseY);
+      const { moved, viewportY } = await call('jump', 'previous');
+      assert.equal(moved, true);
+      assert.equal(viewportY, info.messageMarks.at(-1), 'the newest message, by the keys');
+    } finally {
+      const on = await call('setMarks', true);
+      assert.equal(on.decorations, info.marks.length);
+      assert.equal(on.messageDecorations, info.messageMarks.length);
+      assert.equal(on.cols, info.cols);
+    }
+    const rows = await call('rulerRows');
+    assert.ok(rows.some((r) => isAccent(r.rgba)) && rows.some((r) => isInfo(r.rgba)), 'both drawn again');
   });
 
   test('PMB-12: nothing thrown in the page; the browser goes', async () => {

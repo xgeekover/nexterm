@@ -9,7 +9,7 @@ import { useEditorStore } from '../stores/editorStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 import { useProjectCommandsStore } from '../stores/projectCommandsStore.js';
 import { modalHeld } from '../lib/modalLock.js';
-import { jumpToPrompt, terminalShowsNormalBuffer } from '../components/terminal/terminalRegistry.js';
+import { jumpToPrompt, terminalClaimsMarkKeys } from '../components/terminal/terminalRegistry.js';
 
 /**
  * Wire the keyboard to the resolved keybindings.
@@ -100,7 +100,7 @@ export function useKeybindings() {
       // Read when the chord is pressed, not subscribed to: neither changes.
       openProjectCommandsFile: () => useProjectCommandsStore.getState().openCommandsFile(),
       // The prompt commands act on the terminal typed in, read when pressed.
-      terminalShowsNormalBuffer: () => terminalShowsNormalBuffer(useTerminalStore.getState().activeTabId),
+      terminalClaimsMarkKeys: () => terminalClaimsMarkKeys(useTerminalStore.getState().activeTabId),
       jumpToPrompt: (direction) => jumpToPrompt(useTerminalStore.getState().activeTabId, direction),
       stopTrustingProjectCommands: () => useProjectCommandsStore.getState().distrustCurrent(),
     });

@@ -34,6 +34,8 @@ import './editor_tab_reorder_ui.test.js';
 import './explorer_actions.test.js';
 import './app_menu.test.js';
 import './settings.test.js';
+// Marks for the messages sent to Claude Code: the recorded runs replayed through xterm headless.
+import './agent_message_marks.test.js';
 import './terminal_intellisense.test.js';
 import './suggestion_layer.test.js';
 import './ipc_contract.test.js';

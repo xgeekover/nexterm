@@ -47,6 +47,9 @@ const SETTINGS_KEYS = [
   'terminalSuggestions',
   'terminalStickyHeader',
   'terminalPromptMarks',
+  // Settings ▸ Terminal ▸ Claude Code on the Normal Screen: read by
+  // `spawnPty` as each shell starts (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).
+  'terminalClaudeNormalScreen',
   'terminalCopyOnSelect',
   'terminalMouseReporting',
   'terminalRightClick',
@@ -655,6 +658,78 @@ describe('Every new terminal follows the setting, however it is made', () => {
     assert.deepEqual(splitStartFor({ cwd: '/a', shell: '/bin/zsh' }, { mode: 'default' }), { cwd: null, shell: null });
     assert.deepEqual(splitStartFor(null), { cwd: null, shell: null }, 'nothing to continue');
     assert.deepEqual(splitStartFor({ cwd: '/a', shell: ' ' }), { cwd: '/a', shell: null });
+  });
+
+  test('SET-35: every shell is told the Claude Code normal-screen setting: on by default, off once turned off, for a new tab and a restarted shell', async () => {
+    assert.equal(S.getState().settingsDefaults.terminalClaudeNormalScreen, true);
+    await freshStart();
+    const flags = async (fn) => {
+      const original = mockBridge.invoke;
+      const sent = [];
+      mockBridge.invoke = function (command, args, ...rest) {
+        if (command === 'pty_spawn') sent.push(args?.claude_normal_screen);
+        return original.call(this, command, args, ...rest);
+      };
+      try {
+        await fn();
+      } finally {
+        mockBridge.invoke = original;
+      }
+      return sent;
+    };
+    const restart = async () => {
+      const id = T.getState().activeTabId;
+      setTab(id, { exited: true });
+      assert.equal(await T.getState().restartShell(id), true, 'the shell restarted');
+    };
+    try {
+      assert.deepEqual(await flags(() => T.getState().createTab()), [true], 'a new tab, by default');
+      assert.deepEqual(await flags(restart), [true], 'a restarted shell, by default');
+      S.getState().setSetting('terminalClaudeNormalScreen', false);
+      assert.deepEqual(await flags(() => T.getState().createTab()), [false], 'a new tab, turned off');
+      assert.deepEqual(await flags(restart), [false], 'a restarted shell, turned off');
+      // The mock takes the argument, and works without it (absent = on).
+      const session = await mockBridge.invoke('pty_spawn', { cols: 80, rows: 24, cwd: null, claude_normal_screen: false });
+      assert.equal(mockBridge.lastClaudeNormalScreen, false);
+      const bare = await mockBridge.invoke('pty_spawn', { cols: 80, rows: 24, cwd: null });
+      assert.equal(mockBridge.lastClaudeNormalScreen, null);
+      for (const s of [session, bare]) await mockBridge.invoke('pty_kill', { session_id: s.session_id });
+    } finally {
+      S.getState().setSetting('terminalClaudeNormalScreen', true);
+    }
+  });
+
+  test('SET-36: Claude Code on the Normal Screen is saved when turned off and read back; the Settings row is in the terminal section', async () => {
+    const backing = new Map();
+    const borrowed = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k) => (backing.has(k) ? backing.get(k) : null),
+      setItem: (k, v) => backing.set(k, String(v)),
+      removeItem: (k) => backing.delete(k),
+      clear: () => backing.clear(),
+    };
+    try {
+      const launch = () => import(`../../src/stores/settingsStore.js?claude-normal=${Math.random()}`);
+      const first = await launch();
+      assert.equal(first.useSettingsStore.getState().terminalClaudeNormalScreen, true);
+      first.useSettingsStore.getState().setSetting('terminalClaudeNormalScreen', false);
+      assert.equal(JSON.parse(backing.get('nexterm.settings')).data.terminalClaudeNormalScreen, false, 'saved');
+      const second = await launch();
+      assert.equal(second.useSettingsStore.getState().terminalClaudeNormalScreen, false, 'read back');
+      second.useSettingsStore.getState().setSetting('terminalClaudeNormalScreen', true);
+      assert.equal('terminalClaudeNormalScreen' in JSON.parse(backing.get('nexterm.settings')).data, false, 'the default is not stored');
+    } finally {
+      globalThis.localStorage = borrowed;
+    }
+    const { readFileSync } = await import('node:fs');
+    const window = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8');
+    const row = window.slice(window.indexOf("id: 'terminalClaudeNormalScreen',"));
+    assert.match(
+      row.slice(0, row.indexOf('},')),
+      /section: 'terminal',\s*key: 'terminalClaudeNormalScreen',\s*settingKey: 'terminal\.integrated\.claudeCodeNormalScreen',\s*title: 'Claude Code on the Normal Screen',[\s\S]*CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1[\s\S]*control: 'checkbox',/
+    );
+    assert.ok(window.indexOf("id: 'terminalClaudeNormalScreen',") > window.indexOf("id: 'terminalPromptMarks',"), 'beside the prompt marks row');
+    assert.match(window, /const terminalClaudeNormalScreen = useSettingsStore\(\(s\) => s\.terminalClaudeNormalScreen\);/);
   });
 
   test('SET-25: teardown — leave the terminals disposed and nothing persisted', () => {

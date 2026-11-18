@@ -1,0 +1,50 @@
+{
+ "t0": 1794980286.262912,
+ "cols": 120,
+ "rows": 40,
+ "events": [
+  {
+   "t": 3.154,
+   "offset": 1774,
+   "note": "type ALPHA7QX",
+   "bytes": "Reply with only the word ok. Token ALPHA7QX"
+  },
+  {
+   "t": 4.225,
+   "offset": 1878,
+   "note": "enter ALPHA7QX",
+   "bytes": "\r"
+  },
+  {
+   "t": 10.033,
+   "offset": 3419,
+   "note": "turn done ALPHA7QX",
+   "worked": true
+  },
+  {
+   "t": 10.033,
+   "offset": 3419,
+   "note": "type BRAVO8ZK",
+   "bytes": "Reply with only the word ok. Token BRAVO8ZK and this message is long enough to wrap past the right edge of a 120 column terminal so the measurement covers a sent message that takes two rows on screen"
+  },
+  {
+   "t": 11.135,
+   "offset": 4334,
+   "note": "enter BRAVO8ZK",
+   "bytes": "\r"
+  },
+  {
+   "t": 15.957,
+   "offset": 6172,
+   "note": "turn done BRAVO8ZK",
+   "worked": true
+  },
+  {
+   "t": 15.957,
+   "offset": 6172,
+   "note": "exit",
+   "bytes": "/exit\r"
+  }
+ ],
+ "sanitised": "the scratchpad path, the usage-limit line and the resume session id replaced by ASCII of the same display width; escape sequences unchanged; offsets follow the shorter bytes"
+}

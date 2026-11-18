@@ -12,7 +12,14 @@
   backend sends it after a read's output.
 
   The tokens the registry reads are set here, at the values src/styles/index.css
-  gives them, so the colours are known without the app's stylesheet.
+  gives them, so the colours are known; the app's stylesheet is loaded too,
+  for the scrollbar's rules (always visible on the normal screen).
+
+  Claude Code is stood in for by `claude`, `beginClaude` and `sendMessage`:
+  the tab's agent record as the store keeps it while Claude Code runs, its
+  live input box between two rules, and a message typed there, the Enter
+  through xterm's own input (`term.input`, as a key would come), then the
+  echo above a new box — what the classic renderer draws.
 
   `write` resolves once xterm's own write callback fires; `prompt` writes a
   read, sends its D, and waits for the mark and two frames, so the ruler has
@@ -25,6 +32,7 @@
     <style>
       :root {
         --vsc-accent: #8B5CF6;
+        --vsc-info: #3794ff;
         --vsc-scrollbar: rgba(155, 163, 175, 0.28);
         --vsc-scrollbar-hover: rgba(155, 163, 175, 0.45);
         --vsc-terminal-bg: #0E1014;
@@ -39,6 +47,7 @@
   <body>
     <div id="pane"></div>
     <script type="module">
+      import '../../../src/styles/index.css';
       import { useSettingsStore } from '../../../src/stores/settingsStore.js';
       import { useTerminalStore } from '../../../src/stores/terminalStore.js';
       import { mockBridge } from '../../../src/lib/ipc.js';
@@ -95,8 +104,47 @@
         return rows;
       }
 
+      const RULE = '\u2500'.repeat(200);
+      const rule = () => RULE.slice(0, entry.term.cols);
+      const liveRegion = (text = '') => `${rule()}\r\n\u276F\u00A0${text}\r\n${rule()}\r\n  \u23F8 manual mode on`;
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const settle = async () => {
+        // The scan's debounce and interval (agentMessageMarks.js), then the ruler.
+        await sleep(450);
+        await write('');
+        await frames(3);
+      };
+
       window.__p = {
         ready: false,
+        /** Whether the store believes Claude Code runs in this tab (`agentRuns`). */
+        claude(on) {
+          const tab = { id: tabId, sessionId: SESSION, cwd: '/workspace', exited: false };
+          if (on) Object.assign(tab, { agent: { kind: 'claude' }, agentTyped: { sessionId: SESSION } });
+          useTerminalStore.setState({ tabs: [tab], activeTabId: tabId });
+        },
+        /** `claude` typed at the prompt and Enter, then Claude Code's first box. */
+        async beginClaude() {
+          await write('claude');
+          entry.term.input('\r', true);
+          window.__p.claude(true);
+          await write(`\r\n${liveRegion()}`);
+          await settle();
+        },
+        /** A message in the box, Enter, then its echo, an answer of `answerLines` rows and a new box. */
+        async sendMessage(text, answerLines = 30) {
+          await write(`\r\x1b[3A\x1b[J${liveRegion(text)}`);
+          entry.term.input('\r', true);
+          let answer = '';
+          for (let i = 0; i < answerLines; i += 1) answer += `  answer ${i}\r\n`;
+          await write(`\r\x1b[3A\x1b[J\u276F ${text}\r\n\r\n\u23FA ok\r\n${answer}\r\n${liveRegion()}`);
+          await settle();
+          return entry.messageMarks.lines;
+        },
+        async mouseAwayIdle(ms = 1100) {
+          await sleep(ms);
+          await frames(2);
+        },
         async reset() {
           if (tabId) disposeTerminal(tabId);
           tabId = `prompt-marks-${(tabs += 1)}`;
@@ -150,7 +198,11 @@
         async setMarks(on) {
           useSettingsStore.getState().setSetting('terminalPromptMarks', on);
           await frames(3);
-          return { cols: entry.term.cols, decorations: entry.promptMarks.marks.filter((m) => m.decoration).length };
+          return {
+            cols: entry.term.cols,
+            decorations: entry.promptMarks.marks.filter((m) => m.decoration).length,
+            messageDecorations: entry.messageMarks.marks.filter((m) => m.decoration).length,
+          };
         },
         info() {
           const buffer = entry.term.buffer.active;
@@ -166,6 +218,9 @@
             type: buffer.type,
             marks: entry.promptMarks.lines,
             decorations: entry.promptMarks.marks.filter((m) => m.decoration).length,
+            messageMarks: entry.messageMarks.lines,
+            messageDecorations: entry.messageMarks.marks.filter((m) => m.decoration).length,
+            alternateClass: entry.term.element.classList.contains('xterm-alternate-screen'),
             decorationPointerEvents: decorations.map((d) => getComputedStyle(d).pointerEvents),
             ruler: ruler() && {
               ...rect(ruler()),
@@ -173,8 +228,16 @@
               display: getComputedStyle(ruler()).display,
               pixelHeight: ruler().height,
             },
-            track: track() && { ...rect(track()), className: track().className },
+            track: track() && {
+              ...rect(track()),
+              className: track().className,
+              opacity: getComputedStyle(track()).opacity,
+              pointerEvents: getComputedStyle(track()).pointerEvents,
+              visibility: getComputedStyle(track()).visibility,
+              transition: getComputedStyle(track()).transitionProperty + ' ' + getComputedStyle(track()).transitionDuration,
+            },
             slider: slider && { ...rect(slider), background: getComputedStyle(slider).backgroundColor },
+            paneWidth: pane().getBoundingClientRect().width,
             screen: rect(entry.term.element.querySelector('.xterm-screen')),
             cell: {
               width: entry.term.element.querySelector('.xterm-screen').getBoundingClientRect().width / entry.term.cols,
@@ -190,6 +253,14 @@
           } catch (err) {
             return String(err);
           }
+        },
+        /** For a failure's message: the element a press at viewport (x, y) lands on, and its parents' classes. */
+        hitAt(x, y) {
+          const chain = [];
+          for (let el = document.elementFromPoint(x, y); el && chain.length < 4; el = el.parentElement) {
+            chain.push(`${el.tagName.toLowerCase()}.${String(el.className).trim().replace(/\s+/g, '.')}`);
+          }
+          return chain.join(' < ');
         },
         selection: () => entry.term.getSelection(),
         lineText: (line) => entry.term.buffer.active.getLine(line)?.translateToString(true) ?? null,

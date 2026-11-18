@@ -43,11 +43,13 @@ import { chordFromEvent, chordMatches, displayChord, parseChord, stringifyChord 
  *                  reported as taking a chord (`findConflicts`).
  */
 /**
- * Whether the prompt commands take their key: a terminal has focus and shows
- * its normal buffer (`ctx.terminalShowsNormalBuffer`, the registry's).
+ * Whether the prompt commands take their key: a terminal has focus and the
+ * registry claims the keys for it (`ctx.terminalClaimsMarkKeys`,
+ * `terminalClaimsMarkKeys` in terminalRegistry.js) — today, while it shows
+ * its normal buffer.
  */
 function promptKeysClaimed(ctx) {
-  return Boolean(ctx?.isInTerminal) && Boolean(ctx?.terminalShowsNormalBuffer?.());
+  return Boolean(ctx?.isInTerminal) && Boolean(ctx?.terminalClaimsMarkKeys?.());
 }
 
 export const COMMANDS = {
@@ -225,8 +227,9 @@ export const COMMANDS = {
     run: (ctx) => ctx.clearTerminal?.(),
   },
   // The prompt marks on the scrollbar, from the keyboard (promptMarks.js):
-  // the newest prompt above the top row, or the first one below it, scrolled
-  // to the top. Claimed over a focused terminal, since that is the only place
+  // the newest mark above the top row, or the first one below it, scrolled
+  // to the top — a shell prompt or a message sent to Claude Code
+  // (agentMessageMarks.js), whichever is nearer. Claimed over a focused terminal, since that is the only place
   // they mean anything, and only while it shows its normal buffer: in vim,
   // less or OpenCode the key is the program's. Anywhere else the key is let
   // through too — ⌘⇧↑ selects to the top of a text field on macOS. Matched
