@@ -1,0 +1,200 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/prompt_marks_headless.test.js.
+
+  One REAL `@xterm/xterm` 6 terminal made by the app's own
+  `getOrCreateTerminal` (src/components/terminal/terminalRegistry.js), with
+  every option and installer the app gives it — the 10px overview ruler, the
+  scrollbar colours, the prompt-mark click — bound to a session, attached to a
+  fixed 600 x 320 pane and fitted the way TerminalView fits it. No TerminalView
+  is mounted: the prompts are marked by the registry's own app-level listener,
+  fed `pty-command-done` through the browser mock of src/lib/ipc.js, as the
+  backend sends it after a read's output.
+
+  The tokens the registry reads are set here, at the values src/styles/index.css
+  gives them, so the colours are known without the app's stylesheet.
+
+  `write` resolves once xterm's own write callback fires; `prompt` writes a
+  read, sends its D, and waits for the mark and two frames, so the ruler has
+  been drawn. Not part of the app's own routes; loaded only by that test, over
+  the vite dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --vsc-accent: #8B5CF6;
+        --vsc-scrollbar: rgba(155, 163, 175, 0.28);
+        --vsc-scrollbar-hover: rgba(155, 163, 175, 0.45);
+        --vsc-terminal-bg: #0E1014;
+        --vsc-fg: #cccccc;
+        --vsc-find-match: #9e6a03;
+        --vsc-find-match-other: #613214;
+      }
+      html, body { margin: 0; background: #0E1014; }
+      #pane { position: fixed; left: 20px; top: 20px; width: 600px; height: 320px; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <div id="pane"></div>
+    <script type="module">
+      import { useSettingsStore } from '../../../src/stores/settingsStore.js';
+      import { useTerminalStore } from '../../../src/stores/terminalStore.js';
+      import { mockBridge } from '../../../src/lib/ipc.js';
+      import {
+        disposeTerminal,
+        getOrCreateTerminal,
+        searchInTerminal,
+        clearTerminalSearch,
+        jumpToPrompt,
+      } from '../../../src/components/terminal/terminalRegistry.js';
+
+      const SESSION = 'prompt-marks-session';
+      useSettingsStore.setState({
+        terminalFontFamily: 'monospace',
+        terminalFontSize: 14,
+        terminalLineHeight: 1,
+        terminalScrollback: 1000,
+        terminalPromptMarks: true,
+      });
+
+      let tabs = 0;
+      let tabId = null;
+      let entry = null;
+      const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      const frames = async (n = 2) => {
+        for (let i = 0; i < n; i += 1) await frame();
+      };
+      const write = (data) => new Promise((resolve) => entry.term.write(data, resolve));
+      const pane = () => document.getElementById('pane');
+      const ruler = () => entry.term.element.querySelector('.xterm-decoration-overview-ruler');
+      const track = () => entry.term.element.querySelector('.xterm-scrollable-element > .scrollbar.vertical');
+      const rect = (el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+      };
+
+      /** Every device row of the ruler with a non-transparent pixel right of its 1px border, and that pixel's colour. */
+      function rulerRows() {
+        const canvas = ruler();
+        const ctx = canvas.getContext('2d');
+        const { width, height } = canvas;
+        const data = ctx.getImageData(0, 0, width, height).data;
+        const border = Math.ceil(window.devicePixelRatio || 1);
+        const rows = [];
+        for (let y = 0; y < height; y += 1) {
+          for (let x = border; x < width; x += 1) {
+            const i = (y * width + x) * 4;
+            if (data[i + 3] > 0) {
+              rows.push({ y, rgba: [data[i], data[i + 1], data[i + 2], data[i + 3]] });
+              break;
+            }
+          }
+        }
+        return rows;
+      }
+
+      window.__p = {
+        ready: false,
+        async reset() {
+          if (tabId) disposeTerminal(tabId);
+          tabId = `prompt-marks-${(tabs += 1)}`;
+          useTerminalStore.setState({ activeTabId: tabId });
+          entry = getOrCreateTerminal(tabId, { sessionId: SESSION });
+          pane().replaceChildren(entry.container);
+          await frames(2);
+          entry.fitAddon.fit();
+          await frames(2);
+          return { cols: entry.term.cols, rows: entry.term.rows };
+        },
+        write: (data) => write(data),
+        /** One read of output, then its D — what the backend sends. */
+        async prompt(output) {
+          await write(output);
+          await mockBridge.emit('pty-command-done', { session_id: SESSION, exit_code: 0 });
+          await write('');
+          await frames(2);
+          return entry.promptMarks.lines;
+        },
+        async otherSessionPrompt() {
+          await mockBridge.emit('pty-command-done', { session_id: 'some-other-session', exit_code: 0 });
+          await write('');
+          return entry.promptMarks.lines;
+        },
+        detach() {
+          entry.container.remove();
+        },
+        async attach() {
+          pane().replaceChildren(entry.container);
+          await frames(2);
+        },
+        async scrollToLine(line) {
+          entry.term.scrollToLine(line);
+          await frames(2);
+        },
+        async jump(direction) {
+          const moved = jumpToPrompt(tabId, direction);
+          await frames(1);
+          return { moved, viewportY: entry.term.buffer.active.viewportY };
+        },
+        async find(query) {
+          const found = searchInTerminal(tabId, query, { direction: 'next' });
+          await frames(3);
+          return found;
+        },
+        async clearFind() {
+          clearTerminalSearch(tabId);
+          await frames(2);
+        },
+        async setMarks(on) {
+          useSettingsStore.getState().setSetting('terminalPromptMarks', on);
+          await frames(3);
+          return { cols: entry.term.cols, decorations: entry.promptMarks.marks.filter((m) => m.decoration).length };
+        },
+        info() {
+          const buffer = entry.term.buffer.active;
+          const slider = track()?.querySelector('.slider');
+          const decorations = [...entry.term.element.querySelectorAll('.xterm-decoration')];
+          return {
+            dpr: window.devicePixelRatio || 1,
+            cols: entry.term.cols,
+            rows: entry.term.rows,
+            viewportY: buffer.viewportY,
+            baseY: buffer.baseY,
+            length: buffer.length,
+            type: buffer.type,
+            marks: entry.promptMarks.lines,
+            decorations: entry.promptMarks.marks.filter((m) => m.decoration).length,
+            decorationPointerEvents: decorations.map((d) => getComputedStyle(d).pointerEvents),
+            ruler: ruler() && {
+              ...rect(ruler()),
+              cssWidth: ruler().style.width,
+              display: getComputedStyle(ruler()).display,
+              pixelHeight: ruler().height,
+            },
+            track: track() && { ...rect(track()), className: track().className },
+            slider: slider && { ...rect(slider), background: getComputedStyle(slider).backgroundColor },
+            screen: rect(entry.term.element.querySelector('.xterm-screen')),
+            cell: {
+              width: entry.term.element.querySelector('.xterm-screen').getBoundingClientRect().width / entry.term.cols,
+              height: entry.term.element.querySelector('.xterm-screen').getBoundingClientRect().height / entry.term.rows,
+            },
+          };
+        },
+        rulerRows,
+        /** For a failure's message: what xterm itself holds (internal, diagnostics only). */
+        xtermDecorations() {
+          try {
+            return [...entry.term._core._decorationService.decorations].map((d) => ({ line: d.marker.line, ruler: d.options.overviewRulerOptions ?? null }));
+          } catch (err) {
+            return String(err);
+          }
+        },
+        selection: () => entry.term.getSelection(),
+        lineText: (line) => entry.term.buffer.active.getLine(line)?.translateToString(true) ?? null,
+      };
+      window.__p.ready = true;
+    </script>
+  </body>
+</html>

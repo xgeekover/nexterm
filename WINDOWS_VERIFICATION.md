@@ -1348,6 +1348,52 @@ scaling) and on macOS (WKWebView), side by side with v0.28.1 where it says so.
   for the colours it left out: one Windows Terminal scheme and one Ghostty
   file.
 
+### V48 — prompt marks on the scrollbar
+
+The tracker ran against xterm's headless build and the ruler, the click, the
+find colours, the selection and the alternate screen in headless Chromium
+(tests/adversarial/prompt_marks.test.js and prompt_marks_headless.test.js);
+no shell and no WebView2 or WKWebView was involved. On a release build,
+Windows with cmd first:
+
+- **H1 cmd.** A new cmd tab: its first prompt has a mark. Run `dir` three
+  times: one mark per prompt, empty Enters included. Scroll to the top and
+  click the second mark: that prompt is on the top row.
+- **H2 clear.** `cls`, then a few commands: the marks from before `cls` are
+  gone and the new prompts have theirs. *Terminal: Clear* (`Ctrl+L` outside a
+  terminal, or the palette): one mark is left, on the prompt you are at.
+- **H3 PowerShell.** As H1 and H2 in powershell.exe and pwsh, then
+  `1..20000 | % { "line $_" }` (more than the scrollback): prompts that left
+  the top have no mark, and every mark left lands on its prompt when clicked.
+- **H4 OpenCode from cmd.** While OpenCode is up the marks are hidden; after
+  it exits the old marks are back and the new prompt has one.
+- **H5 Claude Code.** The prompt Claude Code was launched from has a mark; none
+  of its messages do; the prompt after it exits has one.
+- **H6 resize.** Drag a separator to make a cmd pane narrower, then wider, and
+  click a mark each time: it lands on its prompt. Write down any drift, in
+  rows (Windows 10 ConPTY repaints after a resize).
+- **H7 High Contrast** (Night sky and Desert): marks in the Highlight colour,
+  the box visible with its outline when the pointer is over the terminal.
+- **H8 motion.** With Windows' *Animation effects* off, and with NexTerm's
+  reduced-motion setting: the box shows and goes at once, no fade.
+- **H9 the keys.** `Ctrl+Shift+↑` / `Ctrl+Shift+↓` step through the prompts in
+  cmd and in PowerShell (PSReadLine keeps its own keys otherwise); in OpenCode
+  the keys reach OpenCode. Rebind one in Settings ▸ Keyboard and try again.
+- **H10 restore.** Restart with Restore Scrollback on: the restored text has no
+  marks; the new shell's prompts, below the separator, do.
+- **H11 the setting.** Settings ▸ Terminal ▸ *Prompt Marks on Scrollbar* off
+  and on: the marks go and come back at once, and the text does not reflow
+  (the column count in the status bar or `mode con` stays the same).
+- **H12 four terminals flooding** (the V43 scenario) with marks on: no freeze,
+  typing still answers, and the marks are on their prompts afterwards.
+
+On macOS with zsh: H1, H2 and H9 with `⌘⇧↑` / `⌘⇧↓`; a two-line prompt, with
+starship or powerlevel10k: write down which line of it each mark is on, over a
+few prompts (the first line, or the empty line above it, when the prompt is
+drawn after the signal; the line you type on when both come together;
+prompt_marks.test.js PRM-26); and how the box shows and fades in WKWebView (on
+hover and while scrolling, gone a moment after).
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

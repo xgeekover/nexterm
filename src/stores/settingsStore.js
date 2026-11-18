@@ -56,6 +56,15 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalStickyHeader: true,
   /**
+   * Draw a mark on each terminal's scrollbar at every shell prompt, the row
+   * the next command is typed on, from the OSC 133 "D" every integrated shell
+   * prints in front of its prompt (src/lib/promptMarks.js). A click on a mark
+   * scrolls that prompt to the top. Off, only the marks go: they are still
+   * tracked, so they come back at once, and the scrollbar stays 10px wide, so
+   * no terminal reflows. The previous/next prompt commands work either way.
+   */
+  terminalPromptMarks: true,
+  /**
    * Copy a selection to the clipboard the moment the mouse makes it — a drag,
    * a double- or triple-click. Warp's default, and the reason a selection can
    * be pasted elsewhere without a second key. Only mouse selections: a find

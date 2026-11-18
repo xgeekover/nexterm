@@ -431,6 +431,11 @@ export function CommandPalette() {
       case 'clear_terminal':
         clearTerminal();
         return;
+      case 'terminal_previous_prompt':
+      case 'terminal_next_prompt':
+        // The active terminal, as the keys do (the store's `jumpToPrompt`).
+        await useTerminalStore.getState().jumpToPrompt?.(item.command === 'terminal_previous_prompt' ? 'previous' : 'next');
+        return;
       case 'toggle_pane_zoom':
         // The active pane of the group on screen, as the shortcut does.
         togglePaneZoom?.();

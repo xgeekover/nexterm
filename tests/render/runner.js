@@ -220,6 +220,31 @@ scenario('RN-16', 'the sticky command header turned off', () => {
   useSettingsStore.getState().setSetting('terminalStickyHeader', false);
 });
 
+scenario('RN-16b', 'a terminal pane with prompt marks on the scrollbar (the default)', () => {
+  reset();
+  useSettingsStore.getState().setSetting('terminalPromptMarks', true);
+});
+
+scenario('RN-16c', 'a terminal pane with prompt marks turned off', () => {
+  reset();
+  useSettingsStore.getState().setSetting('terminalPromptMarks', false);
+});
+
+scenario(
+  'RN-16d',
+  'the settings window offers Prompt Marks on Scrollbar, on and off',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    expectText(html, 'Prompt Marks on Scrollbar');
+    expectThat(html.includes('terminal.integrated.promptMarksOnScrollbar'), 'the row has no setting key');
+    useSettingsStore.getState().setSetting('terminalPromptMarks', false);
+    expectText(renderArranged(), 'Prompt Marks on Scrollbar');
+  }
+);
+
 scenario('RN-03', 'a pane holding no terminal', () => {
   // The state a split reaches when its last tab is closed. Renders the pane's
   // empty branch AND the group switcher's aggregate over zero tabs.

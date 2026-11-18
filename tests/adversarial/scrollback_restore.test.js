@@ -423,7 +423,8 @@ describe('Scrollback restore: once, and only what the start brought back', () =>
     );
     assert.match(create.slice(create.indexOf('entry = {')), /^\s+scrollbackWatch,$/m, 'kept on the entry');
     const clear = registrySource.slice(registrySource.indexOf('export function clearTerminal(tabId) {'));
-    assert.match(clear, /entry\.term\.clear\(\);\s*noteCleared\(entry\);/);
+    // The prompt marks' clear step sits between the two (prompt_marks.test.js, PRM-08).
+    assert.match(clear, /entry\.term\.clear\(\);\s*(?:entry\.promptMarks\?\.afterClear\(promptMarked\);\s*)?noteCleared\(entry\);/);
     // Terminal: Clear is saved at once every time — never through the clears' 2 s gap.
     assert.match(registrySource, /function noteCleared\(entry\) \{\s*scrollbackSaver\.saveNow\(entry\.tabId\);\s*\}/);
     const dispose = registrySource.slice(registrySource.indexOf('export function disposeTerminal('));

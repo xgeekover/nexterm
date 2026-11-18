@@ -264,6 +264,16 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       control: 'checkbox',
     },
     {
+      id: 'terminalPromptMarks',
+      section: 'terminal',
+      key: 'terminalPromptMarks',
+      settingKey: 'terminal.integrated.promptMarksOnScrollbar',
+      title: 'Prompt Marks on Scrollbar',
+      description:
+        'Mark every shell prompt on the terminal\'s scrollbar; click a mark to scroll that prompt to the top. Needs a shell that reports its prompts (cmd, PowerShell, zsh, bash). Ctrl+Shift+Up and Down (Cmd on macOS) go to the previous and next prompt either way.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalScrollback',
       section: 'terminal',
       key: 'terminalScrollback',
@@ -872,6 +882,7 @@ export function SettingsWindow() {
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
+  const terminalPromptMarks = useSettingsStore((s) => s.terminalPromptMarks);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
@@ -917,6 +928,7 @@ export function SettingsWindow() {
     terminalTheme,
     terminalSuggestions,
     terminalStickyHeader,
+    terminalPromptMarks,
     terminalCopyOnSelect,
     terminalMouseReporting,
     terminalRightClick,

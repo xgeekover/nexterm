@@ -638,29 +638,48 @@ describe('Terminal themes: one resolver for built-in and imported themes', () =>
     const body = [
       cut('export function resolveTerminalTheme('),
       cut('export function shownTerminalTheme('),
+      cut('function withScrollbarColours('),
       cut('function applyShownTerminalTheme('),
       'return { resolveTerminalTheme, shownTerminalTheme, applyShownTerminalTheme };',
     ].join('\n');
+    // The scrollbar's colours, read from the tokens, go on top of whichever
+    // palette is shown (prompt_marks.test.js, PRM-21).
+    const tokens = { '--vsc-scrollbar': 'rgba(1, 2, 3, 0.25)', '--vsc-scrollbar-hover': 'rgba(1, 2, 3, 0.5)' };
+    const doc = { documentElement: {} };
+    const computed = () => ({ getPropertyValue: (name) => tokens[name] ?? '' });
+    const shown = (theme) => ({
+      ...theme,
+      scrollbarSliderBackground: tokens['--vsc-scrollbar'],
+      scrollbarSliderHoverBackground: tokens['--vsc-scrollbar-hover'],
+      scrollbarSliderActiveBackground: tokens['--vsc-scrollbar-hover'],
+      overviewRulerBorder: theme.background,
+    });
     const state = { terminalTheme: 'nord', terminalThemePreview: null, terminalCustomThemes: customs };
     const instances = new Map([
       ['a', { term: { options: { theme: null, fontSize: 12 } } }],
       ['b', { term: { options: { theme: null, fontSize: 12 } } }],
     ]);
     const app = { background: 'token:bg', red: 'token:red', green: 'token:green' };
-    const make = new Function('getTerminalThemeEntry', 'themeColorsOf', 'shownTerminalThemeId', 'readTheme', 'useSettingsStore', 'instances', body);
-    const reg = make(getTerminalThemeEntry, themeColorsOf, shownTerminalThemeId, () => app, { getState: () => state }, instances);
+    const make = new Function('getTerminalThemeEntry', 'themeColorsOf', 'shownTerminalThemeId', 'readTheme', 'useSettingsStore', 'instances', 'document', 'getComputedStyle', 'APP_THEME_TOKENS', body);
+    const reg = make(getTerminalThemeEntry, themeColorsOf, shownTerminalThemeId, () => app, { getState: () => state }, instances, doc, computed, { background: '--vsc-terminal-bg' });
+    const [first, second] = [...instances.values()];
+    const oneObject = () => assert.equal(first.term.options.theme, second.term.options.theme, 'every terminal is handed the one object');
     assert.equal(reg.resolveTerminalTheme('nord'), TERMINAL_THEMES.nord.theme);
     assert.equal(reg.resolveTerminalTheme('custom:mine').red, '#ff0000', 'the store\'s imported themes are known by default');
     assert.equal(reg.resolveTerminalTheme('custom:mine').green, 'token:green');
     assert.equal(reg.resolveTerminalTheme('custom:gone'), app, 'unknown: the default, which follows the app');
     reg.applyShownTerminalTheme();
-    for (const entry of instances.values()) assert.equal(entry.term.options.theme, TERMINAL_THEMES.nord.theme);
+    oneObject();
+    for (const entry of instances.values()) assert.deepEqual(entry.term.options.theme, shown(TERMINAL_THEMES.nord.theme));
     state.terminalThemePreview = 'custom:mine';
     reg.applyShownTerminalTheme();
+    oneObject();
     for (const entry of instances.values()) assert.equal(entry.term.options.theme.background, '#0a0b0c', 'the preview is not on every terminal');
+    for (const entry of instances.values()) assert.equal(entry.term.options.theme.overviewRulerBorder, '#0a0b0c', 'the ruler\'s edge is not the preview\'s background');
     state.terminalThemePreview = null;
     reg.applyShownTerminalTheme();
-    for (const entry of instances.values()) assert.equal(entry.term.options.theme, TERMINAL_THEMES.nord.theme, 'the chosen theme did not come back');
+    oneObject();
+    for (const entry of instances.values()) assert.deepEqual(entry.term.options.theme, shown(TERMINAL_THEMES.nord.theme), 'the chosen theme did not come back');
     // A theme key is not a font key: previewing must not refit every terminal.
     const keys = /const LIVE_TERMINAL_SETTINGS_KEYS = \[([\s\S]*?)\];/.exec(src)?.[1] ?? '';
     assert.ok(keys && !/terminalTheme/.test(keys), 'a theme change still refits and re-reports every terminal');

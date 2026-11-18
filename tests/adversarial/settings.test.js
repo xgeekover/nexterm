@@ -46,6 +46,7 @@ const SETTINGS_KEYS = [
   'terminalCustomThemes',
   'terminalSuggestions',
   'terminalStickyHeader',
+  'terminalPromptMarks',
   'terminalCopyOnSelect',
   'terminalMouseReporting',
   'terminalRightClick',

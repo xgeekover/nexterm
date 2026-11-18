@@ -336,6 +336,46 @@ only repeat what is on screen, and never appears over a full-screen program
 like vim or htop. Settings ▸ Terminal ▸ *Sticky Command Header* turns it off —
 it covers the top row, which is occasionally the row you scrolled up to read.
 
+**Prompt marks on the scrollbar.** The terminal's scrollbar is a map of the
+scrollback: a violet mark at every shell prompt and a translucent box for the
+part on screen, which shows while the pointer is over the terminal or it
+scrolls, and fades otherwise. The marks stay. Click a mark and that prompt
+scrolls to the top of the pane; a click anywhere else on the scrollbar, and
+dragging the box, work as before. `Ctrl+Shift+↑` / `Ctrl+Shift+↓` (`⌘⇧↑` /
+`⌘⇧↓` on macOS), or *Terminal: Go to Previous Prompt* / *Go to Next Prompt* in
+the palette, step through them; past the last prompt, next goes to the bottom.
+On a terminal's normal screen these keys belong to NexTerm, also where there
+are no marks (fish, ssh, WSL), so the shell does not get them; they can be
+given other keys in Settings ▸ Keyboard Shortcuts. A mark comes from the "a
+prompt is here" signal (OSC 133 D) the shell integration prints in front of
+every prompt, the first one included: **cmd**, **PowerShell** (Windows
+PowerShell and pwsh), **zsh**, **bash** and **Git Bash** all send it, so every
+prompt gets a mark, an empty Enter included. Which row of the prompt is marked
+depends on the shell. In cmd and PowerShell the signal is part of the prompt
+string, so the mark is on the row you type on, the second line of a two-line
+prompt. zsh and bash print the signal just before they draw the prompt: when
+the prompt text arrives after it, which a prompt that takes a moment to build
+(starship, powerlevel10k) makes likely, the mark is on the row the prompt
+starts on, the first line of a two-line prompt or the empty line above a
+prompt that begins with one; when both arrive together, it is the row you type
+on. A one-line prompt is marked on its row either way. A batch file run with
+`echo on` marks each line cmd prints its prompt for; cmd's `More?` gets none.
+A shell or program that sends no such signal — fish without its own OSC 133,
+sh, nushell, WSL, a shell on the far end of ssh — shows the box and no marks:
+the only other clue, the line where Enter was pressed, cannot tell a prompt
+from a REPL, a password prompt or an agent's input box. **Claude Code** and **OpenCode**:
+the prompt you started them from is marked and their own messages are not;
+OpenCode, like vim or less, draws on the alternate screen, where the map is
+hidden and the keys go to the program. Marks leave with their text — the
+oldest lines leaving a full scrollback, `clear` / `cls` / Ctrl+L, and
+*Clear Terminal*, after which the prompt you are at keeps its mark. At most
+500 per terminal. A tab never shown has no marks for what it printed before it
+first appeared. Settings ▸ Terminal ▸ *Prompt Marks on Scrollbar* turns the
+marks off without changing the terminal's width; a click on the scrollbar is
+then the scrollbar's own everywhere, and the keys work either way. In
+Windows High Contrast the marks are drawn in the Highlight colour and the box
+keeps an outline; with reduced motion the box does not fade.
+
 **Run something again.** `⌘⇧H` opens the command history: every command line
 this machine has run, newest first, with the directory it ran in. Typing
 narrows it by plain substring — a command line is not a filename — and `Enter`
@@ -922,7 +962,9 @@ what it printed last time, under a dim line:
 - **It reads like any output.** It rewraps when the pane is resized, ⌘F /
   `Ctrl+F` finds in it, and file names and URLs in it can be clicked
   (resolved from the terminal's folder). Links a program sent as OSC 8,
-  command marks and the sticky command line do not come back. Each restart
+  command marks, the sticky command line and the prompt marks on the
+  scrollbar do not come back; marks start again at the new shell's first
+  prompt, below the separator. Each restart
   adds its own separator; the oldest lines leave as the scrollback fills.
 - **Only the session's own terminals.** Opening a saved group, a layout
   template or a workspace, a new tab or a split starts empty.
@@ -1239,7 +1281,8 @@ and only until you type something else. Settings ▸ Terminal turns it off.
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
 scrollback, colour theme, command suggestions, copy on select, what a
-right-click does, and mouse reporting.
+right-click does, mouse reporting, and *Prompt Marks on Scrollbar* (the marks
+at each shell prompt on the terminal's scrollbar; on by default).
 
 **The colours.** NexTerm has one dark palette, ActionMacro's bluish greys with
 a violet accent: the side bars, the terminal and the title and status bars are
@@ -1293,6 +1336,8 @@ when there are any.
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
 | `⌘F` | Find in the active terminal's scrollback |
+| `⌘⇧↑` | Scroll the active terminal to the previous prompt (`Ctrl+Shift+↑` off macOS) |
+| `⌘⇧↓` | Scroll the active terminal to the next prompt, or the bottom past the last (`Ctrl+Shift+↓` off macOS) |
 | `⌘⇧H` | Command history |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / default text |
 | `⌘S` | Save the active editor file |

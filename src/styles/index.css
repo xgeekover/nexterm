@@ -25,12 +25,17 @@
      buttons and small controls are rounded-control.
    - A divider is a react-resizable-panels Separator, drawn by
      [data-separator] below.
-   - The terminal minimap: the scrollbar stays 10px wide; its thumb is
-     --vsc-scrollbar and --vsc-scrollbar-hover; prompt marks are
-     --vsc-accent (4.49:1 on the terminal); the part on screen is a
-     translucent --vsc-scrollbar box; in forced colours the marks are
-     Highlight, inside the existing forced-colours block; any motion stops
-     under both reduced-motion paths.
+   - The terminal minimap: the terminal's scrollbar is xterm's own (VS
+     Code's scrollable element, which the ::-webkit-scrollbar rules below
+     never reach), made 10px wide through `overviewRuler.width`
+     (terminalRegistry.js), with xterm's overview ruler under it. Its
+     slider — the translucent box for the part on screen — is
+     --vsc-scrollbar, and --vsc-scrollbar-hover while hovered or dragged,
+     handed to xterm in the terminal theme; it shows on hover and while
+     scrolling. Prompt marks are --vsc-accent (4.49:1 on the terminal); in
+     forced colours they are Highlight and the slider keeps a CanvasText
+     outline, inside the existing forced-colours block; the slider's fade
+     stops under both reduced-motion paths.
    - An editor pane among the terminals marks itself active as a terminal
      pane does: ring-1 ring-inset ring-vsc-accent.
    --------------------------------------------------------------------------- */
@@ -522,12 +527,26 @@ code, kbd, pre, .font-mono {
     outline: 2px solid Highlight !important;
     outline-offset: -2px;
   }
+  /* The terminal's scrollbar slider — the box for the part on screen —
+     is a translucent background this mode would repaint to nothing. It keeps
+     its colour and gets an outline in CanvasText. The prompt marks under it
+     are a canvas, recoloured to Highlight by terminalRegistry.js. */
+  .xterm .xterm-scrollable-element > .scrollbar > .slider {
+    forced-color-adjust: none;
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+  /* xterm's scrollbar fades in over 100ms and out over 800ms (xterm.css):
+     it shows and goes at once instead. */
+  .xterm .xterm-scrollable-element > .scrollbar {
+    transition-property: none !important;
   }
 }
 
@@ -539,4 +558,7 @@ code, kbd, pre, .font-mono {
 :root.reduce-motion *::after {
   animation-duration: 0.01ms !important;
   transition-duration: 0.01ms !important;
+}
+:root.reduce-motion .xterm .xterm-scrollable-element > .scrollbar {
+  transition-property: none !important;
 }

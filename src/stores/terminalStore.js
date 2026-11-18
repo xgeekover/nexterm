@@ -1690,6 +1690,21 @@ async function clearTerminalView(tabId) {
 }
 
 /**
+ * Scroll a tab's xterm to its previous or next prompt (`jumpToPrompt` in the
+ * registry, src/lib/promptMarks.js). False where there is none — no
+ * document, as in the Node-run tests, or no view yet.
+ */
+async function jumpToPromptView(tabId, direction) {
+  if (typeof document === 'undefined') return false;
+  try {
+    const { jumpToPrompt } = await import('../components/terminal/terminalRegistry.js');
+    return jumpToPrompt(tabId, direction);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * The kind of a tab's shell (`shellKindFor`): the shell it reported, else the
  * one it would have been given (`shellPathOf`), named as the platform names
  * it. Also the path, for naming it (`shellLabel`).
@@ -5837,6 +5852,16 @@ export const useTerminalStore = create((set, get, api) => {
     clearTerminal: async (tabId = null) => {
       const targetId = tabId || get().activeTabId;
       return targetId ? clearTerminalView(targetId) : false;
+    },
+
+    /**
+     * Terminal: Go to Previous / Next Prompt from the palette: the active
+     * terminal's prompt above the top of the view (`'previous'`) or below it
+     * (`'next'`), scrolled to the top. The keys go to the registry directly.
+     */
+    jumpToPrompt: async (direction, tabId = null) => {
+      const targetId = tabId || get().activeTabId;
+      return targetId ? jumpToPromptView(targetId, direction) : false;
     },
 
     /**

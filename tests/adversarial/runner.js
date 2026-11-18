@@ -163,6 +163,9 @@ import './agent_history_curation.test.js';
 // Live Claude Code titles from the terminal's title; its own teardown (AHT-99).
 import './agent_history_live_titles.test.js';
 import './agent_sessions_menus.test.js';
+// Prompt marks on the terminal's scrollbar: the tracker against xterm headless, then the real ruler in a browser.
+import './prompt_marks.test.js';
+import './prompt_marks_headless.test.js';
 
 async function run() {
   console.log('====================================================');

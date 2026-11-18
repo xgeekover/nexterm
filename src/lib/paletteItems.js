@@ -121,6 +121,23 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       title: 'Close Terminal',
       subtitle: 'Close the active terminal and end its shell',
     },
+    // The prompt marks on the scrollbar, one prompt at a time (F11).
+    {
+      type: 'command',
+      id: 'cmd-terminal-previous-prompt',
+      command: 'terminal_previous_prompt',
+      title: 'Terminal: Go to Previous Prompt',
+      subtitle: 'Scroll the active terminal to the prompt above the top of the view',
+      hint: hint('terminal-previous-prompt'),
+    },
+    {
+      type: 'command',
+      id: 'cmd-terminal-next-prompt',
+      command: 'terminal_next_prompt',
+      title: 'Terminal: Go to Next Prompt',
+      subtitle: 'Scroll the active terminal to the next prompt, or to the bottom past the last one',
+      hint: hint('terminal-next-prompt'),
+    },
     {
       type: 'command',
       id: 'cmd-go-to-unread-notification',

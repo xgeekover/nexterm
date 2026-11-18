@@ -60,6 +60,7 @@ import { createModifierTracker, installRevealLinks } from '../../lib/revealLinks
 import { shellKindFor } from '../../lib/dropPaths.js';
 import { shellPathOf } from '../../lib/terminalFileDrop.js';
 import { trackCommandMarks } from '../../lib/stickyCommand.js';
+import { listenForPrompts, trackPromptMarks } from '../../lib/promptMarks.js';
 import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
 import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
@@ -503,7 +504,32 @@ export function resolveTerminalTheme(themeId, customThemes = useSettingsStore.ge
  * window's gallery is previewing, else the chosen one.
  */
 export function shownTerminalTheme(state = useSettingsStore.getState()) {
-  return resolveTerminalTheme(shownTerminalThemeId(state), state.terminalCustomThemes);
+  return withScrollbarColours(resolveTerminalTheme(shownTerminalThemeId(state), state.terminalCustomThemes));
+}
+
+/**
+ * The scrollbar's colours on top of a terminal theme: xterm 6 draws its own
+ * scrollbar (VS Code's scrollable element), which the app's
+ * `::-webkit-scrollbar` rules never reach. The slider — the box for the part
+ * on screen — is --vsc-scrollbar, and --vsc-scrollbar-hover while hovered or
+ * dragged, as every other scrollbar of the app; translucent, so the prompt
+ * marks under it show through. The 1px line xterm draws down the ruler's
+ * left edge is the terminal's own background, so the track stays invisible.
+ * Read at every repaint, as the theme is. The literals are the tokens' own
+ * values, for a document without them.
+ */
+function withScrollbarColours(theme) {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+  const slider = v('--vsc-scrollbar', 'rgba(155, 163, 175, 0.28)');
+  const hover = v('--vsc-scrollbar-hover', 'rgba(155, 163, 175, 0.45)');
+  return {
+    ...theme,
+    scrollbarSliderBackground: slider,
+    scrollbarSliderHoverBackground: hover,
+    scrollbarSliderActiveBackground: hover,
+    overviewRulerBorder: theme?.background ?? v(APP_THEME_TOKENS.background, '#0E1014'),
+  };
 }
 
 export function readFontFamily() {
@@ -559,6 +585,7 @@ function ensureThemeObserverStarted() {
       if (theme) entry.term.options.theme = theme;
       entry.term.options.fontFamily = fontFamily;
     }
+    refreshPromptMarkColour();
   });
   observer.observe(rootEl, { attributes: true, attributeFilter: ['class'] });
 }
@@ -583,6 +610,7 @@ let themeRepaintQueued = false;
 function scheduleThemeRepaint() {
   if (typeof requestAnimationFrame !== 'function') {
     applyShownTerminalTheme();
+    refreshPromptMarkColour();
     return;
   }
   if (themeRepaintQueued) return;
@@ -590,6 +618,7 @@ function scheduleThemeRepaint() {
   requestAnimationFrame(() => {
     themeRepaintQueued = false;
     applyShownTerminalTheme();
+    refreshPromptMarkColour();
   });
 }
 
@@ -638,6 +667,11 @@ function ensureSettingsSubscriptionStarted() {
     const changed = LIVE_TERMINAL_SETTINGS_KEYS.some((key) => state[key] !== prevState[key]);
     if (changed) applyLiveTerminalSettings(state);
     if (THEME_SETTINGS_KEYS.some((key) => state[key] !== prevState[key])) scheduleThemeRepaint();
+    // Prompt Marks on Scrollbar: only the decorations come and go. The marks
+    // are kept, and the scrollbar stays 10px, so no terminal reflows.
+    if (state.terminalPromptMarks !== prevState.terminalPromptMarks) {
+      for (const entry of instances.values()) entry.promptMarks?.setVisible(promptMarksShown(state));
+    }
     // Restore Scrollback turned back on: what every terminal shows now is
     // saved, not only what they print from here on — turning it off deleted
     // every file (scrollbackSession.js).
@@ -1213,6 +1247,12 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     minimumContrastRatio: 4.5,
     allowProposedApi: true,
     theme: shownTerminalTheme(settingsState),
+    // xterm's own scrollbar, 10px wide like the app's other scrollbars
+    // (xterm's default is 14), with its overview ruler drawn under it: the
+    // prompt marks (`entry.promptMarks`). FitAddon takes the same width off
+    // the columns. The width stays when the marks are turned off, so the
+    // setting never changes the column count. See promptMarks.js.
+    overviewRuler: { width: SCROLLBAR_WIDTH },
     // `{}` off Windows: xterm's own "not set". See terminalCompat.js.
     windowsPty: windowsPtyFor(useSystemStore.getState()) ?? {},
     // A program's OSC 8 hyperlinks open as the terminal's other links do.
@@ -1319,6 +1359,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // terminalCompat.js.
   installPagerWheel(term);
   installScrollbackWheel(term);
+  // A press on a prompt mark on the scrollbar's track jumps to that prompt;
+  // see `installPromptMarkClicks`. On `term.element`, hence after `open`.
+  const promptMarkClicks = installPromptMarkClicks(term, () => instances.get(tabId)?.promptMarks);
 
   // ---- Korean inline IME (macOS only) — see src/lib/hangulInlineIme.js ----
   // WebKit composes Hangul by rewriting the textarea in place, which xterm
@@ -1373,6 +1416,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   ensureThemeObserverStarted();
   ensureSettingsSubscriptionStarted();
   ensureFocusSubscriptionStarted();
+  ensurePromptMarksListening();
+  ensureForcedColoursWatched();
 
   entry = {
     // Whose output `writeOutput` is writing, for what the store looks for in it.
@@ -1424,6 +1469,16 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // marks each command as it starts and asks what to show. Disposed with
     // the terminal. See stickyCommand.js.
     commandMarks: trackCommandMarks(term),
+    // Where each prompt is, on the scrollbar: marked on every OSC 133 D of
+    // its session by the one app-level listener (`ensurePromptMarksListening`),
+    // whether or not a pane shows this terminal. Disposed with it. See
+    // promptMarks.js.
+    promptMarks: trackPromptMarks(term, {
+      decorate: promptMarkDecorator(term),
+      visible: promptMarksShown(settingsState),
+      color: promptMarkColour(),
+    }),
+    promptMarkClicks,
   };
   const drawn = entry;
   entry.renderDisposable = term.onRender(() => {
@@ -1575,9 +1630,13 @@ function searchDecorations() {
   const active = v('--vsc-find-match', '#9e6a03');
   return {
     matchBackground: other,
-    matchOverviewRuler: other,
+    // The ruler under the scrollbar is the prompts' alone (the human's
+    // choice): the matches go on it fully transparent. Not left out — the
+    // addon would hand the canvas an undefined colour, which paints in the
+    // one drawn before it.
+    matchOverviewRuler: 'rgba(0, 0, 0, 0)',
     activeMatchBackground: active,
-    activeMatchColorOverviewRuler: active,
+    activeMatchColorOverviewRuler: 'rgba(0, 0, 0, 0)',
   };
 }
 
@@ -1627,6 +1686,178 @@ export function writeNotice(tabId, message) {
     entry.term.write(`\r\n\x1b[33m[NexTerm] ${message}\x1b[0m\r\n`);
   });
   return true;
+}
+
+// ---- Prompt marks on the scrollbar — src/lib/promptMarks.js -----------------
+
+/** The terminal's scrollbar, and the overview ruler under it, in CSS px (index.css: "The terminal minimap"). */
+export const SCROLLBAR_WIDTH = 10;
+
+/** Settings ▸ Terminal ▸ Prompt Marks on Scrollbar; on unless turned off. */
+function promptMarksShown(state = useSettingsStore.getState()) {
+  return state.terminalPromptMarks !== false;
+}
+
+function forcedColours() {
+  try {
+    return typeof matchMedia === 'function' && matchMedia('(forced-colors: active)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A system colour as the page resolves it now. The browser recolours the DOM
+ * in forced colours (Windows High Contrast), never a canvas: the ruler is
+ * handed the colour itself, read off a probe element styled with it. The
+ * probe opts out of forced colours, so the keyword it was given is what
+ * resolves, not the forced text colour put in its place.
+ */
+function systemColour(keyword) {
+  const body = typeof document !== 'undefined' ? document.body : null;
+  if (!body?.appendChild) return keyword;
+  const probe = document.createElement('span');
+  probe.style.forcedColorAdjust = 'none';
+  probe.style.color = keyword;
+  probe.style.display = 'none';
+  body.appendChild(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove?.();
+  return resolved || keyword;
+}
+
+/**
+ * What a prompt mark is drawn in: --vsc-accent, or Highlight in forced
+ * colours. The literal is the token's own value, for a document without it.
+ */
+function promptMarkColour() {
+  if (forcedColours()) return systemColour('Highlight');
+  const value = getComputedStyle(document.documentElement).getPropertyValue('--vsc-accent').trim();
+  return value || '#8B5CF6';
+}
+
+/** Every terminal's marks in the colour of now: a theme repaint, a light/dark flip, forced colours on or off. */
+function refreshPromptMarkColour() {
+  if (instances.size === 0) return;
+  const colour = promptMarkColour();
+  for (const entry of instances.values()) entry.promptMarks?.setColor(colour);
+}
+
+let forcedColoursWatched = false;
+function ensureForcedColoursWatched() {
+  if (forcedColoursWatched) return;
+  forcedColoursWatched = true;
+  try {
+    matchMedia?.('(forced-colors: active)')?.addEventListener?.('change', refreshPromptMarkColour);
+  } catch {
+    // No media queries here: the marks keep the accent.
+  }
+}
+
+/**
+ * A mark on the ruler: a full-width bar, 2 device pixels tall (xterm's
+ * 'full' lane). The decoration's element in the text — one empty cell at
+ * column 0 of the prompt row — takes no pointer events, so a selection or a
+ * link click starting there still reaches the terminal.
+ */
+function promptMarkDecorator(term) {
+  return (marker, color) => {
+    const decoration = term.registerDecoration?.({ marker, overviewRulerOptions: { color, position: 'full' } });
+    decoration?.onRender?.((element) => {
+      element.style.pointerEvents = 'none';
+    });
+    return decoration ?? null;
+  };
+}
+
+/**
+ * A press on the scrollbar's track within 4px of a drawn prompt mark scrolls
+ * that prompt to the top of the view, and nothing else happens: xterm's own
+ * jump to the press is not run as well. Everywhere else the scrollbar is
+ * xterm's: a press on the track away from the marks centres the slider
+ * there, a press on the slider drags it, even over a mark, and the wheel is
+ * untouched. The click is in buffer lines, as the ruler draws them
+ * (`hitPromptMark`). Nothing on the alternate screen, where xterm hides the
+ * ruler. A capture listener on `term.element`, ahead of the scrollbar's own;
+ * the track is VS Code's DOM inside xterm (`.xterm-scrollable-element >
+ * .scrollbar.vertical`), which the browser suite pins. Returns its remover.
+ */
+function installPromptMarkClicks(term, marksOf) {
+  const root = term.element;
+  if (!root?.addEventListener) return () => {};
+  const onPointerDown = (event) => {
+    if (event.button !== 0) return;
+    const track = event.target;
+    if (!track?.matches?.('.xterm-scrollable-element > .scrollbar.vertical')) return;
+    const buffer = term.buffer.active;
+    const marks = marksOf();
+    if (!marks || buffer.type === 'alternate') return;
+    const ruler = root.querySelector('.xterm-decoration-overview-ruler');
+    const area = (ruler ?? track).getBoundingClientRect();
+    const slider = track.querySelector('.slider')?.getBoundingClientRect();
+    const line = marks.hit({
+      offsetY: event.clientY - area.top,
+      rulerHeight: area.height,
+      bufferLength: buffer.length,
+      sliderTop: slider ? slider.top - area.top : 0,
+      sliderHeight: slider ? slider.height : 0,
+    });
+    if (line === null) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    term.scrollToLine(line);
+  };
+  root.addEventListener('pointerdown', onPointerDown, true);
+  return () => root.removeEventListener('pointerdown', onPointerDown, true);
+}
+
+/**
+ * The one listener for prompts, for every terminal: each `pty-command-done`
+ * marks every live terminal of that session once xterm has read what the
+ * shell printed before it (`afterOutputSoFar`: held output first, after a
+ * restore still being written). Started when this module loads — the app's
+ * bootstrap — and again, idempotently, as each terminal is made. Kept here,
+ * not in TerminalView, so a terminal alive in the registry but in no pane
+ * still gets its prompts.
+ */
+let promptListening = null;
+function ensurePromptMarksListening() {
+  if (promptListening) return;
+  promptListening = listenForPrompts({
+    listen,
+    entries: () => instances.values(),
+    mark: (entry) => afterOutputSoFar(entry, (e) => e.promptMarks?.mark()),
+  }).catch((err) => {
+    promptListening = null;
+    console.warn('[Terminal] could not listen for prompts:', err);
+  });
+}
+ensurePromptMarksListening();
+
+/**
+ * Terminal: Go to Previous Prompt / Next Prompt (keybindings.js) on `tabId`'s
+ * terminal: the newest prompt above the top row, or the first one below it
+ * — past the newest, the bottom — scrolled to the top, at once. False, and
+ * nothing done, where there is nowhere to go, no terminal, or the alternate
+ * screen is up. Works whether or not the marks are shown.
+ */
+export function jumpToPrompt(tabId, direction) {
+  const entry = instances.get(tabId);
+  if (!entry || entry.disposed || !entry.promptMarks) return false;
+  const buffer = entry.term.buffer.active;
+  if (buffer.type === 'alternate') return false;
+  const line = direction === 'previous'
+    ? entry.promptMarks.previous(buffer.viewportY)
+    : entry.promptMarks.next(buffer.viewportY, buffer.baseY);
+  if (line === null) return false;
+  entry.term.scrollToLine(line);
+  return true;
+}
+
+/** Whether `tabId`'s terminal shows its normal buffer — not a full-screen program's alternate one. */
+export function terminalShowsNormalBuffer(tabId) {
+  const entry = instances.get(tabId);
+  return Boolean(entry && !entry.disposed && entry.term.buffer.active.type === 'normal');
 }
 
 // Let the store reach the screen without importing this module (it runs in
@@ -1710,7 +1941,11 @@ export function clearTerminal(tabId) {
   // (`afterOutputSoFar`). And the cleared terminal is saved at once (stage
   // 6, `noteCleared`).
   return afterOutputSoFar(instances.get(tabId), (entry) => {
+    // The clear takes every prompt mark; the prompt the cursor is on keeps
+    // one, on its new row, when it had one.
+    const promptMarked = entry.promptMarks?.cursorOnNewestMark() ?? false;
     entry.term.clear();
+    entry.promptMarks?.afterClear(promptMarked);
     noteCleared(entry);
   });
 }
@@ -1789,6 +2024,8 @@ export function disposeTerminal(tabId) {
   entry.revealLinks?.dispose();
   entry.searchAddon?.dispose();
   entry.commandMarks.dispose();
+  entry.promptMarkClicks?.();
+  entry.promptMarks.dispose();
   // Its file is the store's to delete, with the tab (`forgetScrollback`).
   entry.scrollbackWatch?.dispose();
   entry.term.dispose();

@@ -42,6 +42,14 @@ import { chordFromEvent, chordMatches, displayChord, parseChord, stringifyChord 
  * - `windowsOnly`  in force on Windows alone — off it, never run and never
  *                  reported as taking a chord (`findConflicts`).
  */
+/**
+ * Whether the prompt commands take their key: a terminal has focus and shows
+ * its normal buffer (`ctx.terminalShowsNormalBuffer`, the registry's).
+ */
+function promptKeysClaimed(ctx) {
+  return Boolean(ctx?.isInTerminal) && Boolean(ctx?.terminalShowsNormalBuffer?.());
+}
+
 export const COMMANDS = {
   'quick-open': {
     title: 'Go to File…',
@@ -215,6 +223,28 @@ export const COMMANDS = {
   'clear-terminal': {
     title: 'Clear Terminal',
     run: (ctx) => ctx.clearTerminal?.(),
+  },
+  // The prompt marks on the scrollbar, from the keyboard (promptMarks.js):
+  // the newest prompt above the top row, or the first one below it, scrolled
+  // to the top. Claimed over a focused terminal, since that is the only place
+  // they mean anything, and only while it shows its normal buffer: in vim,
+  // less or OpenCode the key is the program's. Anywhere else the key is let
+  // through too — ⌘⇧↑ selects to the top of a text field on macOS. Matched
+  // all the same, so a chord given to another command is still reported as
+  // taken (`findConflicts`). Palette commands; menu.rs has no entry for them.
+  'terminal-previous-prompt': {
+    title: 'Terminal: Go to Previous Prompt',
+    menuId: null,
+    overTerminal: true,
+    passThrough: (ctx) => !promptKeysClaimed(ctx),
+    run: (ctx) => ctx.jumpToPrompt?.('previous'),
+  },
+  'terminal-next-prompt': {
+    title: 'Terminal: Go to Next Prompt',
+    menuId: null,
+    overTerminal: true,
+    passThrough: (ctx) => !promptKeysClaimed(ctx),
+    run: (ctx) => ctx.jumpToPrompt?.('next'),
   },
   'search-in-files': {
     title: 'Search in Files',
@@ -400,6 +430,9 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'toggle-secondary', key: 'mod+alt+b' },
   { command: 'toggle-sidebar', key: 'mod+b' },
   { command: 'clear-terminal', key: 'mod+l' },
+  // Ctrl+Shift+Up/Down, ⌘⇧↑/↓ on macOS (the human's choice, 2026-11-18).
+  { command: 'terminal-previous-prompt', key: 'mod+shift+up' },
+  { command: 'terminal-next-prompt', key: 'mod+shift+down' },
   { command: 'search-in-files', key: 'mod+shift+f' },
   { command: 'command-history', key: 'mod+shift+h' },
   // U for unread. Mark All Notifications Read has no chord: it is one click
@@ -751,6 +784,9 @@ export function dispatchKeydownCapture(e, ctx) {
 export function dispatchKeydownOverTerminal(e, ctx) {
   const binding = findBinding(e, ctx);
   if (!binding?.spec?.overTerminal) return null;
+  // Matched, but the terminal's program keeps the key (the prompt commands
+  // on the alternate screen): neither swallowed nor stopped.
+  if (binding.spec.passThrough?.(ctx, binding)) return `pass:${binding.command}`;
   if (binding.spec.preventDefault !== false) e.preventDefault();
   // The point of running in capture: xterm must not also see this and turn it
   // into a control byte.
