@@ -269,7 +269,7 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
                   'group relative flex items-center gap-2 h-tab px-3 text-ui border-r border-vsc-border shrink-0 whitespace-nowrap',
                   'cursor-grab active:cursor-grabbing touch-none transition-colors',
                   isActive
-                    ? 'bg-vsc-tab-active text-vsc-tab-active-fg shadow-[inset_0_1px_0_0_var(--vsc-focus)]'
+                    ? 'bg-vsc-tab-active text-vsc-tab-active-fg shadow-[inset_0_1px_0_0_var(--vsc-accent)]'
                     : 'text-vsc-tab-inactive-fg hover:text-vsc-tab-active-fg',
                   isBeingDragged && 'opacity-40'
                 )}

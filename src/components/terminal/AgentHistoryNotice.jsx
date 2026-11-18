@@ -47,7 +47,7 @@ export function AgentHistoryNotice() {
       role={informational ? 'status' : 'alert'}
       data-agent-history-notice={notice.kind}
       className={
-        'fixed bottom-statusbar mb-2 z-40 w-[400px] max-w-[calc(100vw-16px)] flex items-start gap-2 px-3 py-2 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-ui text-vsc-fg ' +
+        'fixed bottom-statusbar mb-2 z-40 w-[400px] max-w-[calc(100vw-16px)] flex items-start gap-2 px-3 py-2 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-ui text-vsc-fg ' +
         (besideOpenFailure ? 'right-[416px]' : 'right-2')
       }
     >

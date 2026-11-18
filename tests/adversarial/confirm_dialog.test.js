@@ -1023,7 +1023,8 @@ describe('ConfirmDialog: as drawn', () => {
     const save = drawnButtons(renderToString(h(ui.ConfirmDialog, saveBeforeClose([]))));
     assert.deepEqual(save.map(([label]) => label), ['Close', "Don&#x27;t Save", 'Cancel', 'Save']);
     assert.ok(save[1][1].includes('text-vsc-error'), "altDanger: Don't Save in red");
-    assert.ok(save[3][1].includes('bg-vsc-accent'), 'Save in the accent colour');
+    // The solid violet, not --vsc-accent: white on that is 4.23:1, under 4.5.
+    assert.ok(save[3][1].includes('bg-vsc-accent-solid'), 'Save in the accent colour');
 
     const plain = drawnButtons(renderToString(h(ui.ConfirmDialog, { open: true, title: 'T', message: 'M' })));
     assert.deepEqual(plain.map(([label]) => label), ['Close', 'Cancel', 'OK'], 'the default labels');

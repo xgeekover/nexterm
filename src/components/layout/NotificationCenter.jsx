@@ -222,7 +222,7 @@ export function NotificationCenter() {
             data-notification-count={unread}
             className={cn(
               'min-w-[14px] px-1 rounded-full text-[10px] leading-[14px] text-center',
-              hasUnreadFailure(notifications) ? 'bg-vsc-error text-vsc-fg-bright' : 'bg-vsc-badge text-vsc-badge-fg'
+              hasUnreadFailure(notifications) ? 'bg-vsc-error text-vsc-fg-bright' : 'bg-vsc-badge-accent text-vsc-accent-fg'
             )}
           >
             {unread}
@@ -290,7 +290,7 @@ export function NotificationPopover({
       data-bell-list=""
       aria-label={summary.dialog}
       style={anchor ?? undefined}
-      className="fixed z-50 w-[320px] max-h-[320px] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] overflow-hidden"
+      className="fixed z-50 w-[320px] max-h-[320px] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
     >
       <div className="h-[28px] shrink-0 px-2 flex items-center gap-3 border-b border-vsc-border">
         <span className="flex-1 min-w-0 truncate text-ui-sm text-vsc-muted">{summary.heading}</span>

@@ -459,7 +459,7 @@ export function TerminalsPanel() {
       // (an agent session's resume) is not for it.
       onDoubleClick={(e) => e.stopPropagation()}
       onBlur={commitDraft}
-      className="flex-1 min-w-0 h-[18px] px-1 bg-vsc-input border border-vsc-focus rounded-sm text-ui text-vsc-fg outline-none"
+      className="ui-field flex-1 min-w-0 h-[18px] px-1 text-ui text-vsc-fg"
     />
   );
 

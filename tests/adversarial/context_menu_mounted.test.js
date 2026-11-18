@@ -633,8 +633,14 @@ function layOut(p, { natural, bar, border = 1, overflows = true, engine }) {
   return reads;
 }
 
-/** The menu's class string and inline style keys as v0.27.0 drew them. */
-const V027_CLASS = 'z-[70] min-w-[220px] py-1 rounded-[6px] bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none';
+/**
+ * The menu's class string and inline style keys as v0.27.0 drew them, but for
+ * the UI refresh's corners: the menu is `p-1 rounded-popover` (was
+ * `py-1 rounded-[6px]`) so its rows sit inset with rounded corners of their
+ * own. The vertical padding is the same 4px, so no row moves; the inline
+ * style, which is what these cases are about, is unchanged.
+ */
+const V027_CLASS = 'z-[70] min-w-[220px] p-1 rounded-popover bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none';
 const V027_STYLE = ['position', 'left', 'top', 'visibility', 'maxHeight', 'overflowX', 'overflowY', 'overscrollBehavior'];
 
 /** As v0.27.0 drew it: CXM-01's style, the same class string and no other inline style. */

@@ -1292,6 +1292,62 @@ check is for.
 Note in `%TEMP%\nexterm-qa\report.md` each command's output and exit code
 (`echo %ERRORLEVEL%`), and anything refused that should not have been.
 
+### V47 — the UI refresh: violet, bluish greys, one focus rule, panels that fit
+
+Only the render suite read the stylesheet and the class strings; nothing was
+looked at in a real window. Check on Windows (WebView2, at 100%, 125% and 150%
+scaling) and on macOS (WKWebView), side by side with v0.28.1 where it says so.
+
+- **H1 fields.** Click into each field: the palette (from *Search NexTerm*),
+  the terminal find bar, the Explorer filter, Search, the Settings fields,
+  select and search, the project-command and startup-command fields, the key
+  capture in Keyboard Shortcuts, and every rename (terminal tab, group,
+  TERMINALS row, Explorer). Only the field's own 1px border turns violet: no
+  inner rectangle, no outline outside it, no text moving by a pixel.
+- **H2 the keyboard ring.** A mouse click on a button, tab or chip shows no
+  ring. Tab and the arrow keys through the title bar, the dialogs, Settings
+  and the theme cards show a light-violet 2px ring on each. On macOS try with
+  System Settings ▸ Keyboard ▸ Keyboard navigation off and on, and write down
+  which controls Tab reaches in each.
+- **H3 active and attention.** With three panes, the active one has a violet
+  line; ring a bell in it and the orange ring shows inside the violet line,
+  and the two read as two things.
+- **H4 no stray blue.** Primary buttons, the status bar's folder item,
+  progress bars, activity dots, drop overlays, a separator under the pointer
+  and while dragged, and the marks of the activity bar, the region tabs and
+  the editor tabs are violet. Blue is left only on info icons.
+- **H5 selection.** A selected row is a readable violet tint in the palette,
+  the context menu, the ☰ menu, the Explorer, TERMINALS, terminal text,
+  editor text and selected text in a field.
+- **H6 High Contrast** (Night sky and Desert). A focused field shows a
+  Highlight outline; the active pane's line and the attention ring differ; the
+  keyboard ring is visible.
+- **H7 reduced motion** (the OS setting on macOS and Windows, and NexTerm's
+  own). Colour changes on fields, buttons and separators are instant.
+- **H8 at 960×640** with both side bars open and a long folder name: the pill
+  and the folder name do not overlap; ☰ and the window buttons work; the empty
+  title bar still drags the window; the bell stays with a long terminal
+  folder; the bottom panel at its smallest shows three or more terminal rows;
+  each separator is easy to grab, shows the resize cursor a few pixels either
+  side, and is a violet line while dragged; 1px lines are crisp, not doubled,
+  at 125% and 150%.
+- **H9 native controls.** The Settings select and checkboxes are violet and
+  readable on Windows.
+- **H10 corners.** Menus, the palette, dialogs and notices have 8px corners
+  and nothing is cut off at them; menu rows are inset with corners of their
+  own; secondary buttons have an edge.
+- **H11 the gallery.** The chosen card has a violet border; the NexTerm Dark
+  card shows the new colours; the other 8 cards look as in v0.28.1.
+- **H12 side by side with v0.28.1.** The terminal (background, how bright the
+  text is, `ls --color`, `git diff`, cmd.exe, the OpenCode and Claude Code
+  screens, dim and bright-black text, blue text) and the editor (syntax
+  colours, selection, line numbers, indent guides, the find widget, Monaco's
+  context menu). Write down anything that reads worse, looks purple on this
+  monitor, or is too bright.
+- **H13 an imported theme** imported before the change looks as before, but
+  for the colours it left out: one Windows Terminal scheme and one Ghostty
+  file.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

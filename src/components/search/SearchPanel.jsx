@@ -32,7 +32,7 @@ function Toggle({ title, icon: Icon, on, onToggle }) {
       aria-pressed={on}
       onClick={onToggle}
       className={cn(
-        'w-[20px] h-[20px] flex items-center justify-center rounded-[3px] shrink-0',
+        'w-[20px] h-[20px] flex items-center justify-center rounded-control shrink-0',
         on ? 'bg-vsc-item-active text-vsc-fg-bright' : 'text-vsc-muted hover:bg-vsc-item-hover'
       )}
     >
@@ -115,7 +115,7 @@ export function SearchPanel() {
   return (
     <div className="h-full w-full flex flex-col bg-vsc-sidebar overflow-hidden select-none">
       <div className="px-2 pt-2 pb-1 shrink-0">
-        <div className="flex items-center gap-1 px-1 bg-vsc-input border border-vsc-input-border rounded-[2px] focus-within:border-vsc-focus">
+        <div className="ui-field flex items-center gap-1 px-1">
           <input
             ref={inputRef}
             type="text"

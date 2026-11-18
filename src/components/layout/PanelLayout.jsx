@@ -166,7 +166,7 @@ function RegionHeader({
               className={cn(
                 'h-full flex items-center px-3 text-ui-sm font-medium tracking-wide cursor-grab select-none border-b -mb-px whitespace-nowrap',
                 isActive
-                  ? 'text-vsc-fg border-vsc-focus'
+                  ? 'text-vsc-fg border-vsc-accent'
                   : 'text-vsc-muted border-transparent hover:text-vsc-fg'
               )}
             >
@@ -338,7 +338,7 @@ function RegionBody({
           className={cn(
             'absolute inset-0 z-10 pointer-events-none outline outline-1 animate-overlay-in drop-zone-fade',
             isOver
-              ? 'outline-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
+              ? 'outline-vsc-accent bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
               : 'outline-vsc-border'
           )}
           aria-hidden="true"
@@ -360,7 +360,7 @@ function EdgeDropZone({ region, edgeClassName, isOver, onDragEnter, onDragOver, 
       className={cn(
         'absolute z-20 outline outline-1 animate-overlay-in drop-zone-fade',
         isOver
-          ? 'outline-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
+          ? 'outline-vsc-accent bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
           : 'outline-vsc-border bg-[color-mix(in_srgb,var(--vsc-fg)_4%,transparent)]',
         edgeClassName
       )}
@@ -594,7 +594,7 @@ export function PanelLayout() {
               {editorPresence.mounted && (
                 <Panel
                   id="editor-group"
-                  minSize="20"
+                  minSize={112}
                   className={cn('h-full overflow-hidden bg-vsc-editor', presenceClass(editorPresence))}
                 >
                   <React.Suspense fallback={null}>
@@ -609,7 +609,7 @@ export function PanelLayout() {
                 <Panel
                   id="bottom-panel"
                   defaultSize="40"
-                  minSize="15"
+                  minSize={128}
                   className={cn(
                     'h-full overflow-hidden bg-vsc-panel flex flex-col',
                     presenceClass(bottomPresence)

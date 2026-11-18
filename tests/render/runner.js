@@ -24,7 +24,7 @@
  * right depth: effects are where the real backend would be needed, and that
  * is what driving the app is for (see TEST_INFRA.md).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { register } from 'node:module';
 
 // `import.meta.url` straight through, never via `.pathname`. On Windows that
@@ -2009,12 +2009,12 @@ const paneBodyTag = (html, paneId) => new RegExp(`<div\\b[^>]*\\sdata-pane-body=
     const three = renderArranged();
     expectThat(JSON.stringify(activeIn(three)) === '["pane-b"]', `the active line is on ${JSON.stringify(activeIn(three))}, not pane-b alone`);
     const line = /<div\b[^>]*\sdata-active-pane=""[^>]*>/.exec(three)[0];
-    expectThat(/\binset-0\b/.test(line) && /\bring-1\b/.test(line) && /\bring-vsc-focus\b/.test(line), `not a 1px focus line on the edge: ${line}`);
+    expectThat(/\binset-0\b/.test(line) && /\bring-1\b/.test(line) && /\bring-vsc-accent\b/.test(line), `not a 1px accent line on the edge: ${line}`);
     expectThat(/pointer-events-none/.test(line) && /aria-hidden="true"/.test(line), `the line is in the way: ${line}`);
     // Both on one pane: the ring one pixel in, so the two read as two things.
     expectThat(/data-attention-ring="unread"/.test(paneBody(three, 'pane-b') ?? ''), 'setup: pane-b does not ring');
     // Painted under the strip and the terminal, a ring on the pane's own box never showed.
-    expectThat(!/<div\b[^>]*class="[^"]*ring-vsc-focus[^"]*"[^>]*>\s*<div\b[^>]*data-tab-strip/.test(three), 'the pane box still carries the ring the strip hid');
+    expectThat(!/<div\b[^>]*class="[^"]*ring-vsc-accent[^"]*"[^>]*>\s*<div\b[^>]*data-tab-strip/.test(three), 'the pane box still carries the ring the strip hid');
     reset();
     expectThat(activeIn(renderArranged()).length === 0, 'a lone pane is marked active');
     arrangeThreePanes({ zoomedPaneId: 'pane-b' });
@@ -3408,7 +3408,8 @@ const pressedCards = (html) =>
   attrOrder(html, 'data-theme-card').filter((id) => /<button\b[^>]*\saria-checked="true"/.test(themeCard(html, id) ?? ''));
 /** The opening tag of a card's own button (the radio). */
 const cardRadio = (html, id) => /<button\b[^>]*>/.exec(themeCard(html, id) ?? '')?.[0] ?? '';
-const swatchesIn = (markup) => [...(markup ?? '').matchAll(/<span class="block h-\[10px\] rounded-\[2px\]" style="background:([^"]+)"/g)].map((m) => m[1]);
+// rounded-sm: the 2px of the old rounded-[2px], in Tailwind's own scale (RN-226).
+const swatchesIn = (markup) => [...(markup ?? '').matchAll(/<span class="block h-\[10px\] rounded-sm" style="background:([^"]+)"/g)].map((m) => m[1]);
 const mineTheme = { id: 'custom:mine', label: 'Mine', theme: { background: '#0a0b0c', red: '#ff0000' } };
 
 scenario(
@@ -4880,6 +4881,393 @@ check('RN-221', "a change of Claude Code's state redraws its own line, never the
   expectThat(own.test(line), 'the second line does not subscribe to its own terminal\'s entry');
   const reads = (line.match(/\bagentActivity\b/g) || []).length;
   expectThat(reads === 1, `the second line reads the activity map ${reads} times, not once for its own entry`);
+});
+
+// ---- The UI refresh: palette, focus, simple look, responsive panels ------------
+//
+// What the stylesheet and the class strings must say, read from the source:
+// CSS is not drawn by a server render, and focus, hover and the separators'
+// states only exist in a browser. The human checks what these cannot
+// (WebView2 and WKWebView, forced colours, scaling).
+
+const readSource = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8');
+/** The :root value of `--vsc-<name>` as written, or null. */
+const rootToken = (css, name) => new RegExp(`--vsc-${name}:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? null;
+/** Every .js/.jsx/.css file under a source directory, as [path, text]. */
+function sourcesUnder(rel) {
+  const out = [];
+  for (const entry of readdirSync(new URL(`../../${rel}/`, import.meta.url), { withFileTypes: true })) {
+    const child = `${rel}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...sourcesUnder(child));
+    else if (/\.(jsx?|css)$/.test(entry.name)) out.push([child, readSource(child)]);
+  }
+  return out;
+}
+
+check('RN-222', 'the palette: ActionMacro violet on bluish greys, every text and UI-part pair at WCAG contrast', () => {
+  const css = readSource('src/styles/index.css');
+  const exact = {
+    accent: '#8B5CF6', 'accent-hover': '#6D28D9', 'accent-solid': '#7C3AED', 'accent-pressed': '#5B21B6',
+    'accent-text': '#C4B5FD', focus: '#8B5CF6', 'focus-ring': '#C4B5FD', link: '#A78BFA', 'badge-accent': '#7C3AED',
+    selection: '#3B2C5B',
+    'titlebar-bg': '#0E1014', 'activitybar-bg': '#0E1014', 'sidebar-bg': '#0E1014', 'panel-bg': '#0E1014',
+    'terminal-bg': '#0E1014', 'statusbar-bg': '#0E1014', 'tab-inactive-bg': '#0E1014', 'attention-fg': '#0E1014',
+    'editor-bg': '#15171C', 'tab-active-bg': '#15171C',
+    'widget-bg': '#1B1E25', 'quickinput-bg': '#1B1E25', 'menu-bg': '#1B1E25',
+    'input-bg': '#232731', 'button-secondary': '#232731', hover: '#232731',
+    border: '#2A2F3A',
+    'widget-border': '#3A4150', 'input-border': '#3A4150', 'indent-guide': '#3A4150', 'badge-bg': '#3A4150',
+    'input-border-hover': '#4F586B',
+    fg: '#E7E9EE', 'activitybar-fg': '#E7E9EE', 'line-number-active': '#E7E9EE', 'badge-fg': '#E7E9EE',
+    muted: '#9BA3AF', 'tab-inactive-fg': '#9BA3AF', 'activitybar-muted': '#9BA3AF',
+    'input-placeholder': '#8B93A0', 'inactive-selection': '#2B303C',
+    'line-number': '#6B7280', 'indent-guide-active': '#6B7280',
+    'item-hover': 'rgba(155, 163, 175, 0.18)', 'item-active': 'rgba(155, 163, 175, 0.30)',
+    scrollbar: 'rgba(155, 163, 175, 0.28)', 'scrollbar-hover': 'rgba(155, 163, 175, 0.45)',
+  };
+  for (const [name, value] of Object.entries(exact)) {
+    expectThat((rootToken(css, name) ?? '').toLowerCase() === value.toLowerCase(), `--vsc-${name} is ${rootToken(css, name)}, not ${value}`);
+  }
+  // No colour of the old palette is left, comments included.
+  const old = /#(0078d4|026ec1|04395e|181818|1f1f1f|202020|222222|313131|3c3c3c|2b2b2b|cccccc|9d9d9d|989898|868686|d7d7d7|2a2d2e|37373d|6e7681|404040|707070|282828|aeafad|616161|f8f8f8)\b/i;
+  const left = [...sourcesUnder('src/styles'), ...sourcesUnder('src/components'), ['src/lib/monaco.js', readSource('src/lib/monaco.js')]]
+    .filter(([, text]) => old.test(text)).map(([file, text]) => `${file}: ${old.exec(text)[0]}`);
+  expectThat(left.length === 0, `colours of the old palette are left: ${left.join(', ')}`);
+
+  const hex = (name) => {
+    const value = rootToken(css, name);
+    expectThat(/^#[0-9a-fA-F]{6}$/.test(value ?? ''), `--vsc-${name} is not #RRGGBB (the contrast maths and xterm parse it): ${value}`);
+    return value;
+  };
+  const surfaces = ['sidebar-bg', 'editor-bg', 'widget-bg', 'input-bg', 'inactive-selection'];
+  const needs = (fgName, bgNames, min) => {
+    for (const bgName of bgNames) {
+      const ratio = contrast(hex(fgName), hex(bgName));
+      expectThat(ratio >= min, `--vsc-${fgName} on --vsc-${bgName} is ${ratio.toFixed(2)}:1, under ${min}`);
+    }
+  };
+  for (const text of ['fg', 'muted', 'tab-inactive-fg', 'activitybar-muted']) needs(text, [...surfaces, 'selection'], 4.5);
+  needs('input-placeholder', ['input-bg', 'widget-bg'], 4.5);
+  needs('accent', surfaces, 3);
+  needs('focus', ['input-bg', 'widget-bg', 'editor-bg', 'sidebar-bg'], 3);
+  needs('focus-ring', [...surfaces, 'selection', 'accent-solid'], 3);
+  needs('accent-text', surfaces, 4.5);
+  needs('link', [...surfaces, 'selection'], 4.5);
+  needs('accent-fg', ['accent-solid', 'accent-hover', 'accent-pressed'], 4.5);
+  needs('fg', ['selection'], 4.5);
+  needs('selection-fg', ['selection'], 4.5);
+  needs('attention-fg', ['attention'], 4.5);
+  needs('line-number', ['editor-bg'], 3);
+  // Violet reads as neither "a terminal wants you" nor a warning nor a failure.
+  const apart = (a, b) => Math.min(Math.abs(hue(a) - hue(b)), 360 - Math.abs(hue(a) - hue(b)));
+  for (const other of ['attention', 'warn', 'error']) {
+    expectThat(apart(hex('accent'), hex(other)) >= 60, `the accent is ${apart(hex('accent'), hex(other)).toFixed(0)}\u{00b0} from --vsc-${other}`);
+  }
+  // No text sits on the plain accent: white on it is under 4.5:1.
+  const plainFill = sourcesUnder('src/components').filter(([, text]) => /\bbg-vsc-accent\b(?![-/])[^'"`\n]*\btext-vsc-accent-fg\b|\btext-vsc-accent-fg\b[^'"`\n]*\bbg-vsc-accent\b(?![-/])/.test(text));
+  expectThat(plainFill.length === 0, `text on the plain accent (use bg-vsc-accent-solid): ${plainFill.map(([file]) => file).join(', ')}`);
+});
+
+check('RN-229', "Monaco's theme is a copy of the stylesheet's tokens, key by key", () => {
+  const css = readSource('src/styles/index.css');
+  const monaco = readSource('src/lib/monaco.js');
+  const key = (name) => new RegExp(`'${name.replace(/\./g, '\\.')}':\\s*'(#[0-9a-fA-F]{6,8})'`).exec(monaco)?.[1] ?? null;
+  const mirrors = {
+    'editor.background': 'editor-bg',
+    'editorGutter.background': 'editor-bg',
+    'editor.foreground': 'fg',
+    'editorCursor.foreground': 'fg',
+    'editorLineNumber.foreground': 'line-number',
+    'editorLineNumber.activeForeground': 'line-number-active',
+    'editorIndentGuide.background1': 'indent-guide',
+    'editorIndentGuide.activeBackground1': 'indent-guide-active',
+    'editorWidget.background': 'widget-bg',
+    'editorWidget.border': 'widget-border',
+    'input.background': 'input-bg',
+    'input.border': 'input-border',
+    'inputOption.activeBorder': 'accent',
+    'list.hoverBackground': 'hover',
+    'list.activeSelectionBackground': 'selection',
+    'menu.background': 'menu-bg',
+    'menu.foreground': 'fg',
+    'menu.selectionBackground': 'selection',
+    'menu.border': 'widget-border',
+    focusBorder: 'focus',
+  };
+  for (const [monacoKey, token] of Object.entries(mirrors)) {
+    const value = key(monacoKey);
+    expectThat(value && value.toLowerCase() === (rootToken(css, token) ?? '').toLowerCase(), `Monaco's ${monacoKey} is ${value}, --vsc-${token} is ${rootToken(css, token)}`);
+  }
+  for (const [monacoKey, value] of [
+    ['editor.selectionBackground', '#523F8A'],
+    ['editor.lineHighlightBorder', '#1F232B'],
+    ['scrollbarSlider.background', '#9BA3AF47'],
+    ['scrollbarSlider.hoverBackground', '#9BA3AF73'],
+  ]) {
+    expectThat((key(monacoKey) ?? '').toLowerCase() === value.toLowerCase(), `Monaco's ${monacoKey} is ${key(monacoKey)}, not ${value}`);
+  }
+  // The slider is the stylesheet's scrollbar grey.
+  expectThat(/^rgba\(155, 163, 175,/.test(rootToken(css, 'scrollbar') ?? ''), `--vsc-scrollbar is no longer #9BA3AF: ${rootToken(css, 'scrollbar')}`);
+  // The selection still reads on the editor as the old one did.
+  expectThat(Math.abs(luminance('#523F8A') - luminance('#264f78')) < 0.01, 'the editor selection is lighter or darker than before');
+  expectThat(contrast(key('editor.foreground'), key('editor.selectionBackground')) >= 4.5, 'editor text on the selection is under 4.5:1');
+});
+
+/** The body of the first `<at-rule> {` block that starts at column 0, up to its closing brace at column 0. */
+const topBlock = (css, head) => {
+  const start = css.indexOf(`\n${head} {`);
+  if (start === -1) return null;
+  const end = css.indexOf('\n}', start + 1);
+  return css.slice(start + head.length + 3, end);
+};
+/** Every `selector { declarations }` rule in a block of CSS without nested blocks. */
+const rulesIn = (block) =>
+  [...(block ?? '').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    selector: m[1].trim(),
+    props: m[2].split(';').map((d) => d.trim()).filter(Boolean).map((d) => d.split(':')[0].trim()),
+    body: m[2],
+  }));
+
+check('RN-223', 'focus is one rule: a keyboard-only ring in the base layer, a field shows focus by its own border, and forced colours keep both', () => {
+  const css = readSource('src/styles/index.css');
+  const base = topBlock(css, '@layer base');
+  expectThat(base, 'no @layer base block');
+  expectThat(/(^|\n)\s*:focus-visible \{\s*outline: 2px solid var\(--vsc-focus-ring\);\s*outline-offset: -2px;\s*\}/.test(base), `the keyboard ring is not 2px of --vsc-focus-ring, 2px in: ${base}`);
+  const fields = /:is\(input:not\(\[type=checkbox\], \[type=radio\], \[type=range\], \[type=file\], \[type=color\]\), textarea, select\):focus-visible \{\s*outline: none;\s*\}/;
+  expectThat(fields.test(base), 'text fields keep an outline of their own (F6)');
+  // Unlayered, after `@tailwind utilities`, a :focus-visible rule beats
+  // every `outline-none`: the double frame again.
+  const outside = css.replace(base, '');
+  expectThat(!/(^|\n)\s*:focus-visible\s*\{/.test(outside), 'a :focus-visible rule outside the base layer');
+  expectThat(css.indexOf('@layer base') > css.indexOf('@tailwind utilities'), 'setup: the layers come after the @tailwind lines');
+  const components = rulesIn(topBlock(css, '@layer components'));
+  const rule = (selector) => components.find((r) => r.selector === selector);
+  const field = rule('.ui-field');
+  expectThat(field, 'no .ui-field in @layer components');
+  expectThat(/border: 1px solid var\(--vsc-input-border\)/.test(field.body), `.ui-field's border is not 1px of --vsc-input-border: ${field.body}`);
+  expectThat(/background-color: var\(--vsc-input-bg\)/.test(field.body), '.ui-field is not on --vsc-input-bg');
+  expectThat(/border-radius: var\(--radius-control\)/.test(field.body), '.ui-field does not round to --radius-control');
+  expectThat(!/outline|box-shadow|padding|height|margin/.test(field.body), `.ui-field sets more than its look: ${field.body}`);
+  expectThat(/border-color: var\(--vsc-input-border-hover\)/.test(rule('.ui-field:hover')?.body ?? ''), 'a field gets no hover border');
+  expectThat(/border-color: var\(--vsc-focus\)/.test(rule('.ui-field:focus-within')?.body ?? ''), 'a focused field does not turn --vsc-focus');
+  const invalid = components.filter((r) => r.selector.includes('.ui-field-invalid'));
+  expectThat(invalid.length > 0 && invalid.every((r) => /border-color: var\(--vsc-error\)/.test(r.body)), 'an invalid field does not keep --vsc-error');
+  for (const state of ['', ':hover', ':focus-within']) {
+    expectThat(invalid.some((r) => r.selector.split(',').some((one) => one.trim() === `.ui-field.ui-field-invalid${state}`)), `an invalid field is not red${state ? ` on ${state}` : ' at rest'}`);
+  }
+  // Focus and hover change a colour, never a size: nothing moves.
+  for (const r of components.filter((one) => /:hover|:focus-within/.test(one.selector))) {
+    expectThat(r.props.every((prop) => prop === 'border-color'), `${r.selector} sets ${r.props.join(', ')}, not border-color alone`);
+  }
+  // Forced colours repaint a border colour away: an outline in Highlight.
+  const forced = /@media \(forced-colors: active\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+  expectThat(/\.ui-field:focus-within \{\s*outline: 2px solid Highlight( !important)?;\s*outline-offset: -2px;/.test(forced), 'in forced colours, a focused field shows nothing');
+  expectThat((css.match(/@media \(forced-colors: active\)/g) || []).length === 1, 'a second forced-colours block (RN-94 and RN-114 read the first alone)');
+});
+
+check('RN-224', 'every text field is a ui-field, red through ui-field-invalid, with no focus class of its own', () => {
+  const fields = [
+    ['src/components/command/CommandPalette.jsx', 1],
+    ['src/components/search/SearchPanel.jsx', 1],
+    ['src/components/explorer/FileExplorer.jsx', 1],
+    ['src/components/terminal/TerminalFindBar.jsx', 1],
+    ['src/components/common/SettingsWindow.jsx', 3],
+    ['src/components/command/ProjectCommandDialog.jsx', 2],
+    ['src/components/terminal/StartupCommandsDialog.jsx', 1],
+    ['src/components/common/KeybindingSettings.jsx', 1],
+    ['src/components/terminal/TerminalSplitContainer.jsx', 2],
+    ['src/components/terminal/TerminalsPanel.jsx', 1],
+    ['src/components/explorer/TreeRow.jsx', 1],
+    ['src/components/layout/TitleBar.jsx', 1],
+  ];
+  const forbidden = /\b(focus:border-\S+|focus-within:border-\S+|focus-visible:outline\S*|focus-visible:ring\S*)/;
+  for (const [file, count] of fields) {
+    const source = readSource(file);
+    const classes = [...source.matchAll(/(['"`])([^'"`\n]*\bui-field\b[^'"`\n]*)\1/g)].map((m) => m[2]).filter((c) => /(^|\s)ui-field(\s|$)/.test(c));
+    expectThat(classes.length === count, `${file}: ${classes.length} ui-field class strings, not ${count}`);
+    for (const cls of classes) expectThat(!/\bborder-2\b|\bborder-vsc-error\b|\bbg-vsc-input\b|\bborder-vsc-input-border\b/.test(cls), `${file}: a field draws its own border or fill: ${cls}`);
+    expectThat(!forbidden.test(source), `${file}: a focus class of its own: ${forbidden.exec(source)?.[0]}`);
+  }
+  // A refused value: the field keeps the error colour through ui-field-invalid.
+  for (const [file, flag] of [
+    ['src/components/command/ProjectCommandDialog.jsx', 'error'],
+    ['src/components/terminal/StartupCommandsDialog.jsx', 'error'],
+    ['src/components/common/KeybindingSettings.jsx', 'refusal'],
+    ['src/components/explorer/TreeRow.jsx', 'error'],
+  ]) {
+    const source = readSource(file);
+    expectThat(source.includes(`${flag} && 'ui-field-invalid'`), `${file}: an invalid value is not drawn with ui-field-invalid`);
+    expectThat(!/\? 'border-vsc-error' :/.test(source), `${file}: still picks border-vsc-error by hand`);
+  }
+  // One exception, and only it: the Explorer tree has no ring of its own, so
+  // with no row selected it marks the row the keys move from in the ring's
+  // colour (K-01, explorer_row_menu RM-06 to RM-10).
+  const FOCUS_ROW = "isFocusRow && 'outline outline-1 -outline-offset-1 outline-vsc-focus-ring'";
+  const treeRow = readSource('src/components/explorer/TreeRow.jsx');
+  expectThat(treeRow.split(FOCUS_ROW).length === 2, "TreeRow's focus row is not one 1px inset outline in --vsc-focus-ring");
+  const named = [...sourcesUnder('src/components'), ...sourcesUnder('src/lib')]
+    .map(([file, text]) => [file, file === 'src/components/explorer/TreeRow.jsx' ? text.replace(FOCUS_ROW, '') : text])
+    .filter(([, text]) => /vsc-focus/.test(text))
+    .map(([file]) => file);
+  expectThat(named.length === 0, `components still name vsc-focus (a field border is ui-field's, an active mark --vsc-accent, the ring the global rule's): ${named.join(', ')}`);
+  // The per-component rings are gone: one ring, the global one.
+  for (const file of ['src/components/common/ThemeGallery.jsx', 'src/components/common/ConfirmDialog.jsx', 'src/components/terminal/HiddenStrip.jsx', 'src/components/common/ControlLogDialog.jsx']) {
+    expectThat(!forbidden.test(readSource(file)), `${file}: a focus ring of its own: ${forbidden.exec(readSource(file))?.[0]}`);
+  }
+});
+
+check('RN-225', "'active' is violet and stays apart from focus and attention: pane line, tab marks, activity bar", () => {
+  const read = (rel) => readSource(`src/components/${rel}`);
+  expectThat(/isActive\s*\?\s*'text-vsc-fg border-vsc-accent'/.test(read('layout/PanelLayout.jsx')), 'the region tab underline is not the accent');
+  expectThat(/shadow-\[inset_0_1px_0_0_var\(--vsc-accent\)\]/.test(read('editor/EditorTabs.jsx')), "the editor's active tab line is not the accent");
+  expectThat(/absolute left-0 top-0 bottom-0 w-\[2px\] bg-vsc-accent/.test(read('layout/Sidebar.jsx')), "the activity bar's bar is not the accent");
+  expectThat(/isActivePane && 'ring-1 ring-inset ring-vsc-accent'/.test(read('editor/EditorPanel.jsx')), "the editor's active pane is not marked in the accent");
+  const indicators = read('terminal/AttentionIndicators.jsx');
+  expectThat(/'inset-0 ring-1 ring-inset ring-vsc-accent'/.test(indicators), "the terminal's active pane line is not the accent");
+  // Attention: orange, 2px, one pixel inside the active line, as before.
+  expectThat((indicators.match(/'inset-px ring-2 ring-inset ring-vsc-attention animate-attention-(pulse|flash)'/g) || []).length === 2, 'the attention ring is no longer 2px of --vsc-attention one pixel in');
+  expectThat(/chosen \? 'border-vsc-accent'/.test(read('common/ThemeGallery.jsx')), 'the chosen theme card has no accent border');
+});
+
+/** The :root value of a custom property by its full name, or null. */
+const rootTokenOf = (css, name) => new RegExp(`${name}:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? null;
+check('RN-226', 'the simple look, and only it: two corner tokens, popovers rounded with inset rows, one shadow, edged secondary buttons', () => {
+  const css = readSource('src/styles/index.css');
+  const tailwind = readSource('tailwind.config.js');
+  expectThat(rootTokenOf(css, '--radius-control') === '4px' && rootTokenOf(css, '--radius-popover') === '8px', 'the corner tokens are not 4px and 8px');
+  expectThat(/control: 'var\(--radius-control\)'/.test(tailwind) && /popover: 'var\(--radius-popover\)'/.test(tailwind), 'tailwind has no rounded-control or rounded-popover');
+  expectThat(/widget: '0 8px 24px -6px var\(--vsc-shadow\)'/.test(tailwind), 'shadow-widget is not the one elevation');
+  expectThat(rootToken(css, 'shadow') === 'rgba(0, 0, 0, 0.5)', `--vsc-shadow is ${rootToken(css, 'shadow')}`);
+  const components = sourcesUnder('src/components');
+  /**
+   * The class string around each use of a class, as [file, string, what comes
+   * before it]: the run of text with no quote in it, so an apostrophe in a
+   * comment cannot pair the quotes wrongly.
+   */
+  const around = (pattern) =>
+    components.flatMap(([file, text]) =>
+      [...text.matchAll(new RegExp(`[^'"\`]*${pattern}[^'"\`]*`, 'g'))].map((m) => [file, m[0], text.slice(Math.max(0, m.index - 20), m.index)])
+    );
+  const arbitrary = around('\\brounded-(\\[\\d+px\\]|md\\b)');
+  expectThat(arbitrary.length === 0, `corners outside the tokens: ${arbitrary.map(([file, cls]) => `${file}: ${cls}`).join(' | ')}`);
+  const shadowed = around('\\bshadow-widget\\b');
+  expectThat(shadowed.length >= 12, `setup: only ${shadowed.length} popovers found`);
+  for (const [file, cls] of shadowed) expectThat(/\brounded-popover\b/.test(cls), `${file}: a shadow without the popover corner: ${cls}`);
+  // Menus and the palette: inset rows at the same 22px.
+  const menu = readSource('src/components/common/ContextMenu.jsx');
+  const bar = readSource('src/components/layout/MenuBar.jsx');
+  const palette = readSource('src/components/command/CommandPalette.jsx');
+  expectThat(/className="z-\[70\] min-w-\[220px\] p-1 rounded-popover /.test(menu), 'the context menu is not p-1 rounded-popover');
+  expectThat(/'flex items-center gap-2 h-\[22px\] px-3 rounded-control text-ui select-none'/.test(menu), "the context menu's rows are not inset at 22px");
+  expectThat(/const popupClass =\s*'p-1 rounded-popover /.test(bar), 'the menu-bar popups are not p-1 rounded-popover');
+  expectThat(/'flex items-center gap-2 h-\[22px\] px-3 rounded-control text-ui select-none cursor-pointer'/.test(bar), "the menu bar's rows are not inset at 22px");
+  expectThat(/<div className="max-h-\[400px\] overflow-auto p-1">/.test(palette), "the palette's list is not p-1");
+  expectThat(/'h-\[22px\] px-2 rounded-control flex items-center gap-2 text-ui cursor-pointer'/.test(palette), "the palette's rows are not inset at 22px");
+  // A secondary button is the field colour on a dialog only 1.12:1 lighter: it needs an edge.
+  for (const [file, cls, before] of around('\\bbg-vsc-button-secondary\\b')) {
+    if (/<kbd\s+className=["'`]?$/.test(before)) continue; // a key cap, not a button
+    expectThat(/\bborder-vsc-(input-border|border)\b/.test(cls), `${file}: a secondary button without an edge: ${cls}`);
+    if (/\bborder-vsc-input-border\b/.test(cls)) expectThat(/(^|\s)border(\s|$)/.test(cls), `${file}: an edge colour with no border: ${cls}`);
+  }
+  // Native checkboxes and selected text in violet.
+  expectThat(around('\\baccent-current\\b').length === 0, 'a checkbox is still drawn in the text colour');
+  for (const file of ['src/components/common/SettingsWindow.jsx', 'src/components/command/ProjectCommandDialog.jsx']) expectThat(/accent-vsc-accent/.test(readSource(file)), `${file}: the checkbox is not violet`);
+  expectThat(/::selection \{\s*background: var\(--vsc-accent-solid\);\s*color: var\(--vsc-accent-fg\);\s*\}/.test(css), 'selected text is not the solid violet');
+  // Motion: no new keyframes, and every transition but the maximize one is a colour, 150ms or less.
+  const frames = [...css.matchAll(/@keyframes ([\w-]+)/g)].map((m) => m[1]).sort();
+  expectThat(JSON.stringify(frames) === JSON.stringify(['attention-flash', 'attention-pulse', 'overlay-fade-in', 'panel-fade-in', 'panel-fade-out', 'progress-slide']), `the keyframes changed: ${frames}`);
+  for (const [, value] of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(?:^|[\s;{])transition:\s*([^;]+);/g)) {
+    if (/^flex-grow 180ms/.test(value)) continue;
+    for (const part of value.split(',')) {
+      const [prop, time] = part.trim().split(/\s+/);
+      expectThat(/^(background-color|border-color|outline-color|color)$/.test(prop) && parseInt(time, 10) <= 150 && /ms$/.test(time), `a transition that is not a colour of 150ms or less: ${part.trim()}`);
+    }
+  }
+});
+
+check('RN-227', 'at 960px and wider the title bar does not overlap and the status bar keeps the bell', () => {
+  const bar = readSource('src/components/layout/TitleBar.jsx');
+  expectThat(/isMac \? "pl-\[78px\] pr-3" : "pl-2"/.test(bar), "setup: the title bar's padding changed; the cap below is worked out from it");
+  const pill = /<button\b[^>]*onClick=\{\(\) => setCommandPaletteOpen\(true\)\}[^>]*className="([^"]*)"/.exec(bar)?.[1] ?? '';
+  const share = Number(/\bw-\[(\d+)%\]/.exec(pill)?.[1]);
+  const least = Number(/\bmin-w-\[(\d+)px\]/.exec(pill)?.[1]);
+  const most = Number(/\bmax-w-\[(\d+)px\]/.exec(pill)?.[1]);
+  expectThat(share === 38 && least === 180 && most === 600, `the pill is not clamp(180px, 38%, 600px): ${pill}`);
+  expectThat(/\bui-field\b/.test(pill) && /\bpx-2\b/.test(pill), `the pill is not a field with room for its ellipsis: ${pill}`);
+  expectThat(/<span className="min-w-0 truncate">Search NexTerm/.test(bar), "the pill's label does not truncate");
+  expectThat(/<Search size=\{14\} className="shrink-0" \/>/.test(bar), "the pill's icon gives way to the label");
+  expectThat(/<span className="min-w-0 text-vsc-muted truncate" title=\{rootPath\}>\{workspaceName\}<\/span>/.test(bar), 'the workspace name does not truncate with its path in the tooltip');
+  expectThat(/data-tauri-drag-region/.test(bar) && /absolute inset-0 flex items-center justify-center pointer-events-none/.test(bar), 'the bare title bar no longer drags the window');
+  const cluster = /'relative z-10 flex items-center gap-2 min-w-0',\s*isMac\s*\?\s*'max-w-\[([^\]]+)\]'\s*:\s*'max-w-\[([^\]]+)\]'/.exec(bar);
+  expectThat(cluster, 'the left cluster is not min-w-0 with a cap per platform');
+  /** A Tailwind calc() in px and % of `base`, worked out. */
+  const evaluate = (value, base) => {
+    const expr = value.replace(/_/g, ' ').replace(/calc\(/g, '(').replace(/(\d+(?:\.\d+)?)%/g, `($1*${base}/100)`).replace(/(\d+(?:\.\d+)?)px/g, '$1');
+    return Function('clamp', `return ${expr};`)((lo, v, hi) => Math.min(Math.max(lo, v), hi));
+  };
+  for (const [platform, cap, left, right] of [['macOS', cluster[1], 78, 12], ['Windows and Linux', cluster[2], 8, 0]]) {
+    for (const width of [960, 1024, 1280, 1440, 1600, 1920, 2560, 3840]) {
+      const content = width - left - right;
+      const pillWidth = Math.min(Math.max(least, (share / 100) * width), most);
+      const pillLeft = width / 2 - pillWidth / 2;
+      const clusterRight = left + evaluate(cap, content);
+      expectThat(pillLeft - clusterRight >= 8 - 1e-9, `${platform} at ${width}px: the left cluster can come ${(pillLeft - clusterRight).toFixed(1)}px from the pill`);
+      expectThat(pillLeft - clusterRight <= 8.5, `${platform} at ${width}px: the cap leaves ${(pillLeft - clusterRight).toFixed(1)}px unused`);
+    }
+  }
+
+  const status = readSource('src/components/layout/StatusBar.jsx');
+  expectThat(/const SHRINKS = new Set\(\['workspace', 'cwd'\]\);/.test(status), 'the folder and cwd items are not the ones that give way');
+  expectThat(/SHRINKS\.has\(item\.id\) \? 'min-w-0' : 'shrink-0'/.test(status), 'the folder and cwd items do not shrink');
+  expectThat(/<span className="truncate">\{item\.text\}<\/span>/.test(status), "an item's text does not truncate");
+  expectThat(/<div className="flex-1 min-w-0 flex items-center h-full overflow-hidden">\s*\{left\.map/.test(status), 'the left group is not flex-1 min-w-0');
+  expectThat(/<div className="shrink-0 flex items-center h-full">\s*\{right\.map\(\(it\) => \(\s*<StatusItem key=\{it\.id\} item=\{it\} \/>\s*\)\)\}\s*<NotificationCenter \/>/.test(status), 'the right group, with the bell, can shrink');
+  expectThat(/className="h-statusbar shrink-0 flex items-center justify-between [^"]*overflow-hidden"/.test(status) && !/flex-wrap/.test(status), 'the status bar can wrap or grow');
+});
+
+check('RN-228', 'every separator: a 1px line, violet on hover and drag across a 10px hit area, a keyboard ring; pixel minimums for the editor and the bottom panel', () => {
+  const css = readSource('src/styles/index.css');
+  const rules = rulesIn(css.slice(css.indexOf('[data-separator] {'), css.indexOf('/* ------', css.indexOf('[data-separator] {'))));
+  const rule = (selector) => rules.find((r) => r.selector.replace(/\s+/g, ' ') === selector);
+  expectThat(/background: var\(--vsc-border\)/.test(rule('[data-separator]')?.body ?? ''), 'a separator is not a line in --vsc-border');
+  expectThat(/background: var\(--vsc-accent\)/.test(rule('[data-separator]:hover, [data-separator="hover"], [data-separator="active"]')?.body ?? ''), 'a separator does not turn violet on hover, across its hit area, and while dragged');
+  const focus = rule('[data-separator]:focus-visible')?.body ?? '';
+  expectThat(/background: var\(--vsc-focus-ring\)/.test(focus) && /outline: 1px solid var\(--vsc-focus-ring\)/.test(focus) && /outline-offset: 0/.test(focus), `a focused separator shows no 3px ring line: ${focus}`);
+  expectThat(!/\[data-state/.test(css.replace(/\/\*[\s\S]*?\*\//g, '')), 'a v3 data-state selector, which v4 never sets');
+  // Every separator in the app is the 1px element the rule draws.
+  const separators = [...sourcesUnder('src/components')].flatMap(([file, text]) => [...text.matchAll(/<Separator\b([^>]*)\/>/g)].map((m) => [file, m[1]]));
+  expectThat(separators.length === 5, `setup: ${separators.length} separators`);
+  for (const [file, attrs] of separators) expectThat(/className=(\{direction === 'horizontal' \? 'w-px' : 'h-px'\}|"w-px"|"h-px")/.test(attrs), `${file}: a separator that is not 1px: ${attrs}`);
+  // The hit area is the library's: 10px for a mouse, centred, unless a Group says otherwise.
+  // What the package's own types say is read there; what only its build says
+  // is read from the minified build, which a patch or a new minifier can
+  // reword with nothing changed. A miss there is the library's, not NexTerm's.
+  const types = readFileSync(new URL('../../node_modules/react-resizable-panels/dist/react-resizable-panels.d.ts', import.meta.url), 'utf8');
+  const library = readFileSync(new URL('../../node_modules/react-resizable-panels/dist/react-resizable-panels.js', import.meta.url), 'utf8');
+  const H8 = 'react-resizable-panels changed (this reads its minified build, so the wording may have moved with nothing else): an update needs its hit area and separator states re-verified by hand (H8); NexTerm\u{2019}s own behaviour did not change';
+  const fine = Number(/resizeTargetMinimumSize: \w+ = \{\s*coarse: \d+,\s*fine: (\d+)\s*\}/.exec(library)?.[1]);
+  expectThat(fine >= 8, Number.isNaN(fine) ? `the default hit area for a mouse was not found: ${H8}` : `the default hit area for a mouse is ${fine}px, under 8: ${H8}`);
+  expectThat(/g\.x - L \/ 2/.test(library) && /g\.y - L \/ 2/.test(library), `the hit area was not found centred on the line: ${H8}`);
+  expectThat(/Use the `data-separator` attribute for custom _hover_ and _active_ styles/.test(types), 'the package\u{2019}s types no longer say data-separator carries the hover and active states');
+  expectThat(/Q\("inactive"\)/.test(library) && /state: "hover"/.test(library), `the separator states behind data-separator ("hover" across the hit area, "inactive" at rest) were not found: ${H8}`);
+  expectThat(/declare type BaseSeparatorAttributes = Omit<HTMLAttributes<HTMLDivElement>, "role" \| "tabIndex">/.test(types) && /Separators are not _required_ but they are _recommended_ as they improve keyboard accessibility/.test(types), 'the package\u{2019}s types no longer say a separator is reached by the keyboard, with its tabIndex its own');
+  const overrides = [...sourcesUnder('src')].filter(([file, text]) => /\.jsx?$/.test(file) && /resizeTargetMinimumSize/.test(text));
+  expectThat(overrides.length === 0, `a Group overrides the hit area: ${overrides.map(([file]) => file).join(', ')}`);
+
+  const layout = readSource('src/components/layout/PanelLayout.jsx');
+  const settings = readSource('src/stores/settingsStore.js');
+  const row = Number(/terminalFontSize: (\d+),/.exec(settings)?.[1]) * Number(/terminalLineHeight: ([\d.]+),/.exec(settings)?.[1]);
+  const editorMin = Number(/id="editor-group"\s*minSize=\{(\d+)\}/.exec(layout)?.[1]);
+  const bottomMin = Number(/id="bottom-panel"\s*defaultSize="40"\s*minSize=\{(\d+)\}/.exec(layout)?.[1]);
+  // The editor: its 35px tab row, the 22px breadcrumbs and three 18px lines.
+  expectThat(editorMin >= 35 + 22 + 3 * 18, `the editor's minimum is ${editorMin}px`);
+  // The bottom panel: its 35px header, the 28px pane strip and three terminal rows.
+  expectThat(bottomMin >= 35 + 28 + 3 * row, `the bottom panel's minimum is ${bottomMin}px (a row is ${row}px)`);
+  // Both fit in the 640px window, under the title and status bars.
+  expectThat(editorMin + bottomMin <= 640 - 35 - 22, 'the two minimums do not fit the smallest window');
+  expectThat(/id="primary-sidebar"\s*defaultSize=\{260\}\s*minSize=\{170\}/.test(layout), 'the left side bar is no longer 260px, at least 170px');
+  expectThat(/id="secondary-sidebar"\s*defaultSize=\{320\}\s*minSize=\{220\}/.test(layout), 'the right side bar is no longer 320px, at least 220px');
+  expectThat(/applyLayout\(\{ 'editor-group': 0, 'bottom-panel': 100 \}\)/.test(layout), 'maximize no longer asks for the whole group');
 });
 
 console.log('====================================================');

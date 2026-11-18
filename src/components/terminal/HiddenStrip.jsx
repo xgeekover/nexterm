@@ -244,8 +244,7 @@ export function StripHandle({ paneId, tabId, title, tabs = [], unread = 0, open 
       onContextMenu={onContextMenu}
       className={cn(
         'group/handle relative shrink-0 block w-full h-[6px] p-0 m-0 cursor-pointer',
-        'bg-vsc-panel border-0 border-b border-solid border-vsc-border hover:bg-vsc-hover outline-none',
-        'focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vsc-focus'
+        'bg-vsc-panel border-0 border-b border-solid border-vsc-border hover:bg-vsc-hover'
       )}
     >
       {/* The grip: says "something to take hold of" without a word. */}

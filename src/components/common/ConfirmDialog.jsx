@@ -272,7 +272,7 @@ export function ConfirmDialog({
         // As tall as the window allows below where it opens, the message
         // scrolling and the buttons always on screen: a long list of commands
         // to review pushed Trust and Cancel off the bottom.
-        className="w-[440px] max-w-[92vw] max-h-[80vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-vsc-fg outline-none"
+        className="w-[440px] max-w-[92vw] max-h-[80vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-vsc-fg outline-none"
       >
         <div className="h-[35px] shrink-0 px-3 flex items-center justify-between border-b border-vsc-border">
           <h2 id="confirm-dialog-title" className="text-ui font-semibold m-0">
@@ -296,10 +296,10 @@ export function ConfirmDialog({
               type="button"
               onClick={onAlt}
               className={cn(
-                'h-[26px] px-3 text-ui rounded-[3px]',
+                'h-[26px] px-3 text-ui rounded-control transition-colors',
                 altDanger
-                  ? 'bg-vsc-button-secondary text-vsc-error hover:bg-vsc-item-hover'
-                  : 'bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover'
+                  ? 'bg-vsc-button-secondary border border-vsc-input-border text-vsc-error hover:bg-vsc-item-hover'
+                  : 'bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover'
               )}
             >
               {altLabel}
@@ -309,7 +309,7 @@ export function ConfirmDialog({
             ref={cancelRef}
             type="button"
             onClick={onCancel}
-            className="h-[26px] px-3 text-ui rounded-[3px] bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover"
+            className="h-[26px] px-3 text-ui rounded-control transition-colors bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover"
           >
             {cancelLabel}
           </button>
@@ -328,12 +328,12 @@ export function ConfirmDialog({
               });
               if (counts) onConfirm?.(e);
             }}
-            // The ring shows which button has the keyboard: on the accent
-            // colour the browser's own was drawn in the button's colour.
+            // The keyboard ring is the global one (index.css): light violet,
+            // 3:1 on the solid accent fill, where the browser's own was drawn
+            // in the button's colour.
             className={cn(
-              'h-[26px] px-3 text-ui rounded-[3px] text-vsc-accent-fg disabled:opacity-50 disabled:cursor-default',
-              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-vsc-focus',
-              danger ? 'bg-vsc-error hover:opacity-90' : 'bg-vsc-accent hover:bg-vsc-accent-hover'
+              'h-[26px] px-3 text-ui rounded-control transition-colors text-vsc-accent-fg disabled:opacity-50 disabled:cursor-default',
+              danger ? 'bg-vsc-error hover:opacity-90' : 'bg-vsc-accent-solid hover:bg-vsc-accent-hover active:bg-vsc-accent-pressed'
             )}
           >
             {confirmLabel}

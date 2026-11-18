@@ -340,7 +340,7 @@ function DropIndicator({ zone }) {
     <div
       aria-hidden="true"
       className={cn(
-        'absolute z-20 pointer-events-none border border-vsc-focus',
+        'absolute z-20 pointer-events-none border border-vsc-accent',
         'bg-[color-mix(in_srgb,var(--vsc-accent)_18%,transparent)]',
         box
       )}
@@ -362,7 +362,7 @@ function DragPreview({ drag }) {
     <div
       aria-hidden="true"
       className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
-                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
+                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-accent"
       style={{ left: drag.x + 12, top: drag.y + 12 }}
     >
       <FileCode2 size={12} />
@@ -536,7 +536,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
       onFocusCapture={() => setActiveEditorPane(paneId)}
       className={cn(
         'flex flex-col h-full w-full bg-vsc-editor overflow-hidden',
-        isActivePane && 'ring-1 ring-inset ring-vsc-focus'
+        isActivePane && 'ring-1 ring-inset ring-vsc-accent'
       )}
     >
       <EditorTabs node={node} onSplitH={onSplitH} onSplitV={onSplitV} onClose={onClose} canClose={canClose} />

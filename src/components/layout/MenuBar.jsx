@@ -10,12 +10,12 @@ const MARGIN = 4;
 
 const rowClass = (active) =>
   cn(
-    'flex items-center gap-2 h-[22px] px-3 text-ui select-none cursor-pointer',
+    'flex items-center gap-2 h-[22px] px-3 rounded-control text-ui select-none cursor-pointer',
     active ? 'bg-vsc-selection text-vsc-selection-fg' : 'text-vsc-fg'
   );
 
 const popupClass =
-  'py-1 rounded-[6px] bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none';
+  'p-1 rounded-popover bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none';
 
 /**
  * The application menu NexTerm draws inside its own title row.

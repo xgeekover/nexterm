@@ -130,6 +130,17 @@ Keys are written the macOS way. On Windows and Linux press `Ctrl` for `⌘` and
 | Status bar | the open folder, its git branch, the active terminal's folder, shell and size, the last exit code, the text size when it is not the default, and the bell | |
 | Title bar | on Windows and Linux NexTerm's own, with the ☰ menu; macOS keeps its traffic lights and menu bar | |
 
+**Drag any boundary.** Every line between the side bars, the editor, the
+terminal panel and the split panes resizes what is on either side of it. The
+line turns violet under the pointer and while it is dragged, and it can be
+grabbed a few pixels either side of it; Tab also reaches it, and the arrow keys
+move it. Nothing gets too small to use:
+the window is at least 960×640, the side bars keep 170px (left) and 220px
+(right), the editor keeps its tabs and three lines, and the terminal panel its
+header, the pane strip and three rows. A long folder name in the title bar or
+the status bar is cut short with its whole path in the tooltip, so the search
+box and the bell always stay in view.
+
 The words this README uses:
 
 - **Terminal** — one shell, shown as one tab.
@@ -381,7 +392,7 @@ says so and clicking it resets.
 
 ### Knowing what every terminal is doing
 
-**See what the other terminals are doing.** A tab shows a blue dot while a
+**See what the other terminals are doing.** A tab shows a violet dot while a
 command is running in it and a red one when the last command failed, and a
 group's chip shows the same for every terminal inside it. The point is the ones
 you are not looking at: switching groups replaces the whole arrangement, so
@@ -493,7 +504,7 @@ bells off. Nothing is recorded for the terminal you are typing into; with
 
 **Progress.** A program can report how far along it is with OSC 9;4, the
 sequence Windows Terminal and ConEmu understand. NexTerm draws it as a thin bar
-under the terminal's tab — blue while it runs, red for an error, yellow when
+under the terminal's tab — violet while it runs, red for an error, yellow when
 paused, a sliding segment when the program cannot say how far. The group's
 chip, and on Windows the taskbar button, show one bar for several terminals: an
 error wins over a pause, a pause over normal progress, and among equals the one
@@ -1230,7 +1241,19 @@ window — editor font, terminal font/size/line-height, cursor style and blinkin
 scrollback, colour theme, command suggestions, copy on select, what a
 right-click does, and mouse reporting.
 
-**9 terminal themes, all dark.** Dark Modern, Monokai, Material, Dracula,
+**The colours.** NexTerm has one dark palette, ActionMacro's bluish greys with
+a violet accent: the side bars, the terminal and the title and status bars are
+the darkest, the editor a step lighter, menus and dialogs lighter again, and
+fields lighter still. Violet marks what is active (the selected tab's line, the
+active pane, the activity bar, the selection in a list, progress bars and drop
+targets) and fills the button to press. A text field shows that it has the
+keyboard by its own border turning violet, with no outline around it. Buttons,
+tabs, chips and theme cards show a light-violet ring only when you reach them
+with Tab or the arrow keys, never after a click. Every pair of colours is held
+to WCAG contrast (4.5:1 for text, 3:1 for lines and marks) by the test suite.
+
+**9 terminal themes, all dark.** NexTerm Dark (the default, drawn in the
+app's own colours), Monokai, Material, Dracula,
 Solarized Dark, Nord, One Dark, Gruvbox Dark and Tomorrow Night — and up to 20
 of your own, imported (below).
 

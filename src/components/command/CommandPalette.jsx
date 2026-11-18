@@ -166,7 +166,7 @@ const PaletteRow = memo(function PaletteRow({ item, index, selected, onPick, onH
       onClick={() => onPick(item)}
       onMouseEnter={() => onHover(index)}
       className={cn(
-        'h-[22px] px-2 flex items-center gap-2 text-ui cursor-pointer',
+        'h-[22px] px-2 rounded-control flex items-center gap-2 text-ui cursor-pointer',
         selected ? 'bg-vsc-selection text-vsc-selection-fg' : 'text-vsc-fg'
       )}
     >
@@ -570,11 +570,11 @@ export function CommandPalette() {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="absolute top-[8px] left-1/2 -translate-x-1/2 w-[600px] max-w-[90vw] bg-vsc-quickinput border border-vsc-widget-border shadow-widget rounded-[6px] overflow-hidden"
+        className="absolute top-[8px] left-1/2 -translate-x-1/2 w-[600px] max-w-[90vw] bg-vsc-quickinput border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
       >
         {/* Search Input Bar */}
         <div className="p-2 border-b border-vsc-widget-border">
-          <div className="flex items-center gap-2 h-[30px] px-2 rounded-[3px] bg-vsc-input border border-vsc-input-border focus-within:border-vsc-focus transition-colors">
+          <div className="ui-field flex items-center gap-2 h-[30px] px-2">
             <Search size={16} className="text-vsc-muted flex-shrink-0" />
             <input
               ref={inputRef}
@@ -602,7 +602,7 @@ export function CommandPalette() {
         </div>
 
         {/* Results List */}
-        <div className="max-h-[400px] overflow-auto py-1">
+        <div className="max-h-[400px] overflow-auto p-1">
           {groups.length > 0 ? (
             groups.map((group) => (
               <div key={group.label}>

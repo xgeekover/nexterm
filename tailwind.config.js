@@ -29,6 +29,7 @@ export default {
           menu: v('menu-bg'),
           input: v('input-bg'),
           'input-border': v('input-border'),
+          'input-border-hover': v('input-border-hover'),
           placeholder: v('input-placeholder'),
           'button-secondary': v('button-secondary'),
 
@@ -40,8 +41,12 @@ export default {
 
           accent: v('accent'),
           'accent-hover': v('accent-hover'),
+          'accent-solid': v('accent-solid'),
+          'accent-pressed': v('accent-pressed'),
+          'accent-text': v('accent-text'),
           'accent-fg': v('accent-fg'),
           focus: v('focus'),
+          'focus-ring': v('focus-ring'),
           link: v('link'),
           badge: v('badge-bg'),
           'badge-fg': v('badge-fg'),
@@ -79,8 +84,17 @@ export default {
         'ui-sm': ['11px', '1.3'],
         code: ['12px', '18px'],
       },
+      // Corners (src/styles/index.css): rounded-control for fields, buttons
+      // and small controls, rounded-popover for anything that floats.
+      // rounded-sm (2px) stays on tab chips, group chips and inline items.
+      borderRadius: {
+        control: 'var(--radius-control)',
+        popover: 'var(--radius-popover)',
+      },
+      // The one elevation, for popovers only. On the near-black surfaces
+      // their --vsc-widget-border edge does most of the separating.
       boxShadow: {
-        widget: '0 0 8px 2px var(--vsc-shadow)',
+        widget: '0 8px 24px -6px var(--vsc-shadow)',
       },
       spacing: {
         activitybar: '48px',

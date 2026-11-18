@@ -186,7 +186,7 @@ function ControlLogBox() {
         aria-describedby="control-log-about"
         data-control-log-dialog=""
         tabIndex={-1}
-        className="w-[760px] max-w-[94vw] max-h-[75vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-vsc-fg outline-none"
+        className="w-[760px] max-w-[94vw] max-h-[75vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-vsc-fg outline-none"
       >
         <div className="h-[35px] shrink-0 px-3 flex items-center gap-3 border-b border-vsc-border">
           <h2 id="control-log-title" className="m-0 text-ui font-semibold">
@@ -197,7 +197,7 @@ function ControlLogBox() {
           <button
             type="button"
             onClick={clear}
-            className="h-[24px] px-2 rounded-[3px] text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover"
+            className="h-[24px] px-2 rounded-control text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover"
           >
             Clear
           </button>
@@ -215,7 +215,7 @@ function ControlLogBox() {
         <p id="control-log-about" className="m-0 px-3 pt-2 text-ui-sm text-vsc-muted">
           {`What programs in terminals asked NexTerm to do through nexterm-cli, newest first. The last ${LOG_LIMIT} calls are kept, in memory only, and go when NexTerm closes. What was typed and what was read are never kept.`}
         </p>
-        <div tabIndex={0} aria-label="Calls" className="flex-1 min-h-0 overflow-y-auto px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-vsc-focus">
+        <div tabIndex={0} aria-label="Calls" className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
           <LogList />
         </div>
       </div>

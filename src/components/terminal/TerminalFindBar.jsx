@@ -41,7 +41,7 @@ function FindToggle({ title, icon: Icon, on, onToggle }) {
       aria-pressed={on}
       onClick={onToggle}
       className={cn(
-        'w-[20px] h-[20px] flex items-center justify-center rounded-[3px] shrink-0',
+        'w-[20px] h-[20px] flex items-center justify-center rounded-control shrink-0',
         on ? 'bg-vsc-item-active text-vsc-fg-bright' : 'text-vsc-muted hover:bg-vsc-item-hover'
       )}
     >
@@ -116,9 +116,9 @@ export function TerminalFindBar({ tabId, onClose }) {
       // which would take the caret out of the field on every click.
       onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={onKeyDown}
-      className="absolute top-0 right-0 z-20 m-1 flex items-center gap-1 px-1 py-1 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px]"
+      className="absolute top-0 right-0 z-20 m-1 flex items-center gap-1 px-1 py-1 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover"
     >
-      <div className="flex items-center bg-vsc-input border border-vsc-input-border rounded-[2px] focus-within:border-vsc-focus">
+      <div className="ui-field flex items-center">
         <input
           ref={inputRef}
           type="text"
@@ -167,7 +167,7 @@ export function TerminalFindBar({ tabId, onClose }) {
         aria-label="Previous match"
         disabled={!query}
         onClick={() => step('previous')}
-        className="w-[22px] h-[22px] flex items-center justify-center rounded-[3px] text-vsc-fg hover:bg-vsc-item-hover disabled:text-vsc-muted disabled:hover:bg-transparent"
+        className="w-[22px] h-[22px] flex items-center justify-center rounded-control text-vsc-fg hover:bg-vsc-item-hover disabled:text-vsc-muted disabled:hover:bg-transparent"
       >
         <ArrowUp size={14} />
       </button>
@@ -177,7 +177,7 @@ export function TerminalFindBar({ tabId, onClose }) {
         aria-label="Next match"
         disabled={!query}
         onClick={() => step('next')}
-        className="w-[22px] h-[22px] flex items-center justify-center rounded-[3px] text-vsc-fg hover:bg-vsc-item-hover disabled:text-vsc-muted disabled:hover:bg-transparent"
+        className="w-[22px] h-[22px] flex items-center justify-center rounded-control text-vsc-fg hover:bg-vsc-item-hover disabled:text-vsc-muted disabled:hover:bg-transparent"
       >
         <ArrowDown size={14} />
       </button>
@@ -186,7 +186,7 @@ export function TerminalFindBar({ tabId, onClose }) {
         title="Close (Escape)"
         aria-label="Close find"
         onClick={() => onClose?.()}
-        className="w-[22px] h-[22px] flex items-center justify-center rounded-[3px] text-vsc-fg hover:bg-vsc-item-hover"
+        className="w-[22px] h-[22px] flex items-center justify-center rounded-control text-vsc-fg hover:bg-vsc-item-hover"
       >
         <X size={14} />
       </button>

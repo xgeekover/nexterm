@@ -72,7 +72,7 @@ function ThemeSample({ theme }) {
       {[ANSI_COLOR_KEYS.slice(0, 8), ANSI_COLOR_KEYS.slice(8)].map((row, r) => (
         <span key={r} className={cn('grid grid-cols-8 gap-[3px]', r === 0 ? 'mt-2' : 'mt-[3px]')}>
           {row.map((key) => (
-            <span key={key} className="block h-[10px] rounded-[2px]" style={{ background: colorOf(theme, key) }} />
+            <span key={key} className="block h-[10px] rounded-sm" style={{ background: colorOf(theme, key) }} />
           ))}
         </span>
       ))}
@@ -104,9 +104,8 @@ function ThemeCard({ choice, chosen, tabStop, onCardClick, onFocusCard, onKeyNav
         onFocus={() => onFocusCard(choice.id)}
         onKeyDown={(e) => onKeyNav(e, choice)}
         className={cn(
-          'block w-full text-left rounded-[4px] border-2 overflow-hidden outline-none transition-colors',
-          'focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-vsc-focus',
-          chosen ? 'border-vsc-focus' : 'border-vsc-widget-border hover:border-vsc-muted'
+          'block w-full text-left rounded-control border-2 overflow-hidden transition-colors',
+          chosen ? 'border-vsc-accent' : 'border-vsc-widget-border hover:border-vsc-muted'
         )}
       >
         <ThemeSample theme={choice.theme} />
@@ -125,7 +124,7 @@ function ThemeCard({ choice, chosen, tabStop, onCardClick, onFocusCard, onKeyNav
           onClick={(e) => onTrashClick(e, choice.id)}
           aria-label={`Delete ${choice.label}`}
           title={`Delete ${choice.label}`}
-          className="absolute top-1.5 right-1.5 p-[3px] rounded-sm border border-vsc-widget-border bg-vsc-widget text-vsc-muted hover:text-vsc-error hover:bg-vsc-input focus-visible:outline focus-visible:outline-1 focus-visible:outline-vsc-focus"
+          className="absolute top-1.5 right-1.5 p-[3px] rounded-sm border border-vsc-widget-border bg-vsc-widget text-vsc-muted hover:text-vsc-error hover:bg-vsc-input"
         >
           <Trash2 size={12} aria-hidden="true" />
         </button>
@@ -185,11 +184,11 @@ export function ThemeNotice({ notice, canUndo = Boolean(notice?.undo), onPick, o
                       <button
                         type="button"
                         onClick={(e) => onPick(scheme, e)}
-                        className="inline-flex items-center gap-2 px-1.5 py-0.5 rounded-sm text-vsc-fg hover:bg-vsc-item-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-vsc-focus"
+                        className="inline-flex items-center gap-2 px-1.5 py-0.5 rounded-sm text-vsc-fg hover:bg-vsc-item-hover"
                       >
                         <span
                           aria-hidden="true"
-                          className="w-[12px] h-[12px] rounded-[2px] border border-vsc-widget-border forced-color-adjust-none"
+                          className="w-[12px] h-[12px] rounded-sm border border-vsc-widget-border forced-color-adjust-none"
                           style={{ background: colorOf(scheme.theme, 'background') }}
                         />
                         {scheme.name}
@@ -205,7 +204,7 @@ export function ThemeNotice({ notice, canUndo = Boolean(notice?.undo), onPick, o
               <button
                 type="button"
                 onClick={onUndo}
-                className="mt-1 px-1.5 py-0.5 rounded-sm text-vsc-link hover:bg-vsc-item-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-vsc-focus"
+                className="mt-1 px-1.5 py-0.5 rounded-sm text-vsc-link hover:bg-vsc-item-hover"
               >
                 Undo
               </button>
@@ -216,7 +215,7 @@ export function ThemeNotice({ notice, canUndo = Boolean(notice?.undo), onPick, o
             onClick={onDismiss}
             aria-label="Dismiss"
             title="Dismiss"
-            className="shrink-0 p-0.5 rounded-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-vsc-focus"
+            className="shrink-0 p-0.5 rounded-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover"
           >
             <X size={14} aria-hidden="true" />
           </button>
@@ -473,7 +472,7 @@ export function ThemeGallery() {
         <button
           type="button"
           onClick={onImport}
-          className="shrink-0 inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-[3px] text-ui-sm bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-vsc-focus"
+          className="shrink-0 inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-control text-ui-sm bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover"
         >
           <FileUp size={14} aria-hidden="true" />
           Import Theme…

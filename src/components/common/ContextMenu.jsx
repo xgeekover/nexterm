@@ -283,7 +283,7 @@ export function ContextMenu({
         overflowY: 'auto',
         overscrollBehavior: 'contain',
       }}
-      className="z-[70] min-w-[220px] py-1 rounded-[6px] bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none"
+      className="z-[70] min-w-[220px] p-1 rounded-popover bg-vsc-menu border border-vsc-widget-border shadow-widget outline-none"
     >
       {items.map((item, idx) => {
         if (item.type === 'separator') {
@@ -309,7 +309,7 @@ export function ContextMenu({
               item.onSelect?.();
             }}
             className={cn(
-              'flex items-center gap-2 h-[22px] px-3 text-ui select-none',
+              'flex items-center gap-2 h-[22px] px-3 rounded-control text-ui select-none',
               item.disabled
                 ? 'text-vsc-muted cursor-default'
                 : cn(

@@ -460,7 +460,7 @@ function DropIndicator({ zone }) {
         box
       )}
     >
-      <span className="px-2 py-0.5 rounded-sm bg-vsc-accent text-vsc-accent-fg text-ui-sm font-medium shadow-widget">
+      <span className="px-2 py-0.5 rounded-sm bg-vsc-accent-solid text-vsc-accent-fg text-ui-sm font-medium">
         {label}
       </span>
     </div>
@@ -487,11 +487,11 @@ function PathDropHighlight({ paneId }) {
       data-path-drop-target={paneId}
       className={cn(
         'absolute inset-0 z-20 pointer-events-none flex items-center justify-center',
-        'outline outline-2 -outline-offset-2 outline-vsc-focus animate-overlay-in',
+        'outline outline-2 -outline-offset-2 outline-vsc-accent animate-overlay-in',
         'bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
       )}
     >
-      <span className="px-2 py-0.5 rounded-sm bg-vsc-accent text-vsc-accent-fg text-ui-sm font-medium shadow-widget">
+      <span className="px-2 py-0.5 rounded-sm bg-vsc-accent-solid text-vsc-accent-fg text-ui-sm font-medium">
         {pathDropLabel(count)}
       </span>
     </div>
@@ -534,7 +534,7 @@ function DragPreview({ drag }) {
     <div
       aria-hidden="true"
       className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
-                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
+                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-accent"
       style={{ left: drag.x + 12, top: drag.y + 12 }}
     >
       {drag.kind === 'group' ? <LayoutGrid size={12} /> : <TerminalSquare size={12} />}
@@ -814,8 +814,9 @@ function TerminalPane({
       data-tab-strip={paneId}
       className={cn(
         'relative h-7 shrink-0 flex items-center bg-vsc-panel border-b border-vsc-border select-none',
-        // Over the terminal, it needs an edge to read as a bar of its own.
-        stripHidden && 'shadow-widget',
+        // Over the terminal, it needs an edge to read as a bar of its own: the
+        // popovers' edge colour (the one shadow is for popovers only).
+        stripHidden && 'border-vsc-widget-border',
         // Dropping a tab here is how a pane is merged back into tabs, so it
         // has to look like somewhere you can drop.
         dropZone === 'tabs' && 'bg-vsc-accent/15 ring-1 ring-inset ring-vsc-accent'
@@ -872,7 +873,7 @@ function TerminalPane({
                     setTimeout(() => input?.focus({ preventScroll: true }), 0);
                   }}
                   onBlur={commitRenameTab}
-                  className="w-[110px] h-[20px] px-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
+                  className="ui-field w-[110px] h-[20px] px-1 text-ui-sm text-vsc-fg"
                 />
               </div>
             );
@@ -1255,7 +1256,7 @@ function TerminalPane({
             <button
               type="button"
               onClick={() => createTab(null, { paneId, groupId })}
-              className="px-3 py-1 rounded-sm bg-vsc-button-secondary hover:bg-vsc-item-hover text-vsc-fg transition"
+              className="px-3 py-1 rounded-sm bg-vsc-button-secondary border border-vsc-input-border hover:bg-vsc-item-hover text-vsc-fg transition"
             >
               New Terminal
               <span className="ml-2 text-vsc-muted font-mono">{shortcut('new-terminal')}</span>
@@ -1566,7 +1567,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                 }}
                 onBlur={() => commitRename(group.id)}
                 placeholder="Group name"
-                className="shrink-0 w-28 h-[20px] px-1 rounded-sm bg-vsc-input border border-vsc-focus text-ui-sm text-vsc-fg outline-none"
+                className="ui-field shrink-0 w-28 h-[20px] px-1 text-ui-sm text-vsc-fg"
               />
             );
           }
@@ -1629,7 +1630,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
                   ? 'bg-vsc-tab-active text-vsc-tab-active-fg'
                   : 'text-vsc-tab-inactive-fg hover:bg-vsc-hover',
                 isDropTarget &&
-                  'ring-1 ring-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]',
+                  'ring-1 ring-vsc-accent bg-[color-mix(in_srgb,var(--vsc-accent)_25%,transparent)]',
                 isBeingDragged && 'opacity-40'
               )}
             >

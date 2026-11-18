@@ -486,7 +486,7 @@ export function readTheme() {
  * every place that draws a terminal uses (terminalThemes.js's
  * `getTerminalThemeEntry`): a fixed published palette, the live `readTheme()`
  * snapshot of the app's own tokens for `followsAppTheme` entries (the default
- * "Dark Modern"), or an imported theme over those tokens for whatever colour
+ * NexTerm Dark), or an imported theme over those tokens for whatever colour
  * it left out. An unknown id — an older or newer version's value, a deleted
  * import, undefined before the store has loaded — is the default theme.
  *
@@ -1207,7 +1207,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // xterm's default is 1, i.e. no correction, and several canonical palettes
     // define an ANSI colour equal to their own background — Monokai, One Dark,
     // Gruvbox, Tomorrow Night and Solarized all render "black" invisibly, as
-    // does the default theme (#000000 on #181818). VS Code lifts the same
+    // does the default theme (#000000 on #0E1014). VS Code lifts the same
     // palettes to 4.5 rather than editing them, and so do we: the theme stays
     // the canonical one, the text stays readable.
     minimumContrastRatio: 4.5,
