@@ -116,6 +116,131 @@ pub async fn agent_sessions(kind: String, cwd: String) -> Result<Vec<AgentSessio
     .map_err(|e| e.to_string())?
 }
 
+/// What `opencode --version` said: the first version number in it, and
+/// whether NexTerm may start that opencode in mini mode
+/// (`--mini --no-replay`, opencode V1 1.17.10 and newer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpencodeVersion {
+    pub version: Option<String>,
+    pub mini: bool,
+}
+
+/// `opencode --version` that takes longer than this is not answering.
+const VERSION_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The first opencode V1 with `--mini` (the research of 2026-11-18). V2
+/// (major 2) has a `mini` subcommand instead, which NexTerm does not type.
+const MINI_SINCE: (u64, u64, u64) = (1, 17, 10);
+
+/// The opencode `agent_sessions` would run: its version, and whether it has
+/// mini mode. On the blocking pool, with a deadline of VERSION_DEADLINE,
+/// auto-update off and no stdin. Not found, a timeout, a failure or output
+/// with no version in it is an error or `mini: false`, so the frontend types
+/// the line it typed before mini mode existed (src/lib/opencodeLaunch.js).
+#[tauri::command]
+pub async fn opencode_version() -> Result<OpencodeVersion, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let path = search_path();
+        let bin = find_opencode(path.as_deref()).ok_or_else(|| "opencode was not found on PATH".to_string())?;
+        probe_version(&bin, path.as_deref(), VERSION_DEADLINE)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `bin --version`, as the probe runs it: from the temp directory (no
+/// project's own config is in reach), auto-update off, stdin null, and on
+/// unix a process group of its own, which `kill_tree` ends whole.
+fn version_command(bin: &Path, path: Option<&std::ffi::OsStr>) -> Command {
+    let mut command = quiet_command(bin);
+    command
+        .arg("--version")
+        .current_dir(std::env::temp_dir())
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+/// Run `bin --version` and read what it printed.
+fn probe_version(bin: &Path, path: Option<&std::ffi::OsStr>, deadline: Duration) -> Result<OpencodeVersion, String> {
+    let output = run_with_deadline(version_command(bin, path), deadline).map_err(|e| format!("opencode --version: {e}"))?;
+    if !output.status.success() {
+        let reason = failure_reason(
+            &stderr_text(&output.stderr),
+            &String::from_utf8_lossy(&output.stdout),
+            output.status.code(),
+        );
+        return Err(format!("opencode --version failed: {reason}"));
+    }
+    Ok(version_answer(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The probe's answer for what `opencode --version` printed.
+fn version_answer(text: &str) -> OpencodeVersion {
+    let version = first_version(&without_ansi(text));
+    OpencodeVersion {
+        mini: version.map(mini_supported).unwrap_or(false),
+        version: version.map(|(a, b, c)| format!("{a}.{b}.{c}")),
+    }
+}
+
+/// The first `major.minor.patch` in `text` (a `v` in front, or a word such as
+/// `opencode ` before it, is skipped), or None.
+fn first_version(text: &str) -> Option<(u64, u64, u64)> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let starts = bytes[i].is_ascii_digit() && (i == 0 || !(bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b'.'));
+        if starts {
+            let mut parts = [0u64; 3];
+            let mut at = i;
+            let mut ok = true;
+            for (n, part) in parts.iter_mut().enumerate() {
+                let from = at;
+                while at < bytes.len() && bytes[at].is_ascii_digit() {
+                    at += 1;
+                }
+                let Ok(value) = text[from..at].parse::<u64>() else {
+                    ok = false;
+                    break;
+                };
+                *part = value;
+                if n < 2 {
+                    if at < bytes.len() && bytes[at] == b'.' && bytes.get(at + 1).is_some_and(u8::is_ascii_digit) {
+                        at += 1;
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                return Some((parts[0], parts[1], parts[2]));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether opencode `version` has V1's `--mini` and `--no-replay`: major 1,
+/// and MINI_SINCE or newer. A prerelease of MINI_SINCE (`1.17.10-beta.2`)
+/// counts too, accepted knowingly: only the numbers are compared, and such a
+/// build may predate the flags.
+fn mini_supported(version: (u64, u64, u64)) -> bool {
+    version.0 == 1 && version >= MINI_SINCE
+}
+
 /// For each of `ids` (Claude Code session ids, at most
 /// claude_conversations::MAX_IDS), whether Claude Code saved a conversation
 /// under it and the title it gave it: `{sessionId, saved, title}`, in order.
@@ -1201,5 +1326,84 @@ Options:
     fn only_opencode_has_a_list() {
         let err = tauri::async_runtime::block_on(agent_sessions("claude".into(), "/".into())).unwrap_err();
         assert!(err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn mini_mode_is_v1_from_1_17_10_and_nothing_else() {
+        for text in ["1.18.34", "1.17.10", "opencode 1.19.6", "1.18.34\n", "\u{1b}[1m1.20.0\u{1b}[0m", "1.17.10-beta.2"] {
+            let answer = version_answer(text);
+            assert!(answer.mini, "{text:?} has mini mode");
+        }
+        assert_eq!(version_answer("opencode 1.19.6").version.as_deref(), Some("1.19.6"));
+        for text in ["1.17.9", "0.9.0", "2.3.2", "v2.0.0", "", "garbage", "1.18", "version: none", "1.16.99", "12.0.0"] {
+            let answer = version_answer(text);
+            assert!(!answer.mini, "{text:?} has no mini mode");
+        }
+        assert_eq!(version_answer("").version, None);
+        assert_eq!(version_answer("garbage").version, None);
+        assert_eq!(version_answer("v2.0.0").version.as_deref(), Some("2.0.0"));
+        assert_eq!(first_version("build 7 of 1.18.34"), Some((1, 18, 34)), "the first version, not the first number");
+        assert_eq!(first_version("1.2.3.4"), Some((1, 2, 3)));
+        assert!(!mini_supported((1, 17, 9)) && mini_supported((1, 17, 10)) && !mini_supported((2, 0, 0)));
+    }
+
+    #[test]
+    fn the_probe_runs_version_with_auto_update_off_and_no_stdin() {
+        let command = version_command(Path::new("opencode"), Some(std::ffi::OsStr::new("/nowhere")));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, vec![std::ffi::OsStr::new("--version")]);
+        let envs: HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(envs.get(std::ffi::OsStr::new("OPENCODE_DISABLE_AUTOUPDATE")), Some(&Some(std::ffi::OsStr::new("1"))));
+        assert_eq!(envs.get(std::ffi::OsStr::new("PATH")), Some(&Some(std::ffi::OsStr::new("/nowhere"))));
+        assert_eq!(command.get_current_dir(), Some(std::env::temp_dir().as_path()));
+        assert!(VERSION_DEADLINE <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_missing_opencode_is_an_error_not_a_panic() {
+        let gone = std::env::temp_dir().join(format!("nexterm-no-opencode-{}", std::process::id())).join("opencode");
+        let err = probe_version(&gone, None, Duration::from_secs(2)).unwrap_err();
+        assert!(err.starts_with("opencode --version"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stand_in_cli_answers_the_probe_and_a_failing_or_hanging_one_is_no_mini() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("nexterm-agent-version-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let script = |name: &str, body: &str| {
+            let bin = base.join(name);
+            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
+        };
+        // Says what it was given: its arguments, the variable, and whether stdin had anything.
+        let log = base.join("probe.log");
+        let ok = script(
+            "opencode",
+            &format!(
+                "echo \"$@ $OPENCODE_DISABLE_AUTOUPDATE\" > '{}'\nif read -r line; then echo stdin=data >> '{}'; else echo stdin=eof >> '{}'; fi\necho 1.18.34",
+                log.display(),
+                log.display(),
+                log.display()
+            ),
+        );
+        let answer = while_busy(|| probe_version(&ok, None, Duration::from_secs(5))).unwrap();
+        assert_eq!(answer, OpencodeVersion { version: Some("1.18.34".into()), mini: true });
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "--version 1\nstdin=eof\n");
+        let old = script("opencode-old", "echo 1.17.9");
+        assert!(!while_busy(|| probe_version(&old, None, Duration::from_secs(5))).unwrap().mini);
+        let v2 = script("opencode-v2", "echo 2.3.2");
+        assert!(!while_busy(|| probe_version(&v2, None, Duration::from_secs(5))).unwrap().mini);
+        let failing = script("opencode-failing", "echo broken >&2\nexit 3");
+        let err = while_busy(|| probe_version(&failing, None, Duration::from_secs(5))).unwrap_err();
+        assert!(err.contains("opencode --version failed"), "{err}");
+        let hanging = script("opencode-hanging", "sleep 30");
+        let started = Instant::now();
+        let err = while_busy(|| probe_version(&hanging, None, Duration::from_millis(300))).unwrap_err();
+        assert!(err.contains("gave up"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5), "given up on at the deadline");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

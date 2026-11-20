@@ -244,6 +244,7 @@ fn main() {
             commands::control::control_reply,
             commands::control::control_set_settings,
             commands::agent::agent_sessions,
+            commands::agent::opencode_version,
             commands::agent::claude_conversations,
             commands::agent_history::agent_history_list,
             commands::agent_history::agent_history_groups,

@@ -59,6 +59,7 @@ import {
   serializeAgent,
   startCommand,
 } from '../lib/agents.js';
+import { opencodeLaunchLine } from '../lib/opencodeLaunch.js';
 import { historyKeyOfTab, historyRecord } from '../lib/agentHistory.js';
 import {
   AGENT_IDLE_SETTLE_MS,
@@ -5924,7 +5925,29 @@ export const useTerminalStore = create((set, get, api) => {
         return null;
       }
 
-      const readiness = await untilTypingSafe(targetId);
+      // OpenCode V1 in mini mode when the setting and its version say so
+      // (opencodeLaunch.js): asked now and awaited once the prompt is there,
+      // so the wait for the prompt hides the probe (at most its timeout).
+      // Claude Code's line is not awaited.
+      const launching = kind === 'opencode' ? opencodeLaunchLine(kind, started.command) : null;
+      let answered = false;
+      launching?.then(() => {
+        answered = true;
+      });
+      const shell = get().tabs.find((t) => t.id === targetId)?.sessionId;
+      let readiness = await untilTypingSafe(targetId);
+      let command = started.command;
+      if (launching && readiness !== 'gone' && readiness !== 'hidden') {
+        const checkedAfter = answered;
+        command = await launching;
+        // A probe that answered after the check: the terminal is checked
+        // again, as the first time, before anything is typed — a password
+        // prompt may have come up meanwhile, or the shell gone.
+        if (!checkedAfter) {
+          const now = get().tabs.find((t) => t.id === targetId);
+          readiness = !now || now.sessionId !== shell || now.exited ? 'gone' : await untilTypingSafe(targetId);
+        }
+      }
       if (readiness === 'gone') return null;
       if (readiness === 'hidden') {
         // Not typed into a password prompt, and said where it would have been.
@@ -5935,7 +5958,7 @@ export const useTerminalStore = create((set, get, api) => {
       }
       recordAgent(targetId, started.agent, readiness === 'ready');
       noteAgentLaunch(targetId);
-      await get().writeRaw(targetId, `${started.command}\r`);
+      await get().writeRaw(targetId, `${command}\r`);
       return started.agent;
     },
 
@@ -6024,8 +6047,30 @@ export const useTerminalStore = create((set, get, api) => {
         return false;
       }
       takeOffer(targetId, agent, { continued });
+      // The opencode line in mini mode when the setting and its version say
+      // so (opencodeLaunch.js): asked now, awaited once the prompt is there.
+      const launching = agent?.kind === 'opencode' ? opencodeLaunchLine('opencode', command) : null;
+      let answered = false;
+      launching?.then(() => {
+        answered = true;
+      });
+      const shell = get().tabs.find((t) => t.id === targetId)?.sessionId;
 
-      const readiness = await untilTypingSafe(targetId);
+      let readiness = await untilTypingSafe(targetId);
+      let launched = command;
+      if (launching && readiness !== 'gone' && readiness !== 'hidden') {
+        const checkedAfter = answered;
+        launched = await launching;
+        // A probe that answered after the check: the terminal is checked
+        // again, as the first time, before anything is typed — a password
+        // prompt may have come up meanwhile, or the shell gone — and nothing
+        // is typed once it holds another agent (typed by hand, say).
+        if (!checkedAfter) {
+          const now = get().tabs.find((t) => t.id === targetId);
+          readiness = !now || now.sessionId !== shell || now.exited ? 'gone' : await untilTypingSafe(targetId);
+          if (get().tabs.find((t) => t.id === targetId)?.agent !== agent) return false;
+        }
+      }
       if (readiness === 'gone') return false;
       if (readiness === 'hidden') {
         // Not typed into a password prompt: the offer comes back, as it was
@@ -6042,7 +6087,7 @@ export const useTerminalStore = create((set, get, api) => {
       if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
       recordAgent(targetId, typed.agent, readiness === 'ready');
       noteAgentLaunch(targetId);
-      await get().writeRaw(targetId, `${typed.command}\r`);
+      await get().writeRaw(targetId, `${typed.command === command ? launched : typed.command}\r`);
       if (fresh) {
         conversationReplaced({
           tabId: targetId,

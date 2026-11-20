@@ -1996,6 +1996,22 @@ class BrowserMockBridge {
           .map(({ id, title, updated, created }) => ({ id, title, updated, created }));
       }
 
+      // 21a. opencode_version — the backend runs `opencode --version` and
+      // says whether that opencode has mini mode: V1, 1.17.10 or newer
+      // (src-tauri/src/commands/agent.rs `mini_supported`). The mock reads
+      // `this.opencodeVersion`: what that opencode would print, an Error to
+      // fail with, or nothing — no opencode, as in a browser.
+      case 'opencode_version': {
+        const printed = this.opencodeVersion;
+        if (printed instanceof Error) throw printed;
+        if (typeof printed !== 'string') throw new Error('opencode was not found on PATH');
+        const found = /(?:^|[^\d.])(\d+)\.(\d+)\.(\d+)/.exec(printed);
+        if (!found) return { version: null, mini: false };
+        const [major, minor, patch] = found.slice(1, 4).map(Number);
+        const mini = major === 1 && (minor > 17 || (minor === 17 && patch >= 10));
+        return { version: `${major}.${minor}.${patch}`, mini };
+      }
+
       // 21b. claude_conversations — whether Claude Code saved each
       // conversation, and the title it gave it, from its own transcripts
       // (src-tauri/src/claude_conversations.rs). The mock reads

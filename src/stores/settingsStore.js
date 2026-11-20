@@ -77,6 +77,17 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalClaudeNormalScreen: true,
   /**
+   * Start and resume OpenCode V1 as `opencode --mini --no-replay` (with `-s
+   * <id>` or `--continue` on resume) when `opencode --version` says 1.17.10
+   * or newer (src/lib/opencodeLaunch.js), so its conversation is printed on
+   * the normal screen: it scrolls with the scrollbar and every message sent
+   * gets a mark. The trade: not the full-screen TUI's own layout and mouse.
+   * Any other OpenCode, and this off, get plain `opencode` as before; typing
+   * `opencode` yourself always gives the full TUI. Read when NexTerm types
+   * the line, so a change applies to the next start or resume.
+   */
+  terminalOpencodeMini: true,
+  /**
    * Copy a selection to the clipboard the moment the mouse makes it — a drag,
    * a double- or triple-click. Warp's default, and the reason a selection can
    * be pasted elsewhere without a second key. Only mouse selections: a find

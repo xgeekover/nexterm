@@ -50,6 +50,9 @@ const SETTINGS_KEYS = [
   // Settings ▸ Terminal ▸ Claude Code on the Normal Screen: read by
   // `spawnPty` as each shell starts (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).
   'terminalClaudeNormalScreen',
+  // Settings ▸ Terminal ▸ OpenCode in Mini Mode: read by opencodeLaunch.js
+  // each time NexTerm types an opencode line.
+  'terminalOpencodeMini',
   'terminalCopyOnSelect',
   'terminalMouseReporting',
   'terminalRightClick',

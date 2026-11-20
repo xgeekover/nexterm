@@ -212,6 +212,25 @@ export function resumeCommand(agent) {
 }
 
 /**
+ * What NexTerm adds to an opencode line for OpenCode V1's mini mode (1.17.10
+ * and newer): the conversation on the normal screen, in the scrollback, and
+ * nothing printed again on a resize. Fixed literals only.
+ */
+export const OPENCODE_MINI_FLAGS = '--mini --no-replay';
+
+/**
+ * `command` with OPENCODE_MINI_FLAGS right after a leading `opencode` word
+ * (`opencode`, `opencode -s <id>`, `opencode --continue`), and any other line
+ * — a claude line, one that names `--mini` already — unchanged. Pure: when to
+ * use it is opencodeLaunch.js's to say, right before the line is typed.
+ */
+export function withOpencodeMini(command) {
+  if (typeof command !== 'string' || !/^opencode(?=$|\s)/.test(command)) return command;
+  if (/(?:^|\s)--mini(?=$|\s)/.test(command)) return command;
+  return `opencode ${OPENCODE_MINI_FLAGS}${command.slice('opencode'.length)}`;
+}
+
+/**
  * How certain the resume is, which decides what the banner may promise.
  *
  * `exact` — the record holds the conversation's own id: claude's because
