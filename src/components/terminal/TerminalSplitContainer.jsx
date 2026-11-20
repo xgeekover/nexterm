@@ -19,11 +19,12 @@ import {
   swapChoices,
   swapLabel,
   panelMinSizeOf,
+  minSharesOf,
+  fitSizesToMinimums,
   EDITOR_KIND,
   TERMINAL_KIND,
   leafKind,
-  liftSizes,
-  projectTree,
+  leavesOfKind,
 } from './splitLayout.js';
 import {
   SplitSquareHorizontal,
@@ -31,6 +32,7 @@ import {
   X,
   Plus,
   TerminalSquare,
+  FileCode2,
   Pencil,
   Copy,
   Files,
@@ -40,7 +42,23 @@ import {
   Minimize2,
   ArrowLeftRight,
 } from 'lucide-react';
-import { useTerminalStore, treeOnScreen, zoomedPaneOf, swapBlockedReason } from '../../stores/terminalStore.js';
+import {
+  useTerminalStore,
+  treeOnScreen,
+  zoomedPaneOf,
+  swapBlockedReason,
+  activePaneOf,
+  hiddenTabIdsOf,
+} from '../../stores/terminalStore.js';
+import { useEditorStore } from '../../stores/editorStore.js';
+// The editor pane's frame and strip, drawn at once; neither imports Monaco,
+// which EditorPane.jsx loads lazily for the body. Never EditorPanel.jsx here.
+import { EditorPane } from '../editor/EditorPane.jsx';
+import {
+  EditorDragContext,
+  dropTargetAtPoint as editorDropTargetAtPoint,
+  trackTabDrag,
+} from '../editor/EditorTabs.jsx';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { AgentResumeBanner } from './AgentResumeBanner.jsx';
@@ -142,6 +160,23 @@ function zoneFromPoint(rect, clientX, clientY) {
   return candidates[0].d < EDGE_FRACTION ? candidates[0].zone : 'center';
 }
 
+/**
+ * The edge of a rect nearest the point — never the centre. Where a tab of one
+ * kind is dragged over a pane of the other (FC3): a file cannot join a
+ * terminal pane, nor a terminal an editor pane, so all of the body is split
+ * zones, each point going to its nearest edge.
+ */
+export function edgeZoneFromPoint(rect, clientX, clientY) {
+  const x = (clientX - rect.left) / rect.width;
+  const y = (clientY - rect.top) / rect.height;
+  return [
+    { zone: 'left', d: x },
+    { zone: 'right', d: 1 - x },
+    { zone: 'top', d: y },
+    { zone: 'bottom', d: 1 - y },
+  ].sort((a, b) => a.d - b.d)[0].zone;
+}
+
 // ---------------------------------------------------------------------------
 // Where a dragged chip lands along a ROW of chips — a pane's tab strip, or the
 // group switcher. Both rows scroll sideways once they hold more chips than
@@ -235,20 +270,52 @@ export function readChipRow(row, chipSelector) {
  * The whole strip is the target, its buttons included — so the row is found
  * through the strip, not under the pointer: over Split Down the pointer is
  * beside the row, and counts as its right edge (see `slotAtX`).
+ *
+ * The workbench's ONE hit test (editor placement, sibling C, FC3): it knows
+ * both kinds of pane by their own attributes — `[data-tab-strip]` and
+ * `[data-pane-body]` for a terminal pane, `[data-editor-tab-strip]` and
+ * `[data-editor-pane-body]` for an editor pane, which keeps attributes of its
+ * own so that what reads terminal panes never takes it for one — and says
+ * which in `paneKind`. An editor strip's gap is `index` (EditorTabs'
+ * `stripSlotAt`), a terminal strip's `slot`.
+ *
+ * `tabKind`, the kind of tab being dragged, brings in the rule across kinds:
+ * the other kind's strip is no target at all (null), and its body has no
+ * centre — every point is the nearest edge (`edgeZoneFromPoint`). Left out,
+ * each pane answers as for a tab of its own kind.
  */
-export function dropTargetAtPoint(clientX, clientY, doc = document) {
+export function dropTargetAtPoint(clientX, clientY, doc = document, tabKind = null) {
   const el = doc.elementFromPoint(clientX, clientY);
+  const across = (paneKind) => Boolean(tabKind) && tabKind !== paneKind;
 
   const strip = el?.closest?.('[data-tab-strip]');
   if (strip) {
+    if (across(TERMINAL_KIND)) return null;
     const row = strip.querySelector('[data-chip-row]');
     const { chips, visible } = readChipRow(row, '[data-tab-chip]');
     return {
       paneId: strip.getAttribute('data-tab-strip'),
+      paneKind: TERMINAL_KIND,
       zone: 'tabs',
       slot: slotAtX(chips, clientX, visible),
       row,
     };
+  }
+
+  if (el?.closest?.('[data-editor-tab-strip]') || el?.closest?.('[data-editor-pane-body]')) {
+    const hit = editorDropTargetAtPoint(clientX, clientY, doc);
+    if (!hit) return null;
+    if (across(EDITOR_KIND)) {
+      if (hit.zone === 'tabs') return null;
+      const body = el.closest('[data-editor-pane-body]');
+      return {
+        ...hit,
+        paneKind: EDITOR_KIND,
+        zone: edgeZoneFromPoint(body.getBoundingClientRect(), clientX, clientY),
+        row: null,
+      };
+    }
+    return { ...hit, paneKind: EDITOR_KIND, row: null };
   }
 
   const body = el?.closest?.('[data-pane-body]');
@@ -256,7 +323,8 @@ export function dropTargetAtPoint(clientX, clientY, doc = document) {
   const rect = body.getBoundingClientRect();
   return {
     paneId: body.getAttribute('data-pane-body'),
-    zone: zoneFromPoint(rect, clientX, clientY),
+    paneKind: TERMINAL_KIND,
+    zone: across(TERMINAL_KIND) ? edgeZoneFromPoint(rect, clientX, clientY) : zoneFromPoint(rect, clientX, clientY),
     row: null,
   };
 }
@@ -287,6 +355,71 @@ export function groupSlotAtPoint(clientX, clientY, doc = document) {
   if (!switcher) return { slot: null, row: null };
   const { chips, visible } = readChipRow(switcher.row, '[data-group-chip]');
   return { slot: slotAtX(chips, clientX, visible), row: switcher.row };
+}
+
+/**
+ * What a TAB of kind `tabKind` dragged to this point is over, as the drag
+ * state holds it: the workbench's one hit test (`dropTargetAtPoint`, with the
+ * rule across kinds) and, only where the pointer is over no pane, a chip of
+ * the group switcher — which sits above the panes, never on top of one.
+ * Both kinds of tab go through here (sibling C, FC3).
+ *
+ * `targetGroupId` is another group's chip; the chip of the group the tab is
+ * in (`activeGroupId`, the one on screen) would be a no-op, so it is never a
+ * target. `row` is the row of chips under the pointer, for auto-scroll —
+ * never part of the drag's state. An editor strip's gap is `index`, a
+ * terminal strip's `slot`.
+ */
+export function tabTargetAt(clientX, clientY, tabKind, activeGroupId, doc = document) {
+  const hit = dropTargetAtPoint(clientX, clientY, doc, tabKind);
+  const switcher = hit ? null : switcherAtPoint(clientX, clientY, doc);
+  const groupId = switcher?.groupId ?? null;
+  return {
+    targetPaneId: hit?.paneId ?? null,
+    paneKind: hit?.paneKind ?? null,
+    zone: hit?.zone ?? null,
+    slot: hit?.slot ?? null,
+    index: hit?.index ?? null,
+    targetGroupId: groupId && groupId !== activeGroupId ? groupId : null,
+    row: hit ? hit.row ?? null : switcher?.row ?? null,
+  };
+}
+
+/**
+ * `tabTargetAt` for a FILE tab, in the shape EditorTabs' `trackTabDrag` takes
+ * from its `targetAt`: the pointer follower is the editor strip's own, the
+ * hit test and the switcher are the workbench's.
+ */
+export function fileTabTargetAt(clientX, clientY, activeGroupId, doc = document) {
+  const t = tabTargetAt(clientX, clientY, EDITOR_KIND, activeGroupId, doc);
+  return { paneId: t.targetPaneId, paneKind: t.paneKind, zone: t.zone, index: t.index, targetGroupId: t.targetGroupId };
+}
+
+/**
+ * The one drop dispatcher: what a tab let go in the drag state `cur` does
+ * (sibling C, FC3). On a tab strip it goes in at the gap — along its own
+ * strip, a reorder. On a pane body the centre moves it into that pane and
+ * the edges split; over the other kind's body there is no centre
+ * (`dropTargetAtPoint`), so it always splits. On another group's chip it
+ * moves to that group. Nowhere — the other kind's strip, outside every
+ * target — nothing at all.
+ *
+ * A file goes through editorStore, whose wrappers keep its active tab in
+ * step with the pane it lands in; a terminal straight to terminalStore.
+ */
+export function dropDraggedTab(cur) {
+  if (!cur) return;
+  if (cur.tabKind === EDITOR_KIND) {
+    const editor = useEditorStore.getState();
+    if (cur.targetPaneId && cur.zone === 'tabs') editor.moveEditorTabInStrip(cur.tabId, cur.targetPaneId, cur.index);
+    else if (cur.targetPaneId) editor.dropEditorTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+    else if (cur.targetGroupId) useTerminalStore.getState().moveTabToGroup(cur.tabId, cur.targetGroupId);
+    return;
+  }
+  const store = useTerminalStore.getState();
+  if (cur.targetPaneId && cur.zone === 'tabs') store.moveTabInStrip(cur.tabId, cur.targetPaneId, cur.slot);
+  else if (cur.targetPaneId) store.dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
+  else if (cur.targetGroupId) store.moveTabToGroup(cur.tabId, cur.targetGroupId);
 }
 
 /**
@@ -459,6 +592,8 @@ function DropIndicator({ zone }) {
   return (
     <div
       aria-hidden="true"
+      // The zone shown, for what reads the page (workbench_drag_headless).
+      data-drop-zone={zone}
       className={cn(
         'absolute z-20 pointer-events-none flex items-center justify-center',
         'border-2 border-vsc-accent rounded-sm',
@@ -544,7 +679,13 @@ function DragPreview({ drag }) {
                  bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-accent"
       style={{ left: drag.x + 12, top: drag.y + 12 }}
     >
-      {drag.kind === 'group' ? <LayoutGrid size={12} /> : <TerminalSquare size={12} />}
+      {drag.kind === 'group' ? (
+        <LayoutGrid size={12} />
+      ) : drag.tabKind === EDITOR_KIND ? (
+        <FileCode2 size={12} />
+      ) : (
+        <TerminalSquare size={12} />
+      )}
       <span className="truncate max-w-[140px]">{drag.title}</span>
     </div>,
     document.body
@@ -767,9 +908,12 @@ function TerminalPane({
   const swapMenuFor = () => {
     const state = useTerminalStore.getState();
     const group = state.groups.find((g) => g.id === groupId);
-    // Terminal panes only, as this view draws them (sibling B).
-    const note = swapBlockedReason(group, TERMINAL_KIND);
-    return { note, panes: note ? [] : swapChoices(projectTree(group.tree, TERMINAL_KIND), state.tabs, paneId) };
+    // Every pane on screen, of either kind (sibling C): the workbench draws
+    // them all, and a swap carries each pane's contents with their kind. An
+    // editor pane is named by the file it shows.
+    const files = useEditorStore.getState().tabs.map((t) => ({ id: t.id, title: t.fileName }));
+    const note = swapBlockedReason(group);
+    return { note, panes: note ? [] : swapChoices(group.tree, [...state.tabs, ...files], paneId) };
   };
 
   const beginRenameTab = (tab) => {
@@ -839,7 +983,8 @@ function TerminalPane({
       <div data-chip-row="" className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
         {paneTabs.map((tab, i) => {
           const isActive = tab.id === boundTab?.id;
-          const isBeingDragged = drag?.active && drag.tabId === tab.id;
+          // A file being dragged never dims a terminal, whatever its id.
+          const isBeingDragged = drag?.active && drag.tabId === tab.id && drag.tabKind !== EDITOR_KIND;
           const unread = unreadOf(tab.id);
           // What the dot says, then what the pill says — one sentence for
           // both, so hovering answers "why is that one red" and "what does
@@ -1317,14 +1462,38 @@ function TerminalPane({
 function ResizableSplit({ node, groupId, renderChild }) {
   const setPaneSizes = useTerminalStore((s) => s.setPaneSizes);
   const groupRef = useGroupRef();
+  const direction = node.direction === 'vertical' ? 'vertical' : 'horizontal';
+
+  // The Group's length along its direction, in whole pixels, for the pixel
+  // minimums below (FC7). Null until measured — a server render, the first
+  // paint — when the percentage minimum alone holds.
+  const boxRef = useRef(null);
+  const [lengthPx, setLengthPx] = useState(null);
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const px = Math.round(direction === 'horizontal' ? el.clientWidth : el.clientHeight);
+      setLengthPx(px > 0 ? px : null);
+    };
+    measure();
+    if (typeof ResizeObserver !== 'function') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [direction]);
 
   const childIds = node.children.map((c) => c.id);
-  const sizes = sizesOf(node);
+  // Stored sizes below the pixel minimums are SHOWN fitted to them
+  // (`fitSizesToMinimums`), never written back: only a user's drag writes
+  // the store (`handleLayoutChanged`), so this cannot loop with the
+  // reconcile below.
+  const sizes = lengthPx ? fitSizesToMinimums(node, lengthPx) : sizesOf(node);
   // Cheap structural identity for the memo/effect below: ids + sizes.
   const layoutKey = childIds.map((id, i) => `${id}:${sizes[i].toFixed(2)}`).join(',');
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const layout = useMemo(() => layoutOf(node), [layoutKey]);
+  const layout = useMemo(() => layoutOf({ ...node, sizes }), [layoutKey]);
 
   useLayoutEffect(() => {
     const handle = groupRef.current;
@@ -1349,31 +1518,38 @@ function ResizableSplit({ node, groupId, renderChild }) {
     (nextLayout, meta) => {
       const next = sizesFromLayout(childIds, nextLayout, meta);
       if (!next) return;
-      // Drawn from the terminal projection: the full split may have editor
-      // children this view does not show, which keep their share (`liftSizes`).
-      const full = useTerminalStore.getState().groups.find((g) => g.id === groupId)?.tree;
-      setPaneSizes(groupId, node.id, liftSizes(full, node.id, next, TERMINAL_KIND) ?? next);
+      // The whole tree is drawn (sibling C): these are the split's own sizes,
+      // editor children's included, and go to the store as they are.
+      setPaneSizes(groupId, node.id, next);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [childIds.join(','), groupId, node.id, setPaneSizes]
   );
 
-  const direction = node.direction === 'vertical' ? 'vertical' : 'horizontal';
-  // Small enough that a line of equal panes is truly equal (`panelMinSizeOf`).
-  const minSize = panelMinSizeOf(node);
+  // Each Panel's minimum: the pixels its subtree needs along this split
+  // (PANE_MIN_PX, through `minSharesOf`, which scales them down together when
+  // the Group cannot hold them all) as a share of the measured length — and
+  // never above `panelMinSizeOf`, the bound that keeps a line of equal panes
+  // truly equal. Shares, not raw pixels: nested pixel minimums the space
+  // cannot hold make the library refuse the layout.
+  const equalBound = Number(panelMinSizeOf(node));
+  const pixelShares = lengthPx ? minSharesOf(node, lengthPx) : null;
+  const minSizeOf = (i) =>
+    pixelShares ? String(Math.floor(Math.min(equalBound, pixelShares[i]) * 100) / 100) : String(equalBound);
 
   return (
     <Group
       orientation={direction}
       className="h-full w-full"
       groupRef={groupRef}
+      elementRef={boxRef}
       defaultLayout={layout}
       onLayoutChanged={handleLayoutChanged}
     >
       {node.children.map((child, i) => (
         <React.Fragment key={child.id}>
           {i > 0 && <Separator className={direction === 'horizontal' ? 'w-px' : 'h-px'} />}
-          <Panel id={child.id} minSize={minSize} defaultSize={String(sizes[i])}>
+          <Panel id={child.id} minSize={minSizeOf(i)} defaultSize={String(sizes[i])}>
             {renderChild(child)}
           </Panel>
         </React.Fragment>
@@ -1391,7 +1567,48 @@ function ResizableSplit({ node, groupId, renderChild }) {
  * none), whether the group has panes enough to zoom one, how many a zoom is
  * hiding and the terminals in them.
  */
-function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, onRenameGroup, zoom }) {
+/**
+ * An editor leaf of the workbench (sibling C, FC2): EditorPane, with what the
+ * workbench owns laid in — the drag's indicator over its body, its zoom
+ * control in its strip, and the active line by the terminal's rule (FC6).
+ */
+function EditorLeaf({ node, isActivePane, canClose, zoom, shortcut }) {
+  const { drag } = useContext(DragContext);
+  const zoomed = Boolean(zoom?.paneId) && zoom.paneId === node.id;
+  // Over this pane's own strip the strip draws its marker; the body's overlay
+  // is for the move and split zones only.
+  const dropZone = drag?.active && drag.targetPaneId === node.id && drag.zone !== 'tabs' ? drag.zone : null;
+  return (
+    <EditorPane
+      node={node}
+      canClose={canClose}
+      showActiveLine={isActivePane && Boolean(zoom?.canZoom) && !zoomed}
+      headerExtra={
+        <PaneZoomControl
+          zoomed={zoomed}
+          canZoom={Boolean(zoom?.canZoom)}
+          hiddenPanes={zoom?.hiddenPanes ?? 0}
+          hiddenTabIds={zoom?.hiddenTabIds}
+          onToggle={() => zoom?.onToggle?.(node.id)}
+          shortcut={shortcut}
+        />
+      }
+      bodyOverlay={
+        <>
+          {/* While dragging, swallow pointer events so Monaco cannot eat them. */}
+          {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
+          <DropIndicator zone={dropZone} />
+        </>
+      }
+    />
+  );
+}
+
+function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, onRenameGroup, zoom, keptPaneId = null }) {
+  const { shortcut } = useShortcuts();
+  if (node.type === 'leaf' && leafKind(node) === EDITOR_KIND) {
+    return <EditorLeaf node={node} isActivePane={activePaneId === node.id} canClose={canClose} zoom={zoom} shortcut={shortcut} />;
+  }
   if (node.type === 'leaf') {
     return (
       <TerminalPane
@@ -1401,7 +1618,9 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
         onSplitH={() => onSplit(node.id, 'horizontal')}
         onSplitV={() => onSplit(node.id, 'vertical')}
         onClose={() => onClose(node.id)}
-        canClose={canClose}
+        // The group's one terminal pane, kept empty beside its files (the
+        // human's Q-C1 answer): it has no Close, which would do nothing.
+        canClose={canClose && node.id !== keptPaneId}
         onRenameGroup={onRenameGroup}
         zoomed={Boolean(zoom?.paneId) && zoom.paneId === node.id}
         canZoom={Boolean(zoom?.canZoom)}
@@ -1426,10 +1645,23 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
           canClose={true}
           onRenameGroup={onRenameGroup}
           zoom={zoom}
+          keptPaneId={keptPaneId}
         />
       )}
     />
   );
+}
+
+/**
+ * The group's one terminal leaf when the group also holds files and that
+ * leaf is empty — the pane B's rule keeps (`pruneTerminalLeaves`), drawn as
+ * "No terminal in this pane" with New Terminal and no Close (Q-C1, option A).
+ * Null otherwise.
+ */
+export function keptTerminalPaneOf(tree) {
+  if (leavesOfKind(tree, EDITOR_KIND).length === 0) return null;
+  const terminals = leavesOfKind(tree, TERMINAL_KIND);
+  return terminals.length === 1 && terminals[0].tabIds.length === 0 ? terminals[0].id : null;
 }
 
 /**
@@ -1746,20 +1978,12 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const activeGroupId = useTerminalStore((s) => s.activeGroupId);
   const splitPane = useTerminalStore((s) => s.splitPane);
   const closePane = useTerminalStore((s) => s.closePane);
-  const dropTabOnPane = useTerminalStore((s) => s.dropTabOnPane);
-  const moveTabInStrip = useTerminalStore((s) => s.moveTabInStrip);
-  const moveTabToGroup = useTerminalStore((s) => s.moveTabToGroup);
   const reorderGroup = useTerminalStore((s) => s.reorderGroup);
   const setActiveGroup = useTerminalStore((s) => s.setActiveGroup);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
   const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
-  // The terminal projection of the group on screen (sibling B): what this view draws.
-  const terminalView = useMemo(
-    () => (activeGroup?.tree ? { ...activeGroup, tree: projectTree(activeGroup.tree, TERMINAL_KIND) ?? activeGroup.tree } : activeGroup),
-    [activeGroup]
-  );
 
   // Which group's switcher chip is currently being renamed inline. Lifted here
   // so a pane's "Rename Group…" menu item can open the switcher's editor
@@ -1885,6 +2109,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     (tab, e) => {
       const started = {
         kind: 'tab',
+        tabKind: TERMINAL_KIND,
         tabId: tab.id,
         title: tab.title,
         startX: e.clientX,
@@ -1893,47 +2118,51 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         y: e.clientY,
         active: false,
         targetPaneId: null,
+        paneKind: null,
         zone: null,
         slot: null,
         targetGroupId: null,
       };
 
+      // The one hit test and the one dispatcher, shared with file tabs.
       const targetAt = (x, y) => {
-        const hit = dropTargetAtPoint(x, y);
-        // A group chip is only considered when the pointer isn't over a pane —
-        // the switcher sits above the panes, never on top of one. Its row
-        // scrolls under a tab too, so a group whose chip is out of view can
-        // still be reached.
-        const switcher = hit ? null : switcherAtPoint(x, y);
-        const groupId = switcher?.groupId ?? null;
-        return {
-          targetPaneId: hit?.paneId ?? null,
-          zone: hit?.zone ?? null,
-          slot: hit?.slot ?? null,
-          // Dropping on the chip of the group the tab already lives in (the
-          // active one — only its tabs are on screen) is a no-op, so it is
-          // never highlighted as a target.
-          targetGroupId: groupId && groupId !== activeGroupIdRef.current ? groupId : null,
-          row: hit ? hit.row : switcher?.row ?? null,
-        };
+        const { index: _index, ...target } = tabTargetAt(x, y, TERMINAL_KIND, activeGroupIdRef.current);
+        return target;
       };
 
-      const drop = (cur) => {
-        if (cur.targetPaneId && cur.zone === 'tabs') {
-          // Into that pane at the marker. Along its own strip that is a
-          // reorder; a drop where it already is changes nothing at all.
-          moveTabInStrip(cur.tabId, cur.targetPaneId, cur.slot);
-        } else if (cur.targetPaneId) {
-          // The centre means "into this pane"; only the edges split.
-          dropTabOnPane(cur.tabId, cur.targetPaneId, cur.zone || 'center');
-        } else if (cur.targetGroupId) {
-          moveTabToGroup(cur.tabId, cur.targetGroupId);
-        }
-      };
+      const drop = (cur) => dropDraggedTab(cur);
 
       trackGesture(started, targetAt, drop);
     },
-    [trackGesture, dropTabOnPane, moveTabInStrip, moveTabToGroup]
+    [trackGesture]
+  );
+
+  /**
+   * A FILE tab's chip (sibling C, FC3): into the same drag state, aimed by the
+   * same hit test with the rule across kinds, drawn by the same indicators.
+   * Its press is followed by EditorTabs' `trackTabDrag`, which scrolls an
+   * editor strip at its own per-second pace (the terminal's rows keep their
+   * per-frame one). Dropped on a strip it goes in at the gap; on a body, of
+   * either kind, it moves or splits through editorStore, which keeps its
+   * active tab in step; on another group's chip it moves to that group.
+   */
+  const beginEditorDrag = useCallback(
+    (tab, e) => {
+      cleanupRef.current?.();
+      const detach = trackTabDrag(tab, e, {
+        targetAt: (x, y) => fileTabTargetAt(x, y, activeGroupIdRef.current),
+        onChange: (next) => {
+          dragRef.current = next;
+          setDrag(next);
+        },
+        onDrop: dropDraggedTab,
+      });
+      cleanupRef.current = () => {
+        detach();
+        cleanupRef.current = null;
+      };
+    },
+    []
   );
 
   /**
@@ -2016,6 +2245,8 @@ export function TerminalSplitContainer({ headerSlot = null }) {
     () => ({ drag, beginDrag, beginGroupDrag, cancelActiveDrag }),
     [drag, beginDrag, beginGroupDrag, cancelActiveDrag]
   );
+  // What the editor strips read: the same drag, and their chips' press.
+  const editorDragValue = useMemo(() => ({ drag, beginDrag: beginEditorDrag }), [drag, beginEditorDrag]);
 
   if (!activeGroup?.tree) return null;
 
@@ -2023,27 +2254,25 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   // `treeOnScreen`). A hidden pane is simply not mounted; its terminal waits
   // in the registry, running, like a terminal in another group.
   //
-  // The releasability bridge (sibling B, FB12): this view draws the terminal
-  // projection of the group, ids kept, so a file opened above the terminals
-  // remounts nothing here.
-  const terminalGroup = terminalView;
-  const zoomedPane = zoomedPaneOf(terminalGroup);
-  const shownTree = treeOnScreen(terminalGroup);
-  const paneCount = collectPanes(activeGroup.tree).length;
+  // The whole workbench tree, both kinds (sibling C, FC2): a terminal leaf is
+  // a TerminalPane, an editor leaf an EditorPane. A zoom counts and hides
+  // panes of both kinds (FC8); the hidden-attention count is terminals' only
+  // (`hiddenTabIdsOf`).
+  const zoomedPane = zoomedPaneOf(activeGroup);
+  const shownTree = treeOnScreen(activeGroup);
+  const paneCount = leavesOfKind(activeGroup.tree, EDITOR_KIND).length + collectPanes(activeGroup.tree).length;
+  const hiddenTabIds = hiddenTabIdsOf(activeGroup);
   const zoom = {
     paneId: zoomedPane?.id ?? null,
     canZoom: paneCount > 1,
     hiddenPanes: zoomedPane ? paneCount - 1 : 0,
-    hiddenTabIds: zoomedPane
-      ? collectPanes(activeGroup.tree)
-          .filter((pane) => pane.id !== zoomedPane.id)
-          .flatMap((pane) => pane.tabIds)
-      : NO_TAB_IDS,
+    hiddenTabIds: hiddenTabIds.length ? hiddenTabIds : NO_TAB_IDS,
     onToggle: handleToggleZoom,
   };
 
   return (
     <DragContext.Provider value={dragValue}>
+      <EditorDragContext.Provider value={editorDragValue}>
       <div className={cn('h-full w-full flex flex-col overflow-hidden', drag?.active && 'cursor-grabbing')}>
         <GroupSwitcher
           groups={groups}
@@ -2070,16 +2299,20 @@ export function TerminalSplitContainer({ headerSlot = null }) {
           <SplitNode
             node={shownTree}
             groupId={activeGroup.id}
-            activePaneId={activeGroup.activePaneId}
+            // THE active pane, of either kind (FC1): a terminal pane is told
+            // it lost the focus while a file is the active pane.
+            activePaneId={activePaneOf(activeGroup)}
             onSplit={handleSplit}
             onClose={handleClose}
-            canClose={terminalGroup.tree.type !== 'leaf'}
+            canClose={activeGroup.tree.type !== 'leaf'}
             onRenameGroup={setRenamingGroupId}
             zoom={zoom}
+            keptPaneId={keptTerminalPaneOf(activeGroup.tree)}
           />
         </div>
         <DragPreview drag={drag} />
       </div>
+      </EditorDragContext.Provider>
     </DragContext.Provider>
   );
 }

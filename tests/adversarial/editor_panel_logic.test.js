@@ -27,6 +27,7 @@ let loading = null;
 function loadEditorPanel() {
   loading ??= build({
     stdin: {
+      // Sibling C: the pane around Monaco is EditorPane.jsx, which EditorPanel.jsx names `pressActivatesGroup` from.
       contents: "export * from './EditorPanel.jsx';\nexport * from './EditorPrompts.jsx';",
       resolveDir: EDITOR_DIR,
       sourcefile: 'editor-panel-under-test.js',
@@ -43,7 +44,7 @@ function loadEditorPanel() {
         name: 'editor-panel-stand-ins',
         setup(b) {
           b.onResolve({ filter: /.*/ }, (args) => {
-            if (/^\.\/Editor(Panel|Prompts)\.jsx$/.test(args.path)) return undefined;
+            if (/^\.\/Editor(Panel|Prompts|Pane)\.jsx$/.test(args.path)) return undefined;
             if (REAL.has(args.path)) return { path: import.meta.resolve(args.path), external: true };
             return { path: args.path, namespace: 'stand-in' };
           });
@@ -208,7 +209,8 @@ describe('Which press makes a group the active one', () => {
     assert.equal(pressActivatesGroup(undefined), false);
 
     const { readFileSync } = await import('node:fs');
-    const panel = readFileSync(new URL('../../src/components/editor/EditorPanel.jsx', import.meta.url), 'utf8');
+    // Sibling C: the press is the editor pane's, EditorPane.jsx (mechanical).
+    const panel = readFileSync(new URL('../../src/components/editor/EditorPane.jsx', import.meta.url), 'utf8');
     assert.match(panel, /onMouseDown=\{\(e\) => \{\s*if \(pressActivatesGroup\(e\)\) setActiveEditorPane\(paneId\);\s*\}\}/);
   });
 });

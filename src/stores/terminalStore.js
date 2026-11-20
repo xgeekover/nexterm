@@ -423,6 +423,49 @@ function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
 }
 
+// --- The one active pane (sibling C, FC1) ----------------------------------
+//
+// A group has ONE active pane of either kind. B's two fields keep their
+// meaning — `activePaneId` the last active terminal leaf, which every
+// terminal command and reader acts on, and `editorPaneId` the last active
+// editor leaf, whose shown tab is editorStore's `activeTabId` — and the
+// optional `activeKind: 'editor'` says the editor one is THE active pane.
+// Absent, the terminal one is. Coexisting fields rather than one merged id:
+// `activePaneId` is read as a terminal leaf throughout this file and beyond
+// (createTab, closeActivePane, workspaceFocus, controlDispatcher), and each
+// of those stays right untouched.
+
+/**
+ * The fields that make terminal leaf `paneId` its group's active pane.
+ * `activeKind: undefined` is dropped by `settle`, which every writer of
+ * these goes through.
+ */
+const terminalFocus = (paneId) => ({ activePaneId: paneId, activeKind: undefined });
+
+/** The fields that make editor leaf `paneId` its group's active pane. */
+const editorFocus = (paneId) => ({ editorPaneId: paneId, activeKind: EDITOR_KIND });
+
+/**
+ * The id of `group`'s one active pane, of either kind: its editor pane while
+ * `activeKind` is 'editor' and that leaf is in the tree, else its terminal
+ * active pane. Read defensively, as `zoomedPaneOf` is, so a hand-made or
+ * half-restored group never names a pane that is not there. Null without a
+ * group.
+ */
+export function activePaneOf(group) {
+  if (!group) return null;
+  if (group.activeKind === EDITOR_KIND && group.editorPaneId) {
+    const leaf = collectLeaves(group.tree).find((l) => l.id === group.editorPaneId);
+    if (leaf && isEditorLeaf(leaf)) return leaf.id;
+  }
+  return group.activePaneId ?? null;
+}
+
+/** The kind of `group`'s one active pane: 'editor' or 'terminal'. */
+export function activeKindOf(group) {
+  return group && activePaneOf(group) !== group.activePaneId ? EDITOR_KIND : TERMINAL_KIND;
+}
+
 // --- Zoom ----------------------------------------------------------------
 
 /**
@@ -458,6 +501,20 @@ export function treeOnScreen(group) {
 /** The panes of `group` that are drawn, in DOM order — see `treeOnScreen`. */
 export function panesOnScreen(group) {
   return collectLeaves(treeOnScreen(group));
+}
+
+/**
+ * The TERMINAL tab ids a zoom of `group` hides — what the zoom chip counts
+ * unread attention over (FC8). A zoom hides panes of both kinds now, but
+ * attention is a terminal's alone, and a file tab id is no terminal's.
+ * Empty when the group is not zoomed.
+ */
+export function hiddenTabIdsOf(group) {
+  const zoomed = zoomedPaneOf(group);
+  if (!zoomed) return [];
+  return collectLeaves(group.tree)
+    .filter((leaf) => leaf.id !== zoomed.id && !isEditorLeaf(leaf))
+    .flatMap((leaf) => leaf.tabIds);
 }
 
 /**
@@ -682,6 +739,20 @@ function neighbourEditorLeaf(tree, paneId) {
 }
 
 /**
+ * The editor leaf of `after` that takes over from editor leaf `paneId` of
+ * `before` once it is gone: the nearest one after it in DOM order that is
+ * still there, else the nearest before it — `neighbourEditorLeaf` when
+ * several leaves went at once. Undefined when none is left.
+ */
+function survivingNeighbourEditorLeaf(before, after, paneId) {
+  const order = collectLeaves(before).filter(isEditorLeaf).map((l) => l.id);
+  const left = new Set(collectLeaves(after).filter(isEditorLeaf).map((l) => l.id));
+  const i = order.indexOf(paneId);
+  if (i === -1) return undefined;
+  return order.slice(i + 1).find((id) => left.has(id)) ?? order.slice(0, i).reverse().find((id) => left.has(id));
+}
+
+/**
  * `groups` with every file tab of `state`'s groups moved into group
  * `targetGroupId` as ONE editor leaf, wrapped above its tree (FB4, FB6) —
  * what replacing the groups that held them does. Nothing is closed and
@@ -848,23 +919,25 @@ function settle(state, patch = {}) {
       ? group.editorPaneId
       : editorLeaves[0]?.id;
     const editorSettled = editorPaneId === undefined ? !('editorPaneId' in group) : editorPaneId === group.editorPaneId;
+    // The editor pane is THE active pane only while there is one (FC1):
+    // 'editor' or nothing — any other value, a restored or hand-made one
+    // included, means the terminal pane is.
+    const activeKind = group.activeKind === EDITOR_KIND && editorPaneId !== undefined ? EDITOR_KIND : undefined;
+    const kindSettled = activeKind === undefined ? !('activeKind' in group) : group.activeKind === activeKind;
     const name = typeof group.name === 'string' && group.name ? group.name : 'Group';
-    // Checked against the REPAIRED active panes: a zoomed pane that was pruned
-    // has just handed `activePaneId` to a survivor, which it is not. A zoom
-    // hides panes of its own kind, those its view draws, so only they count
-    // (review K-04): a lone terminal beside an editor leaf has nothing to hide.
-    const zoomedKindCount =
-      group.zoomedPaneId === activePaneId
-        ? terminalLeaves.length
-        : group.zoomedPaneId === editorPaneId
-          ? editorLeaves.length
-          : 0;
-    const zoomHolds = Boolean(group.zoomedPaneId) && zoomedKindCount > 1;
+    // Checked against the REPAIRED active pane: a zoomed pane that was pruned
+    // has just handed the active pane to a survivor, which it is not. One
+    // tree draws both kinds (sibling C, FC8), so a zoom hides every other
+    // pane of either kind, and holds while there is any other pane to hide.
+    const shownActive = activeKind === EDITOR_KIND ? editorPaneId : activePaneId;
+    const zoomHolds = Boolean(group.zoomedPaneId) && group.zoomedPaneId === shownActive && leaves.length > 1;
     const zoomSettled = zoomHolds || !('zoomedPaneId' in group);
-    if (activePaneId === group.activePaneId && name === group.name && zoomSettled && editorSettled) return group;
+    if (activePaneId === group.activePaneId && name === group.name && zoomSettled && editorSettled && kindSettled) return group;
     const next = { ...group, name, activePaneId };
     if (editorPaneId === undefined) delete next.editorPaneId;
     else next.editorPaneId = editorPaneId;
+    if (activeKind === undefined) delete next.activeKind;
+    else next.activeKind = activeKind;
     return zoomHolds ? next : withoutZoom(next);
   });
 
@@ -969,6 +1042,9 @@ function serializeGroupForPersist(group, withEditors = editorsPersisted()) {
     tree: serializeTreeForPersist(tree),
   };
   if (withEditors && group.editorPaneId) out.editorPaneId = group.editorPaneId;
+  // Additive (FC1): which of the two is THE active pane. Older readers
+  // build each group field by field and never look at it.
+  if (withEditors && group.editorPaneId && group.activeKind === EDITOR_KIND) out.activeKind = EDITOR_KIND;
   return out;
 }
 
@@ -3753,6 +3829,8 @@ export const useTerminalStore = create((set, get, api) => {
           : leaves.find((l) => !isEditorLeaf(l))?.id ?? firstLeafId(tree),
       };
       if (leaves.some((l) => l.id === group.editorPaneId && isEditorLeaf(l))) restoredGroup.editorPaneId = group.editorPaneId;
+      // Only the one value this build writes; anything else is a terminal-active group.
+      if (restoredGroup.editorPaneId && group.activeKind === EDITOR_KIND) restoredGroup.activeKind = EDITOR_KIND;
       groups.push(restoredGroup);
     });
 
@@ -4625,16 +4703,17 @@ export const useTerminalStore = create((set, get, api) => {
         if (!group) return {};
         const pane = collectLeaves(group.tree).find((l) => l.id === paneId);
         if (!pane) return {};
-        // An editor leaf is the group's editor pane, never its terminal one (FB2).
+        // An editor leaf is the group's editor pane, never its terminal one
+        // (FB2), and becomes THE active pane (FC1).
         if (isEditorLeaf(pane)) {
-          if (group.editorPaneId === paneId && state.activeGroupId === group.id) return state;
+          if (activePaneOf(group) === paneId && state.activeGroupId === group.id) return state;
           return settle(state, {
-            groups: updateGroup(state, group.id, (g) => ({ ...g, editorPaneId: paneId })),
+            groups: updateGroup(state, group.id, (g) => ({ ...g, ...editorFocus(paneId) })),
             activeGroupId: group.id,
           });
         }
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: paneId })),
+          groups: updateGroup(state, group.id, (g) => ({ ...g, ...terminalFocus(paneId) })),
           activeGroupId: group.id,
           activeTabId: pane.activeTabId ?? state.activeTabId,
         });
@@ -4680,14 +4759,18 @@ export const useTerminalStore = create((set, get, api) => {
       set((state) => {
         const group = state.groups.find((g) => g.id === state.activeGroupId);
         if (!group) return {};
-        // Terminal panes only: `activePaneId` never names an editor leaf (FB2).
-        const leaves = collectLeaves(group.tree).filter((l) => !isEditorLeaf(l));
+        // Panes of both kinds, as one tree draws them (FC1), from the one
+        // active pane; landing on an editor leaf makes it THE active pane.
+        const leaves = collectLeaves(group.tree);
         if (leaves.length === 0) return {};
-        const currentIdx = leaves.findIndex((l) => l.id === group.activePaneId);
+        const currentIdx = leaves.findIndex((l) => l.id === activePaneOf(group));
         const fromIdx = currentIdx === -1 ? 0 : currentIdx;
         const next = leaves[(fromIdx + delta + leaves.length) % leaves.length];
+        if (isEditorLeaf(next)) {
+          return settle(state, { groups: updateGroup(state, group.id, (g) => ({ ...g, ...editorFocus(next.id) })) });
+        }
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: next.id })),
+          groups: updateGroup(state, group.id, (g) => ({ ...g, ...terminalFocus(next.id) })),
           activeTabId: next.activeTabId ?? state.activeTabId,
         });
       }),
@@ -4697,11 +4780,11 @@ export const useTerminalStore = create((set, get, api) => {
      * or, when the group is already zoomed, unzoom it. tmux's `Prefix z`,
      * iTerm2's "Maximize Active Pane".
      *
-     * `paneId` defaults to the active pane of the active group, which is what
+     * `paneId` defaults to THE active pane of the active group (`activePaneOf`), which is what
      * the keyboard, the menu and the palette act on; a pane's own button
-     * passes its id. Zooming makes that pane the active one and brings its
-     * group on screen. A group with one pane of that pane's kind has nothing
-     * to hide, and is left as it is.
+     * passes its id. Zooming makes that pane the active one, of whichever
+     * kind (FC1), and brings its group on screen. A group of one pane has
+     * nothing to hide, and is left as it is.
      *
      * The hidden panes are not closed or moved: the tree does not change at
      * all, so unzooming gives back the very layout that was zoomed, sizes
@@ -4724,13 +4807,15 @@ export const useTerminalStore = create((set, get, api) => {
           return { groups: updateGroup(state, group.id, withoutZoom) };
         }
         const leaves = collectLeaves(group.tree);
-        const pane = leaves.find((l) => l.id === (paneId ?? group.activePaneId));
+        const pane = leaves.find((l) => l.id === (paneId ?? activePaneOf(group)));
         if (!pane) return {};
-        // Panes of its own kind only, as `settle` counts them (review K-04):
-        // one terminal and one editor leaf is one pane in each view.
-        if (leaves.filter((l) => isEditorLeaf(l) === isEditorLeaf(pane)).length < 2) return {};
-        // A zoomed editor leaf is the group's editor pane; a terminal one its active pane.
-        const focus = isEditorLeaf(pane) ? { editorPaneId: pane.id } : { activePaneId: pane.id };
+        // Every pane counts, of either kind, as `settle` counts them (FC8):
+        // one tree draws both, so zooming one hides all the others. B
+        // counted the pane's own kind only (review K-04), when each kind had
+        // a view of its own.
+        if (leaves.length < 2) return {};
+        // The zoomed pane is THE active pane, of whichever kind it is.
+        const focus = isEditorLeaf(pane) ? editorFocus(pane.id) : terminalFocus(pane.id);
         return settle(state, {
           groups: updateGroup(state, group.id, (g) => ({ ...g, ...focus, zoomedPaneId: pane.id })),
           activeGroupId: group.id,
@@ -5155,7 +5240,7 @@ export const useTerminalStore = create((set, get, api) => {
         groups = updateGroup(groups, target.id, (g) => ({
           ...g,
           tree: addTabToPane(g.tree, paneId, tabId),
-          activePaneId: paneId,
+          ...terminalFocus(paneId),
         }));
 
         return settle(state, { groups, activeGroupId: target.id, activeTabId: tabId });
@@ -5386,7 +5471,7 @@ export const useTerminalStore = create((set, get, api) => {
           let tree = group.tree;
           for (const t of spawned) tree = addTabToPane(tree, paneId, t.id);
           return settle(state, {
-            groups: updateGroup(state, groupId, (g) => ({ ...g, tree, activePaneId: paneId })),
+            groups: updateGroup(state, groupId, (g) => ({ ...g, tree, ...terminalFocus(paneId) })),
             activeGroupId: groupId,
             activeTabId: spawned[0].id,
           });
@@ -5575,7 +5660,7 @@ export const useTerminalStore = create((set, get, api) => {
         // One kind per pane (sibling B): a tab is never bound into a pane of the other kind.
         const kind = kindOfTab(state, tabId) ?? TERMINAL_KIND;
         if (kind !== leafKind(target)) return {};
-        const focus = kind === EDITOR_KIND ? { editorPaneId: paneId } : { activePaneId: paneId };
+        const focus = kind === EDITOR_KIND ? editorFocus(paneId) : terminalFocus(paneId);
         const source = groupOfTab(state, tabId);
         const holder = source ? leafHoldingTab(source.tree, tabId) : null;
 
@@ -5631,7 +5716,7 @@ export const useTerminalStore = create((set, get, api) => {
       // anything — it splits the pane with a new leaf of the dragged kind. The
       // centre would mix kinds in one pane, so it changes nothing.
       if (leafKind(targetLeaf) !== kind && zone === 'center') return;
-      const focusOn = (paneId) => (kind === EDITOR_KIND ? { editorPaneId: paneId } : { activePaneId: paneId });
+      const focusOn = (paneId) => (kind === EDITOR_KIND ? editorFocus(paneId) : terminalFocus(paneId));
       const activeTabId = (state) => (kind === EDITOR_KIND ? state.activeTabId : tabId);
 
       const sourceGroup = groupOfTab(state0, tabId);
@@ -5728,7 +5813,7 @@ export const useTerminalStore = create((set, get, api) => {
           fromThisStrip &&
           sameOrder(tabIds, targetPane.tabIds) &&
           targetPane.activeTabId === tabId &&
-          (editor ? targetGroup.editorPaneId : targetGroup.activePaneId) === targetPaneId &&
+          activePaneOf(targetGroup) === targetPaneId &&
           state.activeGroupId === targetGroup.id &&
           (editor || state.activeTabId === tabId)
         ) {
@@ -5746,7 +5831,7 @@ export const useTerminalStore = create((set, get, api) => {
         groups = updateGroup(groups, targetGroup.id, (g) => ({
           ...g,
           tree: replaceNode(g.tree, targetPaneId, (n) => ({ ...n, tabIds, activeTabId: tabId })),
-          ...(editor ? { editorPaneId: targetPaneId } : { activePaneId: targetPaneId }),
+          ...(editor ? editorFocus(targetPaneId) : terminalFocus(targetPaneId)),
         }));
         if (editor && sourceGroup) {
           // A file's strip move prunes only the leaf it left, if that emptied
@@ -5803,7 +5888,10 @@ export const useTerminalStore = create((set, get, api) => {
           tree = wrapWithEditorLeaf(current.tree, leaf);
         }
         placed = { groupId: group.id, paneId: at };
-        groups = updateGroup(groups, group.id, (g) => ({ ...g, tree, editorPaneId: at }));
+        // The file's pane becomes THE active pane (FC1, FC5) — unless the
+        // caller asked for no activation, when it only becomes the group's
+        // editor pane, where the next file lands.
+        groups = updateGroup(groups, group.id, (g) => ({ ...g, tree, ...(activate ? editorFocus(at) : { editorPaneId: at }) }));
         if (source && source.id !== group.id) groups = pruneEditorLeavesIn(groups, [source.id]);
         return settle(state, { groups, ...(activate ? { activeGroupId: group.id } : {}) });
       });
@@ -5822,7 +5910,7 @@ export const useTerminalStore = create((set, get, api) => {
           const leaf = collectLeaves(group.tree).find((l) => isEditorLeaf(l) && l.tabIds.includes(tabId));
           if (!leaf) continue;
           shown = { groupId: group.id, paneId: leaf.id };
-          if (leaf.activeTabId === tabId && group.editorPaneId === leaf.id && state.activeGroupId === group.id) return state;
+          if (leaf.activeTabId === tabId && activePaneOf(group) === leaf.id && state.activeGroupId === group.id) return state;
           const switching = state.activeGroupId !== group.id;
           const terminalPane = collectLeaves(group.tree).find((l) => l.id === group.activePaneId);
           const nextTab = switching ? state.tabs.find((t) => t.id === terminalPane?.activeTabId) : null;
@@ -5830,7 +5918,7 @@ export const useTerminalStore = create((set, get, api) => {
             groups: updateGroup(state, group.id, (g) => ({
               ...g,
               tree: replaceNode(g.tree, leaf.id, (n) => ({ ...n, activeTabId: tabId })),
-              editorPaneId: leaf.id,
+              ...editorFocus(leaf.id),
             })),
             activeGroupId: group.id,
             ...(switching ? { activeTabId: nextTab?.id ?? null, cwd: nextTab?.cwd ?? state.cwd } : {}),
@@ -5865,7 +5953,7 @@ export const useTerminalStore = create((set, get, api) => {
         made = fresh.id;
         return settle(state, {
           groups: updateGroup(state, group.id, (g) =>
-            withoutZoom({ ...g, tree: splitAt(g.tree, paneId, fresh, direction === 'vertical' ? 'vertical' : 'horizontal', false), editorPaneId: fresh.id })
+            withoutZoom({ ...g, tree: splitAt(g.tree, paneId, fresh, direction === 'vertical' ? 'vertical' : 'horizontal', false), ...editorFocus(fresh.id) })
           ),
         });
       });
@@ -5920,6 +6008,15 @@ export const useTerminalStore = create((set, get, api) => {
           return { ...g, tree };
         });
         groups = pruneEditorLeavesIn(groups, touched.map((g) => g.id));
+        // A leaf pruned with its last file hands the editor pane — and, when
+        // it was THE active pane, the focus — to its neighbouring editor leaf
+        // (FC9); with none left, `settle` gives the focus to the terminal pane.
+        groups = groups.map((g) => {
+          const before = touched.find((t) => t.id === g.id);
+          if (!before || collectLeaves(g.tree).some((l) => l.id === g.editorPaneId)) return g;
+          const editorPaneId = survivingNeighbourEditorLeaf(before.tree, g.tree, g.editorPaneId);
+          return editorPaneId ? { ...g, editorPaneId } : g;
+        });
         return settle(state, { groups });
       }),
 
@@ -6542,7 +6639,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, group.id, (g) => ({
             ...g,
             tree: addTabToPane(g.tree, targetPaneId, newTab.id),
-            activePaneId: targetPaneId,
+            ...terminalFocus(targetPaneId),
           })),
           activeGroupId: group.id,
           activeTabId: newTab.id,
@@ -6584,7 +6681,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, group.id, (g) => ({
             ...g,
             tree: addTabToPane(g.tree, targetPaneId, newTab.id),
-            activePaneId: targetPaneId,
+            ...terminalFocus(targetPaneId),
           })),
           activeGroupId: group.id,
           activeTabId: newTab.id,
@@ -6615,7 +6712,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, owner.id, (g) => ({
             ...g,
             tree: replaceNode(g.tree, pane.id, (n) => ({ ...n, activeTabId: tabId })),
-            activePaneId: pane.id,
+            ...terminalFocus(pane.id),
           })),
           activeGroupId: owner.id,
           activeTabId: tabId,

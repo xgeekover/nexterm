@@ -1,7 +1,10 @@
 /**
- * One Monaco text model per open file, against the app's own EditorPanel and
- * REAL Monaco under headless Chromium: what Node and its stand-ins cannot
- * show. Drives tests/adversarial/fixtures/editor_models_harness.html.
+ * One Monaco text model per open file, against the app's own layout and
+ * workbench (PanelLayout drawing TerminalSplitContainer, whose tree holds the
+ * editor panes since editor placement sibling C) and REAL Monaco under
+ * headless Chromium: what Node and its stand-ins cannot show. Drives
+ * tests/adversarial/fixtures/editor_models_harness.html, which until sibling
+ * C mounted EditorPanel's own container — the centre editor area it retired.
  *
  * Each group used to remount its editor on every tab switch
  * (`<Editor key={activeTab.filePath}>`), and @monaco-editor/react disposes the
@@ -17,6 +20,11 @@
  *     mounted again. After each, a.js has the model it had, that model can
  *     undo, one undo takes back exactly the last edit, and the caret is where
  *     it was (and the scroll, where the group's size has not changed).
+ *   - MM-23…MM-26 (AC-C5, sibling C): the same for what the workbench adds
+ *     now that a file is one of its panes — a.js moved by a cross-kind edge
+ *     drop beside a terminal, and back; a group switch and back; a zoom of
+ *     its pane and of another, each undone; the `terminal` view moved to
+ *     another region and back.
  *   - MM-07: a terminal link or Go to File into a file of the group lands on
  *     its line in the editor that group already has.
  *   - MM-08…MM-12 (AC2): closing the last tab on a file disposes its model;
@@ -125,6 +133,36 @@ async function settle(what = 'the editor') {
   await sleep(80);
 }
 
+/** Until `check()` holds, polled; `what` names it when it never does. */
+async function until(check, what, ms = 15000) {
+  const deadline = Date.now() + ms;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(`${what}: ${JSON.stringify(await call('state'))}`);
+    await sleep(50);
+  }
+  await sleep(80);
+}
+
+/** The split whose child is `id`, in a workbench tree, or null. */
+function parentOf(node, id) {
+  if (!node || node.type !== 'split') return null;
+  for (const child of node.children) {
+    if (child.id === id) return node;
+    const found = parentOf(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The terminal leaves of a workbench tree, in order. */
+function terminalLeaves(node, acc = []) {
+  if (!node) return acc;
+  if (node.type === 'leaf') {
+    if (node.kind !== 'editor') acc.push(node);
+  } else node.children.forEach((child) => terminalLeaves(child, acc));
+  return acc;
+}
+
 /** The group a tab is in, by id. */
 async function paneOf(tabId) {
   const { leaves } = await call('state');
@@ -154,7 +192,17 @@ async function survives(label, step, { scroll = false } = {}) {
   assert.equal(after.canUndo, true, `${label}: a.js's model has nothing to undo`);
   assert.deepEqual(after.position, ahead.position, `${label}: the caret moved`);
   if (scroll) assert.equal(after.scrollTop, ahead.scrollTop, `${label}: the scroll moved`);
-  assert.equal(await call('undo', A), before, `${label}: one undo did not take back exactly the last edit`);
+  const undone = await call('undo', A);
+  if (undone !== before) {
+    // What the undo did instead, and where the keyboard was: the text alone
+    // is 300 lines that differ by a few characters.
+    const what = undone === typed ? 'nothing' : undone.length < before.length ? 'more than the last edit' : 'something else';
+    const focus = await harness.evalJs(
+      `(() => { const e = document.activeElement; return [e?.tagName, e?.closest?.('[data-pane-body]')?.getAttribute('data-pane-body') ?? '', e?.closest?.('[data-editor-pane-body]')?.getAttribute('data-editor-pane-body') ?? ''].join(' '); })()`
+    );
+    const probe = await call('probe', A);
+    assert.equal(undone, before, `${label}: one undo did not take back exactly the last edit — it undid ${what}; focus ${focus}; editors on a.js ${probe.editors}, canUndo ${probe.canUndo}`);
+  }
   assert.equal(await call('redo', A), typed, `${label}: redo did not bring the edit back`);
   const { tabs } = await call('state');
   assert.equal(tabs.find((t) => t.id === ids.A).content, typed, `${label}: the tab's text is not the model's`);
@@ -281,6 +329,104 @@ describe('Editor models: one Monaco model per open file, under headless Chromium
       },
       { scroll: true }
     );
+  });
+
+  test('MM-23 (AC-C5): an edit survives a move by a cross-kind edge drop beside a terminal, and the move back', async () => {
+    needHarness();
+    const { groupId, workbenchTree } = await call('state');
+    const [terminal] = terminalLeaves(workbenchTree);
+    assert.ok(terminal, 'the group has no terminal pane');
+    // A terminal in it, as the app has: a.js goes beside a running one.
+    const term = await call('workbench', 'createTab', { paneId: terminal.id, groupId });
+    assert.ok(term, 'no terminal was made');
+    await until(async () => (await harness.evalJs(`document.querySelector('[data-pane-body="${terminal.id}"] .xterm') != null`)), 'the terminal never drew');
+
+    await survives('cross-kind', async () => {
+      // What the workbench's drop does for a file let go on a terminal pane's
+      // right edge (TerminalSplitContainer.jsx's dispatcher).
+      await call('act', 'dropEditorTabOnPane', ids.A, terminal.id, 'right');
+      await settle('a.js beside the terminal');
+      const { workbenchTree: tree } = await call('state');
+      const split = parentOf(tree, terminal.id);
+      assert.ok(split, 'the terminal pane was not split');
+      assert.equal(split.direction, 'horizontal', 'a.js is not beside the terminal');
+      assert.equal(split.children[0].id, terminal.id, 'the terminal is not on the left');
+      assert.equal(split.children[1].kind, 'editor', 'no editor pane right of the terminal');
+      assert.deepEqual(split.children[1].tabIds, [ids.A], 'a.js is not alone in the pane right of the terminal');
+      assert.equal((await call('probe', A)).pane, split.children[1].id, 'a.js is not shown beside the terminal');
+    });
+    // No space in a label: Monaco makes an undo stop at a space typed after
+    // other characters, and the label is what `survives` types.
+    await survives('cross-kind-back', async () => {
+      await call('act', 'moveEditorTabInStrip', ids.A, panes.left, 0);
+      await settle('a.js back in its group');
+      assert.equal((await call('probe', A)).pane, panes.left, 'a.js is not back in the left group');
+    });
+    const { leaves } = await call('state');
+    assert.deepEqual(leaves.map((leaf) => leaf.id), [panes.left, panes.right], 'the pane a.js left was not removed');
+    assertNoPageErrors();
+  });
+
+  test('MM-24 (AC-C5): an edit survives a switch to another group and back', async () => {
+    needHarness();
+    const { groupId } = await call('state');
+    await survives(
+      'group-switch',
+      async () => {
+        const other = await call('workbench', 'createGroup');
+        assert.ok(other && other !== groupId, 'no other group was made');
+        await until(async () => (await call('state')).groupId === other && (await call('probe', A)).editors === 0, 'a.js is still shown in the other group');
+        assert.equal((await call('probe', A)).exists, true, 'a.js lost its model while its group was off screen');
+        await call('workbench', 'setActiveGroup', groupId);
+      },
+      { scroll: true }
+    );
+    assert.equal((await call('probe', A)).pane, panes.left, 'a.js is not back where it was');
+    assertNoPageErrors();
+  });
+
+  test('MM-25 (AC-C5): an edit survives a zoom of its pane and the unzoom, and a zoom of another pane that hides it', async () => {
+    needHarness();
+    const { groupId } = await call('state');
+    await survives('zoom', async () => {
+      await call('workbench', 'togglePaneZoom', panes.left, groupId);
+      await until(async () => {
+        const st = await call('state');
+        return st.zoomedPaneId === panes.left && (await call('editorCount')) === 1 && (await call('probe', A)).pane === panes.left;
+      }, 'a.js never showed alone, zoomed');
+      await call('workbench', 'togglePaneZoom', panes.left, groupId);
+      await until(async () => (await call('state')).zoomedPaneId === null, 'the zoom never ended');
+    });
+    await survives('zoom-other', async () => {
+      await call('workbench', 'togglePaneZoom', panes.right, groupId);
+      await until(async () => (await call('state')).zoomedPaneId === panes.right && (await call('probe', A)).editors === 0, 'a.js is still shown beside the zoomed pane');
+      assert.equal((await call('probe', A)).exists, true, 'a.js lost its model while the zoom hid it');
+      await call('workbench', 'togglePaneZoom', panes.right, groupId);
+      await until(async () => (await call('state')).zoomedPaneId === null, 'the zoom never ended');
+    });
+    await call('act', 'setActiveEditorPane', panes.left);
+    assertNoPageErrors();
+  });
+
+  test('MM-26 (AC-C5): an edit survives the terminal view moved to another region and back', async () => {
+    needHarness();
+    const home = (await call('probe', A)).region;
+    assert.ok(home, 'a.js is drawn in no region of the layout');
+    await survives('region-move', async () => {
+      // What dropping the view's header on the primary side bar does.
+      await call('settings', 'moveView', 'terminal', 'left');
+      await call('settings', 'showView', 'terminal');
+      await until(async () => {
+        const probe = await call('probe', A);
+        return probe.pane === panes.left && probe.region !== null && probe.region !== home;
+      }, 'a.js never showed in the other region');
+      assert.equal((await call('state')).terminalRegion, 'left');
+      await call('settings', 'moveView', 'terminal', 'bottom');
+      await call('settings', 'showView', 'terminal');
+      await call('settings', 'toggleSidebar');
+    });
+    assert.equal((await call('probe', A)).region, home, 'a.js is not back in the region it was in');
+    assertNoPageErrors();
   });
 
   test('MM-07: a terminal link and Go to File into a file of the group land on its line, in the editor the group has', async () => {

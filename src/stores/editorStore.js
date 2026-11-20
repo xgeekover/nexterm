@@ -25,7 +25,7 @@ import {
   withSession,
 } from '../lib/editorSession.js';
 import { useGitStore } from './gitStore.js';
-import { useSettingsStore } from './settingsStore.js';
+import { isViewShown, useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
 import { useTerminalStore, setEditorBridge, isWaitingEditorLeaf, newWorkbenchId } from './terminalStore.js';
 import { EDITOR_KIND, leafKind, projectTree } from '../components/terminal/splitLayout.js';
@@ -116,6 +116,26 @@ function editorLeafById(paneId) {
     if (leaf) return leaf;
   }
   return null;
+}
+
+/** The leaf `paneId` of either kind in any group, or null. */
+function workbenchLeafById(paneId) {
+  for (const group of workbench().groups) {
+    const leaf = collectLeaves(group.tree).find((l) => l.id === paneId);
+    if (leaf) return leaf;
+  }
+  return null;
+}
+
+/**
+ * Bring the `terminal` view on screen — its region shown and the view chosen
+ * in it — when it is not (FC5): the editor panes are drawn inside it now, so
+ * a file opened while it is hidden, or behind another view of its region,
+ * would open where nobody can see it.
+ */
+function showWorkbench() {
+  const settings = useSettingsStore.getState();
+  if (!isViewShown(settings, 'terminal')) settings.showView?.('terminal');
 }
 
 /** Every file tab id some leaf shows, in any group. */
@@ -1640,6 +1660,7 @@ export const useEditorStore = create((set, get) => ({
       if (!ts.revealEditorTab(existing.id)) ts.placeEditorTab(existing.id);
       set({ activeTabId: existing.id, openFailure: null });
       syncActiveTab();
+      showWorkbench();
       return existing;
     };
     const existing = openTab();
@@ -1665,6 +1686,7 @@ export const useEditorStore = create((set, get) => ({
       // a new editor leaf above its terminals [60, 40] (FB4).
       workbench().placeEditorTab(tabId);
       syncActiveTab();
+      showWorkbench();
 
       return newTab;
     } catch (err) {
@@ -1916,12 +1938,17 @@ export const useEditorStore = create((set, get) => ({
   },
 
   /**
-   * Drag & drop a file tab onto an editor pane: 'center' moves it into that
-   * leaf, an edge splits the leaf with the tab on that side.
+   * Drag & drop a file tab onto a pane of either kind (sibling C, FC3): on
+   * an editor pane 'center' moves it into that leaf and an edge splits the
+   * leaf with the tab on that side; on a terminal pane only an edge does
+   * anything, splitting it with a new editor leaf there. A drop the
+   * workbench refuses changes nothing here either.
    */
   dropEditorTabOnPane: (tabId, targetPaneId, zone = 'center') => {
-    if (!editorLeafById(targetPaneId) || !get().tabs.some((t) => t.id === tabId)) return;
+    if (!workbenchLeafById(targetPaneId) || !get().tabs.some((t) => t.id === tabId)) return;
+    const before = workbench().groups;
     workbench().dropTabOnPane(tabId, targetPaneId, zone);
+    if (workbench().groups === before) return;
     set({ activeTabId: tabId });
     syncActiveTab();
   },

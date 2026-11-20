@@ -8,13 +8,16 @@
  *   AC-B7  Unsaved prompts (FB7): closing an editor leaf, closing a group,
  *          a folder switch, window close and Quit each ask with every dirty
  *          file of what closes; Cancel changes nothing, no PTY is killed.
+ *   AC-C8  (sibling C, store half) opening a file brings the terminal view,
+ *          which draws the editor panes, on screen (FC5); a leaf whose last
+ *          file closes hands the active pane on (FC9).
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore, registerEditorBridge } from '../../src/stores/editorStore.js';
-import { useTerminalStore } from '../../src/stores/terminalStore.js';
-import { useSettingsStore } from '../../src/stores/settingsStore.js';
+import { useTerminalStore, activePaneOf } from '../../src/stores/terminalStore.js';
+import { useSettingsStore, isViewShown } from '../../src/stores/settingsStore.js';
 import { invoke, mockBridge } from '../../src/lib/ipc.js';
 import { leafKind, leavesOfKind, tabIdsOfKind } from '../../src/components/terminal/splitLayout.js';
 
@@ -199,6 +202,65 @@ describe('Workbench editors: where a file opens (AC-B3)', () => {
     assert.equal(leavesOfKind(groupById(one).tree, 'editor').length, 0, 'the emptied leaf is pruned: the editor area hides');
     assert.equal(E.getState().activeTabId, null);
     assert.ok(groupById(two.id));
+  });
+});
+
+describe('Workbench editors: opening shows the workbench, closing hands the focus on (sibling C, AC-C8)', () => {
+  beforeEach(setUp);
+  afterEach(teardown);
+
+  const settings = () => useSettingsStore.getState();
+
+  test('WE-11: with the terminal view hidden, or behind another view of its region, openFile, openFileAt and a search result bring it on screen and make the file\u{2019}s pane active', async () => {
+    // Hidden: Toggle Terminal Panel hides the editor panes with the terminals (FC4).
+    settings().togglePanel();
+    assert.equal(isViewShown(settings(), 'terminal'), false);
+    const a = await E.getState().openFile(await file('a'));
+    assert.equal(isViewShown(settings(), 'terminal'), true, 'openFile shows the region holding the terminal view');
+    assert.equal(activePaneOf(active()), holderOf(a.id).leaf.id, 'and the file\u{2019}s pane is THE active pane');
+
+    // Behind another view of its region: Search dragged into the bottom panel and chosen there.
+    settings().moveView('search', 'bottom');
+    settings().chooseView('bottom', 'search');
+    assert.equal(isViewShown(settings(), 'terminal'), false);
+    T.getState().setActivePane(active().activePaneId);
+    const b = await E.getState().openFileAt(await file('b', 'x\ny'), 2, 1);
+    assert.equal(isViewShown(settings(), 'terminal'), true, 'openFileAt (terminal links, Go to File) chooses the terminal view in its region');
+    assert.equal(activePaneOf(active()), holderOf(b.id).leaf.id);
+
+    // A search result is a click on a match, which calls openFileAt (SearchPanel.jsx).
+    settings().chooseView('bottom', 'search');
+    T.getState().setActivePane(active().activePaneId);
+    const again = await E.getState().openFileAt(holderOf(a.id) && E.getState().tabs.find((t) => t.id === a.id).filePath, 1, 1);
+    assert.equal(again.id, a.id, 'an open file is revealed, not reopened');
+    assert.equal(isViewShown(settings(), 'terminal'), true, 'a search result for an open file shows the view as well');
+    assert.equal(activePaneOf(active()), holderOf(a.id).leaf.id);
+    assert.match(read('../../src/components/search/SearchPanel.jsx'), /onClick=\{\(\) => openFileAt\(/);
+
+    // The view moved to a side bar that is hidden: that side bar is shown.
+    settings().moveView('terminal', 'right');
+    if (settings().secondarySidebarVisible) settings().toggleSecondarySidebar();
+    await E.getState().openFile(await file('c'));
+    assert.equal(settings().secondarySidebarVisible, true, 'wherever the view lives, its region comes on screen');
+    assert.equal(isViewShown(settings(), 'terminal'), true);
+  });
+
+  test('WE-12: closing an editor leaf\u{2019}s last tab removes the leaf and hands the active pane to the neighbouring editor leaf, else to the terminal pane', async () => {
+    const termPane = active().activePaneId;
+    const a = await E.getState().openFile(await file('a'));
+    const first = holderOf(a.id).leaf.id;
+    const second = E.getState().splitEditorPane(first, 'horizontal');
+    const b = await E.getState().openFile(await file('b'));
+    assert.equal(holderOf(b.id).leaf.id, second);
+    assert.equal(activePaneOf(active()), second);
+    E.getState().closeTab(b.id);
+    assert.equal(leavesOf(active().tree).some((l) => l.id === second), false, 'the emptied leaf is removed');
+    assert.equal(activePaneOf(active()), first, 'its neighbour is the active pane');
+    assert.equal(E.getState().activeTabId, a.id, 'showing its file, the Save target');
+    E.getState().closeTab(a.id);
+    assert.equal(leavesOfKind(active().tree, 'editor').length, 0);
+    assert.equal(activePaneOf(active()), termPane, 'no editor leaf left: the terminal pane');
+    assert.equal(E.getState().activeTabId, null);
   });
 });
 

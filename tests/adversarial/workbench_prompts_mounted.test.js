@@ -2,8 +2,9 @@
  * The unsaved and overwrite prompts are drawn whatever the group on screen
  * holds (editor placement, sibling B, review K-01 / K-05).
  *
- * Files belong to groups, and the editor area is mounted only while the group
- * on screen has an editor leaf. The Save / Don't Save / Cancel prompt used to
+ * Files belong to groups, and the editor area was mounted only while the group
+ * on screen had an editor leaf; since sibling C there is no editor area at
+ * all (FC4), the files are drawn in the workbench of the group on screen. The Save / Don't Save / Cancel prompt used to
  * be drawn by the editor area alone, so with a dirty file in another group,
  * window close, Quit, a folder switch and closing that group waited on a
  * question nobody could see. These cases mount the real PanelLayout with the
@@ -286,7 +287,12 @@ describe('Workbench prompts: drawn whatever the group on screen holds (K-01, FX-
     });
   });
 
-  test('WV-05: "File Changed on Disk" is drawn too; with the editor area mounted each prompt is drawn once, and the editor area draws none', async () => {
+  // Rewritten for sibling C (FC4): WV-05 asserted that with group 1 on screen
+  // PanelLayout mounted the editor area (EditorPanel) and the prompt was still
+  // drawn once. The centre area is retired, so PanelLayout mounts no editor
+  // area whatever the group holds, and the prompt is drawn once either way;
+  // neither the editor pane nor its Monaco body draws a prompt of its own.
+  test('WV-05: "File Changed on Disk" is drawn too; with group 1 on screen PanelLayout mounts no editor area and each prompt is drawn once', async () => {
     const { one, tab } = await dirtyFileElsewhere();
     await onPage(async (p) => {
       await mountLayout(p);
@@ -301,12 +307,14 @@ describe('Workbench prompts: drawn whatever the group on screen holds (K-01, FX-
       // Group 1 on screen: its editor area is mounted, and the prompt is still drawn once.
       p.settled(() => T.getState().setActiveGroup(one));
       await letItRun();
-      assert.equal(editorAreaOn(p).length, 1, 'group 1 has an editor leaf: the editor area is mounted');
+      assert.equal(editorAreaOn(p).length, 0, 'group 1 has an editor leaf: still no editor area, its files are the workbench\u{2019}s');
       const asked = p.settled(() => E.getState().askBeforeLeaving('window', () => true));
       p.click(button(await theDialog(p, 'window, group 1 on screen'), 'Cancel'));
       assert.equal(await asked, null);
     });
     // The editor area is a stand-in above, so it is read: it must not draw a second copy.
     assert.equal(/ConfirmDialog/.test(read('../../src/components/editor/EditorPanel.jsx')), false, 'EditorPanel.jsx draws no prompt of its own');
+    assert.equal(/ConfirmDialog/.test(read('../../src/components/editor/EditorPane.jsx')), false, 'EditorPane.jsx draws no prompt of its own');
+    assert.equal(/EditorPanel/.test(read('../../src/components/layout/PanelLayout.jsx').replace(/\/\/[^\n]*/g, '')), false, 'PanelLayout loads no editor area');
   });
 });

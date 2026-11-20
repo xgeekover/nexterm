@@ -30,9 +30,12 @@ import './status_bar.test.js';
 import './persist_robustness.test.js';
 import './editor_layout.test.js';
 import './workbench_layout.test.js';
+import './workbench_active.test.js';
 import './workbench_restore.test.js';
 import './workbench_editors.test.js';
 import './workbench_editor_area.test.js';
+import './workbench_render.test.js';
+import './workbench_drag.test.js';
 import './workbench_prompts_mounted.test.js';
 import './editor_tab_reorder.test.js';
 import './editor_tab_reorder_ui.test.js';
@@ -178,6 +181,8 @@ import './prompt_marks_headless.test.js';
 // One Monaco model per open file: the rules against the store, then the real editor in a browser.
 import './editor_models.test.js';
 import './editor_models_headless.test.js';
+// One drag for both kinds across the workbench, and the pixel minimums, in a real browser (sibling C, AC-C4).
+import './workbench_drag_headless.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -294,11 +294,15 @@ function leavesIn(node, acc = []) {
 export function swapChoices(tree, tabs, fromPaneId) {
   const leaves = leavesIn(tree);
   const rects = paneRects(tree);
-  const titleOf = (tabId) => tabs.find((t) => t.id === tabId)?.title ?? 'No terminal';
+  // An editor leaf is named by the file it shows (sibling C: the pane menu
+  // offers panes of both kinds); `tabs` then holds the files too.
+  const titleOf = (leaf) =>
+    tabs.find((t) => t.id === (leaf.activeTabId ?? leaf.tabIds?.[0]))?.title ??
+    (leafKind(leaf) === EDITOR_KIND ? 'No file open' : 'No terminal');
   return leaves
     .map((leaf, index) => ({
       paneId: leaf.id,
-      title: titleOf(leaf.activeTabId ?? leaf.tabIds?.[0]),
+      title: titleOf(leaf),
       place: placeOf(rects.get(leaf.id)),
       index,
       count: leaves.length,
@@ -384,37 +388,9 @@ export function projectTree(tree, kind) {
   };
 }
 
-function findSplit(node, splitId) {
-  if (!isSplit(node)) return null;
-  if (node.id === splitId) return node;
-  for (const child of node.children) {
-    const found = findSplit(child, splitId);
-    if (found) return found;
-  }
-  return null;
-}
-
-/**
- * A resize made in a projection (`projectTree`), as the sizes to store on the
- * FULL split `splitId`: the children the projection shows share what they had
- * together in proportion to `sizes`, and the children it filtered out keep
- * their share untouched. Null for a split the full tree does not have, or
- * `sizes` that are not one per child the projection shows.
- */
-export function liftSizes(tree, splitId, sizes, kind) {
-  const full = findSplit(tree, splitId);
-  if (!full || !Array.isArray(sizes)) return null;
-  const shown = full.children.map((child, i) => (projectTree(child, kind) ? i : -1)).filter((i) => i !== -1);
-  if (shown.length !== sizes.length || !sizes.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) return null;
-  const all = sizesOf(full);
-  const together = shown.reduce((sum, i) => sum + all[i], 0);
-  const given = sizes.reduce((a, b) => a + b, 0);
-  const next = [...all];
-  shown.forEach((childIndex, j) => {
-    next[childIndex] = (sizes[j] / given) * together;
-  });
-  return roundedShares(next);
-}
+// `liftSizes`, which wrote a resize made in one kind's projection back to the
+// full split, went with the bridge (sibling C): the workbench draws the full
+// tree, so a split's sizes are stored as they are dragged.
 
 // ---------------------------------------------------------------------------
 // Pixel minimums per kind (FB11, math only: sibling C wires them into

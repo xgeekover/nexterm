@@ -53,7 +53,8 @@ function loadEditorUi() {
   loading ??= build({
     stdin: {
       contents: [
-        "export * as panel from './EditorPanel.jsx';",
+        // Sibling C: the gesture, its hit test and its auto-scroll moved from
+        // EditorPanel.jsx (now Monaco's body alone) into EditorTabs.jsx.
         "export * as tabs from './EditorTabs.jsx';",
         "export { setFakeEditorState } from '../../stores/editorStore.js';",
       ].join('\n'),
@@ -95,16 +96,16 @@ const loadUi = async () => {
 
 /** An export of one of the two files, failing by name when it is not there. */
 function exported(file, name) {
-  const value = ui[file === 'EditorPanel.jsx' ? 'panel' : 'tabs'][name];
+  const value = ui.tabs[name];
   assert.ok(value !== undefined, `${file} does not export ${name}, so none of this is under test`);
   return value;
 }
 const stripSlotAt = (...a) => exported('EditorTabs.jsx', 'stripSlotAt')(...a);
 const markerSlot = (...a) => exported('EditorTabs.jsx', 'markerSlot')(...a);
-const dropTargetAtPoint = (...a) => exported('EditorPanel.jsx', 'dropTargetAtPoint')(...a);
-const stripAutoScrollSpeed = (...a) => exported('EditorPanel.jsx', 'stripAutoScrollSpeed')(...a);
-const createStripAutoScroller = (...a) => exported('EditorPanel.jsx', 'createStripAutoScroller')(...a);
-const trackTabDrag = (...a) => exported('EditorPanel.jsx', 'trackTabDrag')(...a);
+const dropTargetAtPoint = (...a) => exported('EditorTabs.jsx', 'dropTargetAtPoint')(...a);
+const stripAutoScrollSpeed = (...a) => exported('EditorTabs.jsx', 'stripAutoScrollSpeed')(...a);
+const createStripAutoScroller = (...a) => exported('EditorTabs.jsx', 'createStripAutoScroller')(...a);
+const trackTabDrag = (...a) => exported('EditorTabs.jsx', 'trackTabDrag')(...a);
 
 // ---- Geometry by hand --------------------------------------------------------
 

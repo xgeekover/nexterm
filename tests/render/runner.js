@@ -82,7 +82,6 @@ const { renderToString } = await import('react-dom/server');
 const { useTerminalStore } = await import('../../src/stores/terminalStore.js');
 const { useEditorStore } = await import('../../src/stores/editorStore.js');
 const { setEditorLayout } = await import('../e2e/harness/workbench.js');
-const { projectTree } = await import('../../src/components/terminal/splitLayout.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
@@ -368,42 +367,86 @@ function arrangeWorkbench(active = 'group-1', { wrapped = true } = {}) {
   });
 }
 
-// The editor area itself is React.lazy (PanelLayout), so a server render draws
-// none of its panes: which leaves it draws is checked with the panel bundled on
-// its own, in tests/adversarial/workbench_editor_area.test.js (WV-01, WV-02).
+// The workbench draws the whole tree (editor placement, sibling C, FC2): its
+// editor panes are drawn at once, with only their Monaco body lazy, so a
+// server render of the app shows every pane of both kinds. The same checks,
+// with TerminalSplitContainer bundled on its own, are in
+// tests/adversarial/workbench_render.test.js (AC-C2).
 const editorPanesIn = (html) => [...html.matchAll(/data-editor-pane-body="([^"]+)"/g)].map((m) => m[1]);
 const terminalPanesIn = (html) => [...html.matchAll(/data-pane-body="([^"]+)"/g)].map((m) => m[1]);
+/** Every pane body, of either kind, in the order drawn: `kind:id`. */
+const panesInOrder = (html) =>
+  [...html.matchAll(/data-(editor-pane-body|pane-body)="([^"]+)"/g)].map((m) => `${m[1] === 'pane-body' ? 'terminal' : 'editor'}:${m[2]}`);
+/** The pane whose body holds the active line, or null; throws if there are two. */
+function activeLineOf(html) {
+  const at = [...html.matchAll(/data-active-pane=""/g)].map((m) => m.index);
+  if (at.length === 0) return null;
+  expectThat(at.length === 1, `${at.length} active lines on screen`);
+  const before = [...html.slice(0, at[0]).matchAll(/data-(editor-pane-body|pane-body)="([^"]+)"/g)];
+  return before.length ? before[before.length - 1][2] : null;
+}
 
+// Rewritten for sibling C (FC4): RN-B9b asserted that PanelLayout drew an
+// `editor-group` Panel exactly while the group on screen had an editor leaf.
+// The centre editor area is retired, so it now asserts that there is no
+// editor-group and no Maximize Panel whatever the group holds, and that the
+// files of the group on screen are drawn inside the terminal view instead.
 scenario(
   'RN-B9b',
-  'PanelLayout draws editor-group only while the group on screen has an editor leaf',
+  'PanelLayout draws no editor-group and no Maximize Panel; the files of the group on screen are drawn in the workbench',
   () => arrangeWorkbench('group-1'),
   (html) => {
-    expectThat(html.includes('id="editor-group"'), 'a group with editor leaves draws no editor-group');
+    expectThat(!html.includes('id="editor-group"'), 'a group with editor leaves still draws an editor-group');
+    expectThat(!/Maximize Panel|Restore Panel Size/.test(html), 'the region header still offers Maximize Panel');
+    expectThat(JSON.stringify(editorPanesIn(html)) === JSON.stringify(['pane-e1', 'pane-e2']), `the workbench draws the editor panes ${JSON.stringify(editorPanesIn(html))}`);
     arrangeWorkbench('group-3');
     const none = renderArranged();
-    expectThat(!none.includes('id="editor-group"'), 'a group with no editor leaf draws editor-group although files are open elsewhere');
-    expectThat(editorPanesIn(none).length === 0, 'and no editor pane');
+    expectThat(!none.includes('id="editor-group"'), 'a group with no editor leaf draws an editor-group');
+    expectThat(editorPanesIn(none).length === 0, 'and no editor pane, though files are open in other groups');
   }
 );
 
+// Rewritten for sibling C (FC2): RN-B9c asserted the bridge, that the terminal
+// view drew the terminal PROJECTION of the group and the same panes with or
+// without editor leaves wrapped in. The view now draws the full tree, so it
+// asserts that both kinds are drawn in tree order, each by its own attributes
+// (an editor pane never carries `data-pane-body`), and that a terminal-only
+// group draws exactly its terminal panes, as before.
 scenario(
   'RN-B9c',
-  'the terminal view draws no editor leaf, and the same panes whether or not editor leaves are wrapped in',
+  'the workbench draws both kinds in tree order, an editor pane with its own strip and body and never as a terminal pane',
   () => arrangeWorkbench('group-1', { wrapped: false }),
   (html) => {
     const plain = terminalPanesIn(html);
     expectThat(JSON.stringify(plain) === JSON.stringify(['pane-t1', 'pane-t2']), `without editors: ${JSON.stringify(plain)}`);
+    expectThat(editorPanesIn(html).length === 0, 'an editor pane without an editor leaf');
     arrangeWorkbench('group-1', { wrapped: true });
     const wrapped = renderArranged();
-    expectThat(JSON.stringify(terminalPanesIn(wrapped)) === JSON.stringify(plain), `with editors wrapped in: ${JSON.stringify(terminalPanesIn(wrapped))}`);
+    const order = panesInOrder(wrapped);
+    expectThat(JSON.stringify(order) === JSON.stringify(['editor:pane-e1', 'editor:pane-e2', 'terminal:pane-t1', 'terminal:pane-t2']), `tree order: ${JSON.stringify(order)}`);
     expectThat(!terminalPanesIn(wrapped).some((id) => id.startsWith('pane-e')), 'an editor leaf is drawn as a terminal pane');
-    // The view's React keys are its node ids: the projection it draws keeps them.
-    const projected = projectTree(useTerminalStore.getState().groups[0].tree, 'terminal');
-    expectThat(JSON.stringify(projected) === JSON.stringify(terminalTree()), 'the terminal projection changed its node ids or sizes');
-    for (const pane of plain) {
-      expectThat(paneMarkup(html, pane) === paneMarkup(wrapped, pane), `${pane} is drawn differently once editors are wrapped in`);
+    for (const pane of ['pane-e1', 'pane-e2']) {
+      expectThat(wrapped.includes(`data-editor-tab-strip="${pane}"`), `${pane} has no tab strip of its own`);
+      expectThat(!wrapped.includes(`data-tab-strip="${pane}"`), `${pane} carries a terminal strip`);
     }
+  }
+);
+
+// FC6 (AC-C6): one active line across both kinds, by the terminal's rule.
+scenario(
+  'RN-C6',
+  'one active line across kinds: on the terminal pane, or on the file pane once a file is active; none while zoomed',
+  () => arrangeWorkbench('group-1'),
+  (html) => {
+    expectThat(activeLineOf(html) === 'pane-t1', `terminal-active: the line is on ${activeLineOf(html)}`);
+    const st = useTerminalStore.getState();
+    useTerminalStore.setState({ groups: st.groups.map((g) => (g.id === 'group-1' ? { ...g, activeKind: 'editor', editorPaneId: 'pane-e2' } : g)) });
+    const editorActive = renderArranged();
+    expectThat(activeLineOf(editorActive) === 'pane-e2', `editor-active: the line is on ${activeLineOf(editorActive)}`);
+    useTerminalStore.setState({ groups: useTerminalStore.getState().groups.map((g) => (g.id === 'group-1' ? { ...g, zoomedPaneId: 'pane-e2' } : g)) });
+    const zoomed = renderArranged();
+    expectThat(activeLineOf(zoomed) === null, 'a zoomed editor pane, alone on screen, is marked active');
+    expectThat(JSON.stringify(panesInOrder(zoomed)) === JSON.stringify(['editor:pane-e2']), `the zoom hides both kinds: ${JSON.stringify(panesInOrder(zoomed))}`);
   }
 );
 
@@ -5220,7 +5263,15 @@ check('RN-225', "'active' is violet and stays apart from focus and attention: pa
   expectThat(/isActive\s*\?\s*'text-vsc-fg border-vsc-accent'/.test(read('layout/PanelLayout.jsx')), 'the region tab underline is not the accent');
   expectThat(/shadow-\[inset_0_1px_0_0_var\(--vsc-accent\)\]/.test(read('editor/EditorTabs.jsx')), "the editor's active tab line is not the accent");
   expectThat(/absolute left-0 top-0 bottom-0 w-\[2px\] bg-vsc-accent/.test(read('layout/Sidebar.jsx')), "the activity bar's bar is not the accent");
-  expectThat(/isActivePane && 'ring-1 ring-inset ring-vsc-accent'/.test(read('editor/EditorPanel.jsx')), "the editor's active pane is not marked in the accent");
+  // Rewritten for sibling C (FC6): the editor pane's always-on ring is gone.
+  // Its active line is the terminal's PaneFrame, by the same rule (RN-C6).
+  const editorPane = read('editor/EditorPane.jsx');
+  expectThat(/<PaneFrame active=\{showActiveLine\} \/>/.test(editorPane), "the editor pane's active line is not PaneFrame's");
+  expectThat(!/ring-vsc-accent/.test(editorPane) && !/ring-vsc-accent/.test(read('editor/EditorPanel.jsx')), 'an editor pane still draws a ring of its own');
+  expectThat(/showActiveLine=\{isActivePane && Boolean\(zoom\?\.canZoom\) && !zoomed\}/.test(read('terminal/TerminalSplitContainer.jsx')), "the editor pane's line is not on the terminal's condition");
+  // One drop indicator for both kinds: named zones, the accent border.
+  expectThat(/'border-2 border-vsc-accent rounded-sm'/.test(read('terminal/TerminalSplitContainer.jsx')), 'the drop indicator is not bordered in the accent');
+  expectThat(!/function DropIndicator/.test(editorPane + read('editor/EditorPanel.jsx') + read('editor/EditorTabs.jsx')), 'the editor still draws a drop indicator of its own');
   const indicators = read('terminal/AttentionIndicators.jsx');
   expectThat(/'inset-0 ring-1 ring-inset ring-vsc-accent'/.test(indicators), "the terminal's active pane line is not the accent");
   // Attention: orange, 2px, one pixel inside the active line, as before.
@@ -5272,11 +5323,11 @@ check('RN-226', 'the simple look, and only it: two corner tokens, popovers round
   expectThat(around('\\baccent-current\\b').length === 0, 'a checkbox is still drawn in the text colour');
   for (const file of ['src/components/common/SettingsWindow.jsx', 'src/components/command/ProjectCommandDialog.jsx']) expectThat(/accent-vsc-accent/.test(readSource(file)), `${file}: the checkbox is not violet`);
   expectThat(/::selection \{\s*background: var\(--vsc-accent-solid\);\s*color: var\(--vsc-accent-fg\);\s*\}/.test(css), 'selected text is not the solid violet');
-  // Motion: no new keyframes, and every transition but the maximize one is a colour, 150ms or less.
+  // Motion: no new keyframes, and every transition is a colour, 150ms or less
+  // (the maximize one went with Maximize Panel, sibling C).
   const frames = [...css.matchAll(/@keyframes ([\w-]+)/g)].map((m) => m[1]).sort();
   expectThat(JSON.stringify(frames) === JSON.stringify(['attention-flash', 'attention-pulse', 'overlay-fade-in', 'panel-fade-in', 'panel-fade-out', 'progress-slide']), `the keyframes changed: ${frames}`);
   for (const [, value] of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(?:^|[\s;{])transition:\s*([^;]+);/g)) {
-    if (/^flex-grow 180ms/.test(value)) continue;
     for (const part of value.split(',')) {
       const [prop, time] = part.trim().split(/\s+/);
       expectThat(/^(background-color|border-color|outline-color|color)$/.test(prop) && parseInt(time, 10) <= 150 && /ms$/.test(time), `a transition that is not a colour of 150ms or less: ${part.trim()}`);
@@ -5335,7 +5386,9 @@ check('RN-228', 'every separator: a 1px line, violet on hover and drag across a 
   expectThat(!/\[data-state/.test(css.replace(/\/\*[\s\S]*?\*\//g, '')), 'a v3 data-state selector, which v4 never sets');
   // Every separator in the app is the 1px element the rule draws.
   const separators = [...sourcesUnder('src/components')].flatMap(([file, text]) => [...text.matchAll(/<Separator\b([^>]*)\/>/g)].map((m) => [file, m[1]]));
-  expectThat(separators.length === 5, `setup: ${separators.length} separators`);
+  // Three (sibling C): the two of the side bars and the workbench's own. The
+  // editor area's split and the editor|panel one went with the centre area.
+  expectThat(separators.length === 3, `setup: ${separators.length} separators`);
   for (const [file, attrs] of separators) expectThat(/className=(\{direction === 'horizontal' \? 'w-px' : 'h-px'\}|"w-px"|"h-px")/.test(attrs), `${file}: a separator that is not 1px: ${attrs}`);
   // The hit area is the library's: 10px for a mouse, centred, unless a Group says otherwise.
   // What the package's own types say is read there; what only its build says
@@ -5356,17 +5409,26 @@ check('RN-228', 'every separator: a 1px line, violet on hover and drag across a 
   const layout = readSource('src/components/layout/PanelLayout.jsx');
   const settings = readSource('src/stores/settingsStore.js');
   const row = Number(/terminalFontSize: (\d+),/.exec(settings)?.[1]) * Number(/terminalLineHeight: ([\d.]+),/.exec(settings)?.[1]);
-  const editorMin = Number(/id="editor-group"\s*minSize=\{(\d+)\}/.exec(layout)?.[1]);
+  // Rewritten for sibling C (FC4, FC7): the editor-group Panel and its 112px
+  // minimum went with the centre area, and Maximize Panel with it. An editor
+  // pane's minimum is now the workbench's: PANE_MIN_PX, which ResizableSplit
+  // turns into each Panel's share.
+  const css2 = readSource('src/styles/index.css');
+  const layoutCode = layout.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+  expectThat(!/editor-group/.test(layoutCode) && !/aximize/.test(layoutCode), 'PanelLayout still has an editor-group or a Maximize Panel');
+  expectThat(!/panel-maximize-transition/.test(layout + css2), 'the maximize transition is still there');
   const bottomMin = Number(/id="bottom-panel"\s*defaultSize="40"\s*minSize=\{(\d+)\}/.exec(layout)?.[1]);
-  // The editor: its 35px tab row, the 22px breadcrumbs and three 18px lines.
-  expectThat(editorMin >= 35 + 22 + 3 * 18, `the editor's minimum is ${editorMin}px`);
   // The bottom panel: its 35px header, the 28px pane strip and three terminal rows.
   expectThat(bottomMin >= 35 + 28 + 3 * row, `the bottom panel's minimum is ${bottomMin}px (a row is ${row}px)`);
-  // Both fit in the 640px window, under the title and status bars.
-  expectThat(editorMin + bottomMin <= 640 - 35 - 22, 'the two minimums do not fit the smallest window');
+  // It fits in the 640px window, under the title and status bars.
+  expectThat(bottomMin <= 640 - 35 - 22, 'the bottom panel minimum does not fit the smallest window');
   expectThat(/id="primary-sidebar"\s*defaultSize=\{260\}\s*minSize=\{170\}/.test(layout), 'the left side bar is no longer 260px, at least 170px');
   expectThat(/id="secondary-sidebar"\s*defaultSize=\{320\}\s*minSize=\{220\}/.test(layout), 'the right side bar is no longer 320px, at least 220px');
-  expectThat(/applyLayout\(\{ 'editor-group': 0, 'bottom-panel': 100 \}\)/.test(layout), 'maximize no longer asks for the whole group');
+  const split = readSource('src/components/terminal/TerminalSplitContainer.jsx');
+  const panes = readSource('src/components/terminal/splitLayout.js');
+  expectThat(/terminal: Object\.freeze\(\{ width: 120, height: 88 \}\)/.test(panes) && /editor: Object\.freeze\(\{ width: 160, height: 96 \}\)/.test(panes), 'the documented pane minimums changed');
+  expectThat(/const pixelShares = lengthPx \? minSharesOf\(node, lengthPx\) : null;/.test(split) && /minSize=\{minSizeOf\(i\)\}/.test(split), 'ResizableSplit does not derive its Panel minimums from PANE_MIN_PX');
+  expectThat(/Math\.min\(equalBound, pixelShares\[i\]\)/.test(split), 'a pixel minimum can exceed the equal-share bound');
 });
 
 console.log('====================================================');

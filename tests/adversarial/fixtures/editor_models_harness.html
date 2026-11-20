@@ -2,20 +2,33 @@
 <!--
   Headless-Chromium harness for tests/adversarial/editor_models_headless.test.js.
 
-  The app's own EditorPanel (src/components/editor/EditorPanel.jsx), with the
-  app's own editor store, REAL Monaco and the app's stylesheet, mounted under
+  The app's own layout (src/components/layout/PanelLayout.jsx) with the
+  workbench in it (TerminalSplitContainer.jsx, which draws the editor panes
+  inside the terminal groups' trees since editor placement sibling C), the
+  app's own stores, REAL Monaco and the app's stylesheet, mounted under
   React.StrictMode as src/main.jsx mounts the app. The page is not inside
   Tauri, so the files come from the browser mock (src/lib/ipc.js): the
   harness puts its own under /workspace/models and a second folder at /other.
+  The side bars are hidden, so the region holding the `terminal` view (the
+  bottom one) fills the layout; a terminal pane is drawn by the workbench
+  beside the files, as in the app.
+
+  Until sibling C this mounted EditorPanel's own container, the centre
+  editor area, which no longer exists: a file is a pane of the workbench.
 
   Everything is driven through `window.__m`:
 
     open(path)            opens a file the way the Explorer does; the tab id
     act(name, ...args)    any editor-store action, awaited
+    workbench(name, ...)  any terminal-store action (the workbench's), awaited
+    settings(name, ...)   any settings-store action, as the activity bar, the
+                          region drag and Toggle Terminal Panel call them
     setTree(tree)         an editor split tree put on the workbench as it is
                           (tests/e2e/harness/workbench.js), above an empty
                           terminal pane, as the one group on screen
-    state()               the tabs and the editor tree of the group on screen
+    state()               the tabs and the editor tree of the group on screen,
+                          plus that group's whole tree (both kinds), its id,
+                          its zoom and the region the `terminal` view is in
     settled()             true once every group showing a tab has a live
                           Monaco editor holding that tab's file
     hold(path)            remembers the model of `path` (`probe().same`)
@@ -26,8 +39,8 @@
                           step of its own, in the editor showing `path`
                           (`undo`/`redo` fall back to the model when none
                           shows it)
-    hidePanel / showPanel the editor region unmounted and mounted again, as
-                          PanelLayout does when it hides and shows it
+    hidePanel / showPanel the whole layout unmounted and mounted again: every
+                          pane of the workbench goes, as when its region hides
     models()              the URI of every model Monaco holds
     uri(path)             the URI Monaco names `path` by (`Uri.file`, as
                           src/lib/editorModels.js does)
@@ -57,8 +70,9 @@
       import { mockBridge } from '../../../src/lib/ipc.js';
       import { useEditorStore } from '../../../src/stores/editorStore.js';
       import { useTerminalStore } from '../../../src/stores/terminalStore.js';
+      import { useSettingsStore } from '../../../src/stores/settingsStore.js';
       import { setEditorLayout, editorTree, editorPane } from '../../e2e/harness/workbench.js';
-      import { EditorPanel } from '../../../src/components/editor/EditorPanel.jsx';
+      import { PanelLayout } from '../../../src/components/layout/PanelLayout.jsx';
 
       const S = useEditorStore;
       const DIR = '/workspace/models';
@@ -100,13 +114,19 @@
       const root = createRoot(document.getElementById('root'));
       let shown = true;
       const render = () =>
-        root.render(React.createElement(React.StrictMode, null, shown ? React.createElement(EditorPanel) : null));
+        root.render(React.createElement(React.StrictMode, null, shown ? React.createElement(PanelLayout) : null));
 
       const uriOf = (path) => monaco.Uri.file(path);
       const modelOf = (path) => monaco.editor.getModel(uriOf(path));
       const live = () => monaco.editor.getEditors().filter((e) => e.getContainerDomNode().isConnected);
       const paneOf = (editor) =>
         editor.getContainerDomNode().closest('[data-editor-pane-body]')?.getAttribute('data-editor-pane-body') ?? null;
+      // The layout region an element is drawn in: the Panel PanelLayout gives
+      // each region (react-resizable-panels names it by its id).
+      const regionOf = (el) => {
+        const panel = el?.closest?.('#primary-sidebar, #bottom-panel, #secondary-sidebar, [data-panel-id="primary-sidebar"], [data-panel-id="bottom-panel"], [data-panel-id="secondary-sidebar"]');
+        return panel ? panel.id || panel.getAttribute('data-panel-id') : null;
+      };
       const showing = (path, paneId = null) =>
         live().find(
           (e) => e.getModel()?.uri.toString() === uriOf(path).toString() && (paneId == null || paneOf(e) === paneId)
@@ -133,6 +153,15 @@
           await S.getState()[name](...args);
           return null;
         },
+        async workbench(name, ...args) {
+          const out = await useTerminalStore.getState()[name](...args);
+          // Ids and plain values only: a group or tab object is not sent back whole.
+          return typeof out === 'string' || typeof out === 'boolean' || out == null ? out ?? null : out.id ?? null;
+        },
+        settings(name, ...args) {
+          useSettingsStore.getState()[name](...args);
+          return null;
+        },
         setTree(tree) {
           // As it is, with no repair, as the store took it before; the editor
           // pane stays where it was while it is one of the tree's leaves.
@@ -143,7 +172,14 @@
         state() {
           const { tabs, activeTabId, rootPath, pendingReveal, pendingClose } = S.getState();
           const tree = editorTree();
+          const T = useTerminalStore.getState();
+          const group = T.groups.find((g) => g.id === T.activeGroupId) ?? null;
           return {
+            groupId: group?.id ?? null,
+            groupIds: T.groups.map((g) => g.id),
+            workbenchTree: group?.tree ?? null,
+            zoomedPaneId: group?.zoomedPaneId ?? null,
+            terminalRegion: useSettingsStore.getState().viewLocations.terminal,
             tabs: tabs.map(({ id, filePath, content, isDirty }) => ({ id, filePath, content, isDirty })),
             leaves: leaves(tree).map(({ id, tabIds, activeTabId: shownId }) => ({ id, tabIds, activeTabId: shownId })),
             tree,
@@ -179,6 +215,7 @@
             position: editor ? { ...editor.getPosition() } : null,
             scrollTop: editor ? editor.getScrollTop() : null,
             pane: editor ? paneOf(editor) : null,
+            region: editor ? regionOf(editor.getContainerDomNode()) : null,
             editors: live().filter((e) => e.getModel() === model && model != null).length,
           };
         },
@@ -262,6 +299,9 @@
         tabs: [],
         activeTabId: null,
       });
+      // Only the workbench on screen: the side bars hidden, the `terminal`
+      // view's region (the bottom one) shown and filling the layout.
+      useSettingsStore.setState({ sidebarVisible: false, secondarySidebarVisible: false, panelVisible: true });
       // One empty editor leaf ('editor-pane-root'), the editor pane.
       setEditorLayout();
       render();

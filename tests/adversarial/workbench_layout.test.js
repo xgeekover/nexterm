@@ -22,6 +22,8 @@ import {
   useTerminalStore,
   setEditorBridge,
   zoomedPaneOf,
+  panesOnScreen,
+  hiddenTabIdsOf,
   swapBlockedReason,
   __settleLayout,
 } from '../../src/stores/terminalStore.js';
@@ -32,7 +34,6 @@ import {
   tabIdsOfKind,
   countTerminalTabs,
   projectTree,
-  liftSizes,
   PANE_MIN_PX,
   minSharesOf,
   fitSizesToMinimums,
@@ -315,12 +316,16 @@ describe('Workbench tree: actions across kinds (AC-B1)', () => {
     assert.equal(top.type, 'split');
     assert.deepEqual(top.children.map((c) => c.id), [edPane, termPane]);
 
-    // Zoom counts the pane's own kind (review K-04): the only editor leaf has
-    // nothing to hide, a terminal of two has. WB-20 zooms an editor leaf of two.
-    assert.equal(S.getState().togglePaneZoom(edPane, g.id), false, 'the only editor leaf cannot be zoomed');
+    // Updated for sibling C (FC8): one tree draws both kinds, so a zoom hides
+    // every other pane of either kind, and any pane of a group of two or more
+    // can zoom — the only editor leaf included. B counted the pane's own kind
+    // (review K-04) because each kind then had its own view. WB-20 has more.
+    assert.equal(S.getState().togglePaneZoom(edPane, g.id), true, 'the only editor leaf zooms: there are other panes to hide');
     group = groupById(g.id);
-    assert.equal(zoomedPaneOf(group), null);
-    assert.equal(S.getState().togglePaneZoom(termPane, g.id), true, 'a terminal of two can be zoomed beside an editor leaf');
+    assert.equal(zoomedPaneOf(group)?.id, edPane);
+    assert.equal(group.activeKind, 'editor', 'the zoomed pane is the active pane');
+    assert.equal(S.getState().togglePaneZoom(edPane, g.id), false);
+    assert.equal(S.getState().togglePaneZoom(termPane, g.id), true, 'a terminal beside an editor leaf can be zoomed');
     assert.equal(zoomedPaneOf(groupById(g.id))?.id, termPane);
     assert.equal(S.getState().togglePaneZoom(termPane, g.id), false);
 
@@ -337,35 +342,42 @@ describe('Workbench tree: actions across kinds (AC-B1)', () => {
     assert.equal(groupById(g.id).editorPaneId, undefined);
   });
 
-  // Review K-04: zoom hides panes of the zoomed pane's own kind, the panes its
-  // view draws, so it counts those alone.
-  test('WB-20: zoom counts only the pane\u{2019}s own kind: a lone terminal or a lone editor leaf cannot zoom; two of a kind can, and the zoom ends when one is left', async () => {
+  // Updated for sibling C (FC8, AC-C7). B's version (review K-04) asserted
+  // that a lone terminal beside a lone editor leaf could NOT zoom, because a
+  // zoom then hid only panes of its own view's kind. With one tree drawing
+  // both kinds, Toggle Pane Zoom on any pane hides every other pane, of
+  // either kind, so `canZoom` is "more than one pane in the group".
+  test('WB-20: zoom counts every pane: one terminal and one editor leaf can zoom either; zoom hides both kinds; hiddenTabIds lists terminals only; the zoom ends when one pane is left', async () => {
     const g = S.getState().getActiveGroup();
     const termPane = g.activePaneId;
+    const termTab = S.getState().activeTabId;
     editorIds.add('e1');
     const { paneId: edPane } = S.getState().placeEditorTab('e1');
-    const before = snapshot();
-    assert.equal(S.getState().togglePaneZoom(termPane, g.id), false, 'one terminal and one editor leaf: the only terminal cannot zoom');
-    assert.equal(S.getState().togglePaneZoom(null, null), false, 'nor by the keyboard, on the active pane');
-    assert.equal(S.getState().togglePaneZoom(edPane, g.id), false, 'nor the only editor leaf');
-    assert.equal(snapshot(), before, 'nothing changed');
+    assert.equal(S.getState().togglePaneZoom(termPane, g.id), true, 'one terminal and one editor leaf: the terminal zooms');
+    let group = groupById(g.id);
+    assert.deepEqual(panesOnScreen(group).map((l) => l.id), [termPane], 'the editor pane is hidden by a terminal zoom');
+    assert.deepEqual(hiddenTabIdsOf(group), [], 'the hidden editor pane adds no tab id to the attention pill');
+    assert.equal(S.getState().togglePaneZoom(null, null), false, 'the keyboard unzooms the active pane');
+    assert.equal(S.getState().togglePaneZoom(edPane, g.id), true, 'the editor leaf zooms');
+    group = groupById(g.id);
+    assert.deepEqual(panesOnScreen(group).map((l) => l.id), [edPane], 'the terminal pane is hidden by an editor zoom');
+    assert.deepEqual(hiddenTabIdsOf(group), [termTab], 'hiddenTabIds lists the hidden terminal\u{2019}s tab, and no file tab');
+    assert.equal(S.getState().togglePaneZoom(edPane, g.id), false, 'and unzoom');
+    assert.deepEqual(hiddenTabIdsOf(groupById(g.id)), [], 'nothing hidden while not zoomed');
 
-    // A hand-made zoom on the lone terminal does not survive settle.
+    // A hand-made zoom on a pane that is not the active one does not survive settle.
     S.setState(__settleLayout({ ...S.getState(), groups: S.getState().groups.map((x) => (x.id === g.id ? { ...x, zoomedPaneId: termPane } : x)) }));
-    assert.equal('zoomedPaneId' in groupById(g.id), false, 'settle drops a zoom over the only pane of its kind');
+    assert.equal('zoomedPaneId' in groupById(g.id), false, 'settle drops a zoom that is not on THE active pane (the editor one)');
 
     const second = await S.getState().splitPane(termPane, 'horizontal', g.id);
-    assert.equal(S.getState().togglePaneZoom(second, g.id), true, 'two terminals: zoom');
+    assert.equal(S.getState().togglePaneZoom(second, g.id), true, 'three panes: zoom');
     assert.equal(zoomedPaneOf(groupById(g.id))?.id, second);
+    assert.deepEqual(hiddenTabIdsOf(groupById(g.id)), [termTab], 'the other terminal is hidden; the editor adds nothing');
     await S.getState().closePane(termPane, g.id);
     await new Promise((r) => setTimeout(r, 0));
-    assert.equal('zoomedPaneId' in groupById(g.id), false, 'one terminal left beside the editor: the zoom ends');
-
-    const otherEditor = S.getState().splitEditorLeaf(edPane, 'horizontal');
-    assert.equal(S.getState().togglePaneZoom(edPane, g.id), true, 'two editor leaves: an editor leaf can zoom');
-    assert.equal(groupById(g.id).editorPaneId, edPane);
-    assert.equal(S.getState().togglePaneZoom(edPane, g.id), false, 'and unzoom');
-    assert.ok(otherEditor);
+    assert.equal(zoomedPaneOf(groupById(g.id))?.id, second, 'two panes left, the editor one hidden: the zoom holds');
+    S.getState().removeEditorTabs(['e1']);
+    assert.equal('zoomedPaneId' in groupById(g.id), false, 'one pane left: the zoom ends');
   });
 
   test('WB-08: swapPanes carries `kind` with the contents; the terminal tab is the same object afterwards', () => {
@@ -403,7 +415,11 @@ describe('Workbench tree: actions across kinds (AC-B1)', () => {
     assert.equal(swapBlockedReason(groupById(g.id), 'editor') !== null, true, 'one editor pane cannot swap with an editor');
   });
 
-  test('WB-10: focusNextPane and setActivePane stay on terminal leaves; setActivePane on an editor leaf moves editorPaneId', async () => {
+  // Updated for sibling C (FC1): B's cycle skipped editor leaves, because
+  // `activePaneId` was the only active pane and never names one. With one
+  // active pane of either kind (`activeKind`), the cycle runs over both
+  // kinds in DOM order, and `activePaneId` still only ever names a terminal.
+  test('WB-10: focusNextPane runs over both kinds, keeping activePaneId on terminal leaves; setActivePane on an editor leaf moves editorPaneId', async () => {
     const g = S.getState().getActiveGroup();
     editorIds.add('e1');
     const first = g.activePaneId;
@@ -413,7 +429,12 @@ describe('Workbench tree: actions across kinds (AC-B1)', () => {
     S.getState().focusNextPane(1);
     assert.equal(groupById(g.id).activePaneId, second);
     S.getState().focusNextPane(1);
-    assert.equal(groupById(g.id).activePaneId, first, 'the cycle skips the editor leaf');
+    assert.equal(groupById(g.id).editorPaneId, edPane, 'the cycle wraps onto the editor leaf, above the terminals');
+    assert.equal(groupById(g.id).activeKind, 'editor');
+    assert.equal(groupById(g.id).activePaneId, second, 'the terminal active pane is the one last left');
+    S.getState().focusNextPane(1);
+    assert.equal(groupById(g.id).activePaneId, first);
+    assert.equal('activeKind' in groupById(g.id), false, 'and back onto the first terminal');
     const fresh = S.getState().splitEditorLeaf(edPane, 'vertical');
     S.getState().setActivePane(edPane);
     assert.equal(groupById(g.id).editorPaneId, edPane);
@@ -587,14 +608,13 @@ describe('Workbench tree: projections (AC-B9, unit part)', () => {
     assert.equal(projectTree(pure, 'terminal'), pure, 'a one-kind tree is the same object: nothing remounts');
   });
 
-  test('WB-16: liftSizes writes a projection resize back to the full split, leaving the filtered children their share', () => {
-    const tree = split('s-mid', 'horizontal', [term('pt1', ['t1']), ed('pe3', ['e3']), term('pt2', ['t2'])], [20, 30, 50]);
-    const lifted = liftSizes(tree, 's-mid', [50, 50], 'terminal');
-    assert.deepEqual(lifted, [35, 30, 35], 'the two terminals share their 70 evenly; the editor keeps 30');
-    assert.equal(liftSizes(tree, 's-gone', [50, 50], 'terminal'), null);
-    assert.equal(liftSizes(tree, 's-mid', [50, 25, 25], 'terminal'), null, 'a count that is not the projection is refused');
-    const full = split('s', 'horizontal', [term('a'), term('b')], [30, 70]);
-    assert.deepEqual(liftSizes(full, 's', [40, 60], 'terminal'), [40, 60], 'nothing filtered: the sizes as given');
+  // Rewritten for sibling C (FC2): WB-16 pinned `liftSizes`, the bridge's
+  // write-back of a resize made in one kind's projection. The workbench now
+  // draws the full tree and stores a split's sizes as dragged, so nothing
+  // uses it and it is removed; what is pinned instead is that it is gone.
+  test('WB-16: liftSizes went with the bridge: splitLayout no longer exports it', async () => {
+    const layout = await import('../../src/components/terminal/splitLayout.js');
+    assert.equal('liftSizes' in layout, false, 'liftSizes is still exported');
   });
 });
 

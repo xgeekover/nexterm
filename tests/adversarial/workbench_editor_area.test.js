@@ -1,113 +1,50 @@
 /**
- * The editor area draws the group on screen (editor placement, sibling B,
- * FB12 / AC-B9): EditorPanel renders the editor projection of the active
- * group's tree — exactly its editor leaves, ids kept — and nothing at all for
- * a group with no editor leaf.
+ * The workbench draws the files of the group on screen, and the bridge is
+ * gone (editor placement, sibling C, FC2 / AC-C2; was sibling B's FB12 /
+ * AC-B9, RN-B9a).
  *
- * The render suite cannot check this: PanelLayout loads EditorPanel through
- * React.lazy, so a server render of the app draws none of its panes. So the
- * panel is bundled here with esbuild, as editor_tab_reorder_ui.test.js does:
- * React and the layout libraries kept real, the panel's own files and the
- * pure split-layout module bundled as they are, the three stores replaced by
- * a state the case sets, and Monaco by an empty stand-in. The bundle is
- * imported from a data: URL, so nothing is registered process-wide.
+ * Rewritten for sibling C. Sibling B's editor area, EditorPanel, drew the
+ * editor PROJECTION of the group on screen above the terminals, and this
+ * suite bundled it alone. That area is retired: TerminalSplitContainer draws
+ * the full tree, editor leaves included. The old assertions map as follows:
+ *
+ *   WV-01 "the editor area draws exactly the editor leaves of the group on
+ *         screen, in order, and their files only"
+ *     -> WV-01 below, on the workbench: the same groups, the same editor
+ *        leaves and files, and now the group's terminals beside them.
+ *   WV-01 "no terminal pane in the editor area"
+ *     -> WV-01: no editor leaf is drawn as a terminal pane (the terminal
+ *        panes are the group's terminal leaves exactly); there is no
+ *        separate editor area to hold none.
+ *   WV-02 "a group with no editor leaf draws no editor area at all, though
+ *         files are open in other groups"
+ *     -> WV-02: such a group draws no editor pane, only its terminals; and
+ *        PanelLayout draws no editor area for any group (WV-06).
+ *   WV-02 "nor for a group that is gone"
+ *     -> WV-02: with the active group gone the workbench draws the first
+ *        group, as it does for terminals, never another group's files.
+ *   (new) WV-06: the source checks of AC-C2 — no static import of
+ *        EditorPanel.jsx or `@monaco-editor/react` in the workbench or the
+ *        layout, and `liftSizes` and the projections gone from the UI.
+ *
+ * The workbench is bundled with esbuild (workbench_bundle.js) and drawn with
+ * the app's own stores, arranged here.
  */
-import { build } from 'esbuild';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import React from 'react';
-import { renderToString } from 'react-dom/server';
-import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
+import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
+import { useTerminalStore } from '../../src/stores/terminalStore.js';
+import { useEditorStore } from '../../src/stores/editorStore.js';
+import { chipsIn, drawWorkbench, editorPanesIn, loadWorkbench, terminalPanesIn } from './workbench_bundle.js';
 
-const EDITOR_DIR = fileURLToPath(new URL('../../src/components/editor/', import.meta.url));
-
-/** Bundled as they are: the panel, its tabs and dialog, and the pure helpers they draw with. */
-const BUNDLED = [
-  /^\.\/Editor(Panel|Tabs)\.jsx$/,
-  /\/common\/ConfirmDialog\.jsx$/,
-  /\/terminal\/splitLayout\.js$/,
-  /\/lib\/utils\.js$/,
-  /\/lib\/paths\.js$/,
-];
-/** Kept real, so that the panes really draw. */
-const REAL = new Set(['react', 'react/jsx-runtime', 'react-dom', 'lucide-react', 'react-resizable-panels']);
-
-/** A store as far as the panel reads it: the state the case sets. */
-const fakeStore = (name, initial) => `
-let state = ${initial};
-export function ${name}(select) { return select(state); }
-${name}.getState = () => state;
-${name}.setState = () => {};
-${name}.subscribe = () => () => {};
-export function setFake(next) { state = next; }
-`;
-
-/** Every other import the panel has, by what it is: nothing these renders call does anything. */
-const STAND_INS = [
-  [/\/stores\/editorStore\.js$/, fakeStore('useEditorStore', '{ tabs: [] }').replace('setFake', 'setFakeEditorState')],
-  [/\/stores\/terminalStore\.js$/, fakeStore('useTerminalStore', '{ groups: [], activeGroupId: null }').replace('setFake', 'setFakeTerminalState')],
-  [/\/stores\/settingsStore\.js$/, fakeStore('useSettingsStore', "{ editorFontSize: 14, editorTabSize: 2, editorWordWrap: 'off', editorMinimap: false }")],
-  [/^@monaco-editor\/react$/, 'export default function Editor() { return null; }'],
-  [/^monaco-editor$/, "export const Uri = { file: (path) => ({ path, toString: () => 'file://' + path }) };"],
-  [/\/lib\/monaco\.js$/, ''],
-  [
-    /\/lib\/editorModels\.js$/,
-    [
-      "export const bufferText = () => '';",
-      "export const editorValue = () => '';",
-      'export const modelPath = (path) => path;',
-      'export const saveViewState = () => {};',
-      'export const showFile = () => {};',
-      'export const trackEditor = () => () => {};',
-      'export const watchEditorModels = () => () => {};',
-    ].join('\n'),
-  ],
-  [/\/hooks\/useShortcuts\.js$/, "export function useShortcuts() { return { shortcut: () => '' }; }"],
-  [/\/lib\/workspaceFocus\.js$/, 'export const focusWorkspace = () => {};'],
-];
-
-let loading = null;
-function loadPanel() {
-  loading ??= build({
-    stdin: {
-      contents: [
-        "export { EditorPanel } from './EditorPanel.jsx';",
-        "export { setFakeEditorState } from '../../stores/editorStore.js';",
-        "export { setFakeTerminalState } from '../../stores/terminalStore.js';",
-      ].join('\n'),
-      resolveDir: EDITOR_DIR,
-      sourcefile: 'editor-area-under-test.js',
-      loader: 'js',
-    },
-    bundle: true,
-    write: false,
-    format: 'esm',
-    platform: 'neutral',
-    jsx: 'automatic',
-    logLevel: 'silent',
-    plugins: [
-      {
-        name: 'editor-area-stand-ins',
-        setup(b) {
-          b.onResolve({ filter: /.*/ }, (args) => {
-            if (BUNDLED.some((re) => re.test(args.path))) return undefined;
-            if (REAL.has(args.path)) return { path: import.meta.resolve(args.path), external: true };
-            const index = STAND_INS.findIndex(([re]) => re.test(args.path));
-            if (index === -1) throw new Error(`EditorPanel imports ${args.path}, which this suite has no stand-in for`);
-            return { path: String(index), namespace: 'stand-in' };
-          });
-          b.onLoad({ filter: /.*/, namespace: 'stand-in' }, (args) => ({ contents: STAND_INS[Number(args.path)][1], loader: 'js' }));
-        },
-      },
-    ],
-  }).then(({ outputFiles }) => import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`));
-  return loading;
-}
-
-let ui = null;
-
-// --- The workbench the cases draw ----------------------------------------------
+const T = useTerminalStore;
+const E = useEditorStore;
+const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
+const read = (rel) => readFileSync(join(SRC, rel), 'utf8');
 
 const fileTab = (id) => ({ id, filePath: `/workspace/${id}.js`, fileName: `${id}.js`, content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' });
+const termTab = (id) => ({ id, title: `shell ${id}`, cwd: '/workspace' });
 const editorLeaf = (id, tabIds) => ({ type: 'leaf', kind: 'editor', id, tabIds, activeTabId: tabIds[0] ?? null });
 const terminalLeaf = (id, tabIds) => ({ type: 'leaf', id, tabIds, activeTabId: tabIds[0] ?? null });
 
@@ -130,52 +67,88 @@ const GROUPS = [
   { id: 'group-3', name: 'Group 3', createdAt: 0, activePaneId: 'pane-t4', tree: terminalLeaf('pane-t4', ['t4']) },
 ];
 
-/** EditorPanel drawn with group `activeGroupId` on screen. */
+let saved = null;
+
+/** The workbench drawn with group `activeGroupId` on screen. */
 function drawFor(activeGroupId) {
-  ui.setFakeEditorState({
-    tabs: ['e1', 'e2', 'e3'].map(fileTab),
-    activeTabId: 'e2',
-    rootPath: '/workspace',
-    pendingClose: null,
-    pendingOverwrite: null,
-    pendingReveal: null,
-  });
-  ui.setFakeTerminalState({ groups: GROUPS, activeGroupId });
-  // React says, once per render, that a layout effect does nothing on the
-  // server — with a stack holding the whole bundle's data: URL. Only that.
-  const report = console.error;
-  console.error = (first, ...rest) => {
-    if (typeof first === 'string' && first.includes('useLayoutEffect does nothing on the server')) return;
-    report(first, ...rest);
-  };
-  try {
-    return renderToString(React.createElement(ui.EditorPanel));
-  } finally {
-    console.error = report;
-  }
+  E.setState({ tabs: ['e1', 'e2', 'e3'].map(fileTab), activeTabId: 'e2', rootPath: '/workspace', pendingReveal: null });
+  T.setState({ tabs: ['t1', 't2', 't3', 't4'].map(termTab), groups: GROUPS, activeGroupId, notifications: [] });
+  return drawWorkbench();
 }
 
-const editorPanesIn = (html) => [...html.matchAll(/data-editor-pane-body="([^"]+)"/g)].map((m) => m[1]);
-const chipsIn = (html) => [...html.matchAll(/data-tab-chip="([^"]+)"/g)].map((m) => m[1]);
+/** Every file under `dir` (relative to src/) whose name matches `re`. */
+function filesUnder(dir, re) {
+  const out = [];
+  const walk = (abs) => {
+    for (const name of readdirSync(abs)) {
+      const path = join(abs, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (re.test(name)) out.push(path.slice(SRC.length));
+    }
+  };
+  walk(join(SRC, dir));
+  return out;
+}
 
-describe('Workbench: the editor area draws the editor leaves of the group on screen (AC-B9)', () => {
+/** The module specifiers of `text`'s static imports (and re-exports). */
+const staticImports = (text) => [...text.matchAll(/^\s*(?:import|export)\b[^;]*?from\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]/gm)].map((m) => m[1] ?? m[2]);
+
+describe('Workbench: the files of the group on screen are drawn in the workbench (AC-C2, was AC-B9)', () => {
   beforeEach(async () => {
-    ui = await loadPanel();
+    await loadWorkbench();
+    saved = { t: T.getState(), e: E.getState() };
+  });
+  afterEach(() => {
+    T.setState(saved.t, true);
+    E.setState(saved.e, true);
   });
 
-  test('WV-01: the editor area draws exactly the editor leaves of the group on screen, in order, and their files only', () => {
-    const one = drawFor('group-1');
+  test('WV-01: the workbench draws exactly the editor leaves of the group on screen, in order, their files only, and its terminal leaves as terminal panes', async () => {
+    const one = await drawFor('group-1');
     assert.deepEqual(editorPanesIn(one), ['pane-e1', 'pane-e2'], 'group 1: its two editor leaves');
-    assert.deepEqual(chipsIn(one), ['e1', 'e2'], 'group 1: its files, none of group 2\u{2019}s');
-    assert.equal(/data-pane-body="pane-t/.test(one), false, 'no terminal pane in the editor area');
+    assert.deepEqual(terminalPanesIn(one), ['pane-t1', 'pane-t2'], 'group 1: its terminal leaves, and no editor leaf, as terminal panes');
+    assert.deepEqual(chipsIn(one), ['e1', 'e2', 't1', 't2'], 'group 1: its files, none of group 2\u{2019}s');
 
-    const two = drawFor('group-2');
+    const two = await drawFor('group-2');
     assert.deepEqual(editorPanesIn(two), ['pane-e3'], 'group 2: its one editor leaf');
-    assert.deepEqual(chipsIn(two), ['e3']);
+    assert.deepEqual(chipsIn(two), ['e3', 't3']);
   });
 
-  test('WV-02: a group with no editor leaf draws no editor area at all, though files are open in other groups', () => {
-    assert.equal(drawFor('group-3'), '', 'nothing drawn');
-    assert.equal(drawFor('no-such-group'), '', 'nor for a group that is gone');
+  test('WV-02: a group with no editor leaf draws no editor pane, though files are open in other groups; a group that is gone draws the first one', async () => {
+    const three = await drawFor('group-3');
+    assert.deepEqual(editorPanesIn(three), [], 'no editor pane');
+    assert.deepEqual(terminalPanesIn(three), ['pane-t4'], 'only its terminal');
+    const gone = await drawFor('no-such-group');
+    assert.deepEqual(editorPanesIn(gone), ['pane-e1', 'pane-e2'], 'the first group, as for terminals: never a mix of groups');
+  });
+
+  test('WV-06: no static import of EditorPanel.jsx or Monaco in the workbench or the layout; liftSizes and the projections are gone from the UI', () => {
+    const eager = [
+      'components/terminal/TerminalSplitContainer.jsx',
+      'components/layout/PanelLayout.jsx',
+      'components/editor/EditorPane.jsx',
+      'components/editor/EditorTabs.jsx',
+    ];
+    for (const file of eager) {
+      const imports = staticImports(read(file));
+      assert.ok(imports.length > 0, `setup: ${file} has imports`);
+      assert.equal(imports.some((spec) => /EditorPanel\.jsx$/.test(spec)), false, `${file} imports EditorPanel.jsx statically`);
+      assert.equal(imports.some((spec) => /^@monaco-editor\/react$|^monaco-editor/.test(spec)), false, `${file} imports Monaco statically`);
+    }
+    assert.match(read('components/editor/EditorPane.jsx'), /lazy\(\(\) => import\('\.\/EditorPanel\.jsx'\)\)/, 'the Monaco body is not loaded lazily');
+    assert.equal(/EditorPanel/.test(read('components/layout/PanelLayout.jsx').replace(/\/\/[^\n]*/g, '')), false, 'PanelLayout still names the editor area');
+
+    for (const file of filesUnder('components', /\.jsx?$/)) {
+      assert.equal(/liftSizes/.test(read(file).replace(/\/\/[^\n]*/g, '')), false, `${file} still uses liftSizes`);
+    }
+    assert.equal(/export function liftSizes/.test(read('components/terminal/splitLayout.js')), false, 'liftSizes is still defined');
+    // The bridge's projections. TerminalsPanel's terminal-only list keeps its
+    // own, legitimately (it lists terminals), and the stores keep theirs.
+    for (const file of ['components/terminal/TerminalSplitContainer.jsx', 'components/editor/EditorPanel.jsx', 'components/editor/EditorPane.jsx', 'components/editor/EditorTabs.jsx', 'components/layout/PanelLayout.jsx']) {
+      const code = read(file).replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
+      assert.equal(/projectTree/.test(code), false, `${file} still draws a projection`);
+    }
+    assert.equal(/terminalView/.test(read('components/terminal/TerminalSplitContainer.jsx')), false, 'the terminal projection is still drawn');
+    assert.equal(/hasEditorTabs/.test(read('components/layout/PanelLayout.jsx')), false, 'PanelLayout still asks whether the group has files');
   });
 });
