@@ -19,6 +19,11 @@ import {
   swapChoices,
   swapLabel,
   panelMinSizeOf,
+  EDITOR_KIND,
+  TERMINAL_KIND,
+  leafKind,
+  liftSizes,
+  projectTree,
 } from './splitLayout.js';
 import {
   SplitSquareHorizontal,
@@ -400,7 +405,9 @@ export function commitOpenRename(doc = document, flush = flushSync) {
 function collectPanes(node, acc = []) {
   if (!node) return acc;
   if (node.type === 'leaf') {
-    acc.push(node);
+    // Terminal panes only (sibling B, FB10): an editor leaf holds files, and
+    // counts for nothing here — not a terminal, not a pane of this view.
+    if (leafKind(node) !== EDITOR_KIND) acc.push(node);
     return acc;
   }
   node.children.forEach((child) => collectPanes(child, acc));
@@ -760,8 +767,9 @@ function TerminalPane({
   const swapMenuFor = () => {
     const state = useTerminalStore.getState();
     const group = state.groups.find((g) => g.id === groupId);
-    const note = swapBlockedReason(group);
-    return { note, panes: note ? [] : swapChoices(group.tree, state.tabs, paneId) };
+    // Terminal panes only, as this view draws them (sibling B).
+    const note = swapBlockedReason(group, TERMINAL_KIND);
+    return { note, panes: note ? [] : swapChoices(projectTree(group.tree, TERMINAL_KIND), state.tabs, paneId) };
   };
 
   const beginRenameTab = (tab) => {
@@ -1341,7 +1349,10 @@ function ResizableSplit({ node, groupId, renderChild }) {
     (nextLayout, meta) => {
       const next = sizesFromLayout(childIds, nextLayout, meta);
       if (!next) return;
-      setPaneSizes(groupId, node.id, next);
+      // Drawn from the terminal projection: the full split may have editor
+      // children this view does not show, which keep their share (`liftSizes`).
+      const full = useTerminalStore.getState().groups.find((g) => g.id === groupId)?.tree;
+      setPaneSizes(groupId, node.id, liftSizes(full, node.id, next, TERMINAL_KIND) ?? next);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [childIds.join(','), groupId, node.id, setPaneSizes]
@@ -1744,6 +1755,11 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
 
   const activeGroup = groups.find((g) => g.id === activeGroupId) || groups[0] || null;
+  // The terminal projection of the group on screen (sibling B): what this view draws.
+  const terminalView = useMemo(
+    () => (activeGroup?.tree ? { ...activeGroup, tree: projectTree(activeGroup.tree, TERMINAL_KIND) ?? activeGroup.tree } : activeGroup),
+    [activeGroup]
+  );
 
   // Which group's switcher chip is currently being renamed inline. Lifted here
   // so a pane's "Rename Group…" menu item can open the switcher's editor
@@ -2006,8 +2022,13 @@ export function TerminalSplitContainer({ headerSlot = null }) {
   // Which panes are drawn: all of them, or the zoomed one alone (see
   // `treeOnScreen`). A hidden pane is simply not mounted; its terminal waits
   // in the registry, running, like a terminal in another group.
-  const zoomedPane = zoomedPaneOf(activeGroup);
-  const shownTree = treeOnScreen(activeGroup);
+  //
+  // The releasability bridge (sibling B, FB12): this view draws the terminal
+  // projection of the group, ids kept, so a file opened above the terminals
+  // remounts nothing here.
+  const terminalGroup = terminalView;
+  const zoomedPane = zoomedPaneOf(terminalGroup);
+  const shownTree = treeOnScreen(terminalGroup);
   const paneCount = collectPanes(activeGroup.tree).length;
   const zoom = {
     paneId: zoomedPane?.id ?? null,
@@ -2052,7 +2073,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
             activePaneId={activeGroup.activePaneId}
             onSplit={handleSplit}
             onClose={handleClose}
-            canClose={activeGroup.tree.type !== 'leaf'}
+            canClose={terminalGroup.tree.type !== 'leaf'}
             onRenameGroup={setRenamingGroupId}
             zoom={zoom}
           />

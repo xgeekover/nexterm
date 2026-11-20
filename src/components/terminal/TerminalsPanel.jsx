@@ -20,6 +20,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
+import { TERMINAL_KIND, projectTree } from './splitLayout.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useAgentHistoryStore } from '../../stores/agentHistoryStore.js';
@@ -277,7 +278,8 @@ export function TerminalsPanel() {
   const layout = useMemo(
     () =>
       groups.map((group, index) => {
-        const panes = collectPanes(group.tree);
+        // Terminal panes only (sibling B, FB10): the terminal projection.
+        const panes = collectPanes(projectTree(group.tree, TERMINAL_KIND));
         const tabIds = panes.flatMap(({ pane }) => pane.tabIds);
         return { group, index, panes, tabIds, tabCount: tabIds.length };
       }),

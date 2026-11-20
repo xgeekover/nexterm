@@ -10,6 +10,10 @@
  * and imported from a data: URL, as editor_tab_reorder_ui.test.js does: React
  * kept real and every other import replaced by an empty stand-in that nothing
  * these cases reach ever calls. Nothing is registered process-wide.
+ *
+ * The prompts' words and order moved with the prompts into EditorPrompts.jsx
+ * (sibling B, review K-01: drawn whatever the group on screen holds), which is
+ * bundled alongside.
  */
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
@@ -23,7 +27,7 @@ let loading = null;
 function loadEditorPanel() {
   loading ??= build({
     stdin: {
-      contents: "export * from './EditorPanel.jsx';",
+      contents: "export * from './EditorPanel.jsx';\nexport * from './EditorPrompts.jsx';",
       resolveDir: EDITOR_DIR,
       sourcefile: 'editor-panel-under-test.js',
       loader: 'js',
@@ -39,7 +43,7 @@ function loadEditorPanel() {
         name: 'editor-panel-stand-ins',
         setup(b) {
           b.onResolve({ filter: /.*/ }, (args) => {
-            if (/^\.\/EditorPanel\.jsx$/.test(args.path)) return undefined;
+            if (/^\.\/Editor(Panel|Prompts)\.jsx$/.test(args.path)) return undefined;
             if (REAL.has(args.path)) return { path: import.meta.resolve(args.path), external: true };
             return { path: args.path, namespace: 'stand-in' };
           });
@@ -58,10 +62,10 @@ const loadUi = async () => {
   ui = await loadEditorPanel();
 };
 
-/** An export of EditorPanel.jsx, failing by name when it is not there. */
+/** An export of EditorPanel.jsx or EditorPrompts.jsx, failing by name when it is not there. */
 function exported(name) {
   const value = ui[name];
-  assert.ok(value !== undefined, `EditorPanel.jsx does not export ${name}, so none of this is under test`);
+  assert.ok(value !== undefined, `EditorPanel.jsx and EditorPrompts.jsx do not export ${name}, so none of this is under test`);
   return value;
 }
 
@@ -187,7 +191,7 @@ describe('The editor prompts, in the order they opened', () => {
     assert.deepEqual(inOpenOrder(order, []), []);
 
     const { readFileSync } = await import('node:fs');
-    const panel = readFileSync(new URL('../../src/components/editor/EditorPanel.jsx', import.meta.url), 'utf8');
+    const panel = readFileSync(new URL('../../src/components/editor/EditorPrompts.jsx', import.meta.url), 'utf8');
     assert.match(panel, /promptOrder\.current\.map\(\(key\) => \(\s*<React\.Fragment key=\{key\}>\{promptOf\[key\]\}<\/React\.Fragment>/);
   });
 });

@@ -47,6 +47,7 @@ import { readFileSync } from 'node:fs';
 import { URI } from 'monaco-editor/base/common/uri.js';
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
+import { setEditorLayout, editorTree, editorPane, EMPTY_EDITOR_ROOT, setEditorPaneTabIds } from '../e2e/harness/workbench.js';
 import { invoke, mockBridge } from '../../src/lib/ipc.js';
 import {
   bufferText,
@@ -179,7 +180,7 @@ async function scratchFiles(...names) {
 }
 
 const tabOn = (path) => S.getState().tabs.find((t) => t.filePath === path);
-const leaves = (node = S.getState().editorSplitTree, acc = []) => {
+const leaves = (node = editorTree(), acc = []) => {
   if (node?.type === 'leaf') acc.push(node);
   else node?.children.forEach((c) => leaves(c, acc));
   return acc;
@@ -193,12 +194,11 @@ describe('Editor models: one per open file, disposed with its last tab', () => {
       expandedFolders: new Set([ROOT]),
       tabs: [],
       activeTabId: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
       pendingClose: null,
       pendingOverwrite: null,
       clipboard: null,
     });
+    setEditorLayout();
     monaco = fakeMonaco();
     stop = watchEditorModels(monaco, S);
   });
@@ -235,16 +235,14 @@ describe('Editor models: one per open file, disposed with its last tab', () => {
     await S.getState().openFile(b);
     const ta = tabOn(a).id;
     const tb = tabOn(b).id;
-    S.setState({
-      editorSplitTree: {
-        type: 'split',
-        id: 'editor-split-em02',
-        direction: 'horizontal',
-        children: [
-          { type: 'leaf', id: 'editor-pane-em02-l', tabIds: [ta], activeTabId: ta },
-          { type: 'leaf', id: 'editor-pane-em02-r', tabIds: [ta, tb], activeTabId: ta },
-        ],
-      },
+    setEditorLayout({
+      type: 'split',
+      id: 'editor-split-em02',
+      direction: 'horizontal',
+      children: [
+        { type: 'leaf', id: 'editor-pane-em02-l', tabIds: [ta], activeTabId: ta },
+        { type: 'leaf', id: 'editor-pane-em02-r', tabIds: [ta, tb], activeTabId: ta },
+      ],
     });
     const modelA = monaco.show(a);
     monaco.show(b);
@@ -264,10 +262,8 @@ describe('Editor models: one per open file, disposed with its last tab', () => {
     await S.getState().openFile(b);
     // A second tab on a.js, as a store change could make one: counted, not assumed away.
     const twin = { ...tabOn(a), id: 'tab-edit-em03-twin' };
-    S.setState((state) => ({
-      tabs: [...state.tabs, twin],
-      editorSplitTree: { ...state.editorSplitTree, tabIds: [...state.editorSplitTree.tabIds, twin.id] },
-    }));
+    S.setState((state) => ({ tabs: [...state.tabs, twin] }));
+    setEditorPaneTabIds((tabIds) => [...tabIds, twin.id]);
     const modelA = monaco.show(a);
     monaco.show(b);
     S.getState().closeTab(twin.id);
@@ -482,10 +478,8 @@ describe('Editor models: one per open file, disposed with its last tab', () => {
     assert.equal(editor.getModel(), old);
     // A new tab on a.js, before anything has rendered.
     const again = { ...tab, id: 'tab-edit-em12-again', content: 'the new tab\'s text\n', savedContent: 'the new tab\'s text\n' };
-    S.setState((state) => ({
-      tabs: [...state.tabs, again],
-      editorSplitTree: { ...state.editorSplitTree, tabIds: [...state.editorSplitTree.tabIds, again.id] },
-    }));
+    S.setState((state) => ({ tabs: [...state.tabs, again] }));
+    setEditorPaneTabIds((tabIds) => [...tabIds, again.id]);
     assert.equal(old.disposed, true, 'the reopened file kept the closed tab\'s model, text and undo');
     const fresh = editor.getModel();
     assert.ok(fresh && !fresh.disposed, 'the editor was left with no model');
@@ -601,10 +595,8 @@ describe('Editor models: one per open file, disposed with its last tab', () => {
     const newA = { ...oldA, id: 'tab-edit-em15-a', content: 'the new a\n', savedContent: 'the new a\n' };
     const newB = { ...oldB, id: 'tab-edit-em15-b', content: 'the new b\n', savedContent: 'the new b\n' };
     const swap = (id) => (id === oldA.id ? newA.id : id === oldB.id ? newB.id : id);
-    S.setState((state) => ({
-      tabs: state.tabs.map((t) => (t.id === oldA.id ? newA : t.id === oldB.id ? newB : t)),
-      editorSplitTree: { ...state.editorSplitTree, tabIds: state.editorSplitTree.tabIds.map(swap) },
-    }));
+    S.setState((state) => ({ tabs: state.tabs.map((t) => (t.id === oldA.id ? newA : t.id === oldB.id ? newB : t)) }));
+    setEditorPaneTabIds((tabIds) => tabIds.map(swap));
     assert.equal(shown.disposed, true, 'the new tab on a.js inherited the old tab\'s model, text and undo');
     assert.equal(hidden.disposed, true, 'the new tab on b.js inherited the old tab\'s model, text and undo');
     const fresh = editor.getModel();
@@ -614,10 +606,8 @@ describe('Editor models: one per open file, disposed with its last tab', () => {
 
     // A second tab on a.js, the first still open: one file, one model, kept.
     const second = { ...newA, id: 'tab-edit-em15-a2' };
-    S.setState((state) => ({
-      tabs: [...state.tabs, second],
-      editorSplitTree: { ...state.editorSplitTree, tabIds: [...state.editorSplitTree.tabIds, second.id] },
-    }));
+    S.setState((state) => ({ tabs: [...state.tabs, second] }));
+    setEditorPaneTabIds((tabIds) => [...tabIds, second.id]);
     assert.equal(fresh.disposed, false, 'a second tab on a.js took the model of the first, still open');
     assert.equal(editor.getModel(), fresh);
     editor.dispose();

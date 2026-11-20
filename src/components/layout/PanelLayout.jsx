@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Group, Panel, Separator, useGroupRef } from 'react-resizable-panels';
 import { useSettingsStore, viewsIn, shownView } from '../../stores/settingsStore.js';
-import { useEditorStore } from '../../stores/editorStore.js';
+import { useTerminalStore } from '../../stores/terminalStore.js';
+import { EDITOR_KIND, leavesOfKind } from '../terminal/splitLayout.js';
 import { TerminalSplitContainer } from '../terminal/index.js';
 import { TerminalsPanel } from '../terminal/index.js';
 import { FileExplorer } from '../explorer/FileExplorer.jsx';
 import { SearchPanel } from '../search/SearchPanel.jsx';
+// Not lazy: the unsaved and overwrite prompts must be drawn whatever the group
+// on screen holds, and this imports no Monaco.
+import { EditorPrompts } from '../editor/EditorPrompts.jsx';
 import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 
@@ -383,10 +387,13 @@ export function PanelLayout() {
   const moveView = useSettingsStore((s) => s.moveView);
   const reducedMotionSetting = useSettingsStore((s) => s.reducedMotion);
 
-  // The editor area only exists once a file is open (task: workspace starts
-  // empty, terminal fills the space until Explorer opens something).
-  const editorTabCount = useEditorStore((s) => s.tabs.length);
-  const hasEditorTabs = editorTabCount > 0;
+  // The editor area only exists while the group on screen has an editor leaf
+  // (sibling B: files belong to terminal groups). The workspace starts empty
+  // and the terminal fills the space until Explorer opens something.
+  const hasEditorTabs = useTerminalStore((s) => {
+    const group = s.groups.find((g) => g.id === s.activeGroupId);
+    return leavesOfKind(group?.tree, EDITOR_KIND).length > 0;
+  });
 
   // Two independent "reduce motion" gates: the OS accessibility preference
   // and the Workbench setting. Either one disables motion. The OS query also
@@ -695,6 +702,13 @@ export function PanelLayout() {
           {...bottomHandlers}
         />
       )}
+
+      {/* The editor's Save / Don't Save / Cancel and "File Changed on Disk"
+          prompts, onto <body>. Mounted whatever the layout: the editor area
+          above exists only while the group on screen has an editor leaf, and
+          a window close, Quit, a folder switch or closing another group asks
+          about files in any group. */}
+      <EditorPrompts />
     </div>
   );
 }

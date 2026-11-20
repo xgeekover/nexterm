@@ -54,8 +54,6 @@ describe('The editor on Windows paths', () => {
       activeTabId: null,
       pendingClose: null,
       pendingReveal: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
   });
 
@@ -164,8 +162,6 @@ describe('The editor on Windows paths', () => {
       tabs: [],
       activeTabId: null,
       pendingReveal: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
     assert.equal(S.getState().rootPath, '/workspace');
   });

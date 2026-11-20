@@ -27,6 +27,8 @@ import {
 import { useGitStore } from './gitStore.js';
 import { useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
+import { useTerminalStore, setEditorBridge, isWaitingEditorLeaf, newWorkbenchId } from './terminalStore.js';
+import { EDITOR_KIND, leafKind, projectTree } from '../components/terminal/splitLayout.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
 const loadingDirs = new Set();
@@ -52,24 +54,15 @@ let refreshTimer = null;
 // The init() still running, shared by every caller until it settles — see init.
 let initInFlight = null;
 
-// --- Editor split tree ------------------------------------------------------
-// The same leaf/split tree each terminal group holds (src/stores/terminalStore.js),
-// so the editor can be arranged the way a terminal group is:
-//   { type: 'leaf', id, tabIds: [], activeTabId } |
-//   { type: 'split', id, direction: 'horizontal'|'vertical', children: [...] }
-// Each leaf is an editor group holding its own file tabs, so a tab can be
-// dragged into another group or dropped on a group's edge to split it.
-
-let editorPaneCounter = 1;
-const makeEditorPaneId = () => `editor-pane-${editorPaneCounter++}`;
-
-/**
- * Split ids for a restored layout. Splitting by hand names a split after the
- * millisecond it happened, and a restore builds every split of a saved
- * layout within one: siblings would share an id, which React keys them by.
- */
-let restoredSplitCounter = 1;
-const makeRestoredSplitId = () => `editor-split-restored-${restoredSplitCounter++}`;
+// --- Where the files are: the workbench (editor placement, sibling B) ------
+// Open files are placed in the terminal groups' trees, in leaves of kind
+// 'editor' (src/stores/terminalStore.js, src/components/terminal/splitLayout.js):
+//   { type: 'leaf', kind: 'editor', id, tabIds: [], activeTabId }
+// This store keeps the tabs — their text, dirty state, saves and prompts —
+// and terminalStore keeps where each one is. Until v0.32.0 this store held
+// its own tree (`editorSplitTree`, `activeEditorPaneId`); the editor area
+// now draws the editor projection of the group on screen, and the group's
+// `editorPaneId` is its active editor pane.
 
 /**
  * A tab's id. The counter is there because a restore opens up to fifty tabs
@@ -79,13 +72,6 @@ const makeRestoredSplitId = () => `editor-split-restored-${restoredSplitCounter+
 let editorTabCounter = 1;
 const makeEditorTabId = () =>
   `tab-edit-${Date.now()}-${editorTabCounter++}-${Math.random().toString(36).slice(2, 6)}`;
-
-/** Walks a split-tree node and returns the id of its first leaf (DOM order). */
-function firstLeafId(node) {
-  if (!node) return null;
-  if (node.type === 'leaf') return node.id;
-  return firstLeafId(node.children[0]);
-}
 
 /** Collects every leaf node of a split-tree, in DOM order. */
 function collectLeaves(node, acc = []) {
@@ -116,74 +102,70 @@ function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
 }
 
-/** Remove a tab from whichever leaf holds it, keeping that leaf's active tab valid. */
-function removeTabFromTree(node, tabId) {
-  return mapTree(node, (n) => {
-    if (n.type !== 'leaf' || !n.tabIds.includes(tabId)) return n;
-    const tabIds = n.tabIds.filter((id) => id !== tabId);
-    return {
-      ...n,
-      tabIds,
-      activeTabId: n.activeTabId === tabId ? tabIds[0] ?? null : n.activeTabId,
-    };
-  });
+const workbench = () => useTerminalStore.getState();
+
+/** The editor leaves of a group, in DOM order. */
+function editorLeavesOf(group) {
+  return collectLeaves(group?.tree).filter((leaf) => leafKind(leaf) === EDITOR_KIND);
+}
+
+/** The editor leaf `paneId` in any group, or null. */
+function editorLeafById(paneId) {
+  for (const group of workbench().groups) {
+    const leaf = editorLeavesOf(group).find((l) => l.id === paneId);
+    if (leaf) return leaf;
+  }
+  return null;
+}
+
+/** Every file tab id some leaf shows, in any group. */
+function placedEditorIds() {
+  return new Set(workbench().groups.flatMap((g) => editorLeavesOf(g).flatMap((l) => l.tabIds)));
+}
+
+/** The editor area as the group on screen has it: its editor projection and its editor pane. */
+function activeEditorView() {
+  const group = workbench().getActiveGroup();
+  return { editorTree: projectTree(group?.tree, EDITOR_KIND), editorPane: group?.editorPaneId ?? null };
 }
 
 /**
- * Drop leaves that hold no tabs and collapse splits left with a single child.
- * Returns null when the whole tree is empty.
+ * What a folder's session saves (FB9): the editor projection of the one
+ * group that shows files, or a horizontal split of each group's projection,
+ * in group order, when several do. Each leaf keeps its workbench id, saved
+ * as `pane`, so the files come back to the group they were in.
  */
-function pruneTree(node) {
-  if (!node) return null;
-  if (node.type === 'leaf') return node.tabIds.length > 0 ? node : null;
-  const children = node.children.map(pruneTree).filter(Boolean);
-  if (children.length === 0) return null;
-  if (children.length === 1) return children[0];
-  return { ...node, children };
+function sessionEditorView() {
+  const ts = workbench();
+  const trees = ts.groups.map((g) => projectTree(g.tree, EDITOR_KIND)).filter(Boolean);
+  const editorTree = trees.length <= 1
+    ? trees[0] ?? null
+    : { type: 'split', id: 'editor-view', direction: 'horizontal', children: trees };
+  return { editorTree, editorPane: ts.getActiveGroup()?.editorPaneId ?? null };
 }
 
 /**
- * `pruneTree` for one leaf only: drop `leafId` if it holds no tabs, and
- * collapse the split that leaves with a single child.
- *
- * A tab moved out of a group can leave that group empty, and it goes the way
- * an emptied group always goes. But a group the user has just split off and
- * not filled yet is empty too, and moving a tab between two OTHER groups is
- * not the user asking for that one to disappear.
+ * Bring `activeTabId` (the Save target, the Explorer's highlight) in line with
+ * the workbench: the tab the group on screen shows in its editor pane; with
+ * nothing shown there, the active tab as long as that group still shows it.
  */
-function pruneLeafIfEmpty(node, leafId) {
-  if (!node) return null;
-  if (node.type === 'leaf') return node.id === leafId && node.tabIds.length === 0 ? null : node;
-  const children = node.children.map((child) => pruneLeafIfEmpty(child, leafId)).filter(Boolean);
-  if (children.length === 0) return null;
-  if (children.length === 1) return children[0];
-  return { ...node, children };
-}
-
-/** Append a tab to a pane (falling back to the first leaf) and make it active there. */
-function addTabToPane(node, paneId, tabId) {
-  let placed = false;
-  const next = mapTree(node, (n) => {
-    if (n.type !== 'leaf' || n.id !== paneId) return n;
-    placed = true;
-    return { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId };
-  });
-  if (placed) return next;
-  const first = collectLeaves(node)[0];
-  if (!first) return { type: 'leaf', id: paneId || makeEditorPaneId(), tabIds: [tabId], activeTabId: tabId };
-  return mapTree(node, (n) =>
-    n.type === 'leaf' && n.id === first.id
-      ? { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId }
-      : n
-  );
+function syncActiveTab() {
+  const store = useEditorStore.getState();
+  const group = workbench().getActiveGroup();
+  const leaves = editorLeavesOf(group);
+  const pane = leaves.find((l) => l.id === group?.editorPaneId);
+  const exists = (id) => Boolean(id) && store.tabs.some((t) => t.id === id);
+  let next = exists(pane?.activeTabId) ? pane.activeTabId : null;
+  if (!next) {
+    const shown = new Set(leaves.flatMap((l) => l.tabIds));
+    next = exists(store.activeTabId) && shown.has(store.activeTabId) ? store.activeTabId : null;
+  }
+  if (next !== store.activeTabId) useEditorStore.setState({ activeTabId: next });
 }
 
 /** How many folders "Open Recent" remembers. */
 const RECENT_ROOT_LIMIT = 12;
 const RECENT_ROOTS_KEY = 'nexterm.recentRoots';
-
-/** An empty root, used when the last editor tab goes away. */
-const emptyEditorTree = () => ({ type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null });
 
 // --- Path helpers shared by the move/rename/duplicate flows below ---------
 
@@ -807,8 +789,12 @@ function startReading(set, get) {
  * page — the next keys went nowhere.
  */
 function userTouchedEditor(state) {
-  const tree = state.editorSplitTree;
-  return tree?.type !== 'leaf' || tree.tabIds.length > 0 || state.pendingClose?.kind === 'pane';
+  if (state.tabs.length > 0 || state.pendingClose?.kind === 'pane') return true;
+  // A split made by hand: more than one editor leaf in the group on screen,
+  // not counting the saved layout's leaves waiting for their files. One empty
+  // leaf is the editor as it starts, as the one empty group was.
+  const own = editorLeavesOf(workbench().getActiveGroup()).filter((leaf) => !isWaitingEditorLeaf(leaf.id));
+  return own.length > 1 || own.some((leaf) => leaf.tabIds.length > 0);
 }
 
 /** Whether the keyboard is in an editor group — its text, or its row of tabs. */
@@ -830,38 +816,44 @@ function editorHasKeyboard() {
  *    When the user has done anything in the editor (`userTouchedEditor`).
  *    The tabs never go into a group a "close this group?" question is about.
  */
-function planLayout(state, session, tabIdOf, newId, intoLive) {
+function planLayout(state, session, tabIdOf, newId, intoLive, view = activeEditorView()) {
   const layout = restoredLayout(session, tabIdOf, newId);
   if (!layout) return null;
-  const leaves = collectLeaves(state.editorSplitTree);
+  const leaves = collectLeaves(view.editorTree);
 
   if (intoLive) {
-    const shownNow = new Set(leaves.flatMap((leaf) => leaf.tabIds));
+    // Shown anywhere already — in any group — is not added again.
+    const shownNow = placedEditorIds();
     const incoming = collectLeaves(layout.tree)
       .flatMap((leaf) => leaf.tabIds)
       .filter((id) => !shownNow.has(id));
     const asked = state.pendingClose?.kind === 'pane' ? state.pendingClose.id : null;
     const target =
-      leaves.find((leaf) => leaf.id === state.activeEditorPaneId && leaf.id !== asked) ??
+      leaves.find((leaf) => leaf.id === view.editorPane && leaf.id !== asked) ??
       leaves.find((leaf) => leaf.id !== asked) ??
       leaves[0];
+    if (!target) {
+      // No editor leaf in the group on screen: one is made for them (FB4).
+      const activeTabId = (incoming.includes(layout.activeTabId) ? layout.activeTabId : incoming[0]) ?? null;
+      const leaf = { type: 'leaf', id: newId('pane'), tabIds: incoming, activeTabId };
+      return { tree: leaf, activePane: leaf.id, activeTabId };
+    }
     const shown = target.tabIds.includes(target.activeTabId)
       ? target.activeTabId
       : (incoming.includes(layout.activeTabId) ? layout.activeTabId : incoming[0]) ?? null;
-    const tree = mapTree(state.editorSplitTree, (n) =>
+    const tree = mapTree(view.editorTree, (n) =>
       n.type === 'leaf' && n.id === target.id ? { ...n, tabIds: [...n.tabIds, ...incoming], activeTabId: shown } : n
     );
     // The group the user was in stays the active one, and the active tab is
     // the one it shows, as a click in it makes it (`setActiveEditorPane`).
     const after = collectLeaves(tree);
-    const pane =
-      after.find((leaf) => leaf.id === state.activeEditorPaneId) ?? after.find((leaf) => leaf.id === target.id);
+    const pane = after.find((leaf) => leaf.id === view.editorPane) ?? after.find((leaf) => leaf.id === target.id);
     const activeTabId =
       pane.activeTabId ?? (state.activeTabId && leafHoldingTab(tree, state.activeTabId) ? state.activeTabId : null);
-    return { tree, activeEditorPaneId: pane.id, activeTabId };
+    return { tree, activePane: pane.id, activeTabId };
   }
 
-  return { tree: layout.tree, activeEditorPaneId: layout.activePaneId, activeTabId: layout.activeTabId };
+  return { tree: layout.tree, activePane: layout.activePaneId, activeTabId: layout.activeTabId };
 }
 
 /**
@@ -875,11 +867,11 @@ function planLayout(state, session, tabIdOf, newId, intoLive) {
  * Into the active group, as they went, the files that could not be read
  * this time came back next time in a group that was not theirs.
  */
-function placeCarried(state, session, tabIdOf, carriedIds) {
-  const rows = new Map(collectLeaves(state.editorSplitTree).map((leaf) => [leaf.id, [...leaf.tabIds]]));
+function placeCarried(state, session, tabIdOf, carriedIds, view = sessionEditorView()) {
+  const rows = new Map(collectLeaves(view.editorTree).map((leaf) => [leaf.id, [...leaf.tabIds]]));
   if ([...rows.values()].every((ids) => ids.length === 0)) {
     let minted = 0;
-    return planLayout(state, session, (path) => tabIdOf.get(path) ?? null, (kind) => `kept-${kind}-${(minted += 1)}`, false);
+    return planLayout(state, session, (path) => tabIdOf.get(path) ?? null, (kind) => `kept-${kind}-${(minted += 1)}`, false, view);
   }
   const holderOf = (id) => [...rows].find(([, ids]) => ids.includes(id))?.[0] ?? null;
   const groups = []; // { tabIds, activeTabId }: saved groups with nothing open
@@ -920,7 +912,7 @@ function placeCarried(state, session, tabIdOf, carriedIds) {
   };
   walk(session.tree);
 
-  let tree = mapTree(state.editorSplitTree, (n) => (n.type === 'leaf' ? { ...n, tabIds: rows.get(n.id) } : n));
+  let tree = mapTree(view.editorTree, (n) => (n.type === 'leaf' ? { ...n, tabIds: rows.get(n.id) } : n));
   if (groups.length > 0) {
     const extra = groups.map((group, i) => ({ type: 'leaf', id: `kept-group-${i + 1}`, ...group }));
     tree =
@@ -928,7 +920,7 @@ function placeCarried(state, session, tabIdOf, carriedIds) {
         ? { ...tree, children: [...tree.children, ...extra] }
         : { type: 'split', id: 'kept-split', direction: 'horizontal', children: [tree, ...extra] };
   }
-  return { tree, activeEditorPaneId: state.activeEditorPaneId, activeTabId: state.activeTabId };
+  return { tree, activePane: view.editorPane, activeTabId: state.activeTabId };
 }
 
 /**
@@ -940,8 +932,10 @@ function placeCarried(state, session, tabIdOf, carriedIds) {
 function sessionToSave(state) {
   const recencyOf = (id) => tabRecency.get(id) ?? 0;
   const caseless = caselessPaths();
+  const view = sessionEditorView();
+  const shown = { ...state, ...view };
   if (!carry || carry.waiting.size === 0 || !samePath(carry.root, state.rootPath)) {
-    return serializeSession(state, recencyOf, { caseless });
+    return serializeSession(shown, recencyOf, { caseless });
   }
   const { session } = carry;
   const rankOf = new Map(session.recent.map((saved, i) => [saved, -(i + 1)]));
@@ -963,24 +957,26 @@ function sessionToSave(state) {
       tabIdOf.set(saved, id);
     }
   }
-  if (placeholders.length === 0) return serializeSession(state, recencyOf, { caseless });
+  if (placeholders.length === 0) return serializeSession(shown, recencyOf, { caseless });
   let minted = 0;
   const plan = carry.applied
-    ? placeCarried(state, session, tabIdOf, new Set(placeholders.map((p) => p.id)))
+    ? placeCarried(state, session, tabIdOf, new Set(placeholders.map((p) => p.id)), view)
     : planLayout(
         state,
         session,
         (path) => tabIdOf.get(path) ?? null,
-        (kind) => `planned-${kind}-${(minted += 1)}`,
-        userTouchedEditor(state)
+        // A planned leaf keeps the leaf it was saved in, as the restore will.
+        (kind, saved) => (kind === 'pane' && saved?.pane ? saved.pane : `planned-${kind}-${(minted += 1)}`),
+        userTouchedEditor(state),
+        view
       );
-  if (!plan) return serializeSession(state, recencyOf, { caseless });
+  if (!plan) return serializeSession(shown, recencyOf, { caseless });
   return serializeSession(
     {
       rootPath: state.rootPath,
       tabs: [...state.tabs, ...placeholders],
-      editorSplitTree: plan.tree,
-      activeEditorPaneId: plan.activeEditorPaneId,
+      editorTree: plan.tree,
+      editorPane: plan.activePane,
       activeTabId: plan.activeTabId,
     },
     (id) => (ranks.has(id) ? ranks.get(id) : recencyOf(id)),
@@ -1062,26 +1058,33 @@ function mergeRestored(state, carrying, contents) {
     added.push(tab);
     tabIdOf.set(saved, tab.id);
   }
-  const plan = planLayout(
-    state,
-    session,
-    (path) => tabIdOf.get(path) ?? null,
-    (kind) => (kind === 'pane' ? makeEditorPaneId() : makeRestoredSplitId()),
-    userTouchedEditor(state)
-  );
+  // Ids from the workbench's counters. A saved leaf's `pane` is taken back
+  // when it names a leaf of the restored layout waiting for its files (FB9) —
+  // or, before the terminal layout has landed, one no leaf has yet: the
+  // landing matches it by id (`keepTabsMadeMeanwhile`).
+  const taken = new Set(workbench().groups.flatMap((g) => collectLeaves(g.tree).map((l) => l.id)));
+  const used = new Set();
+  const newId = (kind, saved) => {
+    if (kind !== 'pane') return newWorkbenchId('split');
+    const pane = saved?.pane;
+    const free = pane && !used.has(pane) && (isWaitingEditorLeaf(pane) || (!workbench().isInitialized && !taken.has(pane)));
+    if (!free) return newWorkbenchId('pane');
+    used.add(pane);
+    return pane;
+  };
+  const intoLive = userTouchedEditor(state);
+  const plan = planLayout(state, session, (path) => tabIdOf.get(path) ?? null, newId, intoLive);
   if (!plan) return null;
+  // Not into the editor as it is: the saved layout takes the place of the
+  // empty editor the group on screen starts with.
+  plan.replace = !intoLive;
 
   const fresh = new Set(added.map((tab) => tab.id));
   session.recent.forEach((saved, i) => {
     const id = tabIdOf.get(saved);
     if (fresh.has(id)) tabRecency.set(id, -(i + 1));
   });
-  return {
-    tabs: [...state.tabs, ...added],
-    editorSplitTree: plan.tree,
-    activeEditorPaneId: plan.activeEditorPaneId,
-    activeTabId: plan.activeTabId,
-  };
+  return { tabs: [...state.tabs, ...added], plan };
 }
 
 /**
@@ -1190,7 +1193,11 @@ async function readSession(set, get, carrying) {
       })
     );
     // Another folder opened, or the setting went off, while the files were read.
-    if (!current() || !restoreEnabled()) return;
+    if (!current()) return;
+    if (!restoreEnabled()) {
+      workbench().releaseWaitingEditorLeaves();
+      return;
+    }
 
     // Tried once too often: forgotten like a file that is gone. A miss is
     // counted only for a read that was asked for, and once a run at most:
@@ -1221,7 +1228,15 @@ async function readSession(set, get, carrying) {
     for (const { path } of gone) carrying.waiting.delete(path);
     carrying.applied = true;
     if (carrying.waiting.size === 0) carry = null;
-    if (merged) set(merged);
+    if (merged) {
+      // Tabs first, then where they go: the workbench only takes files it
+      // knows (the bridge), and the active tab follows it (`syncActiveTab`).
+      set({ tabs: merged.tabs });
+      workbench().applyEditorLayout(merged.plan);
+      syncActiveTab();
+    }
+    // Done with the saved layout's editor leaves: those still empty go.
+    workbench().releaseWaitingEditorLeaves();
     // The keyboard stays in the editor if that is where it was: whatever the
     // tabs coming in redrew, the active one is handed it back.
     if (merged && hadKeyboard) get().focusEditor();
@@ -1261,14 +1276,15 @@ async function enterRoot(set, get, root) {
     // still the one pending. The new one is saved from here on.
     flushSessionWrite();
     beginSession(root);
+    // The leaves of the folder being left go from every group, then its tabs.
+    workbench().clearEditorLeaves();
     set({
       rootPath: root,
       expandedFolders: new Set([root]),
       tabs: [],
       activeTabId: null,
-      editorSplitTree: emptyEditorTree(),
-      activeEditorPaneId: 'editor-pane-root',
     });
+    if (!carry) workbench().releaseWaitingEditorLeaves();
   }
   get().rememberRoot(root);
   await get().refreshExplorer();
@@ -1287,13 +1303,6 @@ export const useEditorStore = create((set, get) => ({
   // False until init() has asked the backend for the real root; until then
   // `rootPath` is only the browser mock's placeholder. See FileExplorer.
   rootResolved: false,
-
-  // Split tree: { type: 'leaf', id, tabIds: [], activeTabId } | { type: 'split', id, direction, children }
-  // See the "Editor split tree" comment near the top of this file.
-  editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-
-  // The pane currently focused for "open file lands here" / split-origin.
-  activeEditorPaneId: 'editor-pane-root',
 
   // --- Context-menu-driven UI state ---------------------------------------
   selectedPath: null,   // row highlighted by click or right-click
@@ -1382,6 +1391,9 @@ export const useEditorStore = create((set, get) => ({
       // disposed between, would lay them out again.
       const fresh = !sessionRoot || !samePath(sessionRoot, opened);
       if (fresh) beginSession(opened);
+      // No session to restore (or the setting off): the saved layout's
+      // editor leaves have nothing to wait for.
+      if (fresh && !carry) workbench().releaseWaitingEditorLeaves();
       await get().refreshExplorer();
 
       // Listen to filesystem changes
@@ -1621,17 +1633,13 @@ export const useEditorStore = create((set, get) => ({
     // is (`sameFile`): a link printed as `C:\PROJ\a.js` opened a second tab
     // on the Explorer's `C:\proj\a.js`.
     const openTab = () => get().tabs.find((t) => sameFile(t.filePath, filePath));
+    // Where it is open, in ANY group: that group comes on screen with it
+    // (FB4). A tab in no leaf goes where a new file would.
     const reveal = (existing) => {
-      set((state) => {
-        const holder = leafHoldingTab(state.editorSplitTree, existing.id);
-        const paneId = holder ? holder.id : state.activeEditorPaneId;
-        const tree = holder
-          ? mapTree(state.editorSplitTree, (n) =>
-              n.type === 'leaf' && n.id === holder.id ? { ...n, activeTabId: existing.id } : n
-            )
-          : addTabToPane(state.editorSplitTree, paneId, existing.id);
-        return { activeTabId: existing.id, activeEditorPaneId: paneId, editorSplitTree: tree, openFailure: null };
-      });
+      const ts = workbench();
+      if (!ts.revealEditorTab(existing.id)) ts.placeEditorTab(existing.id);
+      set({ activeTabId: existing.id, openFailure: null });
+      syncActiveTab();
       return existing;
     };
     const existing = openTab();
@@ -1651,10 +1659,12 @@ export const useEditorStore = create((set, get) => ({
       set((state) => ({
         tabs: [...state.tabs, newTab],
         activeTabId: tabId,
-        // A newly opened file joins the active group so it is visible immediately.
-        editorSplitTree: addTabToPane(state.editorSplitTree, state.activeEditorPaneId, tabId),
         openFailure: null,
       }));
+      // A newly opened file joins the editor pane of the group on screen, or
+      // a new editor leaf above its terminals [60, 40] (FB4).
+      workbench().placeEditorTab(tabId);
+      syncActiveTab();
 
       return newTab;
     } catch (err) {
@@ -1724,7 +1734,7 @@ export const useEditorStore = create((set, get) => ({
 
   /** Close a whole editor group, asking first about any unsaved tab in it. */
   requestCloseEditorPane: (paneId) => {
-    const leaf = collectLeaves(get().editorSplitTree).find((l) => l.id === paneId);
+    const leaf = editorLeafById(paneId);
     const dirty = (leaf?.tabIds || [])
       .map((id) => get().tabs.find((t) => t.id === id))
       .filter((t) => t && t.isDirty);
@@ -1843,277 +1853,94 @@ export const useEditorStore = create((set, get) => ({
   },
 
   closeTab: (tabId) => {
-    set((state) => {
-      const nextTabs = state.tabs.filter((t) => t.id !== tabId);
-      // Drop it from its group too, collapsing the group if it was the last tab.
-      const editorSplitTree = pruneTree(removeTabFromTree(state.editorSplitTree, tabId)) || emptyEditorTree();
-      const paneStillThere = collectLeaves(editorSplitTree).some((l) => l.id === state.activeEditorPaneId);
-      const activeEditorPaneId = paneStillThere
-        ? state.activeEditorPaneId
-        : firstLeafId(editorSplitTree) || 'editor-pane-root';
-      // The tab the active group now shows, as `setActiveEditorPane` picks it.
-      // The first tab of the whole list was another group's file as often as
-      // not, or one no group shows: Save then wrote that one, and the
-      // keyboard, given back after "Save X?", went to the other group.
-      let nextActive = state.activeTabId;
-      if (state.activeTabId === tabId) {
-        const leaf = collectLeaves(editorSplitTree).find((l) => l.id === activeEditorPaneId);
-        const open = (leaf?.tabIds ?? []).filter((id) => nextTabs.some((t) => t.id === id));
-        nextActive = open.includes(leaf?.activeTabId) ? leaf.activeTabId : open[0] ?? null;
-      }
-      return {
-        tabs: nextTabs,
-        activeTabId: nextActive,
-        editorSplitTree,
-        activeEditorPaneId,
-      };
-    });
+    // Out of its leaf first — the leaves it empties go, as a group whose
+    // last tab closed always did — then out of the tabs.
+    workbench().removeEditorTabs([tabId]);
+    set((state) => ({ tabs: state.tabs.filter((t) => t.id !== tabId) }));
+    syncActiveTab();
   },
 
   switchTab: (tabId) => {
+    if (!workbench().revealEditorTab(tabId)) {
+      set({ activeTabId: tabId });
+      return;
+    }
     set({ activeTabId: tabId });
+    syncActiveTab();
   },
 
-  // --- Editor split tree: panes, drag-and-drop placement ------------------
+  // --- Editor leaves: panes, drag-and-drop placement ----------------------
+  // Each delegates to terminalStore's workbench actions, keeping the names
+  // and arguments the editor area calls them by.
 
   /**
    * Make a pane the active one — a click or focus anywhere in it — and the
    * tab it shows the active tab.
    *
    * Save (the keys and the menu) and the Explorer's highlight go by
-   * `activeTabId`. This used to move only `activeEditorPaneId`, so after a
-   * file was opened in a second group, typing in the first and pressing
-   * Ctrl+S saved the file in the second, untouched, and left the edited one
-   * unsaved. A group with no file leaves no tab active: there is nothing in
-   * it to save. The tab is the one the group draws, its first when the one it
-   * remembers is gone (see EditorPane).
-   *
-   * Runs on every mousedown in the editor, so a click that changes nothing
-   * leaves the state alone rather than waking every subscriber.
+   * `activeTabId`. A group with no file leaves no tab active: there is
+   * nothing in it to save. Runs on every mousedown in the editor, so a click
+   * that changes nothing leaves the state alone.
    */
-  setActiveEditorPane: (paneId) =>
-    set((state) => {
-      const leaf = collectLeaves(state.editorSplitTree).find((l) => l.id === paneId);
-      if (!leaf) return state;
-      const tabId = leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0] ?? null;
-      if (state.activeEditorPaneId === paneId && state.activeTabId === tabId) return state;
-      return { activeEditorPaneId: paneId, activeTabId: tabId };
-    }),
-
-  /**
-   * Split a leaf pane into two children (horizontal or vertical). The new
-   * pane starts empty — unlike a terminal, a file tab can't be conjured up
-   * out of thin air — and becomes active, so the next file opened (or tab
-   * dragged in) lands there. Returns the new pane's id.
-   */
-  splitEditorPane: (paneId, direction = 'horizontal') => {
-    const newPaneId = makeEditorPaneId();
-
-    const splitNode = (node) => {
-      if (node.type === 'leaf' && node.id === paneId) {
-        return {
-          type: 'split',
-          id: `editor-split-${Date.now()}`,
-          direction,
-          children: [
-            { ...node },
-            { type: 'leaf', id: newPaneId, tabIds: [], activeTabId: null },
-          ],
-        };
-      }
-      if (node.type === 'split') {
-        return { ...node, children: node.children.map(splitNode) };
-      }
-      return node;
-    };
-
-    set((state) => ({ editorSplitTree: splitNode(state.editorSplitTree), activeEditorPaneId: newPaneId }));
-    return newPaneId;
+  setActiveEditorPane: (paneId) => {
+    const leaf = editorLeafById(paneId);
+    if (!leaf) return;
+    workbench().setEditorPane(paneId);
+    const tabId = leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0] ?? null;
+    if (get().activeTabId !== tabId) set({ activeTabId: tabId });
   },
 
   /**
-   * Close a pane (an editor group). The sibling takes over the parent split.
-   * Every tab that pane held is closed too, UNLESS another remaining leaf
-   * still shows that same tabId.
+   * Split an editor leaf in two. The new leaf starts empty — a file tab
+   * can't be conjured up out of thin air — and becomes the group's editor
+   * pane, so the next file opened lands there. Returns the new pane's id.
+   */
+  splitEditorPane: (paneId, direction = 'horizontal') => workbench().splitEditorLeaf(paneId, direction),
+
+  /**
+   * Close an editor leaf. The sibling takes over the parent split. Every tab
+   * it held is closed too, UNLESS another leaf still shows it.
    */
   closeEditorPane: (paneId) => {
-    const { editorSplitTree } = get();
-
-    const closingLeaf = collectLeaves(editorSplitTree).find((leaf) => leaf.id === paneId);
-    const closingTabIds = closingLeaf ? [...closingLeaf.tabIds] : [];
-
-    let replacementLeafId = null;
-
-    const removeNode = (node) => {
-      if (node.type !== 'split') return node;
-
-      const idx = node.children.findIndex(
-        (child) => child.type === 'leaf' && child.id === paneId
-      );
-
-      if (idx !== -1) {
-        const remaining = node.children.filter((_, i) => i !== idx);
-        if (remaining.length === 1) {
-          replacementLeafId = firstLeafId(remaining[0]);
-          return remaining[0];
-        }
-        const neighbourIdx = Math.min(idx, remaining.length - 1);
-        replacementLeafId = firstLeafId(remaining[neighbourIdx]);
-        return { ...node, children: remaining };
-      }
-
-      return { ...node, children: node.children.map(removeNode) };
-    };
-
-    // Closing the only pane empties it rather than removing the root.
-    const nextTree =
-      editorSplitTree.type === 'leaf' && editorSplitTree.id === paneId
-        ? emptyEditorTree()
-        : removeNode(editorSplitTree);
-    set({ editorSplitTree: nextTree });
-
-    if (get().activeEditorPaneId === paneId && replacementLeafId) {
-      set({ activeEditorPaneId: replacementLeafId });
-    }
-
-    for (const tabId of closingTabIds) {
-      if (leafHoldingTab(get().editorSplitTree, tabId)) continue;
-      get().closeTab(tabId);
-    }
+    const orphans = workbench().removeEditorLeaf(paneId);
+    for (const tabId of orphans) get().closeTab(tabId);
+    syncActiveTab();
   },
 
-  /**
-   * Make `tabId` the visible tab of `paneId`. If the tab lives in another
-   * group, move it here first (clicking a tab chip never splits).
-   */
+  /** Make `tabId` the visible tab of `paneId`, moving it there first if it lives elsewhere. */
   bindEditorPaneToTab: (paneId, tabId) => {
-    set((state) => {
-      const holder = leafHoldingTab(state.editorSplitTree, tabId);
-      let tree = state.editorSplitTree;
-      if (!holder || holder.id !== paneId) {
-        tree =
-          pruneTree(addTabToPane(removeTabFromTree(tree, tabId), paneId, tabId)) || emptyEditorTree();
-      } else {
-        tree = mapTree(tree, (n) =>
-          n.type === 'leaf' && n.id === paneId ? { ...n, activeTabId: tabId } : n
-        );
-      }
-      return { editorSplitTree: tree, activeEditorPaneId: paneId, activeTabId: tabId };
-    });
+    if (!editorLeafById(paneId)) return;
+    workbench().bindPaneToTab(paneId, tabId);
+    set({ activeTabId: tabId });
+    syncActiveTab();
   },
 
   /**
-   * Drag & drop a file tab onto a pane.
-   *
-   * `zone` is where inside the target pane it was dropped:
-   *   'center'                  → move the tab into that group
-   *   'left' | 'right'          → split the group horizontally, tab on that side
-   *   'top'  | 'bottom'         → split the group vertically, tab on that side
+   * Drag & drop a file tab onto an editor pane: 'center' moves it into that
+   * leaf, an edge splits the leaf with the tab on that side.
    */
   dropEditorTabOnPane: (tabId, targetPaneId, zone = 'center') => {
-    const state = get();
-    const target = collectLeaves(state.editorSplitTree).find((l) => l.id === targetPaneId);
-    if (!target || !state.tabs.some((t) => t.id === tabId)) return;
-
-    const source = leafHoldingTab(state.editorSplitTree, tabId);
-
-    // Dropping a tab back on its own group: just focus it. Splitting a group
-    // off its only tab would leave the source empty and is a no-op too.
-    if (source && source.id === targetPaneId) {
-      if (zone === 'center' || source.tabIds.length === 1) {
-        get().bindEditorPaneToTab(targetPaneId, tabId);
-        return;
-      }
-    }
-
-    const withoutTab = removeTabFromTree(state.editorSplitTree, tabId);
-
-    if (zone === 'center') {
-      const tree = pruneTree(addTabToPane(withoutTab, targetPaneId, tabId)) || emptyEditorTree();
-      set({ editorSplitTree: tree, activeEditorPaneId: targetPaneId, activeTabId: tabId });
-      return;
-    }
-
-    const newPaneId = makeEditorPaneId();
-    const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
-    const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
-    const insertFirst = zone === 'left' || zone === 'top';
-
-    const split = mapTree(withoutTab, (n) =>
-      n.type === 'leaf' && n.id === targetPaneId
-        ? {
-            type: 'split',
-            id: `editor-split-${Date.now()}`,
-            direction,
-            children: insertFirst ? [newLeaf, n] : [n, newLeaf],
-          }
-        : n
-    );
-
-    set({
-      editorSplitTree: pruneTree(split) || emptyEditorTree(),
-      activeEditorPaneId: newPaneId,
-      activeTabId: tabId,
-    });
+    if (!editorLeafById(targetPaneId) || !get().tabs.some((t) => t.id === tabId)) return;
+    workbench().dropTabOnPane(tabId, targetPaneId, zone);
+    set({ activeTabId: tabId });
+    syncActiveTab();
   },
 
   /**
-   * Drag & drop a file tab onto a tab strip: reorder it within its own group,
-   * or insert it into another group where it was dropped — not at the end, as
-   * a drop on the group's body does.
-   *
-   * `index` is a GAP in the target strip as drawn when the drop happens, with
-   * the dragged tab still in it if it lives there: 0 is before the first chip,
-   * `tabIds.length` is after the last, and `i` is between chips `i - 1` and
-   * `i`. That is what the pointer is measured against — the dragged chip stays
-   * on screen, dimmed, for the whole gesture — so the caller passes it
-   * straight through and the translation happens here, where it is tested.
-   * Both gaps beside the tab's own chip leave it where it is, and every gap
-   * to the right of it is one past the slot it lands in, because by then the
-   * tab has left its old slot.
-   *
-   * A number outside the strip is clamped to the nearer end, and a fraction
-   * rounds down. A gap that is not a number, an unknown tab or an unknown
-   * group changes nothing.
-   *
-   * The tab becomes its group's visible tab and that group the active one,
-   * as a click on the chip would make them. A group the tab leaves empty is
-   * pruned; no other group is touched (see `pruneLeafIfEmpty`).
-   *
-   * A drop that asks for exactly what is already there changes no state at
-   * all — not even a new state object, which every subscriber would take as
-   * a change and re-render for.
+   * Drag & drop a file tab onto a tab strip: reorder it within its own leaf,
+   * or insert it into another leaf where it was dropped. `index` is a gap in
+   * the target strip as drawn when the drop happens (see `moveToSlot` in
+   * terminalStore.js). A drop that asks for what is already there changes
+   * nothing.
    */
   moveEditorTabInStrip: (tabId, targetPaneId, index) => {
     if (typeof index !== 'number' || Number.isNaN(index)) return;
-    const state = get();
-    const target = collectLeaves(state.editorSplitTree).find((l) => l.id === targetPaneId);
-    if (!target || !state.tabs.some((t) => t.id === tabId)) return;
-
-    let slot = Math.min(Math.max(Math.floor(index), 0), target.tabIds.length);
-    const from = target.tabIds.indexOf(tabId);
-    if (from !== -1 && slot > from) slot -= 1;
-    const tabIds = target.tabIds.filter((id) => id !== tabId);
-    tabIds.splice(slot, 0, tabId);
-
-    const source = leafHoldingTab(state.editorSplitTree, tabId);
-    const nothingChanges =
-      source?.id === targetPaneId &&
-      tabIds.every((id, i) => id === target.tabIds[i]) &&
-      target.activeTabId === tabId &&
-      state.activeEditorPaneId === targetPaneId &&
-      state.activeTabId === tabId;
-    if (nothingChanges) return;
-
-    const placed = mapTree(removeTabFromTree(state.editorSplitTree, tabId), (n) =>
-      n.type === 'leaf' && n.id === targetPaneId ? { ...n, tabIds, activeTabId: tabId } : n
-    );
-    const vacated = source && source.id !== targetPaneId ? source.id : null;
-    set({
-      editorSplitTree: (vacated ? pruneLeafIfEmpty(placed, vacated) : placed) || emptyEditorTree(),
-      activeEditorPaneId: targetPaneId,
-      activeTabId: tabId,
-    });
+    if (!editorLeafById(targetPaneId) || !get().tabs.some((t) => t.id === tabId)) return;
+    const before = workbench().groups;
+    workbench().moveTabInStrip(tabId, targetPaneId, index);
+    if (workbench().groups === before && get().activeTabId === tabId) return;
+    if (get().activeTabId !== tabId) set({ activeTabId: tabId });
+    syncActiveTab();
   },
 
   createFile: async (path) => {
@@ -2310,9 +2137,7 @@ useEditorStore.subscribe((state, prev) => {
   if (state.activeTabId !== prev.activeTabId) touchTab(state.activeTabId);
   if (
     state.tabs === prev.tabs &&
-    state.editorSplitTree === prev.editorSplitTree &&
     state.activeTabId === prev.activeTabId &&
-    state.activeEditorPaneId === prev.activeEditorPaneId &&
     state.rootPath === prev.rootPath
   ) {
     return;
@@ -2325,6 +2150,45 @@ useEditorStore.subscribe((state, prev) => {
   }
   noteSessionChange(state);
 });
+
+// Where the files are changes in the workbench (terminalStore): the active
+// tab follows the group on screen, and the session is saved.
+useTerminalStore.subscribe((ts, prev) => {
+  if (ts.groups === prev.groups && ts.activeGroupId === prev.activeGroupId) return;
+  syncActiveTab();
+  noteSessionChange(useEditorStore.getState());
+});
+
+/**
+ * The workbench's view of the file tabs (terminalStore never imports this
+ * store): which exist, closing those a layout change left in no leaf, the
+ * unsaved prompt before a group closes (kind 'group', FB7), and the editor
+ * restore told when the terminal layout has landed.
+ */
+export function registerEditorBridge() {
+  setEditorBridge({
+    tabIds: () => new Set(useEditorStore.getState().tabs.map((t) => t.id)),
+    closeTabs: (ids) => {
+      for (const id of ids) useEditorStore.getState().closeTab(id);
+    },
+    dirtyTabIds: (ids) => ids.filter((id) => useEditorStore.getState().tabs.some((t) => t.id === id && t.isDirty)),
+    confirmClose: (kind, ids) => {
+      const { tabs } = useEditorStore.getState();
+      const dirty = ids.map((id) => tabs.find((t) => t.id === id)).filter((t) => t && t.isDirty);
+      if (dirty.length === 0) return Promise.resolve(true);
+      return holdForAnswer(useEditorStore.setState, useEditorStore.getState, { kind, dirty, proceed: () => true }).then(
+        (answer) => answer === true
+      );
+    },
+    // The terminal layout landed: with the editor restore already done (or
+    // none to do), the leaves still waiting have nothing to wait for.
+    layoutRestored: () => {
+      if (!carry || carry.applied || !restoreEnabled()) workbench().releaseWaitingEditorLeaves();
+    },
+    restoreDeadlineMs: RESTORE_DEADLINE_MS,
+  });
+}
+registerEditorBridge();
 
 // Turned off: forget. Turned back on: start from what is open now, rather
 // than waiting for the next change to save it.

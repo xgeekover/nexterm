@@ -316,3 +316,186 @@ export function swapChoices(tree, tabs, fromPaneId) {
 export function swapLabel(choice) {
   return `Swap with ${choice.title} (${choice.place}, pane ${choice.index + 1} of ${choice.count})`;
 }
+
+// ---------------------------------------------------------------------------
+// Leaf kinds (editor placement, sibling B). A group's tree is the workbench:
+// a leaf with `kind: 'editor'` holds file tabs, any other leaf holds
+// terminals. Terminal leaves are written WITHOUT `kind`, so every v0.31.0
+// payload keeps its meaning and a terminal-only tree is byte-identical to one
+// from before leaves had kinds.
+// ---------------------------------------------------------------------------
+
+export const EDITOR_KIND = 'editor';
+export const TERMINAL_KIND = 'terminal';
+
+/** A leaf's kind: 'editor' only when it says so, 'terminal' otherwise. */
+export function leafKind(leaf) {
+  return leaf?.kind === EDITOR_KIND ? EDITOR_KIND : TERMINAL_KIND;
+}
+
+/** The leaves of `tree` of one kind, in DOM order. */
+export function leavesOfKind(tree, kind) {
+  return leavesIn(tree).filter((leaf) => leafKind(leaf) === kind);
+}
+
+/** Every tab id held by leaves of one kind, in DOM order. */
+export function tabIdsOfKind(tree, kind) {
+  return leavesOfKind(tree, kind).flatMap((leaf) => (Array.isArray(leaf.tabIds) ? leaf.tabIds : []));
+}
+
+/** How many terminals a group's tree holds: editor leaves count for nothing. */
+export function countTerminalTabs(tree) {
+  return tabIdsOfKind(tree, TERMINAL_KIND).length;
+}
+
+/** `sizes` restricted to `kept` indexes, as percentages summing to 100 (two decimals). */
+function keptShares(node, kept) {
+  const all = sizesOf(node);
+  const raw = kept.map((i) => all[i]);
+  const total = raw.reduce((a, b) => a + b, 0);
+  return roundedShares(raw.map((v) => (v / total) * 100));
+}
+
+/**
+ * The part of `tree` one kind of view draws (the releasability bridge, until
+ * sibling C draws the workbench whole): only the leaves of `kind`, splits left
+ * with one child collapsed into it, the sizes kept renormalized among what is
+ * left. Split and leaf ids are kept, and a subtree that is all of `kind` is
+ * handed back as the very same object — so a view keyed by node id does not
+ * remount (no xterm is torn down) when leaves of the other kind come or go.
+ * Null when `tree` has no leaf of `kind`.
+ */
+export function projectTree(tree, kind) {
+  if (!tree || typeof tree !== 'object') return null;
+  if (tree.type === 'leaf') return leafKind(tree) === kind ? tree : null;
+  if (!isSplit(tree)) return null;
+  const kept = [];
+  tree.children.forEach((child, i) => {
+    const projected = projectTree(child, kind);
+    if (projected) kept.push({ node: projected, i });
+  });
+  if (kept.length === 0) return null;
+  if (kept.length === 1) return kept[0].node;
+  if (kept.length === tree.children.length && kept.every((k, i) => k.node === tree.children[i])) return tree;
+  return {
+    ...tree,
+    children: kept.map((k) => k.node),
+    sizes: keptShares(tree, kept.map((k) => k.i)),
+  };
+}
+
+function findSplit(node, splitId) {
+  if (!isSplit(node)) return null;
+  if (node.id === splitId) return node;
+  for (const child of node.children) {
+    const found = findSplit(child, splitId);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * A resize made in a projection (`projectTree`), as the sizes to store on the
+ * FULL split `splitId`: the children the projection shows share what they had
+ * together in proportion to `sizes`, and the children it filtered out keep
+ * their share untouched. Null for a split the full tree does not have, or
+ * `sizes` that are not one per child the projection shows.
+ */
+export function liftSizes(tree, splitId, sizes, kind) {
+  const full = findSplit(tree, splitId);
+  if (!full || !Array.isArray(sizes)) return null;
+  const shown = full.children.map((child, i) => (projectTree(child, kind) ? i : -1)).filter((i) => i !== -1);
+  if (shown.length !== sizes.length || !sizes.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) return null;
+  const all = sizesOf(full);
+  const together = shown.reduce((sum, i) => sum + all[i], 0);
+  const given = sizes.reduce((a, b) => a + b, 0);
+  const next = [...all];
+  shown.forEach((childIndex, j) => {
+    next[childIndex] = (sizes[j] / given) * together;
+  });
+  return roundedShares(next);
+}
+
+// ---------------------------------------------------------------------------
+// Pixel minimums per kind (FB11, math only: sibling C wires them into
+// ResizableSplit). A terminal is still usable at 120 x 88 px (about 14
+// columns by 5 rows at the default font); an editor needs room for its tab
+// strip and a few lines of Monaco, so 160 x 96 px. A split asks for the sum of
+// its children's minimums along its direction and the largest across it. When
+// the space cannot hold every minimum they are scaled down together to fit, so
+// a window too small for all of them still gets a valid layout with no pane
+// at zero or below.
+// ---------------------------------------------------------------------------
+
+export const PANE_MIN_PX = Object.freeze({
+  terminal: Object.freeze({ width: 120, height: 88 }),
+  editor: Object.freeze({ width: 160, height: 96 }),
+});
+
+/** The pixels `node` needs along `direction` for every pane in it to get its minimum. */
+export function minPxAlong(node, direction) {
+  if (!node) return 0;
+  if (!isSplit(node)) {
+    const min = PANE_MIN_PX[leafKind(node)];
+    return direction === 'horizontal' ? min.width : min.height;
+  }
+  const needs = node.children.map((child) => minPxAlong(child, direction));
+  return directionOf(node) === direction ? needs.reduce((a, b) => a + b, 0) : Math.max(...needs);
+}
+
+/**
+ * The minimum share (percent of `lengthPx`, along the split's direction) of
+ * each child of split `node`, capped together so they never sum past 100.
+ */
+export function minSharesOf(node, lengthPx) {
+  if (!isSplit(node)) return [];
+  const direction = directionOf(node);
+  if (!(typeof lengthPx === 'number' && Number.isFinite(lengthPx) && lengthPx > 0)) return node.children.map(() => 0);
+  const needs = node.children.map((child) => minPxAlong(child, direction));
+  const total = needs.reduce((a, b) => a + b, 0);
+  const scale = total > lengthPx ? lengthPx / total : 1;
+  return needs.map((px) => ((px * scale) / lengthPx) * 100);
+}
+
+/**
+ * The sizes of split `node` (as `sizesOf` reads them) with every child raised
+ * to its minimum share at `lengthPx`, the others scaled down to make room.
+ * Sizes already above their minimums come back as they were.
+ */
+export function fitSizesToMinimums(node, lengthPx) {
+  if (!isSplit(node)) return [];
+  const mins = minSharesOf(node, lengthPx);
+  const pinned = new Set();
+  let out = sizesOf(node);
+  for (let pass = 0; pass < out.length; pass += 1) {
+    const low = out.map((v, i) => !pinned.has(i) && v < mins[i] - 1e-9);
+    if (!low.some(Boolean)) break;
+    low.forEach((isLow, i) => isLow && pinned.add(i));
+    const free = out.reduce((total, v, i) => (pinned.has(i) ? total : total + v), 0);
+    const room = 100 - [...pinned].reduce((total, i) => total + mins[i], 0);
+    const unpinned = out.length - pinned.size;
+    out = out.map((v, i) => (pinned.has(i) ? mins[i] : free > 0 ? (v / free) * room : room / unpinned));
+  }
+  return roundedShares(out);
+}
+
+/** `tree` with every split fitted to its minimums (`fitSizesToMinimums`) in a `widthPx` x `heightPx` area. */
+export function fitTreeToMinimums(tree, widthPx, heightPx) {
+  if (!isSplit(tree)) return tree;
+  const across = directionOf(tree) === 'horizontal';
+  const sizes = fitSizesToMinimums(tree, across ? widthPx : heightPx);
+  const children = tree.children.map((child, i) => {
+    const share = sizes[i] / 100;
+    return fitTreeToMinimums(child, across ? widthPx * share : widthPx, across ? heightPx : heightPx * share);
+  });
+  return { ...tree, children, sizes };
+}
+
+/** Every pane's size in pixels in a `widthPx` x `heightPx` area: pane id -> `{ width, height }`. */
+export function panePixelRects(tree, widthPx, heightPx) {
+  const out = new Map();
+  for (const [id, r] of paneRects(tree)) {
+    out.set(id, { width: (r.right - r.left) * widthPx, height: (r.bottom - r.top) * heightPx });
+  }
+  return out;
+}

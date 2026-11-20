@@ -20,7 +20,7 @@
  */
 
 import { useTerminalStore } from '../../../src/stores/terminalStore.js';
-import { useEditorStore } from '../../../src/stores/editorStore.js';
+import { useEditorStore, registerEditorBridge } from '../../../src/stores/editorStore.js';
 import { useSettingsStore } from '../../../src/stores/settingsStore.js';
 import { usePathDropStore } from '../../../src/stores/pathDropStore.js';
 import { mockBridge } from '../../../src/lib/ipc.js';
@@ -183,11 +183,13 @@ export class AppEnvironment {
       expandedFolders: new Set(['/workspace']),
       pendingClose: null,
       pendingOverwrite: null,
-      // The groups too: left as they were, they held the last case's tab ids,
-      // and a tab closed here could hand its place to one that is not open.
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
+    // The editor's placement too (sibling B: it lives on the workbench): no
+    // editor leaf, no `editorPaneId`, nothing waiting for a restore, and the
+    // real editor bridge back in place of any a case installed. Left as they
+    // were, the leaves held the last case's tab ids.
+    registerEditorBridge();
+    useTerminalStore.getState().clearEditorLeaves();
     useSettingsStore.setState({
       isCommandPaletteOpen: false,
       commandPaletteMode: 'all',

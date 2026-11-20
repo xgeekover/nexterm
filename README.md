@@ -176,6 +176,18 @@ the last file and you are back to a pure terminal window. Monaco is loaded the
 first time the editor is shown, not at launch, and it and its workers are
 bundled locally — nothing is fetched from a CDN at runtime.
 
+**Open files belong to a terminal group.** A file opens in the terminal group
+on screen, and the editor area shows that group's files: switch groups and you
+see the other group's files, or no editor at all if it has none. Nothing has
+closed; switching back brings them back. Opening a file that is already open in
+another group switches to that group and shows it there, rather than opening it
+twice. Closing a group that holds unsaved files asks first (Save / Don't Save /
+Cancel). A relaunch puts each file back in its group, and saved templates and
+workspaces stay terminal-only. Files from a version before this come back in
+the active group, above its terminals. A group that holds files outlives its
+last terminal: its terminal area shows "No terminal in this pane" with a New
+Terminal button, and it comes back that way after a relaunch.
+
 **Search across the files.** `⇧⌘F`, or the magnifying glass in the activity
 bar, opens a search over the open folder — match case, whole word, regular
 expressions — grouped by file, and clicking a result opens that file with the

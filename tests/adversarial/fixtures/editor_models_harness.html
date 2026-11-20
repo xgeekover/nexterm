@@ -12,8 +12,10 @@
 
     open(path)            opens a file the way the Explorer does; the tab id
     act(name, ...args)    any editor-store action, awaited
-    setTree(tree)         an editor split tree put in the store as it is
-    state()               the tabs and the split tree
+    setTree(tree)         an editor split tree put on the workbench as it is
+                          (tests/e2e/harness/workbench.js), above an empty
+                          terminal pane, as the one group on screen
+    state()               the tabs and the editor tree of the group on screen
     settled()             true once every group showing a tab has a live
                           Monaco editor holding that tab's file
     hold(path)            remembers the model of `path` (`probe().same`)
@@ -54,6 +56,8 @@
       import '../../../src/styles/index.css';
       import { mockBridge } from '../../../src/lib/ipc.js';
       import { useEditorStore } from '../../../src/stores/editorStore.js';
+      import { useTerminalStore } from '../../../src/stores/terminalStore.js';
+      import { setEditorLayout, editorTree, editorPane } from '../../e2e/harness/workbench.js';
       import { EditorPanel } from '../../../src/components/editor/EditorPanel.jsx';
 
       const S = useEditorStore;
@@ -107,16 +111,14 @@
         live().find(
           (e) => e.getModel()?.uri.toString() === uriOf(path).toString() && (paneId == null || paneOf(e) === paneId)
         ) ?? null;
-      const leaves = (node = S.getState().editorSplitTree, acc = []) => {
+      // Where the files are lives on the workbench (editor placement, sibling
+      // B): the editor tree is the editor projection of the group on screen.
+      const leaves = (node = editorTree(), acc = []) => {
         if (!node) return acc;
         if (node.type === 'leaf') acc.push(node);
         else node.children.forEach((child) => leaves(child, acc));
         return acc;
       };
-      const withLeaf = (node, id, change) =>
-        node.type === 'leaf'
-          ? node.id === id ? change(node) : node
-          : { ...node, children: node.children.map((child) => withLeaf(child, id, change)) };
       const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
       const held = new Map();
 
@@ -132,16 +134,20 @@
           return null;
         },
         setTree(tree) {
-          S.setState({ editorSplitTree: tree });
+          // As it is, with no repair, as the store took it before; the editor
+          // pane stays where it was while it is one of the tree's leaves.
+          const pane = editorPane();
+          setEditorLayout(tree, leaves(tree).some((leaf) => leaf.id === pane) ? pane : undefined, { settle: false });
           return null;
         },
         state() {
-          const { tabs, editorSplitTree, activeEditorPaneId, activeTabId, rootPath, pendingReveal, pendingClose } = S.getState();
+          const { tabs, activeTabId, rootPath, pendingReveal, pendingClose } = S.getState();
+          const tree = editorTree();
           return {
             tabs: tabs.map(({ id, filePath, content, isDirty }) => ({ id, filePath, content, isDirty })),
-            leaves: leaves(editorSplitTree).map(({ id, tabIds, activeTabId: shownId }) => ({ id, tabIds, activeTabId: shownId })),
-            tree: editorSplitTree,
-            activeEditorPaneId,
+            leaves: leaves(tree).map(({ id, tabIds, activeTabId: shownId }) => ({ id, tabIds, activeTabId: shownId })),
+            tree,
+            editorPane: editorPane(),
             activeTabId,
             rootPath,
             pendingReveal,
@@ -243,15 +249,9 @@
           const leaf = leaves().find((l) => l.tabIds.includes(tabId));
           S.getState().closeTab(tabId);
           const fresh = { ...tab, id: `${tabId}-again`, content: text, savedContent: text, isDirty: false };
-          S.setState((state) => ({
-            tabs: [...state.tabs, fresh],
-            activeTabId: fresh.id,
-            editorSplitTree: withLeaf(state.editorSplitTree, leaf.id, (l) => ({
-              ...l,
-              tabIds: [...l.tabIds, fresh.id],
-              activeTabId: fresh.id,
-            })),
-          }));
+          S.setState((state) => ({ tabs: [...state.tabs, fresh], activeTabId: fresh.id }));
+          // Where it goes is the workbench's: the leaf the closed tab was in.
+          useTerminalStore.getState().placeEditorTab(fresh.id, { paneId: leaf.id });
           return fresh.id;
         },
       };
@@ -261,9 +261,9 @@
         rootResolved: true,
         tabs: [],
         activeTabId: null,
-        editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-        activeEditorPaneId: 'editor-pane-root',
       });
+      // One empty editor leaf ('editor-pane-root'), the editor pane.
+      setEditorLayout();
       render();
       window.__m.ready = true;
     </script>

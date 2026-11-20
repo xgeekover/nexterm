@@ -1508,6 +1508,42 @@ release build with real OpenCode V1, Windows first, then macOS:
 
 On macOS: O1 to O3, O6, O8 and O10 with `⌘⇧↑` / `⌘⇧↓`.
 
+### V51 — open files belong to terminal groups (editor placement, part B)
+
+The store and the restore are covered by tests/adversarial/workbench_*.test.js
+under Node. Nothing there runs in a real webview or a real upgrade. On a
+release build, Windows first, then macOS:
+
+- **B1 per-group files.** Open two files in Group 1, make Group 2, open a
+  third file there. Switching groups shows only that group's files, and a
+  group with none shows no editor area. Switching back shows the first two
+  again, with the caret, scroll and undo where they were.
+- **B2 reveal in another group.** In Group 2, click one of Group 1's files in
+  the Explorer: Group 1 comes on screen, showing it, and no second tab opens.
+  The same holds for Go to File (`⌘P` / `Ctrl+P`), a search result and a
+  file link in a terminal.
+- **B3 group close.** Type in a file of Group 2 without saving, then close
+  Group 2. The prompt names the file. Cancel leaves the group, its files and
+  its terminals running. Don't Save closes them. Save writes the file, then
+  closes the group.
+- **B4 relaunch.** Two groups, files split in two editor panes in one of
+  them, custom pane sizes: quit and start again. Every terminal, every file,
+  its group, its pane, the sizes and the active file come back.
+- **B5 upgrade.** With files open in v0.32.0, install this build over it.
+  Every terminal comes back as it was. Every file comes back in the active
+  group, above its terminals, with its splits.
+- **B6 Restore Open Files off.** Settings ▸ Editor ▸ Restore Open Files off,
+  quit, start again: no file comes back, and the terminals do.
+- **B7 the webview.** Drag an editor tab within its strip, onto another
+  editor pane, and onto a pane's edge; drag a terminal tab the same way. Both
+  behave as in v0.32.0. Then switch groups and type Hangul in a file with the
+  IME: the composition is not lost or doubled.
+- **B8 downgrade.** Run v0.32.0 again on what this build saved: every terminal
+  and every file comes back. Only which group each file was in is lost.
+- **B9 last terminal.** Close the last terminal of a group that holds files:
+  the group stays, its terminal area shows "No terminal in this pane" with a
+  New Terminal button, and it comes back that way after a relaunch.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

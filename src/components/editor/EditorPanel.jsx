@@ -10,12 +10,12 @@ import '../../lib/monaco.js';
 import { Uri } from 'monaco-editor';
 import { ChevronRight, FileCode2 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
+import { useTerminalStore } from '../../stores/terminalStore.js';
+import { EDITOR_KIND, projectTree } from '../terminal/splitLayout.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { EditorTabs, EditorDragContext, markEditorDragEnded, stripSlotAt } from './EditorTabs.jsx';
-import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { cn } from '../../lib/utils.js';
 import { segmentsBelow } from '../../lib/paths.js';
-import { focusWorkspace } from '../../lib/workspaceFocus.js';
 import {
   bufferText,
   editorValue,
@@ -408,33 +408,6 @@ function saveHeldViewState(ref) {
 }
 
 /**
- * What the Save / Don't Save / Cancel prompt says. Opening another folder
- * also says why it is asking: nothing about choosing a folder suggests that
- * every editor tab is about to close.
- */
-function unsavedPromptText({ kind, names }) {
-  const many = names.length > 1;
-  const reason = kind === 'root' ? 'Opening another folder closes every editor tab. ' : '';
-  return {
-    title: many ? 'Unsaved Changes' : `Save ${names[0]}?`,
-    message: many
-      ? `${names.join(', ')} have unsaved changes. ${reason}Your changes will be lost if you don't save them.`
-      : `${reason}Your changes to ${names[0]} will be lost if you don't save them.`,
-    confirmLabel: many ? 'Save All' : 'Save',
-  };
-}
-
-/**
- * What the prompt over a save that would replace the file on disk says.
- *
- * Usually the file has changed since the tab read it, and what is on disk
- * can be taken instead. When it could not be read back at all (`unreadable`)
- * — grown past the 50 MB the editor opens, a log appended to; no longer
- * text; behind a link that leads nowhere — whether it changed cannot be
- * known, and there is no version on disk to take: it says why, and offers
- * only to overwrite or not.
- */
-/**
  * Whether a press makes the group it lands in the active one — and so its
  * shown tab what Save writes. Only the main button: a middle-click closes a
  * tab in another group without the focus leaving the one being typed in, and
@@ -443,35 +416,6 @@ function unsavedPromptText({ kind, names }) {
  */
 export function pressActivatesGroup(e) {
   return e?.button === 0;
-}
-
-/**
- * The editor's prompts in the order they opened — `previous`, the order last
- * drawn, with those now closed dropped and those newly `open` added at the
- * end.
- *
- * They share one portal, and the later in it is drawn on top. ConfirmDialog
- * gives the keyboard to the newest; drawn in a fixed order, a window-close
- * prompt that opened while "File Changed on Disk" was showing went under it
- * and still took Enter, Escape and Tab.
- */
-export function inOpenOrder(previous, open) {
-  return [...previous.filter((key) => open.includes(key)), ...open.filter((key) => !previous.includes(key))];
-}
-
-export function overwritePromptText({ fileName, unreadable = null }) {
-  if (unreadable == null) {
-    return {
-      title: 'File Changed on Disk',
-      message: `${fileName} has changed on disk since you opened it. Saving now would replace those changes with this tab's version.`,
-      altLabel: 'Use Disk Version',
-    };
-  }
-  return {
-    title: 'File on Disk Could Not Be Read',
-    message: `${fileName} could not be read back to see whether it changed on disk since you opened it: ${String(unreadable).replace(/\.$/, '')}. Saving now would replace whatever is there with this tab's version.`,
-    altLabel: null,
-  };
 }
 
 /**
@@ -485,7 +429,8 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
   const monacoOptions = useMonacoOptions();
   const paneId = node.id;
   const tabs = useEditorStore((s) => s.tabs);
-  const activeEditorPaneId = useEditorStore((s) => s.activeEditorPaneId);
+  // The group on screen's editor pane (sibling B: placement is the workbench's).
+  const editorPaneId = useTerminalStore((s) => s.groups.find((g) => g.id === s.activeGroupId)?.editorPaneId ?? null);
   const setActiveEditorPane = useEditorStore((s) => s.setActiveEditorPane);
   const editBuffer = useEditorStore((s) => s.editBuffer);
   const saveFile = useEditorStore((s) => s.saveFile);
@@ -501,7 +446,7 @@ function EditorPane({ node, onSplitH, onSplitV, onClose, canClose }) {
 
   const { drag } = useContext(EditorDragContext);
 
-  const isActivePane = activeEditorPaneId === paneId;
+  const isActivePane = editorPaneId === paneId;
   // Over this pane's tab strip the strip draws its own marker; the body's
   // overlay is only for the move and split zones.
   const dropZone =
@@ -722,17 +667,13 @@ function SplitNode({ node, onSplit, onClose, canClose }) {
  * WKWebView/pointer-events rationale).
  */
 export function EditorPanel() {
-  const editorSplitTree = useEditorStore((s) => s.editorSplitTree);
+  // The releasability bridge (sibling B, FB12): the editor area draws the
+  // editor projection of the group on screen — its editor leaves, ids kept —
+  // until sibling C draws the workbench whole.
+  const activeTree = useTerminalStore((s) => s.groups.find((g) => g.id === s.activeGroupId)?.tree ?? null);
+  const editorTree = useMemo(() => projectTree(activeTree, EDITOR_KIND), [activeTree]);
   const splitEditorPane = useEditorStore((s) => s.splitEditorPane);
   const requestCloseEditorPane = useEditorStore((s) => s.requestCloseEditorPane);
-  const pendingClose = useEditorStore((s) => s.pendingClose);
-  const cancelPendingClose = useEditorStore((s) => s.cancelPendingClose);
-  const discardPendingClose = useEditorStore((s) => s.discardPendingClose);
-  const savePendingClose = useEditorStore((s) => s.savePendingClose);
-  const pendingOverwrite = useEditorStore((s) => s.pendingOverwrite);
-  const cancelPendingOverwrite = useEditorStore((s) => s.cancelPendingOverwrite);
-  const confirmPendingOverwrite = useEditorStore((s) => s.confirmPendingOverwrite);
-  const reloadFromDisk = useEditorStore((s) => s.reloadFromDisk);
   const dropEditorTabOnPane = useEditorStore((s) => s.dropEditorTabOnPane);
   const moveEditorTabInStrip = useEditorStore((s) => s.moveEditorTabInStrip);
 
@@ -772,100 +713,22 @@ export function EditorPanel() {
     requestCloseEditorPane(paneId);
   }, [requestCloseEditorPane]);
 
-  // Where the keyboard goes when a prompt closes and what had it is gone —
-  // the tab's own ✕, which Chromium focuses when it is clicked and which
-  // goes with the tab it closed: the file now in front, or the terminal
-  // when no file is left open.
-  const focusAfterPrompt = () => focusWorkspace('editor');
+  // The unsaved and overwrite prompts are not drawn here: the editor area is
+  // mounted only while the group on screen has an editor leaf, and they must
+  // be seen whatever it holds. PanelLayout draws them (EditorPrompts.jsx).
 
-  const unsavedText = pendingClose ? unsavedPromptText(pendingClose) : null;
-  const unsavedPrompt = pendingClose ? (
-    <ConfirmDialog
-      open
-      title={unsavedText.title}
-      message={unsavedText.message}
-      confirmLabel={unsavedText.confirmLabel}
-      altLabel="Don't Save"
-      altDanger
-      cancelLabel="Cancel"
-      onConfirm={() => {
-        savePendingClose().catch((err) =>
-          console.error('[EditorPanel] Save before closing failed; nothing was closed:', err)
-        );
-      }}
-      onAlt={() => {
-        discardPendingClose().catch((err) =>
-          console.error('[EditorPanel] Closing without saving failed:', err)
-        );
-      }}
-      onCancel={cancelPendingClose}
-      fallbackFocus={focusAfterPrompt}
-    />
-  ) : null;
+  if (!editorTree) return null;
 
-  const overwriteText = pendingOverwrite ? overwritePromptText(pendingOverwrite) : null;
-  const overwritePrompt = pendingOverwrite ? (
-    <ConfirmDialog
-      open
-      title={overwriteText.title}
-      message={overwriteText.message}
-      confirmLabel="Overwrite"
-      danger
-      altLabel={overwriteText.altLabel}
-      cancelLabel="Cancel"
-      onConfirm={() => {
-        confirmPendingOverwrite().catch((err) =>
-          console.error('[EditorPanel] Overwrite failed:', err)
-        );
-      }}
-      onAlt={() => {
-        reloadFromDisk(pendingOverwrite.tabId).catch((err) =>
-          console.error('[EditorPanel] Reload from disk failed:', err)
-        );
-      }}
-      onCancel={cancelPendingOverwrite}
-      fallbackFocus={focusAfterPrompt}
-    />
-  ) : null;
-
-  // Onto <body>, for the reason DragPreview is: inside this panel's
-  // transformed ancestor a `fixed` overlay is confined to the editor's own
-  // box. Closing the window and opening a folder ask here too, and with the
-  // terminal panel maximised that box is zero high: a prompt nobody can see
-  // is a window that will not close. The diff view replaces the editor, not
-  // the question, so the prompts are drawn over it as well.
-  // Drawn in the order they opened: see `inOpenOrder`.
-  const promptOrder = useRef([]);
-  promptOrder.current = inOpenOrder(
-    promptOrder.current,
-    [unsavedPrompt && 'unsaved', overwritePrompt && 'overwrite'].filter(Boolean)
-  );
-  const promptOf = { unsaved: unsavedPrompt, overwrite: overwritePrompt };
-  const prompts =
-    unsavedPrompt || overwritePrompt
-      ? createPortal(
-          <>
-            {promptOrder.current.map((key) => (
-              <React.Fragment key={key}>{promptOf[key]}</React.Fragment>
-            ))}
-          </>,
-          document.body
-        )
-      : null;
-
-  if (!editorSplitTree) return null;
-
-  const canClose = editorSplitTree.type !== 'leaf';
+  const canClose = editorTree.type !== 'leaf';
 
   return (
     <EditorDragContext.Provider value={{ drag, beginDrag }}>
       <div className={cn('h-full w-full flex flex-col overflow-hidden bg-vsc-editor', drag?.active && 'cursor-grabbing')}>
         <div className="flex-1 overflow-hidden">
-          <SplitNode node={editorSplitTree} onSplit={handleSplit} onClose={handleClose} canClose={canClose} />
+          <SplitNode node={editorTree} onSplit={handleSplit} onClose={handleClose} canClose={canClose} />
         </div>
         <DragPreview drag={drag} />
       </div>
-      {prompts}
     </EditorDragContext.Provider>
   );
 }

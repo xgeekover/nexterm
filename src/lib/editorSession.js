@@ -99,6 +99,11 @@ export function restorablePath(root, path, { caseless = false } = {}) {
   return `${folder}${spelled.slice(folder.length)}`;
 }
 
+/** Whether `pane` reads as a workbench leaf id (`pane-N`, as terminalStore mints them). */
+function validPane(pane) {
+  return typeof pane === 'string' && /^pane-\d{1,9}$/.test(pane);
+}
+
 /**
  * Drop leaves with no files and collapse splits left with one child, keeping
  * any field a leaf carries. Null when nothing is left.
@@ -133,9 +138,12 @@ function finish(root, tree, marked, activeFile, recent, misses = {}) {
   let activePane = leaves.indexOf(marked);
   const file = files.has(activeFile) ? activeFile : null;
   if (activePane === -1) activePane = Math.max(0, leaves.findIndex((leaf) => leaf.files.includes(file)));
+  // `pane` (sibling B): the workbench leaf the files were in, so a relaunch
+  // puts them back in the same leaf of the same terminal group. Optional, and
+  // only ever written as a leaf id: a v0.31.0 build reading it drops it.
   const strip = (node) =>
     node.type === 'leaf'
-      ? { type: 'leaf', files: node.files, active: node.active }
+      ? { type: 'leaf', files: node.files, active: node.active, ...(validPane(node.pane) ? { pane: node.pane } : {}) }
       : { type: 'split', direction: node.direction, children: node.children.map(strip) };
   return {
     root,
@@ -151,7 +159,7 @@ function finish(root, tree, marked, activeFile, recent, misses = {}) {
 
 /**
  * What is saved for the editor's state now: `rootPath`, `tabs`,
- * `editorSplitTree`, `activeEditorPaneId`, `activeTabId`. Null when no folder
+ * `editorTree`, `editorPane`, `activeTabId`. Null when no folder
  * is open or no tab is.
  *
  * `recencyOf(tabId)` says how recently a tab was the active one, larger being
@@ -163,8 +171,11 @@ function finish(root, tree, marked, activeFile, recent, misses = {}) {
  * is how many launches in a row have failed to read a tab's file.
  */
 export function serializeSession(state, recencyOf = () => 0, { missesOf = () => 0, caseless = false } = {}) {
-  const { rootPath, tabs, editorSplitTree, activeEditorPaneId, activeTabId } = state || {};
-  if (typeof rootPath !== 'string' || !rootPath || !editorSplitTree || !Array.isArray(tabs)) return null;
+  // `editorTree` is the editor projection of the workbench (sibling B): the
+  // active group's editor leaves, or a split of every group's when more than
+  // one group shows files; `editorPane` is the active group's editor pane.
+  const { rootPath, tabs, editorTree, editorPane, activeTabId } = state || {};
+  if (typeof rootPath !== 'string' || !rootPath || !editorTree || !Array.isArray(tabs)) return null;
   const pathOf = new Map(tabs.map((tab) => [tab.id, tab.filePath]));
 
   // Runs at every keystroke (typing changes `tabs`), so once over each tab.
@@ -178,7 +189,7 @@ export function serializeSession(state, recencyOf = () => 0, { missesOf = () => 
       if (pathOf.has(id)) shown.add(id);
     }
   };
-  walk(editorSplitTree);
+  walk(editorTree);
   // A stable sort: tabs never active keep the order they are shown in.
   const files = new Set();
   const ranked = [...shown]
@@ -204,11 +215,12 @@ export function serializeSession(state, recencyOf = () => 0, { missesOf = () => 
       type: 'leaf',
       files: ids.map((id) => pathOf.get(id)),
       active: pathOf.get(ids.includes(node.activeTabId) ? node.activeTabId : ids[0]) ?? null,
+      ...(validPane(node.id) ? { pane: node.id } : {}),
     };
-    if (node.id === activeEditorPaneId) marked = leaf;
+    if (node.id === editorPane) marked = leaf;
     return leaf;
   };
-  const tree = toNode(editorSplitTree);
+  const tree = toNode(editorTree);
   const activeFile = kept.has(activeTabId) ? pathOf.get(activeTabId) : null;
   const misses = Object.fromEntries(ranked.map((id) => [pathOf.get(id), missesOf(id)]));
   return finish(rootPath, tree, marked, activeFile, ranked.map((id) => pathOf.get(id)), misses);
@@ -255,6 +267,7 @@ export function normalizeSession(raw, { caseless = false } = {}) {
       const index = leafIndex++;
       const files = (Array.isArray(node.files) ? node.files : []).map(claim).filter(Boolean);
       const leaf = { type: 'leaf', files, active: typeof node.active === 'string' ? node.active : null };
+      if (validPane(node.pane)) leaf.pane = node.pane;
       if (index === raw.activePane) marked = leaf;
       return leaf;
     }
@@ -278,7 +291,7 @@ export function normalizeSession(raw, { caseless = false } = {}) {
     const files = node.files.filter((path) => kept.has(path));
     const named = claimed(node.active);
     const active = files.includes(named) ? named : files[0] ?? null;
-    const leaf = { type: 'leaf', files, active };
+    const leaf = { type: 'leaf', files, active, ...(node.pane ? { pane: node.pane } : {}) };
     if (node === marked) marked = leaf;
     return leaf;
   };
@@ -341,8 +354,9 @@ export function sessionFiles(session) {
  * read back — is left out; a group left with no file goes, as a group does
  * when its last tab is closed, and its split with it.
  *
- * `newId('pane' | 'split')` mints the ids. Returns `{ tree, activePaneId,
- * activeTabId }`, or null when no file is left to show.
+ * `newId('pane' | 'split', savedNode)` mints the ids — for a pane, the saved
+ * leaf is handed along, so its `pane` can be taken back (sibling B). Returns
+ * `{ tree, activePaneId, activeTabId }`, or null when no file is left to show.
  */
 export function restoredLayout(session, tabIdOf, newId) {
   if (!session) return null;
@@ -364,7 +378,7 @@ export function restoredLayout(session, tabIdOf, newId) {
     const active = tabIdOf(node.active);
     const leaf = {
       type: 'leaf',
-      id: newId('pane'),
+      id: newId('pane', node),
       tabIds,
       activeTabId: tabIds.includes(active) ? active : tabIds[0] ?? null,
     };

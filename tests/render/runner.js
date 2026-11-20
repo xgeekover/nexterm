@@ -81,6 +81,8 @@ const { renderToString } = await import('react-dom/server');
 
 const { useTerminalStore } = await import('../../src/stores/terminalStore.js');
 const { useEditorStore } = await import('../../src/stores/editorStore.js');
+const { setEditorLayout } = await import('../e2e/harness/workbench.js');
+const { projectTree } = await import('../../src/components/terminal/splitLayout.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
@@ -257,8 +259,8 @@ scenario('RN-04', 'an editor pane holding no file', () => {
   useEditorStore.setState({
     tabs: [],
     activeTabId: null,
-    editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
   });
+  setEditorLayout();
 });
 
 scenario('RN-05', 'several groups, one of them running and one failed', () => {
@@ -329,9 +331,81 @@ scenario('RN-12', 'a file open in the editor', () => {
   useEditorStore.setState({
     tabs: [{ id: 'e1', filePath: '/workspace/a.js', fileName: 'a.js', content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' }],
     activeTabId: 'e1',
-    editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: ['e1'], activeTabId: 'e1' },
   });
+  setEditorLayout({ type: 'leaf', id: 'editor-pane-root', tabIds: ['e1'], activeTabId: 'e1' });
 });
+
+// ---- The releasability bridge (editor placement, sibling B, AC-B9) ---------
+// Each view draws its own kind's projection of the group on screen.
+
+const fileTab = (id) => ({ id, filePath: `/workspace/${id}.js`, fileName: `${id}.js`, content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' });
+const editorLeaf = (id, tabIds) => ({ type: 'leaf', kind: 'editor', id, tabIds, activeTabId: tabIds[0] ?? null });
+const terminalTree = () => ({
+  type: 'split', id: 'split-t', direction: 'horizontal', sizes: [50, 50],
+  children: [{ type: 'leaf', id: 'pane-t1', tabIds: ['t1'], activeTabId: 't1' }, { type: 'leaf', id: 'pane-t2', tabIds: ['t2'], activeTabId: 't2' }],
+});
+
+/** Two groups: group-1 [editors e1 | e2 above its terminals], group-2 [editor e3 above its own]; `active` on screen. */
+function arrangeWorkbench(active = 'group-1', { wrapped = true } = {}) {
+  reset();
+  useEditorStore.setState({ tabs: ['e1', 'e2', 'e3'].map(fileTab), activeTabId: 'e1' });
+  const editors = { type: 'split', id: 'split-e', direction: 'horizontal', sizes: [50, 50], children: [editorLeaf('pane-e1', ['e1']), editorLeaf('pane-e2', ['e2'])] };
+  useTerminalStore.setState({
+    tabs: [tab('t1'), tab('t2'), tab('t3')],
+    activeTabId: active === 'group-1' ? 't1' : 't3',
+    groups: [
+      {
+        id: 'group-1', name: 'Group 1', createdAt: 0, activePaneId: 'pane-t1',
+        ...(wrapped ? { editorPaneId: 'pane-e1', tree: { type: 'split', id: 'split-w', direction: 'vertical', sizes: [60, 40], children: [editors, terminalTree()] } } : { tree: terminalTree() }),
+      },
+      {
+        id: 'group-2', name: 'Group 2', createdAt: 0, activePaneId: 'pane-t3', editorPaneId: 'pane-e3',
+        tree: { type: 'split', id: 'split-w2', direction: 'vertical', sizes: [60, 40], children: [editorLeaf('pane-e3', ['e3']), { type: 'leaf', id: 'pane-t3', tabIds: ['t3'], activeTabId: 't3' }] },
+      },
+      { id: 'group-3', name: 'Group 3', createdAt: 0, activePaneId: 'pane-t4', tree: { type: 'leaf', id: 'pane-t4', tabIds: [], activeTabId: null } },
+    ],
+    activeGroupId: active,
+  });
+}
+
+// The editor area itself is React.lazy (PanelLayout), so a server render draws
+// none of its panes: which leaves it draws is checked with the panel bundled on
+// its own, in tests/adversarial/workbench_editor_area.test.js (WV-01, WV-02).
+const editorPanesIn = (html) => [...html.matchAll(/data-editor-pane-body="([^"]+)"/g)].map((m) => m[1]);
+const terminalPanesIn = (html) => [...html.matchAll(/data-pane-body="([^"]+)"/g)].map((m) => m[1]);
+
+scenario(
+  'RN-B9b',
+  'PanelLayout draws editor-group only while the group on screen has an editor leaf',
+  () => arrangeWorkbench('group-1'),
+  (html) => {
+    expectThat(html.includes('id="editor-group"'), 'a group with editor leaves draws no editor-group');
+    arrangeWorkbench('group-3');
+    const none = renderArranged();
+    expectThat(!none.includes('id="editor-group"'), 'a group with no editor leaf draws editor-group although files are open elsewhere');
+    expectThat(editorPanesIn(none).length === 0, 'and no editor pane');
+  }
+);
+
+scenario(
+  'RN-B9c',
+  'the terminal view draws no editor leaf, and the same panes whether or not editor leaves are wrapped in',
+  () => arrangeWorkbench('group-1', { wrapped: false }),
+  (html) => {
+    const plain = terminalPanesIn(html);
+    expectThat(JSON.stringify(plain) === JSON.stringify(['pane-t1', 'pane-t2']), `without editors: ${JSON.stringify(plain)}`);
+    arrangeWorkbench('group-1', { wrapped: true });
+    const wrapped = renderArranged();
+    expectThat(JSON.stringify(terminalPanesIn(wrapped)) === JSON.stringify(plain), `with editors wrapped in: ${JSON.stringify(terminalPanesIn(wrapped))}`);
+    expectThat(!terminalPanesIn(wrapped).some((id) => id.startsWith('pane-e')), 'an editor leaf is drawn as a terminal pane');
+    // The view's React keys are its node ids: the projection it draws keeps them.
+    const projected = projectTree(useTerminalStore.getState().groups[0].tree, 'terminal');
+    expectThat(JSON.stringify(projected) === JSON.stringify(terminalTree()), 'the terminal projection changed its node ids or sizes');
+    for (const pane of plain) {
+      expectThat(paneMarkup(html, pane) === paneMarkup(wrapped, pane), `${pane} is drawn differently once editors are wrapped in`);
+    }
+  }
+);
 
 // ---- Reading the markup back -----------------------------------------------
 
