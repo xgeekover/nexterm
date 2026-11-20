@@ -307,6 +307,7 @@ export function swapChoices(tree, tabs, fromPaneId) {
       index,
       count: leaves.length,
       terminals: Array.isArray(leaf.tabIds) ? leaf.tabIds.length : 0,
+      kind: leafKind(leaf),
     }))
     .filter((choice) => choice.paneId !== fromPaneId);
 }

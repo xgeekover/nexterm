@@ -135,6 +135,13 @@ describe('Workbench: the files of the group on screen are drawn in the workbench
       assert.equal(imports.some((spec) => /EditorPanel\.jsx$/.test(spec)), false, `${file} imports EditorPanel.jsx statically`);
       assert.equal(imports.some((spec) => /^@monaco-editor\/react$|^monaco-editor/.test(spec)), false, `${file} imports Monaco statically`);
     }
+    // Widened in C2 (C1 review M-05): no module anywhere in src imports
+    // EditorPanel.jsx statically — one that did would pull Monaco into the
+    // first chunk. EditorPane.jsx's `lazy(() => import(...))` is the one way in.
+    for (const file of filesUnder('', /\.(jsx?|mjs)$/)) {
+      const spec = staticImports(read(file)).find((s) => /EditorPanel(\.jsx)?$/.test(s));
+      assert.equal(spec, undefined, `${file} imports EditorPanel.jsx statically (${spec})`);
+    }
     assert.match(read('components/editor/EditorPane.jsx'), /lazy\(\(\) => import\('\.\/EditorPanel\.jsx'\)\)/, 'the Monaco body is not loaded lazily');
     assert.equal(/EditorPanel/.test(read('components/layout/PanelLayout.jsx').replace(/\/\/[^\n]*/g, '')), false, 'PanelLayout still names the editor area');
 

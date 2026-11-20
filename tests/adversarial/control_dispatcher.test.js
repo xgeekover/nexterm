@@ -1593,6 +1593,84 @@ describe('The first shells wait for the backend to know the settings', () => {
   });
 });
 
+// Editor placement C2 (FC12, AC-C11): the control API beside editor panes.
+// Editor leaves hold editor tab ids only, so every handler that finds a
+// terminal by its tab id (`placeOf`) is unchanged; these pin it.
+describe('Control requests beside editor panes (editor placement C2)', () => {
+  const withEditors = async (fn) => {
+    const before = terminalStore.__editorBridge();
+    terminalStore.setEditorBridge({ tabIds: () => new Set(['e1', 'e2']), closeTabs: () => {} });
+    try {
+      await inStore(fn);
+    } finally {
+      terminalStore.setEditorBridge(before);
+    }
+  };
+  const leavesIn = (node, acc = []) => {
+    if (node?.type === 'leaf') acc.push(node);
+    else node?.children?.forEach((c) => leavesIn(c, acc));
+    return acc;
+  };
+  const parentIn = (node, id) => {
+    if (!node || node.type !== 'split') return null;
+    for (const child of node.children) {
+      if (child.id === id) return node;
+      const found = parentIn(child, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  test('CD-C2-01: list returns the terminals only, in screen order, with file panes beside the caller', async () => {
+    await withEditors(async () => {
+      const [a, b, c] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      assert.ok(filePane, 'setup: a file pane above the terminals');
+      S.getState().placeEditorTab('e2', { paneId: filePane });
+      const { ask } = harness();
+      const answer = await ask(a, 'list', {});
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      assert.deepEqual(answer.result.map((r) => r.id), [a, b, c], 'no file, no editor pane');
+    });
+  });
+
+  test("CD-C2-02: new-split splits beside the caller's pane, whatever its neighbours; the file pane is left as it was", async () => {
+    await withEditors(async () => {
+      const [a] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      const callerPane = leavesIn(S.getState().getActiveGroup().tree).find((l) => l.tabIds.includes(a)).id;
+      const { ask } = harness();
+      const answer = await ask(a, 'new-split', { direction: 'right' });
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      const tree = S.getState().getActiveGroup().tree;
+      const childPane = leavesIn(tree).find((l) => l.tabIds.includes(answer.result.id));
+      const around = parentIn(tree, childPane.id);
+      assert.equal(around.direction, 'horizontal', 'split right');
+      assert.deepEqual(around.children.map((n) => n.id), [callerPane, childPane.id], "beside the caller's pane");
+      const file = leavesIn(tree).find((l) => l.id === filePane);
+      assert.deepEqual({ kind: file.kind, tabIds: file.tabIds }, { kind: 'editor', tabIds: ['e1'] }, 'the file pane is untouched');
+    });
+  });
+
+  test('CD-C2-03: focus never moves the keyboard (round 4) — with a file pane as THE active pane it stays the active pane, and the target is marked', async () => {
+    await withEditors(async () => {
+      const [a] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      S.getState().setActivePane(filePane);
+      const group = () => S.getState().getActiveGroup();
+      assert.equal(terminalStore.activeKindOf(group()), 'editor', 'setup: the file pane is THE active pane');
+      const { ask, focusedViews } = harness();
+      const answer = await ask(a, 'focus', {});
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      assert.deepEqual(answer.result, { switched: false });
+      assert.equal(terminalStore.activePaneOf(group()), filePane, 'the file pane is still THE active pane');
+      assert.equal(terminalStore.activeKindOf(group()), 'editor');
+      assert.deepEqual(focusedViews, [], 'no terminal is handed the keyboard');
+      assert.equal(S.getState().controlled[a]?.cmd, 'focus', 'the target is marked');
+    });
+  });
+});
+
 describe('Control: teardown', () => {
   test('CD-99: the store and the log back as the next suite expects them', () => {
     S.getState().dispose();

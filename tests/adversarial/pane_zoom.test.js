@@ -485,6 +485,13 @@ describe('Pane zoom: the ways in', () => {
       fileURLToPath(new URL('../../src/components/command/CommandPalette.jsx', import.meta.url)),
       'utf8'
     );
-    assert.ok(/case 'toggle_pane_zoom':\s*\n[^]*?togglePaneZoom/.test(palette), 'CommandPalette dispatches toggle_pane_zoom');
+    // Through the workbench's own command, as the keys and the menu go: it
+    // zooms THE active pane and hands it the keyboard (C2 review S-01).
+    assert.ok(/case 'toggle_pane_zoom':\n(?:(?!\s*case\s)[^\n]*\n)*?\s*toggleZoomActive\(\);/.test(palette), 'CommandPalette dispatches toggle_pane_zoom through toggleZoomActive');
+    const commands = readFileSync(fileURLToPath(new URL('../../src/lib/workbenchCommands.js', import.meta.url)), 'utf8');
+    assert.ok(
+      /export function toggleZoomActive\(\) \{[^}]*togglePaneZoom\?\.\(\);[^}]*focusActivePane\(\);/.test(commands),
+      'toggleZoomActive zooms with the store and then hands the keyboard to the active pane'
+    );
   });
 });

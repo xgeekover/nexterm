@@ -400,18 +400,26 @@ describe('Workbench tree: actions across kinds (AC-B1)', () => {
     assert.equal(S.getState().tabs[0], tabBefore, 'nothing respawned: the very same tab object');
   });
 
-  test('WB-09: swapTargets lists panes of the active pane\'s kind only', async () => {
+  // Updated for sibling C2 (FC11): B offered panes of the active pane's
+  // kind only, each kind having a view of its own. One tree draws both now,
+  // so Swap Pane With… offers every other pane, from THE active pane.
+  test('WB-09: swapTargets lists the other panes of both kinds, from the active pane', async () => {
     const g = S.getState().getActiveGroup();
     editorIds.add('e1');
     const first = g.activePaneId;
-    S.getState().placeEditorTab('e1');
+    const { paneId: edPane } = S.getState().placeEditorTab('e1');
+    S.getState().setActivePane(first);
     let targets = S.getState().swapTargets(g.id);
-    assert.deepEqual(targets.panes, [], 'one terminal pane: nothing of its kind to swap with');
-    assert.ok(targets.note, 'and it says why');
+    assert.deepEqual(targets.panes.map((p) => p.paneId), [edPane], 'one terminal pane: the editor pane is offered');
+    assert.equal(targets.note, null);
     const second = await S.getState().splitPane(first, 'horizontal', g.id);
     targets = S.getState().swapTargets(g.id);
-    assert.deepEqual(targets.panes.map((p) => p.paneId), [second]);
-    assert.equal(targets.panes[0].count, 2, 'counted among the terminal panes');
+    assert.deepEqual(targets.panes.map((p) => p.paneId), [edPane, second], 'both kinds, in screen order');
+    assert.equal(targets.panes[0].count, 3, 'counted among all the panes');
+    S.getState().setActivePane(edPane);
+    targets = S.getState().swapTargets(g.id);
+    assert.equal(targets.fromPaneId, edPane, 'from THE active pane, an editor pane');
+    assert.deepEqual(targets.panes.map((p) => p.paneId).sort(), [first, second].sort());
     assert.equal(swapBlockedReason(groupById(g.id), 'editor') !== null, true, 'one editor pane cannot swap with an editor');
   });
 

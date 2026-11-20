@@ -39,6 +39,32 @@
                           FC7)
     leafBoxes()           every pane's box, by id and kind
     logs()                what reached console.warn and console.error
+    focused()             where the keyboard is: the pane body (and kind)
+                          holding document.activeElement, and whether it is
+                          inside Monaco or an xterm (workbench_focus_headless)
+    written(tabId)        what reached the PTY of a terminal (`pty_write`
+                          through the browser mock), as one string
+    text(path)            a file's model text
+    menu(id)              a menu item run as the native menu runs it
+    isMac                 whether the app modifier is ⌘ here (platform.js)
+    prompt(tabId, output) output and a finished command for a terminal, as
+                          the backend sends them: a prompt mark
+    marks(tabId)          its prompt marks: lines, and how many are painted
+    notify(tabId)         an unread notification for a terminal
+    setting(key, value)   a setting changed, as Settings changes it
+    terminalFeatures(paneId)
+                          what a terminal pane draws of its own: the hidden
+                          strip's handle, the attention ring
+    palette(mode)         the command palette opened, as its chord opens it
+                          (what has the keyboard then is what it gives it
+                          back to)
+    paletteState()        whether it is open, whether its search box has the
+                          keyboard, and the title of the row Enter would run
+    menuItem(label)       the box of the open menu's row reading `label`
+
+  The app's keyboard layer (useKeybindings) and its command palette are
+  mounted beside the workbench, so a chord pressed through CDP runs the
+  command a user's would.
 
   Not part of the app's own routes; loaded only by that test, over the vite
   dev server it starts on its own scratch config.
@@ -74,9 +100,22 @@
       const { useEditorStore, registerEditorBridge } = await import('../../../src/stores/editorStore.js');
       const { useTerminalStore, __settleLayout, activePaneOf } = await import('../../../src/stores/terminalStore.js');
       const { useSettingsStore } = await import('../../../src/stores/settingsStore.js');
-      const { existingTerminal } = await import('../../../src/components/terminal/terminalRegistry.js');
+      const { existingTerminal, getOrCreateTerminal } = await import('../../../src/components/terminal/terminalRegistry.js');
       const { TerminalSplitContainer } = await import('../../../src/components/terminal/TerminalSplitContainer.jsx');
       const { minSharesOf, panelMinSizeOf, sizesOf } = await import('../../../src/components/terminal/splitLayout.js');
+      const { useKeybindings } = await import('../../../src/hooks/useKeybindings.js');
+      const { CommandPalette } = await import('../../../src/components/command/CommandPalette.jsx');
+      const { runMenuAction } = await import('../../../src/lib/menuActions.js');
+      const { isMac } = await import('../../../src/lib/platform.js');
+
+      // Every byte a terminal sends its program, by session: what typing in a
+      // focused xterm reaches (workbench_focus_headless.test.js).
+      const ptyWrites = [];
+      const realInvoke = mockBridge.invoke.bind(mockBridge);
+      mockBridge.invoke = (command, args = {}) => {
+        if (command === 'pty_write') ptyWrites.push({ sessionId: args.session_id, data: String(args.data ?? '') });
+        return realInvoke(command, args);
+      };
 
       const E = useEditorStore;
       const T = useTerminalStore;
@@ -268,10 +307,99 @@
         logs() {
           return consoleLines.slice();
         },
+        isMac,
+        focused() {
+          const el = document.activeElement;
+          const terminal = el?.closest?.('[data-pane-body]');
+          const editor = el?.closest?.('[data-editor-pane-body]');
+          return {
+            tag: el?.tagName ?? null,
+            paneId: terminal?.getAttribute('data-pane-body') ?? editor?.getAttribute('data-editor-pane-body') ?? null,
+            paneKind: terminal ? 'terminal' : editor ? 'editor' : null,
+            inMonaco: Boolean(el?.closest?.('.monaco-editor')),
+            inXterm: Boolean(el?.closest?.('.xterm')),
+          };
+        },
+        written(tabId) {
+          const sessionId = T.getState().tabs.find((t) => t.id === tabId)?.sessionId;
+          return ptyWrites.filter((w) => w.sessionId === sessionId).map((w) => w.data).join('');
+        },
+        text(path) {
+          return modelOf(path)?.getValue() ?? null;
+        },
+        menu(id) {
+          runMenuAction(id);
+          return null;
+        },
+        async prompt(tabId, output) {
+          // Written to the terminal itself, then its D — as prompt_marks_harness.html does.
+          const sessionId = T.getState().tabs.find((t) => t.id === tabId)?.sessionId;
+          const term = existingTerminal(tabId);
+          const write = (data) => new Promise((resolve) => term.write(data, resolve));
+          await write(output);
+          await mockBridge.emit('pty-command-done', { session_id: sessionId, exit_code: 0 });
+          await write('');
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          return window.__w.marks(tabId);
+        },
+        marks(tabId) {
+          // The registry's entry, which an existing terminal is handed back as.
+          const entry = existingTerminal(tabId) ? getOrCreateTerminal(tabId) : null;
+          return {
+            lines: entry?.promptMarks?.lines?.slice() ?? [],
+            painted: entry?.promptMarks?.marks?.filter((m) => m.decoration).length ?? 0,
+          };
+        },
+        notify(tabId) {
+          T.setState((s) => ({
+            notifications: [{ id: `n-${tabId}-${Date.now()}`, tabId, read: false, kind: 'bell', title: 'Bell', body: '', createdAt: Date.now() }, ...(s.notifications ?? [])],
+          }));
+          return null;
+        },
+        setting(key, value) {
+          useSettingsStore.getState().setSetting(key, value);
+          return null;
+        },
+        terminalFeatures(paneId) {
+          const frame = document.getElementById(paneId) ?? document.querySelector(`[data-pane-body="${paneId}"]`)?.parentElement;
+          return {
+            handle: Boolean(document.querySelector(`[data-strip-handle="${paneId}"]`)),
+            strip: Boolean(document.querySelector(`[data-tab-strip="${paneId}"]`)),
+            ring: [...(frame?.querySelectorAll?.('[data-attention-ring]') ?? [])].map((el) => el.getAttribute('data-attention-ring')),
+          };
+        },
+        palette(mode = 'all') {
+          useSettingsStore.getState().setCommandPaletteOpen(true, mode);
+          return null;
+        },
+        paletteState() {
+          const input = document.querySelector('input[placeholder="Type a command or search files…"]');
+          const first = document.querySelector('[data-palette-row="0"] .truncate');
+          return {
+            open: useSettingsStore.getState().isCommandPaletteOpen === true,
+            inputFocused: Boolean(input) && document.activeElement === input,
+            first: first?.textContent ?? null,
+          };
+        },
+        menuItem(label) {
+          return boxOf([...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((el) => el.textContent.trim() === label));
+        },
       };
 
       const root = createRoot(document.getElementById('root'));
-      root.render(React.createElement(React.StrictMode, null, React.createElement(TerminalSplitContainer)));
+      function Keys() {
+        useKeybindings();
+        return null;
+      }
+      root.render(
+        React.createElement(
+          React.StrictMode,
+          null,
+          React.createElement(Keys),
+          React.createElement(TerminalSplitContainer),
+          React.createElement(CommandPalette)
+        )
+      );
       window.__w.ready = true;
     </script>
   </body>

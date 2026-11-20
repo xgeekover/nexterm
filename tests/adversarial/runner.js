@@ -183,6 +183,10 @@ import './editor_models.test.js';
 import './editor_models_headless.test.js';
 // One drag for both kinds across the workbench, and the pixel minimums, in a real browser (sibling C, AC-C4).
 import './workbench_drag_headless.test.js';
+import './workbench_commands.test.js';
+import './workbench_focus_headless.test.js';
+import './workbench_features.test.js';
+import './monaco_chunk.test.js';
 
 async function run() {
   console.log('====================================================');

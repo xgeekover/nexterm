@@ -1,7 +1,9 @@
-import React, { createContext, useContext, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { X, Circle, FileCode2, FileJson, FileText, File, SplitSquareHorizontal, SplitSquareVertical } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
+import { ContextMenu } from '../common/ContextMenu.jsx';
+import { moveEditorToNewPane } from '../../lib/workbenchCommands.js';
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
@@ -499,6 +501,8 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
   const bindEditorPaneToTab = useEditorStore((s) => s.bindEditorPaneToTab);
   const requestCloseTab = useEditorStore((s) => s.requestCloseTab);
   const { drag, beginDrag } = useContext(EditorDragContext);
+  // A chip's own menu (FC11): `{ x, y, tabId }` while it is open.
+  const [menu, setMenu] = useState(null);
 
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const activeTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
@@ -545,6 +549,10 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   beginDrag(tab, e);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
                 }}
                 onMouseDown={(e) => {
                   // Middle-click closes the tab.
@@ -604,6 +612,37 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
           <TabDropMarker first={paneTabs.length === 0} last />
         )}
       </div>
+
+      {/* The chip's menu: the editor counterpart of a terminal tab's Move to
+          New Pane (FC11), in both directions, and Close. */}
+      <ContextMenu
+        open={Boolean(menu && node.tabIds.includes(menu.tabId))}
+        x={menu?.x ?? 0}
+        y={menu?.y ?? 0}
+        onClose={() => setMenu(null)}
+        items={
+          menu
+            ? [
+                {
+                  key: 'move-new-pane-right',
+                  label: 'Move Editor to New Pane Right',
+                  disabled: node.tabIds.length <= 1,
+                  disabledReason: node.tabIds.length <= 1 ? 'It is already the only file in its pane' : undefined,
+                  onSelect: () => moveEditorToNewPane('horizontal', menu.tabId),
+                },
+                {
+                  key: 'move-new-pane-down',
+                  label: 'Move Editor to New Pane Down',
+                  disabled: node.tabIds.length <= 1,
+                  disabledReason: node.tabIds.length <= 1 ? 'It is already the only file in its pane' : undefined,
+                  onSelect: () => moveEditorToNewPane('vertical', menu.tabId),
+                },
+                { type: 'separator', key: 's1' },
+                { key: 'close', label: 'Close', onSelect: () => requestCloseTab(menu.tabId) },
+              ]
+            : []
+        }
+      />
 
       <div className="flex items-center gap-0.5 px-1 shrink-0">
         {/* The workbench's own controls for this pane: its zoom (FC8). */}

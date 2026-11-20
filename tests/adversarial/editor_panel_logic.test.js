@@ -27,8 +27,8 @@ let loading = null;
 function loadEditorPanel() {
   loading ??= build({
     stdin: {
-      // Sibling C: the pane around Monaco is EditorPane.jsx, which EditorPanel.jsx names `pressActivatesGroup` from.
-      contents: "export * from './EditorPanel.jsx';\nexport * from './EditorPrompts.jsx';",
+      // Sibling C: the pane around Monaco is EditorPane.jsx, where `pressActivatesGroup` lives; EditorPanel.jsx no longer re-exports it (C1 review M-05).
+      contents: "export * from './EditorPanel.jsx';\nexport * from './EditorPrompts.jsx';\nexport { pressActivatesGroup } from './EditorPane.jsx';",
       resolveDir: EDITOR_DIR,
       sourcefile: 'editor-panel-under-test.js',
       loader: 'js',

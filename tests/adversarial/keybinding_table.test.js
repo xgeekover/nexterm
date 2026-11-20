@@ -240,9 +240,19 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
   });
 
   test('KB-06: Monaco keeps the chords it owns, without them being swallowed', () => {
-    // ⌘D and ⌘W belong to the editor while the cursor is in a file: the table
-    // must step aside AND leave the key unprevented.
-    for (const key of ['mod+d', 'mod+w']) {
+    // ⌘D and ⌘F belong to the editor while the cursor is in a file: the table
+    // must step aside AND leave the key unprevented. ⌘W left this list in
+    // editor placement C2: by the human's Q5 it closes the file tab there
+    // (Monaco binds nothing to it), so it is claimed — and prevented — as
+    // anywhere else.
+    {
+      let prevented = false;
+      const e = { ...eventFor('mod+w', 'macos'), preventDefault: () => { prevented = true; } };
+      const fired = dispatchKeydown(e, ctxFor(e, 'macos', { isInMonacoEditor: true }));
+      assert.equal(fired, 'close-pane', 'mod+w is Close Pane inside Monaco (Q5)');
+      assert.equal(prevented, true, 'and the browser does not get it');
+    }
+    for (const key of ['mod+d', 'mod+f']) {
       let prevented = false;
       const e = { ...eventFor(key, 'macos'), preventDefault: () => { prevented = true; } };
       const fired = dispatchKeydown(e, ctxFor(e, 'macos', { isInMonacoEditor: true }));

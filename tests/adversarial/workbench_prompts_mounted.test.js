@@ -32,6 +32,8 @@ import { useTerminalStore } from '../../src/stores/terminalStore.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { invoke, mockBridge } from '../../src/lib/ipc.js';
 import { leavesOfKind } from '../../src/components/terminal/splitLayout.js';
+import { answerCloseRequest, answerQuitRequest } from '../../src/hooks/useUnsavedGuard.js';
+import { loadWorkbench } from './workbench_bundle.js';
 
 const h = React.createElement;
 const E = useEditorStore;
@@ -304,7 +306,7 @@ describe('Workbench prompts: drawn whatever the group on screen holds (K-01, FX-
       assert.equal(E.getState().pendingOverwrite, null);
       assert.equal(dialogsOn(p).length, 0);
 
-      // Group 1 on screen: its editor area is mounted, and the prompt is still drawn once.
+      // Group 1 on screen: still no editor area (FC4), and the prompt is still drawn once.
       p.settled(() => T.getState().setActiveGroup(one));
       await letItRun();
       assert.equal(editorAreaOn(p).length, 0, 'group 1 has an editor leaf: still no editor area, its files are the workbench\u{2019}s');
@@ -316,5 +318,115 @@ describe('Workbench prompts: drawn whatever the group on screen holds (K-01, FX-
     assert.equal(/ConfirmDialog/.test(read('../../src/components/editor/EditorPanel.jsx')), false, 'EditorPanel.jsx draws no prompt of its own');
     assert.equal(/ConfirmDialog/.test(read('../../src/components/editor/EditorPane.jsx')), false, 'EditorPane.jsx draws no prompt of its own');
     assert.equal(/EditorPanel/.test(read('../../src/components/layout/PanelLayout.jsx').replace(/\/\/[^\n]*/g, '')), false, 'PanelLayout loads no editor area');
+  });
+  // L-02 (editor placement C2, AC-C12): Don't Save, for every way out, as
+  // the backend asks it — the window's close and Quit through
+  // useUnsavedGuard, which tells the backend the question was heard (`ack`)
+  // before asking — and the folder switch, asked by the store.
+  test('WV-07: Don\u{2019}t Save goes ahead for window, Quit and a folder switch, each asked once on screen; the guard acks first', async () => {
+    const { tab } = await dirtyFileElsewhere();
+    await onPage(async (p) => {
+      await mountLayout(p);
+      let request = 40;
+      for (const kind of ['window', 'quit', 'root']) {
+        // Unsaved again before each: Don't Save leaves the buffer as it is.
+        if (!E.getState().tabs.find((t) => t.id === tab.id)?.isDirty) E.getState().editBuffer(tab.id, `edited ${kind}`);
+        const log = [];
+        const api = {
+          ack: (id) => log.push(['ack', id]),
+          closeWindow: () => log.push(['closeWindow']),
+          quit: () => log.push(['quit']),
+          flush: async () => log.push(['flush']),
+        };
+        let went = 0;
+        request += 1;
+        const id = request;
+        let asked;
+        if (kind === 'window') asked = p.settled(() => answerCloseRequest(id, E.getState(), api));
+        else if (kind === 'quit') asked = p.settled(() => answerQuitRequest(id, E.getState(), api));
+        else asked = p.settled(() => E.getState().askBeforeLeaving('root', () => (went += 1)));
+        // The guard answers at once (true: a question is up); the folder
+        // switch's promise settles with the answer.
+        if (kind !== 'root') assert.equal(await asked, true, `${kind}: a question is asked`);
+        if (kind !== 'root') assert.deepEqual(log[0], ['ack', id], `${kind}: the backend is told the question was heard, first`);
+        const dialog = await theDialog(p, kind);
+        assert.match(dialog.textContent, new RegExp(tab.fileName.replace(/[.]/g, '\\.')), `${kind}: names the dirty file`);
+        p.click(button(dialog, "Don't Save"));
+        await letItRun(20);
+        assert.equal(dialogsOn(p).length, 0, `${kind}: the dialog goes`);
+        assert.equal(E.getState().pendingClose, null, `${kind}: nothing is left asking`);
+        if (kind === 'window') assert.deepEqual(log.slice(1), [['flush'], ['closeWindow']], 'window: the scrollback is saved, then the window closes');
+        else if (kind === 'quit') assert.deepEqual(log.slice(1), [['flush'], ['quit']], 'quit: the scrollback is saved, then the app quits');
+        else {
+          await asked;
+          assert.equal(went, 1, 'root: the folder switch goes ahead');
+        }
+      }
+    });
+  });
+
+  // L-02 with a real editor pane in the workbench (AC-C12): the workbench
+  // (TerminalSplitContainer, workbench_bundle.js: EditorPane and EditorTabs
+  // real, Monaco's body and the xterm stood in) drawn beside PanelLayout,
+  // group 1 — the dirty file's — on screen. Every prompt is still drawn once:
+  // neither the editor pane nor anything in the workbench draws one.
+  test('WV-08: with a real editor pane on screen, each prompt kind — window, quit, root, group, tab, pane, overwrite — is one alertdialog', async () => {
+    const { one, tab } = await dirtyFileElsewhere();
+    const wb = await loadWorkbench();
+    // The global ResizeObserver as this suite found it: the stand-in below is
+    // taken away again in `finally`, so it never reaches a later suite in the
+    // same runner (C2 review S-03).
+    const globalHad = Object.getOwnPropertyDescriptor(globalThis, 'ResizeObserver');
+    const globalBefore = globalThis.ResizeObserver;
+    await onPage(async (p) => {
+      furnish(p);
+      p.window.ResizeObserver ??= class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+      // The page lays nothing out: every element sits at the same place.
+      const proto = Object.getPrototypeOf(p.document.createElement('div'));
+      const had = Object.getOwnPropertyDescriptor(proto, 'getBoundingClientRect');
+      try {
+        globalThis.ResizeObserver ??= p.window.ResizeObserver;
+        proto.getBoundingClientRect = () => ({ left: 10, top: 10, bottom: 300, right: 600, width: 590, height: 290 });
+        p.settled(() => T.getState().setActiveGroup(one));
+        p.render(h('div', null, h(ui.PanelLayout), h(wb.TerminalSplitContainer)));
+        await letItRun(20);
+        const paneId = leavesOfKind(T.getState().groups.find((g) => g.id === one).tree, 'editor')[0].id;
+        assert.ok(p.document.body.querySelector(`[data-editor-pane-body="${paneId}"]`), 'setup: the real editor pane is drawn in the workbench');
+        assert.ok(p.document.body.querySelector(`[data-tab-chip="${tab.id}"]`), 'setup: with the dirty file\u{2019}s chip');
+        const asks = [
+          ['window', () => E.getState().askBeforeLeaving('window', () => true)],
+          ['quit', () => E.getState().askBeforeLeaving('quit', () => true)],
+          ['root', () => E.getState().askBeforeLeaving('root', () => true)],
+          ['group', () => T.getState().closeGroup(one)],
+          ['tab', () => E.getState().requestCloseTab(tab.id)],
+          ['pane', () => E.getState().requestCloseEditorPane(paneId)],
+        ];
+        for (const [kind, ask] of asks) {
+          const asked = p.settled(ask);
+          const dialog = await theDialog(p, `${kind}, a real editor pane on screen`);
+          if (kind !== 'tab' && kind !== 'pane') assert.equal(E.getState().pendingClose?.kind, kind, `${kind}: the store asks this kind`);
+          p.click(button(dialog, 'Cancel'));
+          await asked;
+          await letItRun();
+          assert.equal(dialogsOn(p).length, 0, `${kind}: Cancel closes it`);
+        }
+        p.settled(() => E.setState({ pendingOverwrite: { tabId: tab.id, fileName: tab.fileName, diskContent: 'theirs', unreadable: null } }));
+        p.click(button(await theDialog(p, 'overwrite, a real editor pane on screen'), 'Cancel'));
+        await letItRun();
+        assert.equal(dialogsOn(p).length, 0);
+        assert.ok(T.getState().groups.some((g) => g.id === one), 'Cancel kept group 1');
+        assert.ok(E.getState().tabs.some((t) => t.id === tab.id), 'and the file');
+      } finally {
+        if (had) Object.defineProperty(proto, 'getBoundingClientRect', had);
+        else delete proto.getBoundingClientRect;
+        if (globalHad) Object.defineProperty(globalThis, 'ResizeObserver', globalHad);
+        else delete globalThis.ResizeObserver;
+      }
+    });
+    assert.equal(globalThis.ResizeObserver, globalBefore, 'WV-08 leaves the global ResizeObserver as it found it');
   });
 });

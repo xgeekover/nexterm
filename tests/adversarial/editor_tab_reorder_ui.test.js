@@ -76,9 +76,12 @@ function loadEditorUi() {
             if (BUNDLED.some((re) => re.test(args.path))) return undefined;
             if (REAL.has(args.path)) return { path: import.meta.resolve(args.path), external: true };
             if (/\/stores\/editorStore\.js$/.test(args.path)) return { path: 'editorStore', namespace: 'fake' };
+            // The chip's own menu (editor placement C2): drawn only when opened, never here.
+            if (/\/ContextMenu\.jsx$/.test(args.path)) return { path: 'ContextMenu', namespace: 'context-menu' };
             return { path: args.path, namespace: 'stand-in' };
           });
           b.onLoad({ filter: /.*/, namespace: 'fake' }, () => ({ contents: FAKE_EDITOR_STORE, loader: 'js' }));
+          b.onLoad({ filter: /.*/, namespace: 'context-menu' }, () => ({ contents: 'export const ContextMenu = () => null;', loader: 'js' }));
           b.onLoad({ filter: /.*/, namespace: 'stand-in' }, () => ({ contents: 'module.exports = {};', loader: 'js' }));
         },
       },

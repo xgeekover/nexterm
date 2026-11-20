@@ -170,23 +170,57 @@ list the Explorer shows when nothing is open. A folder that has since been
 moved or deleted is refused by the backend and drops out of the list rather
 than staying as a row that fails every time it is clicked.
 
-**Open a file.** Click a file in the Explorer. The Monaco editor opens above the
-terminal panel as a normal tab; the terminals keep running underneath. Close
-the last file and you are back to a pure terminal window. Monaco is loaded the
-first time the editor is shown, not at launch, and it and its workers are
-bundled locally — nothing is fetched from a CDN at runtime.
+#### Editors and terminals in one layout
+
+**Open a file.** Click a file in the Explorer. It opens in the same area as the
+terminals, in an editor pane above them (about 60/40) — there is no separate
+editor area and no Maximize Panel button. Close the last file and you are back
+to a pure terminal window. Monaco is loaded the first time a file is shown, not
+at launch, and it and its workers are bundled locally — nothing is fetched from
+a CDN at runtime.
+
+**One active pane.** Panes of both kinds sit side by side, and one of them is
+the active pane, drawn with the accent line. The pane commands act on it:
+`⌘S`/`Ctrl+S` saves the file the active editor pane shows; `⌘W`/`Ctrl+W` in an
+editor pane closes its file tab (asking first when it is unsaved), and on its
+last tab the pane goes; in a terminal pane it closes the pane, as before.
+`⌘F`/`Ctrl+F` is Monaco's find in an editor pane and the terminal's find bar in
+a terminal pane. Split Right/Down from an editor pane makes an empty editor
+pane; `⌘D` inside Monaco is still Monaco's "add next match", and `Ctrl+Alt+D`
+splits. Toggle Pane Zoom, Equalize Splits and Swap Pane With… work across both
+kinds; inside Monaco the zoom chord is left to Monaco (`⌘⇧Enter` is its Insert
+Line Above), so an editor pane is zoomed from its ⤢ button, Terminal → *Toggle
+Pane Zoom* or the command palette. Focus Next/Previous Pane (`⌥⌘→`/`⌥⌘←`, `Ctrl+Alt+→`/`Ctrl+Alt+←`)
+goes through editors and terminals in screen order, and the keyboard goes with
+it: what you type next lands in the pane that is now active. New Terminal,
+Clear Terminal and the prompt jumps always act on the group's terminal.
+
+#### Moving editors
+
+Drag a file tab onto the left, right, top or bottom edge of any pane — a
+terminal included — to split there, or onto another editor pane's strip to move
+it in. A terminal tab can be dragged onto the edge of an editor pane the same
+way. Across kinds only the edges are offered: dropping on the other kind's
+strip or middle changes nothing. Drop a file tab on another group's chip to move
+it to that group. "Move Editor to New Pane Right/Down" (a file tab's right-click
+menu, or the command palette) splits the file out beside its pane. Moving a file
+keeps its text, undo history and caret; moving a terminal keeps its program and
+scrollback.
+
+#### Restoring the layout
 
 **Open files belong to a terminal group.** A file opens in the terminal group
-on screen, and the editor area shows that group's files: switch groups and you
-see the other group's files, or no editor at all if it has none. Nothing has
-closed; switching back brings them back. Opening a file that is already open in
-another group switches to that group and shows it there, rather than opening it
-twice. Closing a group that holds unsaved files asks first (Save / Don't Save /
-Cancel). A relaunch puts each file back in its group, and saved templates and
-workspaces stay terminal-only. Files from a version before this come back in
-the active group, above its terminals. A group that holds files outlives its
-last terminal: its terminal area shows "No terminal in this pane" with a New
-Terminal button, and it comes back that way after a relaunch.
+on screen, where it is already open if it is open somewhere, else in the last
+editor pane you used. Switch groups and you see the other group's files and
+terminals; nothing has closed. Closing a group that holds unsaved files asks
+first (Save / Don't Save / Cancel). A relaunch puts back every pane of both
+kinds — the split sizes, the files in each pane, the active pane and the active
+group. Saved templates and workspaces stay terminal-only. Files from a version
+before this come back in the active group, above its terminals. A group that
+holds files keeps one terminal pane after its last terminal closes: it shows
+"No terminal in this pane" with a New Terminal button and no Close button, and
+it comes back that way after a relaunch. Unsaved edits are not kept across a
+restart (there is no hot exit): quitting with unsaved files asks first.
 
 **Search across the files.** `⇧⌘F`, or the magnifying glass in the activity
 bar, opens a search over the open folder — match case, whole word, regular

@@ -1544,6 +1544,31 @@ release build, Windows first, then macOS:
   the group stays, its terminal area shows "No terminal in this pane" with a
   New Terminal button, and it comes back that way after a relaunch.
 
+### V52 — editors and terminals in one layout (editor placement, part C)
+
+Covered under Node by tests/adversarial/workbench_*.test.js and in headless
+Chromium by workbench_drag_headless, workbench_focus_headless and
+editor_models_headless. Nothing there runs in WebView2 or WKWebView, with a
+real OpenCode/cmd session or the Korean IME. On a release build, each check on
+**Windows** (WebView2: cmd, OpenCode, Korean IME) **and on macOS** (WKWebView):
+
+1. **V52-1:** With only terminals, open a file from EXPLORER. It opens above the terminals at about 60/40 in the same area. There is no separate editor area and no Maximize Panel button.
+2. **V52-2:** Drag a file tab onto the left, right, top and bottom edge of a terminal pane. The indicator names the edge, and the drop splits there. The terminal keeps its scrollback and a running OpenCode/cmd session without a restart.
+3. **V52-3:** Drag a terminal tab onto each edge of an editor pane. Over the editor's tab strip, and over the middle of the other kind's pane, only edges are offered, and releasing on the strip changes nothing.
+4. **V52-4:** Drag a file tab onto another group's chip. The file moves there.
+5. **V52-5:** Type in a file, move it beside a terminal, then Ctrl+Z. The text is restored and the cursor is where it was. Korean IME composition in Monaco works after the move.
+6. **V52-6:** Click an editor, then a terminal. Exactly one accent line is shown. Ctrl+S saves the file when the editor is active. Ctrl+W in an editor closes the file tab (with a prompt if it is unsaved); on the last tab the pane goes; in a terminal, Ctrl+W closes the pane. Ctrl+F opens Monaco's find in an editor and the terminal find bar in a terminal. Ctrl+Alt+D (Windows) or ⌘D outside Monaco (macOS) splits the editor into an empty editor pane; ⌘D inside Monaco still adds the next match.
+7. **V52-7:** Focus Next/Previous Pane goes through editors and terminals, and typing goes to the focused one (nothing typed after landing on a file reaches the shell).
+8. **V52-8:** Toggle Pane Zoom on an editor hides every other pane. Unzoom restores the sizes. The keyboard stays in the zoomed pane. Two more checks, on both release builds: (a) Inside Monaco, press the zoom chord (Ctrl+Shift+Enter on Windows, ⌘⇧Enter on macOS). It inserts a line above and does not zoom: the native menu's accelerator must not take the key first. (b) With the keyboard in a file, run Toggle Pane Zoom from the command palette, then run it again. The file pane zooms and unzooms, and each time the keyboard stays in its editor: what you type goes into the file.
+9. **V52-9:** Resize the split between an editor and a terminal, then relaunch. Sizes, files per pane, the active pane and the active group come back.
+10. **V52-10:** In a small window (1024x640 or a half-screen snap) with 6 panes, no pane collapses, and every terminal keeps its strip and about 3 rows.
+11. **V52-11:** Toggle Terminal Panel hides the files too. Opening a file from EXPLORER while it is hidden shows the area again.
+12. **V52-12:** Move the Terminal view to the right side bar. The editors move with it and keep undo.
+13. **V52-13:** With an unsaved file in a group that is not on screen, Quit or close the window. One visible prompt appears, and Don't Save quits.
+14. **V52-14:** Upgrade from v0.32.0 with saved files and terminals. Everything comes back, with the files above the terminals.
+15. **V52-15:** A drag that starts on a tab and passes over Monaco text or an xterm selects no text and still lands.
+16. **V52-16:** (Q-C1, option A) In a group with files, close its last terminal. 'No terminal in this pane' with New Terminal remains, without a Close button.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

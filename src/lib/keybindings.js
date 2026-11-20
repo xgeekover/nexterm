@@ -110,7 +110,12 @@ export const COMMANDS = {
   },
   'close-pane': {
     title: 'Close Pane',
-    passThrough: (ctx) => ctx.isInMonacoEditor,
+    // Claimed inside Monaco too (the human's Q5, editor placement C2): there
+    // it closes the file tab the pane shows, asking first when it is
+    // unsaved — Monaco binds nothing to ⌘W / Ctrl+W, and stepping aside left
+    // the key to the browser. Which pane and which kind is decided in
+    // workbenchCommands.js (`closeActive`), the keyboard's place first, so
+    // the key pressed in a file never closes a shell.
     run: (ctx) => ctx.closeActivePane?.(),
   },
   'focus-next-pane': {
@@ -318,6 +323,10 @@ export const COMMANDS = {
     // shortcuts a user can now change in Settings. On macOS nothing is given
     // up — ⌘ never reaches the pty.
     overTerminal: true,
+    // Inside Monaco the key is Monaco's own find (editor placement C2,
+    // FC10). Anywhere else it is the active pane's: a file pane's Monaco
+    // find, a terminal pane's find bar (workbenchCommands.js `findActive`).
+    passThrough: (ctx) => ctx.isInMonacoEditor,
     run: (ctx) => ctx.openFind?.(),
   },
   'zoom-in': {

@@ -461,9 +461,18 @@ export function activePaneOf(group) {
   return group.activePaneId ?? null;
 }
 
-/** The kind of `group`'s one active pane: 'editor' or 'terminal'. */
+/**
+ * The kind of `group`'s one active pane: 'editor' or 'terminal'. 'editor'
+ * only when the group says so and its editor pane is the one `activePaneOf`
+ * names (C1 review M-02): compared with `activePaneId` instead, a group
+ * with no terminal active pane yet (`activePaneId` undefined, `activePaneOf`
+ * null) answered 'editor' with no editor pane in it.
+ */
 export function activeKindOf(group) {
-  return group && activePaneOf(group) !== group.activePaneId ? EDITOR_KIND : TERMINAL_KIND;
+  if (!group) return TERMINAL_KIND;
+  return group.activeKind === EDITOR_KIND && group.editorPaneId != null && activePaneOf(group) === group.editorPaneId
+    ? EDITOR_KIND
+    : TERMINAL_KIND;
 }
 
 // --- Zoom ----------------------------------------------------------------
@@ -5054,19 +5063,29 @@ export const useTerminalStore = create((set, get, api) => {
      * What "Swap Pane With…" offers from the active pane of a group (the one
      * on screen by default): `panes`, the other panes by the terminal each
      * shows and where it is (`swapChoices`), and `note`, why there are none
-     * to offer (`swapBlockedReason`) — a zoomed group offers none.
+     * to offer (`swapBlockedReason`) — a zoomed group offers none. `files`:
+     * the editor's tabs, which name the editor panes (this store does not
+     * hold them).
      */
-    swapTargets: (groupId = null) => {
+    swapTargets: (groupId = null, files = []) => {
       const state = get();
       const group = resolveGroup(state, groupId, null);
-      // From the active pane, which is a terminal pane, to panes of its kind
-      // only, placed and counted as the terminal view draws them (sibling B).
-      const note = swapBlockedReason(group, TERMINAL_KIND);
-      if (note) return { panes: [], note, fromPaneId: group?.activePaneId ?? null };
+      // From THE active pane, of either kind, to every other pane of the
+      // group, placed and counted as the one tree draws them (FC11). An
+      // editor pane is named by the file it shows, so the files are looked
+      // up beside the terminals.
+      const from = activePaneOf(group);
+      const note = swapBlockedReason(group);
+      if (note) return { panes: [], note, fromPaneId: from };
       return {
-        panes: swapChoices(projectTree(group.tree, TERMINAL_KIND), state.tabs, group.activePaneId),
+        // A file tab is named by its file name, as its chip is.
+        panes: swapChoices(
+          group.tree,
+          [...state.tabs, ...(Array.isArray(files) ? files : []).map((f) => ({ id: f.id, title: f.fileName ?? f.title }))],
+          from
+        ),
         note: null,
-        fromPaneId: group.activePaneId,
+        fromPaneId: from,
       };
     },
 
@@ -5074,7 +5093,9 @@ export const useTerminalStore = create((set, get, api) => {
     swapActivePane: (otherPaneId) => {
       const group = get().getActiveGroup();
       if (!group) return false;
-      return get().swapPanes(group.activePaneId, otherPaneId, group.id);
+      // From THE active pane, of either kind (FC11): its contents keep the
+      // keyboard's place, as `swapPanes` has the active pane follow them.
+      return get().swapPanes(activePaneOf(group), otherPaneId, group.id);
     },
 
     /**
@@ -5170,7 +5191,12 @@ export const useTerminalStore = create((set, get, api) => {
       // A pane's only tab already "is" its own pane.
       if (!source || source.tabIds.length <= 1) return null;
       get().dropTabOnPane(tabId, source.id, direction === 'vertical' ? 'bottom' : 'right', group.id);
-      return get().groups.find((g) => g.id === group.id)?.activePaneId ?? null;
+      // The pane the tab is in now, of whichever kind (FC11): reading
+      // `activePaneId` gave the terminal pane for a file moved out of its
+      // editor pane.
+      const after = get().groups.find((g) => g.id === group.id);
+      const moved = after ? leafHoldingTab(after.tree, tabId) : null;
+      return moved && moved.id !== source.id ? moved.id : null;
     },
 
     /**

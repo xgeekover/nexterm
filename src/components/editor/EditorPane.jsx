@@ -108,7 +108,7 @@ export function EditorPane({ node, canClose = false, showActiveLine = false, hea
           {/* The drop target is drawn at once; Monaco arrives inside it. */}
           <div data-editor-pane-body={paneId} className="relative flex-1 overflow-hidden">
             <Suspense fallback={null}>
-              <EditorBody activeTab={activeTab} />
+              <EditorBody activeTab={activeTab} paneId={paneId} />
             </Suspense>
             <PaneFrame active={showActiveLine} />
             {bodyOverlay}
@@ -117,7 +117,11 @@ export function EditorPane({ node, canClose = false, showActiveLine = false, hea
       ) : (
         <div
           data-editor-pane-body={paneId}
-          className="relative flex-1 flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none"
+          // Focusable from code only: Focus Next Pane landing here takes the
+          // keyboard out of the terminal it was in (workspaceFocus.js), so
+          // keys typed next reach no shell (C1 review M-01).
+          tabIndex={-1}
+          className="relative flex-1 flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none outline-none"
         >
           {/* "No file open" on its own is a statement, not help. The two ways
               to put a file here are named, and the shortcut is read from the

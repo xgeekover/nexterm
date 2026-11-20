@@ -53,6 +53,9 @@ const STAND_INS = {
     export const useSystemStore = create(() => ({ os: 'macos', defaultShell: '/bin/zsh' }));`,
   terminalStore: `
     import { create } from 'zustand';
+    // What workspaceFocus.js asks of a group (editor placement C2): terminal-only here.
+    export const activePaneOf = (group) => group?.activePaneId ?? null;
+    export const activeKindOf = () => 'terminal';
     export const useTerminalStore = create((set, get) => ({
       tabs: [],
       activeTabId: null,

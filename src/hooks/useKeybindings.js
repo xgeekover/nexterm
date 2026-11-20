@@ -10,6 +10,7 @@ import { useTerminalStore } from '../stores/terminalStore.js';
 import { useProjectCommandsStore } from '../stores/projectCommandsStore.js';
 import { modalHeld } from '../lib/modalLock.js';
 import { jumpToPrompt, terminalClaimsMarkKeys } from '../components/terminal/terminalRegistry.js';
+import { editorPaneOfElement, workbenchContext } from '../lib/workbenchCommands.js';
 
 /**
  * Wire the keyboard to the resolved keybindings.
@@ -103,6 +104,15 @@ export function useKeybindings() {
       terminalClaimsMarkKeys: () => terminalClaimsMarkKeys(useTerminalStore.getState().activeTabId),
       jumpToPrompt: (direction) => jumpToPrompt(useTerminalStore.getState().activeTabId, direction),
       stopTrustingProjectCommands: () => useProjectCommandsStore.getState().distrustCurrent(),
+      // Save, Close Pane, Split, Find, Focus Next/Previous Pane, Toggle Pane
+      // Zoom and Equalize Splits act on THE active pane, of either kind —
+      // the editor's when the key was pressed inside Monaco, that of the pane
+      // holding it — decided in one place with the menus
+      // (workbenchCommands.js, editor placement C2).
+      ...workbenchContext({
+        isInMonacoEditor: Boolean(e.target?.closest?.('.monaco-editor')),
+        editorPaneId: editorPaneOfElement(e.target),
+      }),
     });
 
     // Bubble phase, as before: xterm has already swallowed anything it turns

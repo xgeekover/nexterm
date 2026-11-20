@@ -27,7 +27,7 @@ import {
 import { useGitStore } from './gitStore.js';
 import { isViewShown, useSettingsStore } from './settingsStore.js';
 import { useSystemStore } from './systemStore.js';
-import { useTerminalStore, setEditorBridge, isWaitingEditorLeaf, newWorkbenchId } from './terminalStore.js';
+import { useTerminalStore, setEditorBridge, isWaitingEditorLeaf, newWorkbenchId, activePaneOf } from './terminalStore.js';
 import { EDITOR_KIND, leafKind, projectTree } from '../components/terminal/splitLayout.js';
 
 /** Folders whose read is in flight, so an impatient double-click reads once. */
@@ -1920,6 +1920,55 @@ export const useEditorStore = create((set, get) => ({
   splitEditorPane: (paneId, direction = 'horizontal') => workbench().splitEditorLeaf(paneId, direction),
 
   /**
+   * Move Editor to New Pane Right/Down (FC11): `tabId` split out of its
+   * editor pane into a new one beside it, as Move to New Pane does for a
+   * terminal. Returns the new pane's id, or null when it is alone already.
+   */
+  moveEditorTabToNewPane: (tabId, direction = 'horizontal') => workbench().moveTabToNewPane(tabId, direction),
+
+  /**
+   * Give editor pane `paneId`'s editor the keyboard (C1 review M-01): what
+   * Focus Next/Previous Pane, a zoom or a split hands to the pane it lands
+   * on. Parked in `pendingReveal` with no line, as `focusEditor` is, but for
+   * that pane only — the same file can be shown in two panes — so a pane
+   * that is still mounting (a zoom remounts it, Monaco may still be loading)
+   * takes it in `onMount`. `find`: open Monaco's find widget too (Find with
+   * the keyboard outside the editor, FC10). False when the pane shows no
+   * file, and nothing is parked.
+   *
+   * A line a link asked for (`openFileAt`) that no editor has taken yet is
+   * kept, never replaced (C2 review N-02): its editor takes the keyboard as
+   * it reveals the line. And the request goes as soon as the keyboard goes
+   * elsewhere (`dropPaneFocusRequest`): left, it took the keyboard from the
+   * shell the user had moved on to when that pane's Monaco mounted.
+   */
+  focusEditorPane: (paneId, { find = false } = {}) => {
+    const leaf = editorLeafById(paneId);
+    const tabId = leaf ? (leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0] ?? null) : null;
+    const tab = tabId ? get().tabs.find((t) => t.id === tabId) : null;
+    if (!tab) return false;
+    if (get().pendingReveal?.line != null) return true;
+    set({ pendingReveal: { filePath: tab.filePath, line: null, column: null, paneId, ...(find ? { find: true } : {}) } });
+    return true;
+  },
+
+  /**
+   * Drop a pane's focus request (`focusEditorPane`) that has not been taken,
+   * unless it is `keepPaneId`'s: THE active pane of the group on screen
+   * moved on (the terminalStore subscription below) — Focus Next, a click
+   * or the keyboard coming into a terminal, another group. A line asked for
+   * (`openFileAt`) and a plain `focusEditor` request are not a pane's, and
+   * stay. True when one went.
+   */
+  dropPaneFocusRequest: (keepPaneId = null) => {
+    const reveal = get().pendingReveal;
+    if (reveal?.paneId == null || reveal.line != null) return false;
+    if (keepPaneId != null && reveal.paneId === keepPaneId) return false;
+    set({ pendingReveal: null });
+    return true;
+  },
+
+  /**
    * Close an editor leaf. The sibling takes over the parent split. Every tab
    * it held is closed too, UNLESS another leaf still shows it.
    */
@@ -2183,6 +2232,13 @@ useEditorStore.subscribe((state, prev) => {
 useTerminalStore.subscribe((ts, prev) => {
   if (ts.groups === prev.groups && ts.activeGroupId === prev.activeGroupId) return;
   syncActiveTab();
+  // A pane's focus request waits for that pane's Monaco only while it is THE
+  // active pane of the group on screen (C2 review N-02): a click on a
+  // terminal, Focus Next, a group switch — and it goes.
+  if (useEditorStore.getState().pendingReveal?.paneId != null) {
+    const group = ts.groups?.find((g) => g.id === ts.activeGroupId);
+    useEditorStore.getState().dropPaneFocusRequest(activePaneOf(group));
+  }
   noteSessionChange(useEditorStore.getState());
 });
 

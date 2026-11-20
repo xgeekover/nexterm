@@ -40,8 +40,11 @@
      and LinkText and the slider keeps a CanvasText outline, inside the
      existing forced-colours block; nothing fades under either
      reduced-motion path.
-   - An editor pane among the terminals marks itself active as a terminal
-     pane does: ring-1 ring-inset ring-vsc-accent.
+   - Editor panes follow the PaneFrame rule (editor placement C): THE
+     active pane of a group, of either kind, draws the one active line —
+     PaneFrame's ring-1 ring-inset ring-vsc-accent (AttentionIndicators.jsx)
+     — and only while more than one pane is on screen and the group is not
+     zoomed. An editor pane draws no ring of its own.
    --------------------------------------------------------------------------- */
 :root {
   color-scheme: dark;

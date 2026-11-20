@@ -71,6 +71,9 @@ const STAND_INS = {
     }));`,
   terminalStore: `
     import { create } from 'zustand';
+    // What workspaceFocus.js asks of a group (editor placement C2): terminal-only here.
+    export const activePaneOf = (group) => group?.activePaneId ?? null;
+    export const activeKindOf = () => 'terminal';
     import { calls } from 'stand-in:calls';
     export const useTerminalStore = create(() => ({
       activeTabId: 't1',

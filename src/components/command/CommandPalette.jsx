@@ -36,7 +36,8 @@ import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
 import { commandHistory } from '../../lib/commandIndex.js';
 import { notifyTerminal } from '../../lib/terminalNotice.js';
-import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { focusActivePane, focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { moveEditorToNewPane, toggleZoomActive } from '../../lib/workbenchCommands.js';
 import { swallowRepeatsOf } from '../../lib/heldKeys.js';
 import { handDialogReturn } from '../../lib/dialogReturn.js';
 
@@ -208,7 +209,6 @@ export function CommandPalette() {
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
-  const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
   const goToLatestUnread = useTerminalStore((s) => s.goToLatestUnread);
   const markAllNotificationsRead = useTerminalStore((s) => s.markAllNotificationsRead);
   const writeRaw = useTerminalStore((s) => s.writeRaw);
@@ -306,7 +306,7 @@ export function CommandPalette() {
   const swap = useMemo(
     () =>
       isOpen && paletteMode === 'swap-pane'
-        ? useTerminalStore.getState().swapTargets?.() ?? { panes: [], note: null }
+        ? useTerminalStore.getState().swapTargets?.(null, useEditorStore.getState().tabs) ?? { panes: [], note: null }
         : null,
     [isOpen, paletteMode]
   );
@@ -406,10 +406,14 @@ export function CommandPalette() {
       return;
     }
     if (item.type === 'pane') {
-      // The active pane's terminals trade places with this pane's; the
-      // keyboard follows the terminal it was in (see `swapPanes`).
-      swapActivePane?.(item.paneId);
+      // The active pane's contents trade places with this pane's, and THE
+      // active pane follows them (see `swapPanes`). The palette has already
+      // given the keyboard back to what had it, which a swap across kinds
+      // remounts — a file pane's Monaco — so the keyboard is handed on to
+      // the active pane in its new place (`focusActivePane`, C2 review S-01).
+      const swapped = swapActivePane?.(item.paneId);
       setActiveView('terminal');
+      if (swapped) focusActivePane();
       return;
     }
     // A project or user command opens its run dialog, which shows the exact
@@ -437,9 +441,13 @@ export function CommandPalette() {
         await useTerminalStore.getState().jumpToPrompt?.(item.command === 'terminal_previous_prompt' ? 'previous' : 'next');
         return;
       case 'toggle_pane_zoom':
-        // The active pane of the group on screen, as the shortcut does.
-        togglePaneZoom?.();
+        // THE active pane of the group on screen, as the shortcut and the
+        // menu do (`toggleZoomActive`): the zoom remounts a file pane's
+        // Monaco, the one the palette has just given the keyboard back to,
+        // so the keyboard is handed on to the pane zoomed or unzoomed (C2
+        // review S-01).
         setActiveView('terminal');
+        toggleZoomActive();
         return;
       case 'go_to_unread_notification':
         // As the shortcut does — the Terminal view brought on screen wherever
@@ -448,6 +456,17 @@ export function CommandPalette() {
         return;
       case 'mark_notifications_read':
         markAllNotificationsRead?.();
+        return;
+      case 'move_editor_new_pane_right':
+      case 'move_editor_new_pane_down':
+        // The file the active editor pane shows (else the editor's active
+        // tab), split out beside it (FC11). The palette has already given the
+        // keyboard back to what had it — the old pane's editor, or a
+        // terminal — so the move hands it on to the new pane, THE active one
+        // now (`focusActivePane`, C2 review N-01), as the keys and a file
+        // chip's menu do.
+        setActiveView('terminal');
+        moveEditorToNewPane(item.command === 'move_editor_new_pane_down' ? 'vertical' : 'horizontal');
         return;
       case 'equalize_splits':
         // The group on screen, nested splits included.

@@ -20,8 +20,9 @@ import {
 
 // The pane around the editor — its strip, breadcrumb, frame and drop target —
 // is EditorPane.jsx, drawn by the workbench (editor placement, sibling C).
-// The press rule lives with it and is named here too.
-export { pressActivatesGroup } from './EditorPane.jsx';
+// Nothing is re-exported from it here: this module is the lazy Monaco chunk,
+// and an eager module importing anything from it would pull Monaco into the
+// first chunk (C1 review M-05; WV-06 forbids any static import of it).
 
 // The app is dark-only (light mode was removed from settingsStore), so the
 // Monaco theme is a fixed constant instead of a live settingsStore read.
@@ -90,7 +91,7 @@ function saveHeldViewState(ref) {
  * The Monaco editor of one editor pane, for `activeTab`, the tab the pane
  * shows. Drawn inside the pane's `data-editor-pane-body` box by EditorPane.jsx.
  */
-export function EditorBody({ activeTab }) {
+export function EditorBody({ activeTab, paneId = null }) {
   const monacoOptions = useMonacoOptions();
   const editBuffer = useEditorStore((s) => s.editBuffer);
   const pendingReveal = useEditorStore((s) => s.pendingReveal);
@@ -112,13 +113,22 @@ export function EditorBody({ activeTab }) {
   const applyPendingReveal = useCallback(
     (editor, filePath) => {
       const reveal = useEditorStore.getState().pendingReveal;
-      if (!editor || !reveal || reveal.filePath !== filePath) return;
+      if (!editor || !reveal) return;
+      // A request for one pane (`focusEditorPane`) is that pane's alone, for
+      // whichever of its files it shows by now (C2 review N-02): kept for
+      // the file it showed when asked, it took the keyboard later, when that
+      // file came back. Any other request is the file's.
+      if (reveal.paneId != null ? reveal.paneId !== paneId : reveal.filePath !== filePath) return;
       // Only the keyboard was asked for (`focusEditor`): the caret stays.
       if (reveal.line == null) {
         editor.focus();
+        // Find with the keyboard outside the editor (FC10): Monaco's own.
+        if (reveal.find) editor.getAction?.('actions.find')?.run?.();
         clearReveal();
         return;
       }
+      // A line is the file's, in whichever pane asked.
+      if (reveal.filePath !== filePath) return;
       const lineCount = editor.getModel()?.getLineCount?.() ?? reveal.line;
       // A stack trace can name a line past the end of a file that has since
       // been edited. Land on the last line rather than refusing to move.
@@ -128,7 +138,7 @@ export function EditorBody({ activeTab }) {
       editor.focus();
       clearReveal();
     },
-    [clearReveal]
+    [clearReveal, paneId]
   );
 
   const language = activeTab?.language || 'javascript';

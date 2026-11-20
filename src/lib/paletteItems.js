@@ -99,7 +99,7 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       id: 'cmd-swap-pane',
       command: 'swap_pane',
       title: 'Swap Pane With…',
-      subtitle: "Trade the active pane's terminals with another pane of this group",
+      subtitle: "Trade the active pane's terminals or files with another pane of this group",
       hint: hint('swap-pane'),
       // Picked, it does not run: the palette turns into the list of panes
       // to swap with (mode 'swap-pane'), keeping what had the keyboard.
@@ -157,6 +157,22 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
     },
     // No hint: nothing is bound to Save All. It used to show Save's chord,
     // which writes the active tab and leaves every other one unsaved.
+    // The editor counterpart of a terminal's Move to New Pane (FC11): the
+    // file the active editor pane shows, alone in a new pane beside it.
+    {
+      type: 'command',
+      id: 'cmd-move-editor-new-pane-right',
+      command: 'move_editor_new_pane_right',
+      title: 'Move Editor to New Pane Right',
+      subtitle: 'Split the open file out of its pane into a new pane on the right',
+    },
+    {
+      type: 'command',
+      id: 'cmd-move-editor-new-pane-down',
+      command: 'move_editor_new_pane_down',
+      title: 'Move Editor to New Pane Down',
+      subtitle: 'Split the open file out of its pane into a new pane below',
+    },
     {
       type: 'command',
       id: 'cmd-save-all',
@@ -534,7 +550,10 @@ export function buildPaletteGroups({
         id: `pane-${pane.paneId}`,
         paneId: pane.paneId,
         title: pane.title,
-        subtitle: [pane.place, pane.terminals > 1 ? `${pane.terminals} terminals` : ''].filter(Boolean).join(', '),
+        // An editor pane counts files, not terminals (FC11).
+        subtitle: [pane.place, pane.terminals > 1 ? `${pane.terminals} ${pane.kind === 'editor' ? 'files' : 'terminals'}` : '']
+          .filter(Boolean)
+          .join(', '),
         hint: `Pane ${pane.index + 1} of ${pane.count}`,
       }));
     if (rows.length === 0 && !panesNote) return [];
