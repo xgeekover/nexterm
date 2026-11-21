@@ -131,9 +131,11 @@ const SECTIONS = [
 /**
  * Every row the Settings window can render, grouped by section. Exported for
  * its tests. `keepAwake` is the backend's keep-awake support answer
- * (`{ supported, method }`), or null while it is not known.
+ * (`{ supported, method }`), or null while it is not known. `mac` adds the
+ * rows that exist on macOS only (⌘ editing keys, Option as Meta); it is the
+ * platform the window runs on unless a test says otherwise.
  */
-export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake = null) {
+export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake = null, { mac = isMac } = {}) {
   return [
     // ---- Text Editor ----
     {
@@ -199,6 +201,18 @@ export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake =
         ? 'Delete in the Explorer moves files and folders to the Recycle Bin, where they can be restored. On a drive that has none — a network drive, a USB stick — you are asked again before anything is deleted permanently. Disabled: Delete removes them permanently, after one question.'
         : 'Delete in the Explorer moves files and folders to the Trash, where they can be restored. Where there is none — some network and USB drives — you are asked again before anything is deleted permanently. Disabled: Delete removes them permanently, after one question.',
       control: 'checkbox',
+    },
+    {
+      id: 'externalEditorCommand',
+      section: 'files',
+      key: 'externalEditorCommand',
+      settingKey: 'files.externalEditorCommand',
+      title: 'External Editor',
+      description:
+        'A program and its arguments, for example code or subl -w; run without a shell, with the path added as the last argument. Adds Open in External Editor to the Explorer menu for files, folders and the open folder. A shell, an app that opens files in their default app (open, xdg-open, start, explorer) or a wrapper that runs its arguments (env, xargs, wsl) is refused. That guards against a mistake and is not a sandbox: whatever else you set runs with the path, and interpreters such as python or node are not refused. Empty: no such item, and nothing is opened with the default app.',
+      control: 'text',
+      // Blank means none, not a default editor: the placeholder says so.
+      placeholder: 'Not set',
     },
     // ---- Terminal ----
     {
@@ -654,6 +668,42 @@ export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake =
         'Lets a full-screen program such as vim, htop or tmux use the mouse. A program in the scrollback, like Claude Code, never gets it, so a drag there always selects text. Inside a full-screen program, hold Shift while dragging to select (on macOS ⌥ works too).',
       control: 'checkbox',
     },
+    // ---- macOS keyboard (bundle 2, A6 and A7): rows that exist on macOS only ----
+    ...(mac
+      ? [
+          {
+            id: 'terminalMacEditingKeys',
+            section: 'terminal',
+            key: 'terminalMacEditingKeys',
+            settingKey: 'terminal.integrated.macEditingKeys',
+            title: 'macOS Text-Editing Keys',
+            description:
+              '⌘← and ⌘→ go to the start and the end of the line, ⌘Backspace deletes to its start and ⌘Delete (Fn+Backspace) to its end — sent as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K, which shells and most line editors read that way. Only on the normal screen: in a full-screen program such as vim, htop or less the keys are its own, as before, and so they are once a program turns modifyOtherKeys on. While a password prompt is up only ⌘Backspace works, clearing what was typed; the other three would type a character into the password. Disabled: the keys are the terminal\'s, as before.',
+            control: 'checkbox',
+          },
+          {
+            id: 'terminalOptionAsMeta',
+            section: 'terminal',
+            key: 'terminalOptionAsMeta',
+            settingKey: 'terminal.integrated.macOptionIsMeta',
+            title: 'Use Option as Meta',
+            description:
+              '⌥ and a key send Esc and that key, as Meta does: ⌥B and ⌥F move a word in zsh and bash, and Emacs gets its Meta key. The trade: while this is on, ⌥ no longer types ⌥-characters — ™, €, and on many non-US keyboard layouts @ [ ] { } | ~ — and no longer starts dead keys such as ⌥E for é. Both ⌥ keys act alike. ⌥-drag still selects text, ⌥Enter still sends Esc Enter, and ⌥← / ⌥→ still move a word, either way. Applies to every open terminal at once.',
+            control: 'checkbox',
+          },
+        ]
+      : []),
+    // ---- OSC 52 (bundle 2, A8): a program putting text on the clipboard ----
+    {
+      id: 'terminalOsc52Write',
+      section: 'terminal',
+      key: 'terminalOsc52Write',
+      settingKey: 'terminal.integrated.osc52Write',
+      title: 'Let Programs Set the Clipboard (OSC 52)',
+      description:
+        'Lets a program in a terminal — tmux, vim, Neovim, a shell over ssh — copy text to your clipboard with OSC 52. Off by default, because anything that can print to a terminal could then set the clipboard, a file shown with cat or a server over ssh included, and your next paste would run what it put there. Writes only: a program never reads the clipboard and never clears it, more than 128 KiB is refused whole, and output kept from before a terminal was shown is ignored. While this is off, the first copy a terminal tries prints one notice saying so. Nothing a program copies is logged.',
+      control: 'checkbox',
+    },
     {
       id: 'terminalUserCommands',
       section: 'terminal',
@@ -937,6 +987,9 @@ export function SettingsWindow() {
   const terminalOpencodeMini = useSettingsStore((s) => s.terminalOpencodeMini);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
+  const terminalMacEditingKeys = useSettingsStore((s) => s.terminalMacEditingKeys);
+  const terminalOptionAsMeta = useSettingsStore((s) => s.terminalOptionAsMeta);
+  const terminalOsc52Write = useSettingsStore((s) => s.terminalOsc52Write);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
   const terminalMultiLinePasteWarning = useSettingsStore((s) => s.terminalMultiLinePasteWarning);
   const terminalAutoReplyBatchJob = useSettingsStore((s) => s.terminalAutoReplyBatchJob);
@@ -968,6 +1021,7 @@ export function SettingsWindow() {
   const editorMinimap = useSettingsStore((s) => s.editorMinimap);
   const editorRestoreTabs = useSettingsStore((s) => s.editorRestoreTabs);
   const filesEnableTrash = useSettingsStore((s) => s.filesEnableTrash);
+  const externalEditorCommand = useSettingsStore((s) => s.externalEditorCommand);
   const reducedMotion = useSettingsStore((s) => s.reducedMotion);
 
   const values = {
@@ -987,6 +1041,9 @@ export function SettingsWindow() {
     terminalOpencodeMini,
     terminalCopyOnSelect,
     terminalMouseReporting,
+    terminalMacEditingKeys,
+    terminalOptionAsMeta,
+    terminalOsc52Write,
     terminalRightClick,
     terminalMultiLinePasteWarning,
     terminalAutoReplyBatchJob,
@@ -1018,6 +1075,7 @@ export function SettingsWindow() {
     editorMinimap,
     editorRestoreTabs,
     filesEnableTrash,
+    externalEditorCommand,
     reducedMotion,
   };
 

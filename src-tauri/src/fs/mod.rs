@@ -1,4 +1,5 @@
 pub mod drive;
+pub mod external_editor;
 pub mod git;
 pub mod project_commands;
 pub mod watcher;

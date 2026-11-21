@@ -52,6 +52,30 @@ function promptKeysClaimed(ctx) {
   return Boolean(ctx?.isInTerminal) && Boolean(ctx?.terminalClaimsMarkKeys?.());
 }
 
+/**
+ * Whether the Ctrl+Tab switcher may open (A5-3): not over a dialog, a menu
+ * that took the keyboard, or the command palette — as `go-to-unread-
+ * notification` — since the open switcher takes Escape, Enter and the arrows
+ * for itself. Asked only when the chord matches.
+ */
+function recentSwitchAllowed(ctx) {
+  return !ctx?.isDialogOpen?.() && !ctx?.isMenuOpen?.() && !ctx?.isCommandPaletteOpen;
+}
+
+/** Go to Tab 1 to 8 (A5-2), one command each; see `go-to-last-tab` below. */
+function goToTabCommands() {
+  const commands = {};
+  for (let n = 1; n <= 8; n += 1) {
+    commands[`go-to-tab-${n}`] = {
+      title: `Go to Tab ${n}`,
+      menuId: null,
+      overTerminal: true,
+      run: (ctx) => ctx.goToTab?.(n),
+    };
+  }
+  return commands;
+}
+
 export const COMMANDS = {
   'quick-open': {
     title: 'Go to File…',
@@ -127,6 +151,79 @@ export const COMMANDS = {
     title: 'Focus Previous Pane',
     menuId: null,
     run: (ctx) => ctx.focusNextPane?.(-1),
+  },
+  // The tabs of THE active pane (Bundle 2, A5-1 and A5-2), in its tab
+  // strip's order (workbenchCommands.js `switchTabActive`), the keyboard
+  // landing in the terminal switched to. Nothing happens in an editor pane.
+  // Keyboard-only, as the pane-focus pair are: menu.rs has no entry for
+  // them. Window chrome, so claimed over a focused terminal — over vim, tmux
+  // and OpenCode too, as GNOME Terminal and VS Code do. ⌘ never reaches the
+  // pty; the one trade is Ctrl+PageUp/Down, which xterm would send as
+  // `CSI 5;5~` / `CSI 6;5~` and vim reads as its own tab pages (its `gt` and
+  // `gT` stay vim's). Settings can move either. KB-11 holds the list.
+  'next-tab': {
+    title: 'Next Tab',
+    menuId: null,
+    overTerminal: true,
+    // Inside Monaco the key is the editor's: off macOS its suggest list pages
+    // with Ctrl+PageUp/Down, and a file pane has no terminal tabs to switch.
+    passThrough: (ctx) => ctx.isInMonacoEditor,
+    run: (ctx) => ctx.goToTab?.('next'),
+  },
+  'previous-tab': {
+    title: 'Previous Tab',
+    menuId: null,
+    overTerminal: true,
+    passThrough: (ctx) => ctx.isInMonacoEditor,
+    run: (ctx) => ctx.goToTab?.('previous'),
+  },
+  // The Nth tab of the active pane; a number past its last tab does nothing.
+  ...goToTabCommands(),
+  'go-to-last-tab': {
+    title: 'Go to Last Tab',
+    menuId: null,
+    overTerminal: true,
+    run: (ctx) => ctx.goToTab?.('last'),
+  },
+  // Reopen Closed Terminal (A5-4): the terminal closed last comes back as a
+  // fresh shell, with its name, folder and shell, where it was
+  // (closedTerminals.js). No scrollback, no agent, nothing typed; memory
+  // only. Claimed over a focused terminal, which is where a tab is closed
+  // from: ⌘⇧T never reaches the pty, and off macOS Ctrl+Shift+T is not a
+  // bare Ctrl+letter — xterm sends nothing for it, the reasoning of
+  // `go-to-unread-notification` — so nothing is taken from a shell either
+  // way. Ctrl+T itself stays the shell's (RC-07). KB-11 holds the list.
+  'reopen-closed-terminal': {
+    title: 'Reopen Closed Terminal',
+    menuId: null,
+    overTerminal: true,
+    run: (ctx) => ctx.reopenClosedTerminal?.(),
+  },
+  // Ctrl+Tab and Ctrl+Shift+Tab (A5-3): the terminals most recently used,
+  // across every group, walked while Ctrl is held and picked when it comes
+  // up (tabSwitcherStore.js). Literal Ctrl on every platform, ⌘ included:
+  // Terminal.app's and Safari's chord as much as VS Code's, Windows
+  // Terminal's and the browsers'. Claimed over a focused terminal, and the
+  // shell gives up nothing: xterm sends Ctrl+Tab as a plain Tab (HT) and
+  // Ctrl+Shift+Tab as Shift+Tab (`CSI Z`), the keys those still are. Pressed
+  // again while the switcher is open, they move its selection. Not over a
+  // dialog, a menu that took the keyboard or the command palette
+  // (`recentSwitchAllowed`): the switcher answers Escape, Enter and the
+  // arrows itself, and would take them from what is on top. KB-11 holds the
+  // list.
+  'switch-recent-tab': {
+    title: 'Switch to Recent Terminal',
+    menuId: null,
+    overTerminal: true,
+    enabled: (ctx) => recentSwitchAllowed(ctx),
+    run: (ctx) => ctx.switchRecentTab?.(1, ctx.heldModifiers),
+  },
+  'switch-recent-tab-back': {
+    title: 'Switch to Recent Terminal (Backwards)',
+    menuId: null,
+    overTerminal: true,
+    enabled: (ctx) => recentSwitchAllowed(ctx),
+    run: (ctx) => ctx.switchRecentTab?.(-1, ctx.heldModifiers),
   },
   'toggle-pane-zoom': {
     title: 'Toggle Pane Zoom',
@@ -431,6 +528,34 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'close-pane', key: 'mod+w' },
   { command: 'focus-next-pane', key: 'mod+alt+right' },
   { command: 'focus-previous-pane', key: 'mod+alt+left' },
+  // Next/Previous Tab: Ctrl+PageDown/PageUp on every platform — GNOME
+  // Terminal's, VS Code's and the browsers' — and on macOS ⌘⇧] / ⌘⇧[ as well,
+  // Terminal.app's and iTerm2's. Over a terminal, Ctrl+PageUp/Down are then
+  // the app's rather than vim's tab-page keys (see the commands).
+  //
+  // `macOnly`: a default spelled with ⌘ for macOS alone. Off macOS its ⌘ is
+  // the Windows or Super key, which the desktop mostly keeps for itself
+  // (Win+1 starts the first taskbar app on Windows, Super+1 the first
+  // favourite in GNOME), so the binding is not in force there
+  // (`bindingMatches`). A chord a user records with that key is theirs, and
+  // works.
+  { command: 'next-tab', key: 'ctrl+pagedown' },
+  { command: 'next-tab', key: 'cmd+shift+bracketright', macOnly: true },
+  { command: 'previous-tab', key: 'ctrl+pageup' },
+  { command: 'previous-tab', key: 'cmd+shift+bracketleft', macOnly: true },
+  // Go to Tab 1-8 and the last tab, ⌘9 as in browsers and VS Code: macOS
+  // alone. Off macOS there is no default. Alt+1..9 is readline's
+  // digit-argument (ESC 1..9) and irssi's and weechat's window keys, and
+  // Ctrl+Alt+digit is AltGr on Windows layouts — German AltGr+7..0 types
+  // { [ ] }. A user can bind their own in Settings.
+  ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({ command: `go-to-tab-${n}`, key: `cmd+${n}`, macOnly: true })),
+  { command: 'go-to-last-tab', key: 'cmd+9', macOnly: true },
+  // The browsers' and VS Code's Reopen Closed Tab: ⌘⇧T, Ctrl+Shift+T off
+  // macOS (a `mod` chord, so in force on every platform).
+  { command: 'reopen-closed-terminal', key: 'mod+shift+t' },
+  // The recent-terminals switcher: literal Ctrl everywhere, macOS too.
+  { command: 'switch-recent-tab', key: 'ctrl+tab' },
+  { command: 'switch-recent-tab-back', key: 'ctrl+shift+tab' },
   // iTerm2's own chord for "Maximize Active Pane" (⌘⇧Enter), and Ctrl+Shift+
   // Enter off macOS, where nothing in a shell reads it: xterm sends it as the
   // Enter key. tmux's `Prefix z` is a prefix NexTerm does not have.
@@ -562,7 +687,8 @@ export function resolveKeybindings(overrides = {}) {
 
   for (const entry of DEFAULT_KEYBINDINGS) {
     if (!byCommand.has(entry.command)) byCommand.set(entry.command, []);
-    byCommand.get(entry.command).push(entry.key);
+    // A macOS-only default keeps saying so; a user's chord never does.
+    byCommand.get(entry.command).push(entry.macOnly ? { key: entry.key, macOnly: true } : entry.key);
   }
 
   for (const [command, value] of Object.entries(overrides || {})) {
@@ -604,12 +730,26 @@ export function resolveKeybindings(overrides = {}) {
 
   const bindings = [];
   for (const [command, keys] of byCommand) {
-    for (const key of keys) {
+    for (const item of keys) {
+      const key = typeof item === 'string' ? item : item.key;
       const chord = parseChord(key);
-      if (chord) bindings.push({ command, key, chord });
+      if (!chord) continue;
+      bindings.push(item.macOnly ? { command, key, chord, macOnly: true } : { command, key, chord });
     }
   }
   return { bindings, problems };
+}
+
+/**
+ * Whether `e` presses `binding`: its chord (`chordMatches`), and for a
+ * default spelled with ⌘ for macOS alone (`macOnly`, DEFAULT_KEYBINDINGS),
+ * only where ⌘ is the app modifier. Off macOS the app modifier is Ctrl,
+ * which such a chord leaves up, so `isMod` is false there and Win+1 runs
+ * nothing. `findBinding` and `findConflicts` both ask this, so what the
+ * keyboard runs and what Settings reports cannot come apart.
+ */
+function bindingMatches(binding, e, isMod) {
+  return chordMatches(binding.chord, e, isMod) && (!binding.macOnly || Boolean(isMod));
 }
 
 /**
@@ -658,12 +798,17 @@ function pressOf(chord, isMac) {
  */
 export function findConflicts(bindings, { isMac = false, isWindows = false } = {}) {
   const conflicts = [];
-  // A command in force on Windows alone takes no keypress anywhere else.
-  const inForce = isWindows ? bindings : bindings.filter((b) => !COMMANDS[b.command]?.windowsOnly);
+  // A command in force on Windows alone takes no keypress anywhere else, and
+  // a default spelled with ⌘ for macOS alone (`macOnly`) none off macOS: it
+  // never ran there, so a chord of the user's on the same keys takes nothing
+  // from it — Win+1 recorded for Split Right leaves Go to Tab 1 as it was.
+  const inForce = bindings.filter(
+    (b) => (isWindows || !COMMANDS[b.command]?.windowsOnly) && (isMac || !b.macOnly)
+  );
   for (const binding of inForce) {
     const press = pressOf(binding.chord, isMac);
     const isMod = isMac ? press.metaKey : press.ctrlKey;
-    const first = inForce.find((b) => chordMatches(b.chord, press, isMod));
+    const first = inForce.find((b) => bindingMatches(b, press, isMod));
     if (!first || first.command === binding.command) continue;
     conflicts.push({
       key: binding.key,
@@ -712,7 +857,7 @@ export function findBinding(e, ctx) {
   const bindings = ctx?.bindings ?? DEFAULT_RESOLVED;
   const modal = typeof ctx?.modalOpen === 'function' ? ctx.modalOpen() : Boolean(ctx?.modalOpen);
   for (const binding of bindings) {
-    if (!chordMatches(binding.chord, e, ctx?.isMod)) continue;
+    if (!bindingMatches(binding, e, ctx?.isMod)) continue;
     const spec = COMMANDS[binding.command];
     if (!spec) continue;
     if (modal && !spec.guard) continue;
@@ -815,9 +960,18 @@ export function menuIdOf(binding) {
   return spec.menuId === undefined ? id : spec.menuId;
 }
 
-/** Every chord in force for a command, for a menu label or a settings row. */
-export function keysFor(command, bindings = DEFAULT_RESOLVED) {
-  return bindings.filter((b) => b.command === command).map((b) => b.key);
+/**
+ * Every chord in force for a command, for a menu label or a settings row.
+ *
+ * Given `isMac`, the chords in force on that platform only: off macOS a
+ * default spelled with ⌘ for macOS alone (`macOnly`) is left out, so a
+ * Windows or Linux settings row does not show ⌘1 for Go to Tab 1, a chord
+ * that does nothing there (`bindingMatches`). Without `isMac` every chord is
+ * listed, for a caller that picks its own (`shortcutLabel`, the menus).
+ */
+export function keysFor(command, bindings = DEFAULT_RESOLVED, { isMac } = {}) {
+  const offMac = isMac === false;
+  return bindings.filter((b) => b.command === command && !(offMac && b.macOnly)).map((b) => b.key);
 }
 
 /**

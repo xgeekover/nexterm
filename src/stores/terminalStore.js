@@ -27,6 +27,7 @@ import {
 import { isWindows } from '../lib/platform.js';
 import { isWindows10Conpty, windowsPtyFor, withoutVerbatimPrefix } from '../lib/terminalCompat.js';
 import { resolveStartDir, splitStartFor, startableCwd } from '../lib/terminalCwd.js';
+import { createClosedTerminals, reopenPlacement } from '../lib/closedTerminals.js';
 import { createBatchJobReplies } from '../lib/batchJobReply.js';
 import { shellKindFor } from '../lib/dropPaths.js';
 import { shellPathOf } from '../lib/terminalFileDrop.js';
@@ -1870,6 +1871,26 @@ const closingTabs = new Set();
  */
 export function isTabClosing(tabId) {
   return closingTabs.has(tabId);
+}
+
+/**
+ * The terminals the user closed last, for Reopen Closed Terminal (A5-4,
+ * closedTerminals.js): memory only, never persisted, no scrollback. Fed by
+ * the close paths a user takes — `closeTab` (and so Close Others and Close
+ * to the Right), `closePane` and `closeGroup` — while the tab still stands
+ * in the layout. A restart (`restartShell`), the start-up reaping and a
+ * restore or workspace load that replaces the layout put nothing here.
+ */
+const closedTerminals = createClosedTerminals();
+
+/** What Reopen Closed Terminal would bring back, newest first (a copy, for tests). */
+export function __closedTerminals() {
+  return closedTerminals.list();
+}
+
+/** Forget every closed terminal (tests start from an empty stack). */
+export function __forgetClosedTerminals() {
+  closedTerminals.clear();
 }
 
 /**
@@ -3755,6 +3776,38 @@ export const useTerminalStore = create((set, get, api) => {
       )
     );
 
+  /**
+   * Put the terminals `tabIds` on the Reopen Closed Terminal stack (A5-4),
+   * read off the layout as it stands: the close paths call this BEFORE they
+   * change it, as `killTabIfOrphaned` runs only once a tab has left every
+   * pane. Its name if the user gave it one, its folder as a shell can start
+   * there (`startableCwd`, as `duplicateTab` reads it), the shell it ran and
+   * its group, pane and slot; nothing else of it. One already on its way out
+   * is not put there twice. Recorded last first, so the tabs of one closed
+   * pane or group come back in their strip order.
+   */
+  const rememberClosed = (tabIds) => {
+    const state = get();
+    const os = useSystemStore.getState().os;
+    const entries = [];
+    for (const tabId of tabIds) {
+      if (closingTabs.has(tabId)) continue;
+      const tab = state.tabs.find((t) => t.id === tabId);
+      if (!tab) continue;
+      const group = groupOfTab(state, tabId);
+      const pane = group ? leafHoldingTab(group.tree, tabId) : null;
+      entries.push({
+        title: isDefaultTitle(tab.title) ? null : tab.title,
+        cwd: startableCwd(tab, os) || null,
+        shell: tab.shell || null,
+        groupId: group?.id ?? null,
+        paneId: pane?.id ?? null,
+        index: pane ? pane.tabIds.indexOf(tabId) : null,
+      });
+    }
+    for (const entry of entries.reverse()) closedTerminals.record(entry);
+  };
+
   /** Kill a tab's PTY and drop it, unless some pane in some group still shows it. */
   const killTabIfOrphaned = async (tabId) => {
     if (groupOfTab(get(), tabId)) return;
@@ -4995,6 +5048,9 @@ export const useTerminalStore = create((set, get, api) => {
       const owned = leaves.filter((l) => !isEditorLeaf(l)).flatMap((l) => l.tabIds);
       const files = leaves.filter(isEditorLeaf).flatMap((l) => l.tabIds);
       for (const leaf of leaves) waitingEditorLeaves.delete(leaf.id);
+      // Its terminals can be reopened (A5-4): taken now, while they still
+      // stand in the group; their shells die below, once they have left it.
+      rememberClosed(owned);
 
       set((state) => {
         const idx = state.groups.findIndex((g) => g.id === groupId);
@@ -5721,6 +5777,9 @@ export const useTerminalStore = create((set, get, api) => {
       const closingTabIds = [...closing.tabIds];
       const editorPane = isEditorLeaf(closing);
       if (editorPane) waitingEditorLeaves.delete(paneId);
+      // Its terminals can be reopened (A5-4): taken before the pane goes, as
+      // `killTabIfOrphaned` sees them only after.
+      else rememberClosed(closingTabIds);
 
       set((state) => {
         const idx = state.groups.findIndex((g) => g.id === group.id);
@@ -6859,6 +6918,50 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
+     * Reopen Closed Terminal (A5-4): the terminal closed last comes back as
+     * a NEW shell — with its name if the user gave it one (else a fresh
+     * default one), in its folder and with its shell, in its old pane at its
+     * old slot if that pane is still there, else in the active terminal pane
+     * of its old group, else where a new terminal goes (`createTab`). Made
+     * the active tab. Not strict about the folder: one that is gone falls
+     * back as `duplicateTab`'s does. Nothing comes back from its scrollback,
+     * no agent is started (AGENT SESSIONS resumes a conversation) and
+     * nothing is typed. The entry is taken before the shell is awaited, so
+     * two presses reopen two terminals; one whose shell cannot start is not
+     * kept. Null when there is nothing to reopen.
+     */
+    reopenClosedTerminal: async () => {
+      const entry = closedTerminals.take();
+      if (!entry) return null;
+      const newTab = await spawnTab(entry.title, entry.cwd, entry.shell);
+      if (!newTab) return null;
+
+      set((state) => {
+        const spot = reopenPlacement(entry, state.groups, { isTerminalLeaf: (leaf) => !isEditorLeaf(leaf) });
+        const group = spot ? state.groups.find((g) => g.id === spot.groupId) : resolveGroup(state, null, null);
+        if (!group) return {};
+        const targetPaneId = spot ? spot.paneId : group.activePaneId;
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) => {
+            let tree = addTabToPane(g.tree, targetPaneId, newTab.id);
+            // The pane it landed in: `addTabToPane` picks another terminal
+            // pane when the one named is not one.
+            const holder = leafHoldingTab(tree, newTab.id);
+            if (holder && spot?.index != null) {
+              const tabIds = moveToSlot(holder.tabIds, newTab.id, spot.index);
+              if (tabIds) tree = replaceNode(tree, holder.id, (n) => ({ ...n, tabIds }));
+            }
+            return { ...g, tree, ...terminalFocus(holder?.id ?? targetPaneId) };
+          }),
+          activeGroupId: group.id,
+          activeTabId: newTab.id,
+        });
+      });
+
+      return newTab;
+    },
+
+    /**
      * Show a terminal. Because only one group is on screen at a time, this
      * also switches to the group that owns the tab and focuses the pane
      * holding it.
@@ -6892,6 +6995,9 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       if (!tab) return;
 
+      // Reopen Closed Terminal (A5-4) brings back a fresh shell in its place;
+      // taken before `settle` drops it from the layout.
+      rememberClosed([tabId]);
       closingTabs.add(tabId);
       try {
         try {

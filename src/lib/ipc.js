@@ -58,6 +58,29 @@ function namesAnotherMachine(path) {
 const MOCK_MAX_KIND_PATHS = 64;
 const MOCK_MAX_KIND_PATH_BYTES = 4096;
 
+/**
+ * The programs `fs_open_in_external_editor` never runs as the editor — shells,
+ * the OS openers and the wrappers that run their arguments — by file stem,
+ * any case, `.exe` or not: the backend's `REFUSED_PROGRAMS`
+ * (src-tauri/src/fs/external_editor.rs), name for name. ipc_contract.test.js
+ * holds the two lists to the same names.
+ */
+const MOCK_REFUSED_EDITORS = new Set([
+  'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'nu', 'cmd', 'powershell', 'pwsh',
+  'open', 'xdg-open', 'gio', 'kde-open', 'kde-open5', 'gnome-open', 'exo-open', 'wslview', 'start',
+  'explorer', 'rundll32',
+  'env', 'nohup', 'xargs', 'osascript', 'cscript', 'wscript', 'mshta', 'wsl', 'conhost',
+]);
+
+/** The program an external editor command starts with: its first word, quotes taken off. */
+function mockEditorProgram(command) {
+  const text = String(command ?? '').trim();
+  const quote = text[0] === '"' || text[0] === "'" ? text[0] : null;
+  if (!quote) return text.split(/\s+/)[0] ?? '';
+  const end = text.indexOf(quote, 1);
+  return end < 0 ? null : text.slice(1, end);
+}
+
 /** Folders `git_branch` looks in for a repository, and the longest name it hands back — the backend's (src-tauri/src/fs/git.rs). */
 const MOCK_BRANCH_WALK_MAX = 64;
 const MOCK_BRANCH_CHARS_MAX = 100;
@@ -807,6 +830,12 @@ class BrowserMockBridge {
     // system clipboard here: the suites put on it what a right-click should
     // find, and a copy made in the page never reaches it.
     this.clipboard = { text: '', has_image: false };
+    // The text `clipboard_write_text` last put on the clipboard (a program's
+    // OSC 52 the user allowed, src/lib/osc52.js), or null, and how many
+    // writes went through. The write also lands in `this.clipboard`, as it
+    // would on the system clipboard. The suites read these.
+    this.lastClipboardWrite = null;
+    this.clipboardWrites = 0;
     // The conversations `agent_sessions` answers from, in the shape
     // `opencode session list --format json` prints — `directory` included,
     // which the backend narrows by and does not hand back.
@@ -830,6 +859,9 @@ class BrowserMockBridge {
     // What `fs_reveal_path` was asked to show, oldest first, as `{ path,
     // kind }`. There is no file manager here; the suites read this.
     this.revealed = [];
+    // What `fs_open_in_external_editor` was asked to run, oldest first, as
+    // `{ command, path }`. No editor is started here; the suites read this.
+    this.externalEditorOpens = [];
     // What `fs_delete_path` moved to the Trash, oldest first, as `{ path,
     // recursive }` — there is no Trash here; the suites read this. And, while
     // set, why the next moves fail: the reason the backend gives after "Not
@@ -1546,6 +1578,32 @@ class BrowserMockBridge {
         this.revealed.push({ path, kind });
         return null;
       }
+      // fs_open_in_external_editor — Open in External Editor in the Explorer
+      // (src-tauri/src/fs/external_editor.rs). Refused as the backend refuses
+      // it, in its words: no folder open, a path outside it or not there, no
+      // command, unclosed quotes, a shell or an OS opener. Otherwise recorded
+      // in `externalEditorOpens`; nothing is started.
+      case 'fs_open_in_external_editor': {
+        const command = String(args?.command ?? '');
+        const path = String(args?.path ?? '');
+        const root = this.root ?? '/workspace';
+        const target = resolvePath(root, path);
+        if (!path || (target !== root && !target.startsWith(`${root}/`))) {
+          throw new Error(`Path is outside the open folder: ${path}`);
+        }
+        if (!this.kindOf(target)) throw new Error(`Path does not exist: ${path}`);
+        const program = mockEditorProgram(command);
+        if (program === null) throw new Error('The external editor command has a quote that is never closed');
+        if (!program) throw new Error('No external editor is set');
+        const stem = program.split(/[\\/]/).pop().replace(/[. ]+$/, '').toLowerCase().replace(/\.exe$/, '');
+        if (MOCK_REFUSED_EDITORS.has(stem)) {
+          throw new Error(
+            `'${program}' is a shell or opens files in their default app, so NexTerm does not run it as the external editor. Set the editor itself, for example code or subl -w`
+          );
+        }
+        this.externalEditorOpens.push({ command, path });
+        return null;
+      }
 
       // 6. fs_read_dir
       // The real one validates through `Workspace::set_root` and refuses a
@@ -2006,6 +2064,22 @@ class BrowserMockBridge {
         return { text: typeof text === 'string' ? text : '', has_image: has_image === true };
       }
 
+      // 20b. clipboard_write_text — the backend puts `text` on the system
+      // clipboard, refusing an empty one and more than 131072 bytes of UTF-8
+      // before it touches it (MAX_WRITE_BYTES, src-tauri/src/commands/
+      // clipboard.rs), in words that never quote the text. The mock refuses
+      // the same, and records the rest in `lastClipboardWrite`.
+      case 'clipboard_write_text': {
+        const { text } = args;
+        if (typeof text !== 'string' || text === '') throw new Error('nothing to put on the clipboard');
+        const bytes = new TextEncoder().encode(text).length;
+        if (bytes > 131072) throw new Error(`too much to put on the clipboard: ${bytes} bytes, more than 131072`);
+        this.lastClipboardWrite = text;
+        this.clipboardWrites += 1;
+        this.clipboard = { text, has_image: false };
+        return null;
+      }
+
       // 21. agent_sessions — the backend runs `opencode session list` and keeps
       // the conversations of `cwd`, newest first. The mock reads
       // `this.agentSessions`; any other agent is refused, as there.
@@ -2457,6 +2531,18 @@ export function revealInFileManager(path) {
 }
 
 /**
+ * Open `path` — a file or folder in the open folder — in the external editor
+ * the user set (`fs_open_in_external_editor`): `command` is split into a
+ * program and its arguments without a shell and run with `path` added as the
+ * last argument. Never waits for the editor, and never falls back to the OS
+ * default app. Rejects with the backend's reason when it is refused or cannot
+ * start (src-tauri/src/fs/external_editor.rs).
+ */
+export function openInExternalEditor(command, path) {
+  return invoke('fs_open_in_external_editor', { command, path });
+}
+
+/**
  * For each of `ids`, Claude Code session ids (200 at most), whether Claude
  * Code saved a conversation under it and the title it gave it, in order:
  * `{ sessionId, saved: true|false|null, title: string|null }`
@@ -2464,6 +2550,15 @@ export function revealInFileManager(path) {
  */
 export function claudeConversations(ids) {
   return invoke('claude_conversations', { ids });
+}
+
+/**
+ * Put `text` on the system clipboard (`clipboard_write_text`), for a program's
+ * OSC 52 the user allowed (src/lib/osc52.js). Rejects, without the text in the
+ * reason, when it is empty or over 131072 bytes, or the OS refused.
+ */
+export function writeClipboardText(text) {
+  return invoke('clipboard_write_text', { text });
 }
 
 const unwrap = (callback) => (evt) => callback(evt?.payload !== undefined ? evt.payload : evt);

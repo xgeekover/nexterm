@@ -693,4 +693,92 @@ mod tests {
         assert_eq!(r.output, text);
         assert!(r.markers.is_empty());
     }
+
+    /// `before ESC ] 52 ; c ; <payload> <terminator> after`, with a payload of
+    /// 200 KB of base64 — far over MAX_PENDING, which is what a program's
+    /// OSC 52 copy of a large selection looks like (src/lib/osc52.js decides
+    /// on it in the page; this filter only has to pass it on).
+    fn big_osc52(terminator: &str) -> (String, usize, usize) {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let payload: String = (0..200 * 1024).map(|i| ALPHABET[(i * 7 + i / 64) % 64] as char).collect();
+        let head = "before\x1b]52;c;";
+        let text = format!("{head}{payload}{terminator}after");
+        let payload_start = head.len();
+        let terminator_start = payload_start + payload.len();
+        (text, payload_start, terminator_start)
+    }
+
+    /// Feed `text` cut at each of `cuts` (byte offsets, ascending) and return
+    /// what came out, joined, and every marker reported.
+    fn feed_cut(text: &str, cuts: &[usize]) -> (String, Vec<Marker>) {
+        let bytes = text.as_bytes();
+        let mut f = OscFilter::new();
+        let mut output = String::new();
+        let mut markers = Vec::new();
+        let mut from = 0;
+        for &cut in cuts.iter().chain(std::iter::once(&bytes.len())) {
+            let r = f.feed(&bytes[from..cut]);
+            output.push_str(&r.output);
+            markers.extend(r.markers);
+            from = cut;
+        }
+        assert!(f.take_utf8_tail().is_empty(), "nothing is left held back");
+        (output, markers)
+    }
+
+    #[test]
+    fn a_200_kb_osc_52_passes_byte_for_byte_wherever_a_read_cuts_it() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let (text, payload_start, terminator_start) = big_osc52(terminator);
+            let esc = "before".len();
+            let after = terminator_start + terminator.len();
+            let mut cuts = vec![
+                esc + 1,                      // between ESC and ']'
+                esc + 2,                      // right after ESC ]
+                esc + 3,                      // inside the number: ESC ] 5 | 2
+                payload_start - 1,            // between `c` and its ';'
+                payload_start,                // right before the payload
+                payload_start + 1,            // inside the payload, at its start
+                payload_start + MAX_PENDING - 10, // still within what is held back
+                esc + MAX_PENDING,            // at the hold-back limit
+                esc + MAX_PENDING + 1,        // one past it
+                payload_start + 100_000,      // in the middle
+                terminator_start - 1,         // one byte before the terminator
+                terminator_start,             // right before BEL / ST
+                after,                        // right after it
+            ];
+            if terminator.len() == 2 {
+                cuts.push(terminator_start + 1); // between ST's ESC and '\\'
+            }
+            for &cut in &cuts {
+                let (output, markers) = feed_cut(&text, &[cut]);
+                assert!(output == text, "cut at {cut}, terminator {terminator:?}: not byte-identical");
+                assert!(markers.is_empty(), "cut at {cut}: {markers:?}");
+            }
+            // Every cut at once, and the 4 KB reads a PTY really hands over.
+            cuts.sort_unstable();
+            cuts.dedup();
+            let (output, markers) = feed_cut(&text, &cuts);
+            assert!(output == text, "every cut at once, terminator {terminator:?}");
+            assert!(markers.is_empty());
+            let reads: Vec<usize> = (1..).map(|n| n * 4096).take_while(|&n| n < text.len()).collect();
+            let (output, markers) = feed_cut(&text, &reads);
+            assert!(output == text, "4 KB reads, terminator {terminator:?}");
+            assert!(markers.is_empty());
+            // And whole, in one read.
+            let (output, markers) = feed_cut(&text, &[]);
+            assert!(output == text, "one read, terminator {terminator:?}");
+            assert!(markers.is_empty());
+        }
+    }
+
+    #[test]
+    fn markers_around_a_big_osc_52_are_still_reported_and_stripped() {
+        let (copy, _, _) = big_osc52("\x07");
+        let text = format!("\x1b]133;C\x07{copy}\x1b]133;D;0\x07");
+        let reads: Vec<usize> = (1..).map(|n| n * 4096).take_while(|&n| n < text.len()).collect();
+        let (output, markers) = feed_cut(&text, &reads);
+        assert!(output == copy, "only our own markers are removed");
+        assert_eq!(markers, vec![Marker::CommandExecuted, Marker::CommandFinished(Some(0))]);
+    }
 }

@@ -328,17 +328,37 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'escape',
       'focus-next-pane',
       'focus-previous-pane',
+      // The tab commands (Bundle 2, A5-1/A5-2): keyboard-only, as the
+      // pane-focus pair are; menu.rs has none of ⌘1-⌘9, ⌘⇧[ or ⌘⇧].
+      'go-to-last-tab',
+      'go-to-tab-1',
+      'go-to-tab-2',
+      'go-to-tab-3',
+      'go-to-tab-4',
+      'go-to-tab-5',
+      'go-to-tab-6',
+      'go-to-tab-7',
+      'go-to-tab-8',
       'go-to-unread-notification',
       'mark-notifications-read',
+      'next-tab',
       // The project commands (stage 5): palette commands, as the split
       // polish pair are; menu.rs has no entry for them.
       'open-project-commands-file',
+      'previous-tab',
       'reload-guard',
       // Ctrl+R's half of the guard, outside a terminal only (KB-14).
       'reload-guard-ctrl-r',
+      // Reopen Closed Terminal (Bundle 2, A5-4): keyboard-only, as the tab
+      // commands are; menu.rs has no ⌘⇧T.
+      'reopen-closed-terminal',
       'run-project-command',
       'stop-trusting-project-commands',
       'swap-pane',
+      // The Ctrl+Tab switcher (Bundle 2, A5-3): keyboard-only, as the tab
+      // commands are; menu.rs has no Ctrl+Tab.
+      'switch-recent-tab',
+      'switch-recent-tab-back',
       // The prompt commands (prompt marks on the scrollbar): palette
       // commands, as the split polish pair are; menu.rs has no entry for them.
       'terminal-next-prompt',
@@ -367,6 +387,18 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // would never work at all, VS Code makes the same trade, and Settings
       // can move it. The arrow keys do the same job in the shell.
       'find-in-terminal',
+      // ⌘1..⌘8 and ⌘9 (the last tab), macOS alone: ⌘ never reaches the pty,
+      // so the shell gives up nothing. No default off macOS — Alt+digit is
+      // readline's digit-argument, Ctrl+Alt+digit is AltGr (TN-04).
+      'go-to-last-tab',
+      'go-to-tab-1',
+      'go-to-tab-2',
+      'go-to-tab-3',
+      'go-to-tab-4',
+      'go-to-tab-5',
+      'go-to-tab-6',
+      'go-to-tab-7',
+      'go-to-tab-8',
       // ⇧⌘U, and Ctrl+Shift+U off macOS. Getting from the terminal you are in
       // to the one that is waiting is what the command is for. Shifted it is
       // not a bare Ctrl+letter — xterm sends nothing for Ctrl+Shift+U — so
@@ -381,7 +413,18 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // choice, in a Settings window that names every command claimed over a
       // terminal (SW-10).
       'mark-notifications-read',
+      // Ctrl+PageDown/PageUp everywhere, ⌘⇧] / ⌘⇧[ on macOS: tab switching
+      // is window chrome, over vim, tmux and OpenCode too. Not a control
+      // byte; the trade is vim's own Ctrl+PageUp/Down tab-page keys (xterm
+      // would send `CSI 6;5~` / `CSI 5;5~`). Settings can move them.
+      'next-tab',
+      'previous-tab',
       'reload-guard',
+      // ⌘⇧T, and Ctrl+Shift+T off macOS: Reopen Closed Terminal, from the
+      // terminal a tab was closed from. ⌘ never reaches the pty, and shifted
+      // it is not a bare Ctrl+letter — xterm sends nothing for Ctrl+Shift+T —
+      // so the shell gives up nothing; Ctrl+T stays its own (RC-07).
+      'reopen-closed-terminal',
       // ⇧⌘F. The terminal has no use for it, and shifted it is not a bare
       // Ctrl+letter, so nothing is taken from the shell.
       'search-in-files',
@@ -392,6 +435,12 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'split-right',
       // Equalize Splits' twin (above): the pick of panes to swap with.
       'swap-pane',
+      // Ctrl+Tab and Ctrl+Shift+Tab, literal Ctrl everywhere: the switcher of
+      // the terminals most recently used (A5-3). xterm sends them as Tab (HT)
+      // and Shift+Tab (`CSI Z`), the keys those still are, so the shell gives
+      // up nothing (MRU-06).
+      'switch-recent-tab',
+      'switch-recent-tab-back',
       // Ctrl+Shift+Up/Down, ⌘⇧↑/↓ on macOS: the prompt above or below the top
       // of the view. A terminal is the only place they mean anything. Neither
       // is a control byte, and no shell's line editor binds them by default;

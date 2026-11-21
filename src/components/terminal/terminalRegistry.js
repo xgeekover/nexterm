@@ -20,9 +20,9 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
 import { UnicodeGraphemesAddon } from '@xterm/addon-unicode-graphemes';
 import '@xterm/xterm/css/xterm.css';
-import { listen, pathKinds } from '../../lib/ipc.js';
+import { listen, pathKinds, writeClipboardText } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
-import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
+import { notifyTerminal, setTerminalNoticeSink } from '../../lib/terminalNotice.js';
 import { setContextTerminalSource } from '../../lib/copyContext.js';
 import {
   APP_THEME_TOKENS,
@@ -80,6 +80,7 @@ import { attachOutput, createHistoryMark, forgetOutput, startPtyOutputBus } from
 import { createOutputPacer } from '../../lib/outputPacing.js';
 import { installProgramNotifications } from '../../lib/programNotifications.js';
 import { installTerminalProgress } from '../../lib/terminalProgress.js';
+import { installOsc52 } from '../../lib/osc52.js';
 import { exitNotice, freshScreen } from '../../lib/shellExit.js';
 import { screenRow, setBatchJobScreenReader } from '../../lib/batchJobReply.js';
 import { MAX_FILE_BYTES, snapshotTerminal } from '../../lib/scrollbackSnapshot.js';
@@ -87,7 +88,8 @@ import { RESTORE_FIT_WAIT_MS, restoreScrollback } from '../../lib/scrollbackRest
 import { scrollbackEnabled, scrollbackSaver, setScrollbackSnapshotSource, takeRestore } from '../../lib/scrollbackSession.js';
 import { watchScrollbackChanges } from '../../lib/scrollbackWatch.js';
 import { usablePtySize } from '../../lib/terminalCompat.js';
-import { isWindows } from '../../lib/platform.js';
+import { isMac, isWindows } from '../../lib/platform.js';
+import { macOptionIsMetaFor } from '../../lib/optionAsMeta.js';
 
 const instances = new Map();
 
@@ -689,6 +691,13 @@ function ensureSettingsSubscriptionStarted() {
     if (scrollbackEnabled(state) && !scrollbackEnabled(prevState)) {
       for (const [tabId, entry] of instances) if (!entry.disposed) scrollbackSaver.markDirty(tabId);
     }
+    // Option as Meta (macOS, src/lib/optionAsMeta.js): xterm reads the option
+    // at every key, so every open terminal takes the change at once, no
+    // reflow and nothing redrawn.
+    if (state.terminalOptionAsMeta !== prevState.terminalOptionAsMeta) {
+      const macOptionIsMeta = macOptionIsMetaFor(state, { mac: isMac });
+      for (const entry of instances.values()) if (!entry.disposed) entry.term.options.macOptionIsMeta = macOptionIsMeta;
+    }
   });
 }
 
@@ -1268,6 +1277,9 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     overviewRuler: { width: SCROLLBAR_WIDTH },
     // `{}` off Windows: xterm's own "not set". See terminalCompat.js.
     windowsPty: windowsPtyFor(useSystemStore.getState()) ?? {},
+    // ⌥ as Meta (Esc and the key) when Use Option as Meta is on, macOS only;
+    // xterm's default, false, otherwise. See optionAsMeta.js.
+    macOptionIsMeta: macOptionIsMetaFor(settingsState, { mac: isMac }),
     // A program's OSC 8 hyperlinks open as the terminal's other links do.
     linkHandler: hyperlinkHandler(container),
   });
@@ -1327,6 +1339,20 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   installTerminalProgress(term, {
     enabled: () => !history.reading && useSettingsStore.getState().terminalProgress !== false,
     onProgress: (report) => useTerminalStore.getState().setTabProgress?.(tabId, report),
+  });
+  // A program putting text on the clipboard — OSC 52, from tmux, vim or a
+  // shell over ssh: written only while Settings > Terminal > Let Programs Set
+  // the Clipboard (OSC 52) is on, read at each sequence; reads and clears are
+  // refused, and output kept from before the terminal was shown is ignored.
+  // While it is off, the first write in this tab prints one notice naming the
+  // setting, held while a full-screen program has the screen. Nothing the
+  // program wrote is logged. Disposed with the terminal. See osc52.js.
+  installOsc52(term, {
+    enabled: () => useSettingsStore.getState().terminalOsc52Write === true,
+    keptHistory: () => history.reading,
+    write: (text) => writeClipboardText(text),
+    notice: (message) => notifyTerminal(tabId, message),
+    noticeKey: tabId,
   });
   // The terminal's bell — a BEL in the output — to the store, which decides
   // whether it is worth an entry (`bellFromTerminal`); a BEL in history rang

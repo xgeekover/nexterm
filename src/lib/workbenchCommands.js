@@ -18,7 +18,8 @@
  * group shows, even while a file is THE active pane.
  *
  * Each command that moves the active pane without a pointer — Focus
- * Next/Previous Pane, a zoom, a split or a move — hands the keyboard to the
+ * Next/Previous Pane, a zoom, a split or a move, and the tab commands
+ * (`switchTabActive`) — hands the keyboard to the
  * pane it lands on (`focusActivePane`, C1 review M-01): before, only the
  * store changed, and what was typed next went to the shell that still had
  * the keyboard.
@@ -27,6 +28,8 @@ import { activeKindOf, activePaneOf, useTerminalStore } from '../stores/terminal
 import { useEditorStore } from '../stores/editorStore.js';
 import { EDITOR_KIND, leafKind } from '../components/terminal/splitLayout.js';
 import { focusActivePane } from './workspaceFocus.js';
+import { paneTabs, tabTarget } from './tabNavigation.js';
+import { useTabSwitcherStore } from '../stores/tabSwitcherStore.js';
 
 function activeGroup() {
   const { groups, activeGroupId } = useTerminalStore.getState();
@@ -195,6 +198,35 @@ export function focusNextActive(delta = 1) {
 }
 
 /**
+ * Next/Previous Tab, Go to Tab N and Go to Last Tab (A5-1, A5-2): `move` is
+ * 'next', 'previous', 'last' or a 1-based number (`tabTarget`), within THE
+ * active pane of the group on screen, the keyboard landing in its terminal.
+ * An editor pane is not a terminal pane's tabs, and a key pressed inside
+ * Monaco is the editor's (`commandKind`): nothing happens, as for a number
+ * past the pane's last tab. Returns the tab switched to, or null.
+ */
+export function switchTabActive(move, opts = {}) {
+  if (commandKind(opts) === EDITOR_KIND) return null;
+  const group = activeGroup();
+  const tabId = tabTarget(paneTabs(group?.tree, activePaneOf(group)), move);
+  if (!tabId) return null;
+  useTerminalStore.getState().switchTab?.(tabId);
+  focusActivePane();
+  return tabId;
+}
+
+/**
+ * Reopen Closed Terminal (A5-4): the terminal closed last, back as a fresh
+ * shell where it was (terminalStore's `reopenClosedTerminal`), the keyboard
+ * in it. Returns the new tab, or null when nothing was closed.
+ */
+export async function reopenClosedTerminal() {
+  const tab = (await useTerminalStore.getState().reopenClosedTerminal?.()) ?? null;
+  if (tab) focusActivePane();
+  return tab;
+}
+
+/**
  * Move Editor to New Pane Right/Down: the file the active editor pane shows
  * (else the editor's active tab) split out beside its pane, as Move to New
  * Pane does for a terminal. Returns the new pane's id, or null when the
@@ -225,6 +257,12 @@ export function workbenchContext({ isInMonacoEditor = false, editorPaneId = null
     splitActivePane: (direction) => splitActive(direction, opts),
     closeActivePane: () => closeActive(opts),
     focusNextPane: (delta) => focusNextActive(delta),
+    goToTab: (move) => switchTabActive(move, opts),
+    reopenClosedTerminal: () => reopenClosedTerminal(),
+    // The Ctrl+Tab switcher (A5-3): opened, or its selection moved, by
+    // `delta`; `modifiers` are those the opening press held, which the
+    // switch waits for to come up (tabSwitcherStore.js).
+    switchRecentTab: (delta, modifiers) => useTabSwitcherStore.getState().step(delta, modifiers),
     togglePaneZoom: () => toggleZoomActive(),
     openFind: () => findActive(opts),
     equalizeSplits: () => useTerminalStore.getState().equalizeSplits?.(),

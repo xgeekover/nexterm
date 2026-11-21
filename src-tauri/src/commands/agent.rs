@@ -642,7 +642,8 @@ fn resolvable(path: &str) -> bool {
 }
 
 /// Where to look for opencode: the login shell's PATH, then this process's.
-fn search_path() -> Option<OsString> {
+/// The external editor runs with it too (`fs::external_editor`).
+pub(crate) fn search_path() -> Option<OsString> {
     let own = std::env::var_os("PATH");
     #[cfg(unix)]
     {

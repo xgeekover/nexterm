@@ -10,6 +10,7 @@ import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { AgentHistoryNotice } from './components/terminal/AgentHistoryNotice.jsx';
 import { AgentHistoryClearDialog } from './components/terminal/AgentHistoryClearDialog.jsx';
 import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
+import { TabSwitcher } from './components/terminal/TabSwitcher.jsx';
 import { ProjectCommandDialog } from './components/command/ProjectCommandDialog.jsx';
 import { ProjectCommandsTrustDialog } from './components/command/ProjectCommandsTrustDialog.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
@@ -29,6 +30,7 @@ import { startControl } from './lib/controlBridge.js';
 import { startKeepAwake } from './lib/keepAwake.js';
 import { useControlLogStore } from './stores/controlLogStore.js';
 import { useAgentHistoryStore } from './stores/agentHistoryStore.js';
+import { ensureTabMruStarted } from './stores/tabSwitcherStore.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
@@ -67,6 +69,12 @@ export default function App() {
   // here rather than when the store is imported, so a test suite that loads
   // the store records nothing it did not ask for; stopped on unmount / HMR.
   useEffect(() => useAgentHistoryStore.getState().start(), []);
+
+  // The terminals most recently used, for the Ctrl+Tab switcher: followed
+  // from here on, in memory only (tabSwitcherStore.js). Once, before the
+  // first terminal starts; the stop it returns is the effect's cleanup, so
+  // an unmount or a hot reload does not leave the subscription behind.
+  useEffect(() => ensureTabMruStarted(), []);
 
   useEffect(() => {
     // What earlier sessions ran. Read once, before anything can record over
@@ -120,6 +128,9 @@ export default function App() {
 
       {/* What picking an AGENT SESSIONS entry did instead of opening a terminal */}
       <AgentHistoryNotice />
+
+      {/* Ctrl+Tab: the terminals most recently used, every group's */}
+      <TabSwitcher />
 
       {/* Global ⌘K Command Palette */}
       <CommandPalette />

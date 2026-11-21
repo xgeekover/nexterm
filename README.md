@@ -261,6 +261,57 @@ focused. On Windows and Linux a link is removed as a link and what it points to
 stays; on macOS it goes to the Trash. Settings ▸ Files ▸ *Enable Trash* turns
 it off.
 
+**Reveal a file, or open a terminal there.** Right-click a row in the
+Explorer, or the space below the rows for the open folder itself. *Reveal in
+Finder* (*Reveal in File Explorer* on Windows, *Reveal in File Manager* on
+Linux) shows it in the file manager: a file is selected in its folder, a folder
+is opened (on Linux it is selected in its parent), and a macOS package such as
+an `.app` is shown, never launched. Nothing is opened with its default
+application. *Open Terminal Here* starts a new terminal in that folder — for a
+file, in the folder it sits in — beside the ones in the active pane, and gives
+it the keyboard. It starts there or not at all: when the shell cannot start in
+that folder, the Explorer says so instead of opening a terminal somewhere else.
+
+**Open a file or folder in an external editor.** Off by default: set
+*Settings ▸ Files ▸ External Editor* to a program and its arguments, for
+example `code` or `subl -w`, and the Explorer's menu gains *Open in External
+Editor* for files, folders and the space below the rows (the open folder
+itself). While the setting is empty, or only spaces, the item is not there, and
+nothing is ever opened with the system's default application instead. What
+runs is exactly the setting, split into words without a shell — words are
+separated by spaces, `'…'` and `"…"` keep spaces inside one word, a backslash
+is an ordinary character so `"C:\Program Files\…\code.cmd"` works, and an
+unclosed quote is refused — followed by the path as one last argument. Nothing
+is expanded or substituted: `*`, `$HOME`, `;`, `|` and `&&` are passed as they
+are. The program is refused when it is a shell, a program that opens files
+in their default application, or a wrapper that runs its arguments as a
+command or a script, by name, in any case, with or without `.exe`: `sh`,
+`bash`, `zsh`, `fish`, `dash`, `ksh`, `csh`, `tcsh`, `nu`, `cmd`,
+`powershell`, `pwsh`, `open`, `xdg-open`, `gio`, `kde-open`, `kde-open5`,
+`gnome-open`, `exo-open`, `wslview`, `start`, `explorer`, `rundll32`, `env`,
+`nohup`, `xargs`, `osascript`, `cscript`, `wscript`, `mshta`, `wsl` and
+`conhost`. This list guards against a mistake in the setting; it is not a
+sandbox. Whatever else you set runs, with the path as its last argument: an
+interpreter such as `python` or `node` is not refused, and neither is a shell
+copied or linked under another name. The path must be inside the open folder (the same confinement as every other file
+command) and must exist; with no folder open nothing runs. A program given as
+a relative path (`bin/editor`, `.\editor.exe`) is refused, because it would be
+looked up inside the open folder: give a name found on `PATH` or a full path.
+The editor runs in the open folder with `PATH` set to your login shell's `PATH`
+followed by NexTerm's own, so on macOS `code` is found even when NexTerm was
+started from the Finder or the Dock; relative entries on `PATH` (`.`, `bin`, an
+empty one) are ignored for the same reason. NexTerm does not wait for the
+editor, and its input and output go nowhere. On Windows a bare name is looked
+up on `PATH` as `.exe`, `.com`, `.cmd` or `.bat`, so VS Code's `code` runs as
+`code.cmd`; batch files are run because the Rust toolchain NexTerm is built
+with escapes their arguments (Rust 1.77.2 and later, CVE-2024-24576), and no
+console window opens. A `.cmd` or `.bat` editor runs through `cmd.exe`, which
+would otherwise look a bare command name up in the open folder before `PATH`,
+so a `node.bat` in a cloned repository could run in place of `node`: NexTerm
+starts the editor with `NoDefaultCurrentDirectoryInExePath=1`, which turns
+that lookup off, and the editor and what it starts inherit it. A refusal or a failure to start is shown in red at the
+top of the Explorer, in words that say why.
+
 **Filesystem confinement.** Every file command is resolved against the open
 folder, with the deepest existing ancestor canonicalised so symlinks cannot
 escape it. With no folder open, file commands are refused outright.
@@ -350,6 +401,116 @@ on (mouse reporting, the full-screen view) is switched off, so a drag selects
 text again. On Windows this is how a terminal comes back when quitting
 OpenCode with Ctrl+C took cmd down with it, as has been seen; the code it
 prints says how cmd ended.
+
+#### Switching tabs
+
+The tab commands act on the tabs of the active pane, in the order its tab
+strip shows them, and leave the keyboard in the terminal they switch to.
+
+| | Next / previous tab | Tab 1 to 8 | Last tab |
+| --- | --- | --- | --- |
+| macOS | `⌃PageDown` / `⌃PageUp`, or `⌘⇧]` / `⌘⇧[` | `⌘1` … `⌘8` | `⌘9` |
+| Windows and Linux | `Ctrl+PageDown` / `Ctrl+PageUp` | not bound | not bound |
+
+On a Mac keyboard without PageUp and PageDown keys, `⌃PageUp` is `fn+⌃↑` and
+`⌃PageDown` is `fn+⌃↓`. Next and previous wrap around at both ends. `⌘9` is
+always the last tab, as in browsers and VS Code, however many tabs the pane
+holds. A number past the pane's last tab does nothing. With an editor pane active, or the keyboard in
+a file, none of these switch anything. Inside the editor, `Ctrl+PageUp` and
+`Ctrl+PageDown` are left to the editor. The commands have no menu entry; the
+keys work wherever the keyboard is in the window.
+
+They work while a terminal has focus, also over vim, tmux or OpenCode, as in
+GNOME Terminal and VS Code. On macOS that costs a program nothing, because `⌘`
+never reaches the pty. `Ctrl+PageUp` and `Ctrl+PageDown` are the exception:
+xterm would send them on as `CSI 5;5~` and `CSI 6;5~`, which vim reads as its
+own previous and next tab page. vim's `gT` and `gt` still do that. Emacs in a
+terminal loses the same two keys, which it reads as `C-<prior>` and
+`C-<next>`. If you need the chords in a program, rebind the commands in
+Settings ▸ Keyboard Shortcuts.
+
+**Why there is no Go to Tab chord on Windows and Linux.** The obvious
+candidates already mean something there. `Alt+1` … `Alt+9` is readline's
+digit argument (`Esc 1` … `Esc 9`) in bash and zsh, and switches windows in
+irssi and weechat. `Ctrl+Alt+` a digit is `AltGr` on Windows keyboard layouts,
+which type characters with it: on a German layout `AltGr+7` … `AltGr+0` type
+`{ [ ] }`. The `⌘` defaults do not carry over to the Windows or Super key,
+which the desktop mostly keeps for itself: `Win+1` opens the first taskbar
+app. Any of these can still be bound to Go to Tab 1 … 8 or Go to Last Tab in
+Settings ▸ Keyboard Shortcuts, and a chord you record with the Windows key
+works.
+
+#### Reopening a closed terminal
+
+`⌘⇧T` on macOS, `Ctrl+Shift+T` on Windows and Linux (*Reopen Closed
+Terminal*), brings back the terminal you closed last. Press it again for the
+one before, up to the last 10, newest first. It counts every terminal you
+close: a tab's ✕ or *Close Terminal*, *Close Others in Pane* and *Close
+Terminals to the Right*, *Close Pane*, and *Close Group*. Closing a pane or a group brings
+its terminals back one per press, in their old tab order.
+
+**`Ctrl+Shift+T` is not New Tab here.** In GNOME Terminal, Konsole and Windows
+Terminal `Ctrl+Shift+T` opens a new tab. In NexTerm it reopens the terminal you
+closed last, as it does in the browsers and VS Code. If your fingers expect a
+new tab, rebind *Reopen Closed Terminal* in Settings ▸ Keyboard Shortcuts.
+
+What comes back is a **new shell**, not the old one:
+
+- in the folder the terminal was in when you closed it, with the shell it ran
+  (a Git Bash terminal comes back as Git Bash). A folder that no longer exists
+  falls back to where a new terminal starts, as *Copy Tab* (*Duplicate*) does;
+- with the name you gave it; a terminal that still had its default
+  `Terminal N` name gets a fresh one;
+- in its old pane at its old place in the tab strip, if that pane is still
+  open. Otherwise it goes in the active terminal pane of its old group, and if
+  that group is gone, where a new terminal goes. It becomes the active tab
+  and gets the keyboard.
+
+**No scrollback comes back**, and nothing is typed into the new shell. An agent
+that was running there is not restarted: AGENT SESSIONS in the TERMINALS panel
+resumes its conversation. The list lives in memory only. It is never saved,
+holds only each terminal's name, folder, shell and place, and is empty after a
+restart. Restarting a shell that exited, loading a workspace and the start-up
+of the app add nothing to it. Loading a workspace or opening another folder
+does not empty it either: reopening is something you ask for, and it brings a
+terminal back to where it was, in its own folder. With nothing to reopen the
+key does nothing.
+
+The key works while a terminal has focus. `⌘` never reaches the pty, and xterm
+sends nothing for `Ctrl+Shift+T`, so no program loses a key; `Ctrl+T` stays the
+shell's. The command has no menu entry, and Settings ▸ Keyboard Shortcuts can
+rebind it.
+
+#### Recent tabs (Ctrl+Tab)
+
+`Ctrl+Tab` switches between the terminals you used most recently, across every
+group, as in VS Code, Windows Terminal and the browsers. It is literal `Ctrl`
+on every platform, macOS included (`⌃Tab`, as in Terminal.app and Safari).
+
+- Press `Ctrl+Tab` and let go: you are back in the terminal you were in
+  before, even if it is in another group. Press it again to come back.
+- Hold `Ctrl` and press `Tab` again to walk further down the list, which
+  opens in a small overlay at the top of the window. `Ctrl+Shift+Tab` walks
+  the other way. Both wrap around. While the list is open, `↑` and `↓` move
+  the selection too.
+- Let go of `Ctrl`, press `Enter` or click a row to switch to the selected
+  terminal. It becomes the active tab and gets the keyboard.
+- `Esc`, or switching to another app, closes the list without switching.
+
+Each row shows the terminal's name, its group and the last part of its
+folder. The list holds terminal tabs only: files are not in it. It lives in
+memory only, is never saved, and starts again with the terminal on screen
+after a restart. Terminals you have not used since then come after the ones
+you have. With fewer than two terminals the keys do nothing, and they do not
+open the list over a dialog, an open menu or the command palette. The overlay
+does not animate, so there is nothing for *Reduce Motion* to turn off.
+
+The keys work while a terminal has focus, also over vim, tmux or OpenCode. A
+program gives nothing up: xterm sends `Ctrl+Tab` as a plain `Tab` and
+`Ctrl+Shift+Tab` as `Shift+Tab` (`CSI Z`), and those two keys still reach it.
+The commands (*Switch to Recent Terminal* and *Switch to Recent Terminal
+(Backwards)*) have no menu entry. Settings ▸ Keyboard Shortcuts can rebind
+them; with a chord like `Alt+Q`, letting go of `Alt` picks the terminal.
 
 ### Working in a terminal
 
@@ -576,6 +737,97 @@ quoting are typed.
 **Make the text bigger.** `⌘=` and `⌘-` step the terminal and editor font
 together, `⌘0` puts them back. While the size is not the default, the status bar
 says so and clicking it resets.
+
+#### macOS text-editing keys
+
+On macOS the keys that move and delete in every text field work at a shell
+prompt too. Settings ▸ Terminal ▸ *macOS Text-Editing Keys* is **on by
+default**:
+
+| Key | Sent as | Does, in zsh, bash and fish |
+|---|---|---|
+| `⌘←` | `Ctrl+A` | go to the start of the line |
+| `⌘→` | `Ctrl+E` | go to the end of the line |
+| `⌘Backspace` | `Ctrl+U` | delete to the start of the line |
+| `⌘Delete` (`Fn+Backspace`) | `Ctrl+K` | delete to the end of the line |
+
+Only `⌘` and the key: with `⇧`, `⌥` or `⌃` as well it is a different chord
+(`⌥⌘←` still focuses the previous pane), and a key an input method is
+composing stays the input method's. A command suggestion drawn after the
+cursor takes `⌘→` as it takes `→`, and accepts it.
+
+- **Full-screen programs keep their keys.** On the alternate screen — vim,
+  htop, `less`, a full-screen TUI — the four keys go to the program exactly as
+  before, because there `Ctrl+A` or `Ctrl+U` is a command of that program's,
+  not "start of line". So does a program that turned on xterm's
+  *modifyOtherKeys* (OpenCode does): it reads its keys itself.
+- **At a password prompt only `⌘Backspace` works.** While the lock shows
+  ([Safety nets](#safety-nets)), `⌘Backspace` sends `Ctrl+U`, which the
+  terminal itself reads as "erase the line" and so clears what was typed of
+  the password. `⌘←`, `⌘→` and `⌘Delete` are left alone there, because their
+  control characters would become part of the password.
+
+Turn the setting off to give all four back to the terminal as before (xterm
+sends nothing for `⌘←` and `⌘→`). Windows and Linux are unchanged: there is
+no `⌘`, and `Ctrl+←` / `Ctrl+→` still move a word.
+
+#### Option as Meta
+
+On macOS, Settings ▸ Terminal ▸ *Use Option as Meta* makes `⌥` act as the
+Meta key: `⌥` and a key send `Esc` and that key, so `⌥B` and `⌥F` move a word
+in zsh and bash, `⌥D` deletes one, `⌥.` inserts the last argument, and Emacs
+gets its Meta. It is **off by default**, because it costs something: while it
+is on, `⌥` no longer types the characters your keyboard layout puts on it —
+`™`, `€`, and on many non-US layouts `@ [ ] { } | ~` — and no longer starts
+dead keys such as `⌥E` then `E` for `é`. Both `⌥` keys act alike; there is no
+left/right split. A change applies to every open terminal at once.
+
+The other `⌥` keys are the same with it on or off:
+
+- **`⌥`-drag still selects** over a full-screen program that has the mouse
+  ([Select, copy and paste](#working-in-a-terminal)): that is a mouse
+  modifier, not a key.
+- **`⌥Enter` still sends `Esc Enter`**, which OpenCode and Claude Code read as
+  a newline.
+- **`⌥←` / `⌥→` still move a word**: NexTerm sends `Esc b` / `Esc f` for them
+  itself, ahead of the terminal.
+
+Windows and Linux have no such setting: there `Alt` already acts as Meta.
+
+#### Programs setting the clipboard (OSC 52)
+
+tmux, vim, Neovim and a shell over ssh can copy text to your clipboard by
+printing an OSC 52 sequence: the program cannot reach the clipboard of the
+machine you sit at, and the terminal can. Settings ▸ Terminal ▸ *Let Programs
+Set the Clipboard (OSC 52)* lets them. It is **off by default**, because
+anything that can print to a terminal could then set your clipboard — a file
+shown with `cat`, a log line, a server you ssh'd into — and your next paste
+would run whatever it put there. Turn it on if you copy from tmux or a remote
+vim.
+
+With it on, the rules are:
+
+- **Writes only.** A program asking to *read* the clipboard (`?`) is refused,
+  and nothing is sent back to it: otherwise anything you ssh into could read
+  the password you copied last. A request to *clear* the clipboard (empty or
+  not valid base64) is refused too.
+- **The one system clipboard.** Whichever selections the program names (`c`,
+  `p`, `q`, `s`, `0`-`7`, or none), the text goes to the system clipboard; a
+  request naming anything else is ignored.
+- **At most 128 KiB.** More than 131072 bytes of text, or bytes that are not
+  UTF-8 text, are refused whole — never cut short to fit. The first such
+  refusal in a terminal prints one notice saying so.
+- **Live output only.** Output a terminal received before you first looked at
+  it, and restored scrollback, is ignored: what a program copied an hour ago
+  in a background tab is not what you want on the clipboard now.
+- **Nothing is logged.** What a program copies is never written to the log,
+  kept in notifications, or saved with the scrollback.
+
+With it off, the first time a program in a terminal tries to copy, NexTerm
+prints one notice in that terminal naming the setting, so you know why the
+copy did nothing; it does not repeat in that terminal until NexTerm restarts.
+If a full-screen program (vim, tmux) has the screen, the notice waits until
+the program leaves it, rather than drawing over it.
 
 ### Knowing what every terminal is doing
 
@@ -1604,6 +1856,10 @@ when there are any.
 | `⌘W` | Close the active terminal pane |
 | `⌘⇧W` | Close the window |
 | `⌥⌘←` / `⌥⌘→` | Focus the previous / next pane |
+| `⌃PageUp` / `⌃PageDown`, `⌘⇧[` / `⌘⇧]` | Previous / next tab of the active pane (`Ctrl+PageUp` / `Ctrl+PageDown` off macOS; see [Switching tabs](#switching-tabs)) |
+| `⌘1` … `⌘8` / `⌘9` | Tab 1 to 8 / the last tab of the active pane (macOS only) |
+| `⌘⇧T` | Reopen the terminal closed last, as a new shell (`Ctrl+Shift+T` off macOS; see [Reopening a closed terminal](#reopening-a-closed-terminal)) |
+| `⌃Tab` / `⌃⇧Tab` | Switch to the terminal used before, across groups; hold `⌃` to walk the list (`Ctrl+Tab` / `Ctrl+Shift+Tab` everywhere; see [Recent tabs](#recent-tabs-ctrltab)) |
 | `⌘⇧Enter` | Zoom the active pane / show every pane again |
 | `⌘⇧U` | Go to the latest unread notification's terminal |
 | `⌘B` | Toggle the primary sidebar |
@@ -1678,13 +1934,23 @@ claims these ahead of xterm:
   *modifyOtherKeys* (OpenCode, see below) would have received it as a key of
   its own off macOS, and binds nothing to it. Inside the editor `⌘⇧Enter` stays
   Monaco's *Insert Line Above*
+- the tab keys, `Ctrl+PageUp` / `Ctrl+PageDown` everywhere and `⌘⇧[` / `⌘⇧]`
+  and `⌘1` … `⌘9` on macOS. They take vim's own `Ctrl+PageUp` /
+  `Ctrl+PageDown` tab-page keys (see [Switching tabs](#switching-tabs))
+- Reopen Closed Terminal, `⌘⇧T` / `Ctrl+Shift+T`. xterm sends nothing for
+  `Ctrl+Shift+T`, so a shell gives nothing up, and `Ctrl+T` stays its own
+- the recent-terminals switcher, `Ctrl+Tab` / `Ctrl+Shift+Tab` on every
+  platform. xterm would send them as a plain `Tab` and `Shift+Tab`, which
+  still reach the shell, so it gives nothing up
 
 VS Code makes the same trades with the same keys. Two of them do take something
 away on Windows and Linux, where `⌘` is `Ctrl`: **`Ctrl+B` will not reach tmux**
 (rebind tmux's prefix, or rebind the toggle) and **`Ctrl+F` no longer moves the
 cursor forward in readline** (the arrow keys still do). Both rows are rebindable
 in Settings ▸ Keyboard Shortcuts. On macOS nothing is given up — `⌘` never
-reaches the pty. Everything else in the table above is left to the shell.
+reaches the pty. The tab keys `Ctrl+PageUp` / `Ctrl+PageDown` are the one
+trade on every platform, macOS included: they no longer reach vim as its
+tab-page keys. Everything else in the table above is left to the shell.
 
 **`Shift+Enter` for a newline in OpenCode.** A program that turns on xterm's
 *modifyOtherKeys*, as OpenCode does, gets `Shift+Enter` and `Ctrl+Enter` as
@@ -1707,6 +1973,9 @@ builds still reload, because that is the point of them.
 - Builds are for Apple Silicon and unsigned: the first launch needs
   right-click → Open (see [Install](#install)).
 - `⌘` never reaches the shell, so no shortcut takes a key away from a terminal.
+  The four [text-editing keys](#macos-text-editing-keys) (`⌘←`, `⌘→`,
+  `⌘Backspace`, `⌘Delete`) are sent as the shell's own `Ctrl+A`, `Ctrl+E`,
+  `Ctrl+U` and `Ctrl+K` unless that setting is off.
 - A lock marks a password prompt ([Safety nets](#safety-nets)).
 - Quitting with `⌘Q`, the Dock or a logout does not wait for the last output
   to be saved ([Output after a restart](#output-after-a-restart)).

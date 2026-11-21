@@ -91,10 +91,11 @@ const { useSystemStore } = await import('../../src/stores/systemStore.js');
 const { useControlLogStore } = await import('../../src/stores/controlLogStore.js');
 const { useAgentHistoryStore } = await import('../../src/stores/agentHistoryStore.js');
 const { useAgentHistoryPromptStore } = await import('../../src/stores/agentHistoryPromptStore.js');
+const { useTabSwitcherStore } = await import('../../src/stores/tabSwitcherStore.js');
 const { default: App } = await import('../../src/App.jsx');
 const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore, useTabSwitcherStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -5494,6 +5495,77 @@ scenario(
     arrangeHidden({ extra: { tabs: [tab('t1', { title: 'mine', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 })] } });
     const named = attrOf(openingTag(handleOf(paneMarkup(renderArranged(), 'pane-1'))), 'aria-label') ?? '';
     expectThat(named === 'mine. Show its tab strip', `the renamed handle's words: ${JSON.stringify(named)}`);
+  }
+);
+
+/** The Ctrl+Tab switcher's overlay, or '' when none is drawn. */
+function tabSwitcherIn(html) {
+  const at = html.indexOf('data-tab-switcher=""');
+  if (at < 0) return '';
+  const start = html.lastIndexOf('<div', at);
+  const end = html.indexOf('</div></div>', at);
+  return end < 0 ? html.slice(start) : html.slice(start, end + '</div></div>'.length);
+}
+/** Its rows, in order: the tab id, whether marked selected, and the words drawn. */
+function tabSwitcherRows(markup) {
+  return [...markup.matchAll(/<div\b[^>]*data-tab-switcher-row="([^"]+)"[^>]*>([\s\S]*?)(?=<div\b[^>]*data-tab-switcher-row=|<\/div><\/div>$)/g)].map((m) => {
+    const tag = m[0].match(/^<div\b[^>]*>/)[0];
+    const words = (sel) => m[2].match(new RegExp(`<span[^>]*${sel}[^>]*>([^<]*)</span>`))?.[1] ?? null;
+    return {
+      tabId: m[1],
+      selected: attrOf(tag, 'aria-selected'),
+      role: attrOf(tag, 'role'),
+      id: attrOf(tag, 'id'),
+      title: words('data-tab-switcher-title'),
+      group: words('data-tab-switcher-group'),
+      folder: words('data-tab-switcher-folder'),
+    };
+  });
+}
+
+scenario(
+  'RN-233',
+  'the Ctrl+Tab switcher: a listbox of every group\u{2019}s terminals, most recent first, the selected row marked, each with its name, group and folder',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        tab('t1', { title: 'Terminal 1', defaultTitle: 'Terminal 1', cwd: '/home/me/api' }),
+        tab('t2', { title: 'build', defaultTitle: 'Terminal 2', cwd: 'C:\\work\\web' }),
+        tab('t3', { title: 'Terminal 3', defaultTitle: 'Terminal 3', cwd: '/srv/logs/' }),
+      ],
+      activeTabId: 't1',
+      activeGroupId: 'group-1',
+      groups: [
+        { id: 'group-1', name: 'Group 1', createdAt: 0, activePaneId: 'pane-1', tree: { type: 'leaf', id: 'pane-1', tabIds: ['t1', 't2'], activeTabId: 't1' } },
+        { id: 'group-2', name: 'Servers', createdAt: 0, activePaneId: 'pane-2', tree: { type: 'leaf', id: 'pane-2', tabIds: ['t3'], activeTabId: 't3' } },
+      ],
+    });
+    useTabSwitcherStore.setState({ open: true, items: ['t1', 't3', 't2'], selectedIndex: 1, modifiers: { ctrl: true, alt: false, meta: false, shift: false } });
+  },
+  (html) => {
+    const overlay = tabSwitcherIn(html);
+    expectThat(overlay, 'no switcher drawn while it is open');
+    const listbox = overlay.match(/<div\b[^>]*role="listbox"[^>]*>/)?.[0];
+    expectThat(listbox, 'the switcher is no listbox');
+    expectThat(attrOf(listbox, 'aria-label') === 'Recent terminals', `the listbox is called ${JSON.stringify(attrOf(listbox, 'aria-label'))}`);
+    const rows = tabSwitcherRows(overlay);
+    expectThat(rows.map((r) => r.tabId).join() === 't1,t3,t2', `the rows, in order: ${rows.map((r) => r.tabId).join()}`);
+    expectThat(rows.every((r) => r.role === 'option'), 'a row is not an option');
+    expectThat(rows.map((r) => r.selected).join() === 'false,true,false', `the selected marks: ${rows.map((r) => r.selected).join()}`);
+    expectThat(attrOf(listbox, 'aria-activedescendant') === rows[1].id && rows[1].id, `aria-activedescendant ${JSON.stringify(attrOf(listbox, 'aria-activedescendant'))} is not the selected row ${JSON.stringify(rows[1].id)}`);
+    const drawn = rows.map((r) => [r.title, r.group, r.folder].join('|')).join(' / ');
+    expectThat(drawn === 'Terminal 1|Group 1|api / Terminal 3|Servers|logs / build|Group 1|web', `the rows say ${JSON.stringify(drawn)}`);
+    // The theme's colours only, and nothing that moves (reduce motion).
+    const classes = [...overlay.matchAll(/class="([^"]*)"/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean);
+    const colours = classes.filter((c) => /^(bg|text|border|shadow)-/.test(c) && !/^text-ui(-sm)?$/.test(c) && !/^shadow-widget$/.test(c));
+    const notTheme = colours.filter((c) => !/^(bg|text|border)-vsc-/.test(c));
+    expectThat(notTheme.length === 0, `colours that are not the theme's: ${notTheme.join(' ')}`);
+    const moving = classes.filter((c) => /^(transition|animate|duration)/.test(c));
+    expectThat(moving.length === 0, `classes that animate: ${moving.join(' ')}`);
+    // Closed: nothing drawn, whatever list it last held.
+    useTabSwitcherStore.setState({ open: false });
+    expectThat(!tabSwitcherIn(renderArranged()), 'the switcher is drawn while closed');
   }
 );
 

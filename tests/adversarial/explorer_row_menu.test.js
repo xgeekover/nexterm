@@ -230,7 +230,14 @@ const STAND_INS = {
       return { onRowPointerDown: () => {}, ghost: null, ghostRef: { current: null } };
     }`,
   copyText: `export async function copyText() {}`,
-  workspaceFocus: `export function focusWorkspace() {}`,
+  workspaceFocus: `export function focusWorkspace() {}
+    export function focusTerminal() { return false; }`,
+  // Reveal, Open Terminal Here and Open in External Editor are
+  // explorer_open_actions': the real terminal store would bring xterm with
+  // it, and nothing here is revealed or opened.
+  terminalStore: `export const useTerminalStore = { getState: () => ({ createTab: async () => null }) };`,
+  ipc: `export async function revealInFileManager() { return null; }
+export async function openInExternalEditor() { return null; }`,
 };
 
 /** Which stand-in a module FileExplorer imports is replaced by, if any. */
@@ -240,6 +247,8 @@ function explorerStandIn(path) {
   if (/\/hooks\/useExplorerPathDrag\.js$/.test(path)) return 'pathDrag';
   if (/\/lib\/copyText\.js$/.test(path)) return 'copyText';
   if (/\/lib\/workspaceFocus\.js$/.test(path)) return 'workspaceFocus';
+  if (/\/stores\/terminalStore\.js$/.test(path)) return 'terminalStore';
+  if (/\/lib\/ipc\.js$/.test(path)) return 'ipc';
   return null;
 }
 

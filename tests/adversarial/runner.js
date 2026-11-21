@@ -193,6 +193,20 @@ import './agent_fork.test.js';
 import './copy_context.test.js';
 // Keep-awake (bundle 1, A4): the backend told only when a Claude Code terminal starts or stops Working; KA-99 tears down.
 import './keep_awake.test.js';
+// Next/Previous Tab and Go to Tab 1-8/Last (bundle 2, A5-1/A5-2) over a focused terminal; TN-99 tears down.
+import './tab_navigation.test.js';
+// Reopen Closed Terminal (bundle 2, A5-4): closed terminals back as fresh shells, memory only; RC-99 tears down.
+import './reopen_closed_terminal.test.js';
+// The Ctrl+Tab switcher (bundle 2, A5-3): the terminals most recently used, every group's, memory only; MRU-99 tears down.
+import './tab_mru.test.js';
+// macOS text-editing keys (bundle 2, A6): ⌘←/→/Backspace/Delete as Ctrl+A/E/U/K, normal screen only; ME-99 tears down.
+import './mac_editing_keys.test.js';
+// Option as Meta (bundle 2, A7): macOptionIsMeta on macOS only, new and live terminals; OM-99 tears down.
+import './option_as_meta.test.js';
+// OSC 52 (bundle 2, A8): programs setting the clipboard, writes only and off by default, one notice per terminal; O52-99 tears down.
+import './osc52.test.js';
+// Explorer Reveal and Open Terminal Here (bundle 2, A12-1/A12-2): fs_reveal_path and a strict createTab; EXO-99 tears down.
+import './explorer_open_actions.test.js';
 
 async function run() {
   console.log('====================================================');

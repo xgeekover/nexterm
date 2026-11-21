@@ -111,6 +111,38 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalMouseReporting: true,
   /**
+   * macOS only (bundle 2, A6): ⌘← and ⌘→ go to the start and the end of the
+   * line, ⌘Backspace deletes to its start and ⌘Forward-Delete to its end, sent
+   * as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K. On the normal screen only — a
+   * full-screen program keeps the keys as xterm sends them — and not once the
+   * program has turned modifyOtherKeys on. While a password prompt is up only
+   * ⌘Backspace is sent. Off: every one of them is xterm's, as before. The
+   * Settings row is shown on macOS only. See src/lib/macEditingKeys.js.
+   */
+  terminalMacEditingKeys: true,
+  /**
+   * macOS only (bundle 2, A7): ⌥ acts as Meta — xterm's `macOptionIsMeta` —
+   * so ⌥ and a key send Esc and that key (⌥B / ⌥F move a word in zsh). Off
+   * by default, because with it on ⌥ no longer types ⌥-characters (™, €, and
+   * @ [ ] { } | ~ on many non-US layouts) or dead keys. Applied to every open
+   * terminal when it changes. The ⌥ mouse-select override, ⌥Enter (Esc
+   * Enter) and ⌥←/→ (Esc b / Esc f) are the same either way. The Settings
+   * row is shown on macOS only. See src/lib/optionAsMeta.js.
+   */
+  terminalOptionAsMeta: false,
+  /**
+   * Bundle 2, A8: whether a program in a terminal may put text on the
+   * clipboard with OSC 52 (tmux, vim, a shell over ssh). Off by default:
+   * anything that can print to a terminal — a file shown with `cat`, a log
+   * line, a server over ssh — could otherwise set the clipboard, and the next
+   * paste would run what it put there. Writes only: reads and clears are
+   * always refused, more than 128 KiB is refused whole, and output kept from
+   * before a terminal was shown is ignored. Read at each sequence. While off,
+   * the first write in a terminal prints one notice naming this setting.
+   * Nothing a program writes is logged. See src/lib/osc52.js.
+   */
+  terminalOsc52Write: false,
+  /**
    * What a right-click in a terminal does. 'copyPaste': copy the selection
    * when one is on screen, paste otherwise — and the program under the
    * pointer never hears of it, full-screen ones included. Shift+right-click
@@ -325,6 +357,14 @@ export const SETTINGS_DEFAULTS = {
    * src-tauri/src/fs/trash.rs.
    */
   filesEnableTrash: true,
+  /**
+   * The external editor for the Explorer's Open in External Editor: a program
+   * and its arguments (`code`, `subl -w`), split without a shell and run with
+   * the path added as the last argument. Empty: no such item in the menu —
+   * nothing is ever opened with the OS default app. See
+   * src-tauri/src/fs/external_editor.rs.
+   */
+  externalEditorCommand: '',
   reducedMotion: false,
   /**
    * Shortcut overrides, `{ [commandId]: 'mod+shift+b' | ['a','b'] | null }`.

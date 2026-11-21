@@ -77,6 +77,12 @@ const SETTINGS_KEYS = [
   // computer awake while an agent works (A4).
   'terminalCopyContextLines',
   'terminalKeepAwakeWhileAgentsWork',
+  // Bundle 2, macOS only in the window: the ⌘ editing keys (A6) and
+  // Option as Meta (A7).
+  'terminalMacEditingKeys',
+  'terminalOptionAsMeta',
+  // Bundle 2, A8: programs putting text on the clipboard with OSC 52 (off).
+  'terminalOsc52Write',
   // Settings ▸ Terminal ▸ Control (stage 7, spec D5): what programs in
   // terminals may ask of NexTerm through nexterm-cli.
   'terminalControl',
@@ -93,6 +99,8 @@ const SETTINGS_KEYS = [
   'editorMinimap',
   'editorRestoreTabs',
   'filesEnableTrash',
+  // Bundle 2, A12-3: the Explorer's external editor (empty: none).
+  'externalEditorCommand',
   'reducedMotion',
 ];
 
@@ -147,6 +155,9 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalSuggestions: false,
       terminalCopyOnSelect: false,
       terminalMouseReporting: false,
+      terminalMacEditingKeys: false,
+      terminalOptionAsMeta: true,
+      terminalOsc52Write: true,
       terminalProgramNotifications: false,
       terminalAttentionFlashFocused: true,
       terminalBellAttention: false,
@@ -158,6 +169,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalAutoReplyBatchJob: false,
       terminalUserCommands: '{ "version": 1, "commands": [] }',
       filesEnableTrash: false,
+      externalEditorCommand: 'subl -w',
       editorFontSize: 16,
       editorTabSize: 4,
       editorWordWrap: true,

@@ -1832,6 +1832,297 @@ NexTerm terminal whose shell is **PowerShell, then cmd**:
    still comes after a long turn. Close that terminal afterwards so the
    variable goes with it.
 
+### V60 — next/previous tab and Go to Tab (bundle 2, A5-1 and A5-2)
+
+Covered under Node by tests/adversarial/tab_navigation.test.js (TN-01 to
+TN-08). The cases press the keys through the window's own lookup, against the
+real terminal store and a stand-in page. They cannot show whether WebView2
+delivers `Ctrl+PageUp` / `Ctrl+PageDown` to the page, or whether Windows keeps
+`Win+1` for itself, so check those here on a release build. Use one group
+with a pane of three terminals (`` Ctrl+Shift+` `` twice), named `one`,
+`two` and `three` from their tabs' menus, and a second pane beside it (split
+right with `Ctrl+Alt+D`).
+
+1. **V60-1:** Click in `one` and press `Ctrl+PageDown` three times. The pane
+   shows `two`, then `three`, then `one` again, and the tab strip marks each.
+   The other pane never changes. Type `echo hi` and Enter after each press:
+   it runs in the terminal shown, so the keyboard went with the switch.
+2. **V60-2:** Press `Ctrl+PageUp` three times: `three`, `two`, `one`. Run
+   `vim` in `one` (Git Bash has one) and open a second tab page (`:tabnew`). `Ctrl+PageDown`
+   still switches NexTerm's tab and does not change vim's tab page. `gt`
+   still does. Quit vim with `:qa!`.
+3. **V60-3:** In `one`, press `Win+1`, then `Alt+1`, then `Ctrl+Alt+1`. No
+   NexTerm tab changes. `Win+1` does what Windows does with it (it opens or
+   switches to the first taskbar app). `Alt+1` and `Ctrl+Alt+1` reach the
+   shell as they did before this change. In Settings ▸ Keyboard Shortcuts,
+   *Go to Tab 1* … *Go to Tab 8* and *Go to Last Tab* read *Unassigned*, with
+   no `Cmd+…` chord, and *Next Tab* and *Previous Tab* show only
+   `Ctrl+PageDown` and `Ctrl+PageUp`. The note above the list does not name
+   *Go to Tab 1* or *Go to Last Tab*, and no row is marked as a conflict.
+   (That a user's `Cmd+1` chord is in no conflict with *Go to Tab 1* off
+   macOS is checked by TN-07, since Windows keeps `Win+1` for itself.)
+4. **V60-4:** In Settings ▸ Keyboard Shortcuts, record `Ctrl+Alt+F1` for *Go
+   to Tab 1*, then `Ctrl+Alt+F9` for *Go to Last Tab*. Close Settings. Click
+   in `two`. `Ctrl+Alt+F1` shows `one` and `Ctrl+Alt+F9` shows `three`.
+   Reset both rows.
+5. **V60-5:** Open a file from the Explorer so an editor pane is the active
+   pane, and click in its text. `Ctrl+PageDown` and `Ctrl+PageUp` move no
+   terminal tab. Click back in a terminal: they switch tabs again.
+
+### V61 — Reopen Closed Terminal (bundle 2, A5-4)
+
+Covered under Node by tests/adversarial/reopen_closed_terminal.test.js (RC-01
+to RC-08). The cases close and reopen terminals in the real terminal store
+over the IPC mock. They cannot show whether WebView2 delivers `Ctrl+Shift+T`
+to the page, what a real ConPTY shell does in a folder that is gone, or that
+nothing reaches the disk, so check those here on a release build. Use one
+group with two panes side by side (split right with `Ctrl+Alt+D`). The left
+pane holds three terminals (`` Ctrl+Shift+` `` twice): name the second one
+`build` from its tab's menu and leave the others with their `Terminal N`
+names.
+
+1. **V61-1:** In `build`, which runs PowerShell, run `cd $env:TEMP` and then
+   `echo before-close`. Close `build` with its tab's ✕. Click in another
+   terminal and press `Ctrl+Shift+T`. A tab named `build` comes back as the
+   second tab of the left pane, active, with the keyboard in it. `pwd` shows
+   the TEMP folder. The screen is empty: `before-close` does not come back.
+2. **V61-2:** Open a Git Bash terminal (*New Terminal With ▸ Git Bash*), run
+   `cd /c/Windows`, and close it. `Ctrl+Shift+T` reopens a Git Bash (the
+   prompt and `echo $BASH_VERSION` show it) in `/c/Windows`.
+3. **V61-3:** Close a `Terminal N` tab, then press `Ctrl+Shift+T`. It comes
+   back with a `Terminal N` name that no other tab has, not necessarily its
+   old number.
+4. **V61-4:** Close the right pane with its ✕ (or `Ctrl+W` on its last tab).
+   `Ctrl+Shift+T` brings its terminal back into the left pane. Make a second
+   group with two terminals, then close the group from the group switcher.
+   `Ctrl+Shift+T` twice brings both back into the group on screen, in their
+   old order.
+5. **V61-5:** Make a folder `C:\Temp\gone` and `cd` into it in a terminal.
+   Close that terminal. In another terminal run `Remove-Item C:\Temp\gone`,
+   then press `Ctrl+Shift+T`. A terminal opens where a new one starts, with
+   no error box.
+6. **V61-6:** Close two terminals, then quit NexTerm and start it again.
+   `Ctrl+Shift+T` does nothing: the list was in memory only. Search the files
+   under `%APPDATA%\com.nexterm.ide` and `%LOCALAPPDATA%\com.nexterm.ide`
+   for the name of a terminal you closed: it is not there.
+7. **V61-7:** In a terminal, press `Ctrl+T` at a bash prompt with `ab` typed
+   (Git Bash): readline swaps the two letters to `ba`, so `Ctrl+T` still
+   reaches the shell.
+
+### V62 — the Ctrl+Tab switcher (bundle 2, A5-3)
+
+Covered under Node by tests/adversarial/tab_mru.test.js (MRU-01 to MRU-09)
+and the render case RN-233. The cases drive the real terminal store and the
+switcher's window listeners with key events built by hand. They cannot show
+whether WebView2 delivers `Ctrl+Tab` and the release of `Ctrl` to the page,
+or where the keyboard lands on a real screen, so check those here on a
+release build. Use two groups: `Group 1` with terminals `one` and `two`, and a
+second group `Work` with terminal `three` (name them from their tabs' menus).
+Use `one`, then `three`, then `two`, in that order, by clicking in them.
+
+1. **V62-1:** In `two`, press `Ctrl+Tab` and let go at once. `three` comes
+   up, in `Work`, with the keyboard in it: type `echo here` and it appears in
+   `three`. Press `Ctrl+Tab` again and let go: back in `two`.
+2. **V62-2:** Hold `Ctrl` and press `Tab`. An overlay at the top of the
+   window lists `two`, `three` and `one`, each with its group and the last
+   part of its folder, `three` highlighted. Still holding `Ctrl`, press `Tab`
+   twice more: the highlight goes to `one`, then wraps to `two`. Press
+   `Shift+Tab` (with `Ctrl` still down): it wraps back to `one`. Press `↓`
+   and `↑`: the highlight moves. Let go of `Ctrl`: the highlighted terminal
+   is shown and has the keyboard.
+3. **V62-3:** Hold `Ctrl`, press `Tab`, press `Esc`, then let go of `Ctrl`.
+   The overlay closes and nothing switched; typing still goes to the
+   terminal you were in. Hold `Ctrl`, press `Tab`, then `Alt+Tab` to another
+   app and back: the overlay is gone and nothing switched.
+4. **V62-4:** Hold `Ctrl`, press `Tab`, and click a row: that terminal is
+   shown with the keyboard in it.
+5. **V62-5:** Open a file from the Explorer and click in it. `Ctrl+Tab` lists
+   terminals only, not the file, and letting go puts the keyboard in a
+   terminal.
+6. **V62-6:** At a Git Bash or PowerShell prompt, type `ec` and press `Tab`:
+   completion still works. Close every terminal but one: `Ctrl+Tab` opens
+   nothing and sends no `Tab` to the shell.
+7. **V62-7:** In Settings ▸ Keyboard Shortcuts, set *Switch to Recent
+   Terminal* to `Alt+Q`. Hold `Alt`, press `Q` twice, let go of `Alt`: the
+   terminal used two switches ago is shown. Reset the shortcut afterwards.
+8. **V62-8:** Turn Windows' animations off (Settings ▸ Accessibility ▸
+   Visual effects ▸ Animation effects). The overlay appears and goes without
+   any animation, as it does with them on.
+
+### V63 — macOS text-editing keys: nothing changes on Windows (bundle 2, A6)
+
+`⌘←`, `⌘→`, `⌘Backspace` and `⌘Delete` are sent as `Ctrl+A`, `Ctrl+E`,
+`Ctrl+U` and `Ctrl+K` on macOS only. Windows has no `⌘` for a terminal key,
+so its keys must behave exactly as before. Covered under Node by
+tests/adversarial/mac_editing_keys.test.js (ME-02: no mapping off macOS) and
+settings_window.test.js (SW-B2-01: no Settings row off macOS); this checks
+the release build.
+
+1. **V63-1:** Open Settings ▸ Terminal. There is no *macOS Text-Editing Keys*
+   row.
+2. **V63-2:** At a PowerShell prompt and a Git Bash prompt, type
+   `echo one two three`. `Ctrl+←` and `Ctrl+→` still move one word at a time,
+   `Home` and `End` go to the start and the end of the line, and `Backspace`
+   and `Delete` still delete one character.
+3. **V63-3:** In Git Bash, press the `Windows` key with `←` (Win+←). Windows
+   snaps the NexTerm window to the left half of the screen, as before; no
+   character appears at the prompt, and the cursor does not move.
+
+### V64 — Option as Meta: no such setting on Windows (bundle 2, A7)
+
+*Use Option as Meta* sets xterm's `macOptionIsMeta`, which means something on
+macOS only. Off macOS the setting has no row and never turns the option on,
+and `Alt` acts as Meta in xterm as it always did. Covered under Node by
+tests/adversarial/option_as_meta.test.js (OM-02: false off macOS whatever the
+setting says; OM-03: a live change sets false off macOS) and
+settings_window.test.js (SW-B2-01); this checks the release build.
+
+1. **V64-1:** Open Settings ▸ Terminal. There is no *Use Option as Meta* row.
+2. **V64-2:** At a Git Bash prompt, type `echo one two three` and press
+   `Alt+B` twice, then `Alt+F` once: the cursor moves back two words and
+   forward one, as before. `Alt+D` deletes the word after the cursor.
+3. **V64-3:** At the same prompt, `Alt+←` and `Alt+→` still move a word, and
+   `Alt+Enter` in OpenCode still inserts a newline instead of sending the
+   message.
+4. **V64-4:** In `vim` with `:set mouse=a`, hold `Shift` and drag over text:
+   it is selected, as before.
+
+### V65 — OSC 52: a program sets the clipboard, only when allowed (bundle 2, A8)
+
+A program's OSC 52 reaches the clipboard through `clipboard_write_text`
+(src-tauri/src/commands/clipboard.rs), which on Windows opens the one global
+clipboard. Covered under Node by tests/adversarial/osc52.test.js (O52-01..09:
+writes, refused reads and clears, the 128 KiB limit, kept output, one notice
+per terminal, the alternate screen) and by `cargo test` (the size check, and a
+200 KB OSC 52 through the PTY filter byte for byte), none of which touches a
+real clipboard; this checks the release build against the Windows clipboard.
+Put something of your own on the clipboard first (copy the word `before` from
+Notepad).
+
+1. **V65-1:** With the setting off (the default), in Git Bash run
+   `printf '\e]52;c;%s\a' "$(printf 'from osc52' | base64)"`. One yellow
+   `[NexTerm]` notice appears naming *Settings ▸ Terminal ▸ Let Programs Set
+   the Clipboard (OSC 52)*, and `Ctrl+V` in Notepad still pastes `before`.
+   Run the same line again: no second notice.
+2. **V65-2:** Turn the setting on in Settings ▸ Terminal and run the line
+   again. `Ctrl+V` in Notepad pastes `from osc52`. No notice appears.
+3. **V65-3:** Run `printf '\e]52;c;?\a'`: nothing appears at the prompt (no
+   reply is typed into the shell) and the clipboard still holds `from osc52`.
+   Run `printf '\e]52;c;\a'`: the clipboard still holds `from osc52`.
+4. **V65-4:** Run
+   `head -c 140000 /dev/zero | tr '\0' a | base64 -w0 | (printf '\e]52;c;'; cat; printf '\a')`.
+   One notice says the copy was refused; the clipboard still holds
+   `from osc52`, not a shortened run of `a`.
+5. **V65-5:** Turn the setting off again. In a new tab, run
+   `printf '\e[?1049h'; printf '\e]52;c;%s\a' "$(printf x | base64)"; sleep 3; printf '\e[?1049l'`.
+   For the 3 seconds the alternate screen is up, no notice is drawn on it;
+   once it is gone, the notice appears at the prompt, once.
+6. **V65-6:** Quit NexTerm. In a Command Prompt, run
+   `findstr /s /m ZnJvbSBvc2M1Mg "%APPDATA%\com.nexterm.ide\*" "%LOCALAPPDATA%\com.nexterm.ide\*"`
+   — the base64 of `from osc52`, which only the OSC 52 sequences carried and
+   nothing typed or shown did. It prints no file: the payload was not saved
+   with the scrollback, the notifications or anything else.
+
+### V66 — Reveal in File Explorer and Open Terminal Here (bundle 2, A12-1/A12-2)
+
+The Explorer's menu hands a row to `fs_reveal_path`
+(src-tauri/src/fs/reveal.rs), which on Windows runs `explorer.exe /select,`
+for a file and opens a folder, and to a terminal started there or nowhere
+(`strict_cwd`). Covered under Node by
+tests/adversarial/explorer_open_actions.test.js (EXO-01..04: the label per
+platform, the path revealed, the folder a terminal starts in, the error when it
+cannot) and by tests/e2e/tier1-features/explorer.test.js (TC-EXPL-B2-01..02,
+through the mock bridge), none of which opens File Explorer or starts a shell;
+this checks the release build against the Windows shell. Open a folder whose
+path has spaces, for example `C:\Users\<you>\My Project`, holding a file
+`a b.txt` and a folder `sub dir`.
+
+1. **V66-1:** Right-click `a b.txt`. The menu says *Reveal in File Explorer*
+   (not Finder, not File Manager). Choose it: a File Explorer window opens on
+   `My Project` with `a b.txt` selected, and Notepad or any other editor does
+   not start.
+2. **V66-2:** Right-click `sub dir` and choose *Reveal in File Explorer*: File
+   Explorer opens `sub dir` itself. Right-click the empty space below the rows
+   and choose it: File Explorer opens `My Project`.
+3. **V66-3:** Right-click `a b.txt` and choose *Open Terminal Here*. A new tab
+   opens in the active pane, has the keyboard (type `cd` and press `Enter`
+   without clicking), and prints `C:\Users\<you>\My Project` — the file's
+   folder, spaces and all. Do the same on `sub dir`: the new terminal is in
+   `...\My Project\sub dir`.
+4. **V66-4:** In File Explorer, rename `sub dir` to `gone` without refreshing
+   NexTerm's Explorer, then right-click `sub dir` in NexTerm and choose *Open
+   Terminal Here*. No terminal opens, and the Explorer shows *No terminal
+   could be started in ...\sub dir* in red. Rename it back.
+
+### V67 — Open in External Editor: code.cmd, spaces and &, no console (bundle 2, A12-3/A12-4)
+
+*Open in External Editor* runs the command set in *Settings ▸ Files ▸ External
+Editor* through `fs_open_in_external_editor`
+(src-tauri/src/fs/external_editor.rs): split without a shell, the path added as
+the last argument, a bare name found on `PATH` as `.exe`, `.com`, `.cmd` or
+`.bat`. Covered under Node by tests/adversarial/explorer_open_actions.test.js
+(EXO-05..06: the item only while an editor is set, what is sent, the refusal in
+the Explorer) and tests/e2e/tier1-features/explorer.test.js (TC-EXPL-B2-03,
+through the mock bridge), and in Rust by XE-01..05 and XE-07 (the split, the
+deny-list, the confinement, the command built, `code` found as `code.cmd`, and
+`NoDefaultCurrentDirectoryInExePath=1` set for the editor), none of which
+starts an editor; this checks the release build against a real one. Install
+VS Code with its `code` command on `PATH` (the installer's default). Open a
+folder whose path has spaces, for example `C:\Users\<you>\My Project`, holding
+a file `a & b.txt` and a folder `sub dir`.
+
+1. **V67-1:** With the setting empty (the default), right-click `a & b.txt`:
+   there is no *Open in External Editor*. Type a few spaces into the setting
+   and leave the field: still none.
+2. **V67-2:** Set the setting to `code` and right-click `a & b.txt`. Choose
+   *Open in External Editor*: VS Code opens `a & b.txt` — the whole name, not
+   `a` — and no console window flashes up, not even for a moment. Nothing else
+   starts, and Notepad does not open.
+3. **V67-3:** Right-click `sub dir`, then the empty space below the rows, and
+   choose it each time: VS Code opens `...\My Project\sub dir`, then
+   `My Project`. NexTerm stays responsive while VS Code is open, and closing VS
+   Code leaves no `cmd.exe` behind in Task Manager.
+4. **V67-4:** Set the setting to the full path in quotes, for example
+   `"C:\Users\<you>\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd"
+   --new-window`: *Open in External Editor* on `a & b.txt` opens it in a new
+   VS Code window.
+5. **V67-5:** Set the setting to `cmd /c echo` and choose *Open in External
+   Editor*: nothing starts, and the Explorer shows in red that `cmd` is a shell
+   or opens files in their default app. Do the same with `explorer`, with
+   `START` and with `wsl.exe`: refused the same way. Set it to `"code` (an
+   unclosed quote): the Explorer says the quote is never closed.
+6. **V67-6:** Set the setting to `nosuch-editor`: the Explorer says
+   *'nosuch-editor' was not found on PATH (looked for .exe, .com, .cmd and
+   .bat)*, and nothing opens. Clear the setting: the item is gone from the
+   menu again.
+7. **V67-7:** A batch-file editor finds no program in the open folder. Make a
+   folder outside the open one, for example `C:\Users\<you>\v67-editor`,
+   holding `editor.cmd`:
+
+   ```bat
+   @echo off
+   v67probe
+   echo ran> "%TEMP%\v67-editor-ran.txt"
+   ```
+
+   and at the root of `My Project` put `v67probe.bat`:
+
+   ```bat
+   @echo off
+   echo planted> "%TEMP%\v67-planted-ran.txt"
+   ```
+
+   First the control, in a Command Prompt rather than NexTerm (if
+   `set NoDefault` shows the variable there, clear it with
+   `set NoDefaultCurrentDirectoryInExePath=`): `cd /d "C:\Users\<you>\My Project"`,
+   then `"C:\Users\<you>\v67-editor\editor.cmd" x`. `%TEMP%\v67-planted-ran.txt`
+   now exists: run in that folder, cmd.exe found the planted `v67probe.bat`.
+   Delete both `.txt` files. Now set the setting to
+   `"C:\Users\<you>\v67-editor\editor.cmd"` and choose *Open in External
+   Editor* on `a & b.txt`: `%TEMP%\v67-editor-ran.txt` appears, so the editor
+   ran, and `%TEMP%\v67-planted-ran.txt` does not. Delete `v67probe.bat` and
+   clear the setting afterwards.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

@@ -25,6 +25,8 @@ import {
 } from '../../src/lib/terminalCompat.js';
 import { suggestionKeyAction, lineAfterKey, rankedSuggestions, NEW_LINE } from '../../src/lib/suggestionLayer.js';
 import { handleClipboardKey } from '../../src/lib/terminalClipboard.js';
+import { macEditingKeySequence } from '../../src/lib/macEditingKeys.js';
+import { typingHidden } from '../../src/lib/secretInput.js';
 import { scrollbackRows55 } from './xterm55Wheel.js';
 
 const ARROW_CODES = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
@@ -185,6 +187,11 @@ function terminalViewKeyHandler({ mac, suggestState, windows = false }) {
     writeRaw: (tabId, text) => calls.writeRaw.push([tabId, text]),
     tabId: 'tab-1',
     EMPTY_SUGGEST_STATE,
+    // The macOS editing keys (src/lib/macEditingKeys.js), on as by default, no password prompt up.
+    macEditingKeySequence,
+    typingHidden,
+    useSettingsStore: { getState: () => ({ terminalMacEditingKeys: true }) },
+    useTerminalStore: { getState: () => ({ secretInput: {} }) },
   };
   const names = Object.keys(scope);
   const make = new Function(...names, `${src.slice(start, end)}\nreturn handleKeyEvent;`);

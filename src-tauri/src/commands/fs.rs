@@ -204,6 +204,32 @@ pub async fn fs_reveal_path(path: String) -> Result<(), String> {
     .map_err(|e| format!("Showing the path stopped unexpectedly: {e}"))?
 }
 
+/// Open `path` in the external editor the user set: `command`, a program and
+/// its arguments (`code`, `subl -w`), split into an argument list and run
+/// without a shell, the path added as one last argument
+/// (`fs::external_editor`). Never the OS default app: a shell or an opener as
+/// the program is refused. `path` is confined to the open folder like every
+/// other file command, and refused — before anything starts — outside it or
+/// with no folder open.
+///
+/// Returns once the editor has started; it is never waited for. On the
+/// blocking pool: the first call reads the login shell's PATH
+/// (`agent::search_path`), and Windows looks the program up on it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fs_open_in_external_editor(
+    state: State<'_, AppState>,
+    command: String,
+    path: String,
+) -> Result<(), String> {
+    let workspace = state.workspace.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let editor = fs::external_editor::prepare(&workspace, &command, &path, crate::commands::agent::search_path())?;
+        fs::external_editor::spawn_detached(editor)
+    })
+    .await
+    .map_err(|e| format!("Opening the external editor stopped unexpectedly: {e}"))?
+}
+
 /// The open folder, or `null` until one has been opened.
 #[tauri::command(rename_all = "snake_case")]
 pub fn fs_get_root(state: State<AppState>) -> Result<Option<String>, String> {

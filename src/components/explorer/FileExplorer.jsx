@@ -31,7 +31,10 @@ import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
-import { focusWorkspace } from '../../lib/workspaceFocus.js';
+import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { openInExternalEditor, revealInFileManager } from '../../lib/ipc.js';
+import { useTerminalStore } from '../../stores/terminalStore.js';
+import { buildOpenActionItems } from './explorerOpenActions.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
 import { useExplorerPathDrag } from '../../hooks/useExplorerPathDrag.js';
 
@@ -220,6 +223,25 @@ export function FileExplorer() {
       disabledReason: noSelectionReason,
       onSelect: () => copyText(relativeTo(rootPath, target.path)),
     });
+
+    // Reveal in Finder / File Explorer / File Manager, Open Terminal Here and,
+    // while an editor is set in Settings ▸ Files, Open in External Editor
+    // (A12-1 to A12-3): the row, or the open folder for the empty area.
+    pushSeparator();
+    items.push(
+      ...buildOpenActionItems(target, {
+        os,
+        rootPath,
+        reveal: revealInFileManager,
+        createTab: (options) => useTerminalStore.getState().createTab(options),
+        // After the new terminal has been drawn: it is the active pane's by
+        // then, and the keyboard goes to it rather than staying in the tree.
+        focusTerminal: () => requestAnimationFrame(() => focusTerminal()),
+        externalEditorCommand: useSettingsStore.getState().externalEditorCommand,
+        openInExternalEditor,
+        setError: setExplorerError,
+      })
+    );
 
     pushSeparator();
     items.push({

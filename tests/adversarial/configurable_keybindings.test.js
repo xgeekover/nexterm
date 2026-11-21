@@ -368,6 +368,14 @@ describe('Conflicts are found by the keys pressed, not by how a chord is spelled
           const runs = findBinding(e, ctx(e, platform, { bindings, blockReload: true, isWindows }))?.command;
           const reported = conflicts.find((c) => c.command === binding.command && c.key === binding.key);
           const where = `${platform} ${JSON.stringify(overrides)} ${binding.command}:${binding.key}`;
+          // Nor is a default spelled with ⌘ for macOS alone (`macOnly`) off
+          // macOS: it never runs there, so a user's chord on the same keys
+          // takes nothing from it, and nothing is reported for it.
+          if (binding.macOnly && platform !== 'macos') {
+            assert.notEqual(runs, binding.command, `${where} is macOS's alone, yet runs`);
+            assert.equal(reported, undefined, `${where} is macOS's alone, yet is reported`);
+            continue;
+          }
           if (runs === binding.command) assert.equal(reported, undefined, `${where} runs, yet is reported`);
           else assert.equal(reported?.winner, runs, `${where} runs ${runs}`);
         }
