@@ -3,11 +3,12 @@ import { CircleAlert, Info, X } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 
-/** The first line of each notice, by `resumeFromHistory`'s outcome. */
+/** The first line of each notice, by `resumeFromHistory`'s (or `forkConversation`'s) outcome. */
 const HEADINGS = {
   focused: 'Already open',
   missingFolder: 'Folder not found',
   refused: 'Not resumed',
+  notForked: 'Not forked',
   gone: 'No longer in the list',
   unreadable: 'Agent session history not read',
   failed: 'No terminal could be started',
@@ -27,6 +28,8 @@ const INFORMATIONAL = new Set(['focused', 'newConversation']);
  * Code conversation that was never saved, that a new one was started in the
  * terminal it opened ('newConversation'). And a Clear Agent
  * Session History… that failed (`showAgentHistoryNotice`, 'clearFailed'),
+ * a Fork Conversation that could not fork ('notForked', 'missingFolder',
+ * 'failed', or 'newConversation' for a source never saved),
  * or a pin, rename, group, archive or delete the history refused or could
  * not save ('curationFailed', in the backend's words).
  *

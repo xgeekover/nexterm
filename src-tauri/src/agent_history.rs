@@ -20,14 +20,20 @@
 //! and `{"version":2,"entries":[…],"groups":[…]}` once anything is
 //! (`document_text`). Each entry is `{key, kind, sessionId, cwd, title,
 //! startedAt, lastUsedAt, endedAt, endReason}` (`Entry`), times in
-//! milliseconds since the epoch, newest first; then, each only when it is
-//! not at its default, what the user curated: `name`, their own name for it,
+//! milliseconds since the epoch, newest first; then `forkOf`, only for a
+//! conversation forked from another (Fork Conversation): that one's session
+//! id, of the entry's kind's shape. It is recorded, not curated — an upsert
+//! writes it, a later one without it keeps it (`merge`) — and an entry
+//! without it is written exactly as before, so it alone never makes the file
+//! version 2; a build before it reads the file and ignores the field. Then,
+//! each only when it is not at its default, what the user curated: `name`, their own name for it,
 //! one line as a title is; `pinned` and `archived`, true; and `groupId`, the
 //! `id` of one of `groups`. A group is `{id, name, collapsed}`, in the order
 //! the side bar shows them: an id the page made (`^[0-9A-Za-z_-]{1,64}$`), a
 //! name of one line, and whether its list is folded. VERSION, the newest
 //! format this build reads and writes, is 2; it reads version 1 as well. A
-//! field this build does not know is ignored. A kind it does not know but
+//! field this build does not know is ignored — which is how a build before
+//! `forkOf` reads one that has it. A kind it does not know but
 //! that is well formed (`is_kind`) is kept and handed back like any other:
 //! the page shows and resumes only the agents it knows, and a later build can
 //! add one without a new format.
@@ -44,7 +50,8 @@
 //! typed into a shell when a conversation is resumed. So an entry is only
 //! kept when every field is what this build could have written (`entry_from`,
 //! and `stored_entry_from` for what the user curated): a session id of its
-//! kind's one shape — the same patterns as src/lib/agents.js — a folder that
+//! kind's one shape — the same patterns as src/lib/agents.js, and the same
+//! for the `forkOf` it was forked from — a folder that
 //! is an absolute path without control characters, a title and a name of one
 //! line, a `groupId` of a group id's shape. An entry that is not is dropped
 //! on read and refused on write; the rest of the file is kept. A group that
@@ -277,6 +284,14 @@ pub struct Entry {
     pub ended_at: Option<u64>,
     /// Set exactly when `ended_at` is.
     pub end_reason: Option<EndReason>,
+    /// The conversation this one was forked from (Fork Conversation): a
+    /// session id of its kind's shape, as `session_id` is. Written and handed
+    /// to the page only when there is one, so an entry with none is the nine
+    /// fields; not curated, so it never makes the file version 2. Recorded
+    /// like the rest — an upsert reads it — and kept by `merge` when a later
+    /// event has none. NexTerm 0.26.0 to 0.33 ignore it when they read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_of: Option<String>,
     // What the user curated, written and handed to the page only when not at
     // its default: an entry with none is the nine fields NexTerm 0.26.0
     // writes. Never read from an upsert (`merge`).
@@ -557,6 +572,13 @@ fn entry_from(value: &Value) -> Result<Entry, String> {
     if ended_at.is_some() != end_reason.is_some() {
         return Err("it has an endedAt without an endReason, or an endReason without an endedAt".to_string());
     }
+    // Asked last, so that an entry of the nine fields is refused for exactly
+    // what it always was.
+    let fork_of = match text_field(entry, "forkOf") {
+        Ok(None) => None,
+        Ok(Some(id)) if is_session_id_for(kind, id) => Some(id),
+        _ => return Err(format!("its forkOf is not one that {kind} gives a conversation")),
+    };
     Ok(Entry {
         key: key_of(kind, session_id, cwd, title),
         kind: kind.to_string(),
@@ -567,6 +589,7 @@ fn entry_from(value: &Value) -> Result<Entry, String> {
         last_used_at,
         ended_at,
         end_reason,
+        fork_of: fork_of.map(str::to_string),
         name: None,
         pinned: false,
         archived: false,
@@ -711,11 +734,16 @@ fn group_changes_from(value: &Value) -> Result<GroupChanges, String> {
 /// last use; but for an entry with no id the title is part of its key, so it
 /// stays the incoming one.
 ///
+/// The conversation it was forked from is the incoming one's when it names
+/// one, else the first there is of `others`: an event after the fork — a
+/// title, an end — sends none, and must not undo the link.
+///
 /// What the user curated is never the incoming one's (`entry_from` reads
 /// none): its name and group are the first there are of `others`, it is
 /// pinned when either is, and archived as the first of them is — the entry
 /// under its key when there is one — unless it is to `unarchive`.
 fn merge(incoming: Entry, others: Vec<Entry>, unarchive: bool) -> Entry {
+    let fork_of = incoming.fork_of.clone().or_else(|| others.iter().find_map(|e| e.fork_of.clone()));
     let name = others.iter().find_map(|e| e.name.clone());
     let group_id = others.iter().find_map(|e| e.group_id.clone());
     let pinned = others.iter().any(|e| e.pinned);
@@ -740,6 +768,7 @@ fn merge(incoming: Entry, others: Vec<Entry>, unarchive: bool) -> Entry {
     merged.ended_at = ended_at;
     merged.end_reason = end_reason;
     merged.title = title;
+    merged.fork_of = fork_of;
     merged.name = name;
     merged.pinned = pinned;
     merged.archived = archived;
@@ -1971,6 +2000,7 @@ mod tests {
         let other_id = "its session id is not one that agy gives a conversation";
         let folder = "its folder is not an absolute path";
         let title = "its title is not one line of at most 200 characters";
+        let claude_fork = "its forkOf is not one that claude gives a conversation";
         let mut cases: Vec<(Value, &str)> = vec![
             (json!(["not", "an", "object"]), "it is not an object"),
             (json!("an entry"), "it is not an object"),
@@ -2023,6 +2053,21 @@ mod tests {
             (with(&good, "endReason", json!(1)), "its endReason is neither exited nor closed"),
             (with(&good, "endedAt", json!(5)), "it has an endedAt without an endReason, or an endReason without an endedAt"),
             (with(&good, "endReason", json!("closed")), "it has an endedAt without an endReason, or an endReason without an endedAt"),
+            // The conversation it was forked from: its kind's shape, as its own id.
+            (with(&good, "forkOf", json!("x; curl a | sh")), claude_fork),
+            (with(&good, "forkOf", json!(CLAUDE_B.to_uppercase())), claude_fork),
+            (with(&good, "forkOf", json!(OPENCODE_A)), claude_fork),
+            (with(&good, "forkOf", json!("")), claude_fork),
+            (with(&good, "forkOf", json!(7)), claude_fork),
+            (with(&good, "forkOf", json!([CLAUDE_B])), claude_fork),
+            (with(&good, "forkOf", json!({"sessionId": CLAUDE_B})), claude_fork),
+            (with(&good, "forkOf", json!(format!("{CLAUDE_B}\n"))), claude_fork),
+            (with(&opencode, "forkOf", json!(CLAUDE_B)), "its forkOf is not one that opencode gives a conversation"),
+            (with(&opencode, "forkOf", json!("ses_1234567")), "its forkOf is not one that opencode gives a conversation"),
+            (with(&other, "forkOf", json!("a".repeat(MAX_OTHER_ID_CHARS + 1))), "its forkOf is not one that agy gives a conversation"),
+            // Every other field first: a fork refused for its forkOf is one
+            // whose nine fields are what this build would have written.
+            (with(&with(&good, "forkOf", json!("bad")), "endReason", json!("killed")), "its endReason is neither exited nor closed"),
         ];
         // Every class of character refused in a folder, a title and the id
         // of a kind this build does not know: C0 (NUL, BEL, ESC, a line
@@ -2331,6 +2376,153 @@ mod tests {
                 "cwd": "/w", "title": "Title", "startedAt": 1, "lastUsedAt": 2, "endedAt": 2, "endReason": "closed",
             }]})
         );
+    }
+
+    // ---- Fork Conversation: the conversation a fork was forked from -----------------------------------
+
+    /// A fork of CLAUDE_A recorded as CLAUDE_B, as the page writes it when
+    /// the fork is typed (src/lib/agentHistory.js `entryOfAgent`).
+    fn fork(started: u64, used: u64) -> Value {
+        let mut e = entry("claude", Some(CLAUDE_B), "/w", None, started, used);
+        e["forkOf"] = json!(CLAUDE_A);
+        e
+    }
+
+    /// The source (`write_two`'s Claude Code entry, used at 4) and its fork,
+    /// used at 6: the fork's `forkOf` after its nine fields, the source as
+    /// it always was, and still version 1.
+    const FORK_TEXT: &str = r#"{
+  "version": 1,
+  "entries": [
+    {
+      "key": "claude:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "kind": "claude",
+      "sessionId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "cwd": "/w",
+      "title": null,
+      "startedAt": 5,
+      "lastUsedAt": 6,
+      "endedAt": null,
+      "endReason": null,
+      "forkOf": "0f8fad5b-d9cb-469f-a165-70867728950e"
+    },
+    {
+      "key": "claude:0f8fad5b-d9cb-469f-a165-70867728950e",
+      "kind": "claude",
+      "sessionId": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "cwd": "/w",
+      "title": null,
+      "startedAt": 3,
+      "lastUsedAt": 4,
+      "endedAt": null,
+      "endReason": null
+    }
+  ]
+}
+"#;
+
+    #[test]
+    fn a_fork_keeps_the_conversation_it_was_forked_from_and_stays_version_1() {
+        let scratch = Scratch::new("fork-of");
+        let base = scratch.base();
+        upsert(&base, &entry("claude", Some(CLAUDE_A), "/w", None, 3, 4), None).unwrap();
+        let kept = upsert(&base, &fork(5, 6), None).unwrap();
+        assert_eq!(kept.fork_of.as_deref(), Some(CLAUDE_A));
+        assert_eq!(kept.key, format!("claude:{CLAUDE_B}"), "keyed by its own id, not the source's");
+        assert!(!kept.is_curated(), "a link is not curation");
+        assert_eq!(text(&scratch), FORK_TEXT);
+        let listed = list(&base).unwrap();
+        assert_eq!(listed[0].fork_of.as_deref(), Some(CLAUDE_A));
+        assert_eq!(listed[1].fork_of, None, "the source is left as it was");
+        assert_eq!(serde_json::to_value(&listed[0]).unwrap().as_object().unwrap().len(), 10);
+        assert_eq!(serde_json::to_value(&listed[1]).unwrap().as_object().unwrap().len(), 9, "handed to the page as before");
+        assert_eq!(groups(&base).unwrap().version, 1);
+
+        // Later events of the fork send none: the link stays — an end, a
+        // title from the transcript, a resume that names it null.
+        let mut ended = entry("claude", Some(CLAUDE_B), "/w", None, 5, 7);
+        ended["endedAt"] = json!(7);
+        ended["endReason"] = json!("exited");
+        assert_eq!(upsert(&base, &ended, None).unwrap().fork_of.as_deref(), Some(CLAUDE_A));
+        let titled = upsert(&base, &entry("claude", Some(CLAUDE_B), "/w", Some("From the transcript"), 5, 8), None).unwrap();
+        assert_eq!(titled.fork_of.as_deref(), Some(CLAUDE_A));
+        let mut resumed = entry("claude", Some(CLAUDE_B), "/w", None, 9, 9);
+        resumed["forkOf"] = Value::Null;
+        let resumed = upsert(&base, &resumed, None).unwrap();
+        assert_eq!((resumed.fork_of.as_deref(), resumed.title.as_deref()), (Some(CLAUDE_A), Some("From the transcript")));
+        assert_eq!(document(&scratch)["version"], json!(1), "never version 2 by itself");
+
+        // Curated, it is version 2, with the link between the nine and the
+        // curated fields; uncurated again, version 1 with the link.
+        let key = format!("claude:{CLAUDE_B}");
+        update(&base, &key, &json!({"pinned": true})).unwrap();
+        let pinned = text(&scratch);
+        assert!(pinned.starts_with("{\n  \"version\": 2,"), "{pinned}");
+        assert!(pinned.contains(&format!("\"endReason\": null,\n      \"forkOf\": \"{CLAUDE_A}\",\n      \"pinned\": true\n")), "{pinned}");
+        update(&base, &key, &json!({"pinned": false})).unwrap();
+        assert_eq!(document(&scratch)["version"], json!(1));
+        assert_eq!(document(&scratch)["entries"][0]["forkOf"], json!(CLAUDE_A));
+        assert_eq!(list(&base).unwrap()[0].fork_of.as_deref(), Some(CLAUDE_A), "a curation keeps it too");
+
+        // The newest that names one wins.
+        let mut again = entry("claude", Some(CLAUDE_B), "/w", None, 9, 10);
+        again["forkOf"] = json!("d4bef4d0-c043-40ef-b157-640fb31ac0ea");
+        assert_eq!(upsert(&base, &again, None).unwrap().fork_of.as_deref(), Some("d4bef4d0-c043-40ef-b157-640fb31ac0ea"));
+    }
+
+    #[test]
+    fn no_fork_of_is_written_as_nothing_and_each_kind_has_its_own_shape() {
+        let scratch = Scratch::new("fork-of-none");
+        let base = scratch.base();
+        // A page that sends `forkOf: null` for every entry writes 0.26.0's text.
+        let mut ended = entry("opencode", Some(OPENCODE_A), "/w", Some("Title"), 1, 2);
+        ended["endedAt"] = json!(2);
+        ended["endReason"] = json!("closed");
+        ended["forkOf"] = Value::Null;
+        upsert(&base, &ended, None).unwrap();
+        let mut claude = entry("claude", Some(CLAUDE_A), "/w", None, 3, 4);
+        claude["forkOf"] = Value::Null;
+        upsert(&base, &claude, None).unwrap();
+        assert_eq!(text(&scratch), V1_TEXT, "byte for byte the nine-field version 1");
+
+        // Each kind's own shape: an OpenCode fork names an OpenCode
+        // conversation; a kind this build does not know, a line of text.
+        let mut opencode = entry("opencode", Some("ses_0123456789abcdefGHIJKLMNop"), "/w", None, 5, 5);
+        opencode["forkOf"] = json!(OPENCODE_A);
+        assert_eq!(upsert(&base, &opencode, None).unwrap().fork_of.as_deref(), Some(OPENCODE_A));
+        let mut other = entry("agy", Some("agy-2"), "/w", None, 6, 6);
+        other["forkOf"] = json!("agy 1 of a line");
+        assert_eq!(upsert(&base, &other, None).unwrap().fork_of.as_deref(), Some("agy 1 of a line"));
+        // A fork whose own id is not known yet may still name its source.
+        let mut provisional = entry("claude", None, "/x", None, 7, 7);
+        provisional["forkOf"] = json!(CLAUDE_A);
+        assert_eq!(upsert(&base, &provisional, None).unwrap().fork_of.as_deref(), Some(CLAUDE_A));
+    }
+
+    #[test]
+    fn a_malformed_fork_of_is_refused_on_write_and_its_entry_dropped_on_read() {
+        let scratch = Scratch::new("fork-of-bad");
+        let base = scratch.base();
+        for bad in [json!("x; curl a | sh"), json!(CLAUDE_A.to_uppercase()), json!(OPENCODE_A), json!(""), json!(1), json!([CLAUDE_A])] {
+            let mut e = fork(1, 1);
+            e["forkOf"] = bad.clone();
+            assert_eq!(
+                upsert(&base, &e, None).unwrap_err(),
+                format!("{INVALID}: its forkOf is not one that claude gives a conversation"),
+                "{bad}"
+            );
+        }
+        assert!(!base.exists(), "nothing was made for a refused write");
+        fs::create_dir_all(&base).unwrap();
+        let mut malformed = entry("claude", Some(CLAUDE_A), "/w", None, 1, 9);
+        malformed["forkOf"] = json!("x; curl a | sh");
+        let file = json!({"version": 1, "entries": [malformed, fork(1, 5), entry("opencode", Some(OPENCODE_A), "/w", None, 1, 3)]});
+        fs::write(scratch.file(), serde_json::to_vec(&file).unwrap()).unwrap();
+        let listed = list(&base).unwrap();
+        assert_eq!(keys(&listed), vec![format!("claude:{CLAUDE_B}"), format!("opencode:{OPENCODE_A}")], "dropped, the rest kept");
+        assert_eq!(listed[0].fork_of.as_deref(), Some(CLAUDE_A));
+        assert!(scratch.bad().is_empty(), "the file is not moved aside for one entry");
+        assert_eq!(document(&scratch), file, "nor rewritten by a list");
     }
 
     // ---- AC25: version 2, and only once something is curated -----------------------------------------
@@ -3209,6 +3401,7 @@ mod contract_tests {
     use serde_json::json;
 
     const CLAUDE_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    const CLAUDE_B: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     const OPENCODE_A: &str = "ses_ef45006f5ffeAMtumN5ySj4VmT";
     const OPENCODE_B: &str = "ses_0123456789abcdefGHIJKLMNop";
 
@@ -3535,9 +3728,49 @@ mod contract_tests {
                 "a newer file with no list reads as empty",
                 vec![write_file(r#"{"version":3,"sessions":[]}"#, None), json!({"op": "list"}), json!({"op": "groups"})],
             ),
+            ("a fork keeps the conversation it was forked from", fork_scenario()),
         ];
         all.extend(curated_scenarios());
         all
+    }
+
+    /// Fork Conversation: a fork of CLAUDE_A recorded as CLAUDE_B. Its
+    /// `forkOf` is written after the nine fields and only when there is one,
+    /// kept when a later event sends none, curated or not, and never makes
+    /// the file version 2 by itself; one of the wrong shape is refused, and
+    /// dropped from a file.
+    fn fork_scenario() -> Vec<Value> {
+        let source = entry("claude", Some(CLAUDE_A), "/work/app", None, 1, 2);
+        let fork = |started: u64, used: u64| with(entry("claude", Some(CLAUDE_B), "/work/app", None, started, used), "forkOf", json!(CLAUDE_A));
+        let plain = |started: u64, used: u64| entry("claude", Some(CLAUDE_B), "/work/app", None, started, used);
+        let fork_key = format!("claude:{CLAUDE_B}");
+        let in_file = json!({"version": 1, "entries": [
+            fork(3, 9),
+            with(entry("claude", Some(CLAUDE_A), "/w", None, 1, 8), "forkOf", json!("x; curl a | sh")),
+            with(entry("opencode", Some(OPENCODE_A), "/w", None, 1, 7), "forkOf", json!(CLAUDE_A)),
+            with(entry("opencode", Some(OPENCODE_B), "/w", None, 1, 6), "forkOf", json!(OPENCODE_A)),
+            with(entry("claude", None, "/w", None, 1, 5), "forkOf", json!(null)),
+        ]});
+        vec![
+            upsert_op(source.clone(), None),
+            upsert_op(fork(3, 4), None),
+            upsert_op(ended(plain(3, 5), 5, "exited"), None),
+            upsert_op(with(plain(3, 6), "title", json!("From the transcript")), None),
+            upsert_op(with(plain(7, 7), "forkOf", json!(null)), None),
+            json!({"op": "list"}),
+            update_op(&fork_key, json!({"pinned": true})),
+            json!({"op": "list"}),
+            update_op(&fork_key, json!({"pinned": false})),
+            upsert_op(with(entry("opencode", Some(OPENCODE_B), "/w", None, 8, 8), "forkOf", json!(OPENCODE_A)), None),
+            upsert_op(with(entry("claude", None, "/x", None, 9, 9), "forkOf", json!(CLAUDE_A)), None),
+            upsert_op(with(plain(10, 10), "forkOf", json!(OPENCODE_A)), None),
+            upsert_op(with(plain(10, 10), "forkOf", json!(CLAUDE_A.to_uppercase())), None),
+            json!({"op": "list"}),
+            write_file(&in_file.to_string(), None),
+            json!({"op": "list"}),
+            upsert_op(source, None),
+            json!({"op": "list"}),
+        ]
     }
 
     fn update_op(key: &str, changes: Value) -> Value {

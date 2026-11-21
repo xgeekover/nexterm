@@ -24,6 +24,7 @@ import { expandHome } from '../../lib/paths.js';
 import { isNetworkPath } from '../../lib/terminalLinks.js';
 import { NETWORK_START_DIR } from '../../lib/terminalCwd.js';
 import { invoke } from '../../lib/ipc.js';
+import { keepAwakeDescription, keepAwakeSupport } from '../../lib/keepAwake.js';
 import { userCommandsCheck } from '../../stores/projectCommandsStore.js';
 import { COMMANDS_FILE } from '../../lib/projectCommands.js';
 
@@ -127,8 +128,12 @@ const SECTIONS = [
   { id: 'workbench', label: 'Workbench' },
 ];
 
-/** Every row the Settings window can render, grouped by section. */
-function buildItems(monoPlaceholder, detectedShells, homeDir) {
+/**
+ * Every row the Settings window can render, grouped by section. Exported for
+ * its tests. `keepAwake` is the backend's keep-awake support answer
+ * (`{ supported, method }`), or null while it is not known.
+ */
+export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake = null) {
   return [
     // ---- Text Editor ----
     {
@@ -326,6 +331,20 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       actionLabel: 'Clear Saved Scrollback…',
       action: 'clearSavedScrollback',
     },
+    // ---- Copy Context (bundle 1, A3) ----
+    {
+      id: 'terminalCopyContextLines',
+      section: 'terminal',
+      key: 'terminalCopyContextLines',
+      settingKey: 'terminal.integrated.copyContextLines',
+      title: 'Copy Context Lines',
+      description:
+        "How many of a terminal's last lines Copy Last N Lines (Secrets Masked) puts on the clipboard, from the tab's menu, the TERMINALS list or the Command Palette. Plain text, wrapped lines joined; strings that look like secrets (API keys, tokens, passwords after NAME=) are replaced with [hidden], as read-screen does. Nothing is written to a file.",
+      control: 'number',
+      min: 1,
+      max: 10000,
+      step: 1,
+    },
     {
       id: 'terminalTheme',
       section: 'terminal',
@@ -504,6 +523,16 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         'Shows the progress a program reports with OSC 9;4, the sequence Windows Terminal understands, as a thin bar under its tab and its group, and on Windows on the taskbar button too. Off, every bar is taken down at once.',
       control: 'checkbox',
     },
+    // ---- Keep-awake (bundle 1, A4): src/lib/keepAwake.js ----
+    {
+      id: 'terminalKeepAwakeWhileAgentsWork',
+      section: 'terminal',
+      key: 'terminalKeepAwakeWhileAgentsWork',
+      settingKey: 'terminal.integrated.keepAwakeWhileAgentsWork',
+      title: 'Keep the Computer Awake While an Agent Works',
+      description: keepAwakeDescription(keepAwake),
+      control: 'checkbox',
+    },
     // ---- The TERMINALS side bar's rows (stage 2) ----
     // With any of Branch, Agent and Status, or Last Notification on, every
     // terminal row is two lines of one height; with all three off, one line.
@@ -648,7 +677,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       settingKey: 'terminal.control.enabled',
       title: 'Let Programs in Terminals Control NexTerm',
       description:
-        'Lets a program running in a terminal — an agent\'s hook, a script — use nexterm-cli to show a notification, set a status line for its terminal in the TERMINALS side bar, show a progress bar, list the terminals of this window, open a split beside its own terminal and point you to a terminal — its pane flashes and its tab is marked, and while NexTerm is in the background the Dock or taskbar asks for you too; it never switches terminals for you or raises the window. Only programs in terminals NexTerm started can reach it, as you: each shell gets a token of its own, the address is a socket or pipe only your user account can open, and nothing listens on the network. Every call is in the palette\'s Show Control Log. Off, nothing answers, and every terminal\'s token stops working.',
+        'Lets a program running in a terminal — an agent\'s hook, a script — use nexterm-cli to show a notification, set a status line for its terminal in the TERMINALS side bar, show a progress bar, give its terminal a title (nexterm-cli set-title — shown on its tab until the shell exits, unless you renamed the tab: a name you gave it always stays), list the terminals of this window, open a split beside its own terminal and point you to a terminal — its pane flashes and its tab is marked, and while NexTerm is in the background the Dock or taskbar asks for you too; it never switches terminals for you or raises the window. Only programs in terminals NexTerm started can reach it, as you: each shell gets a token of its own, the address is a socket or pipe only your user account can open, and nothing listens on the network. Every call is in the palette\'s Show Control Log. Off, nothing answers, and every terminal\'s token stops working.',
       control: 'checkbox',
     },
     {
@@ -899,6 +928,7 @@ export function SettingsWindow() {
   const terminalCursorBlink = useSettingsStore((s) => s.terminalCursorBlink);
   const terminalScrollback = useSettingsStore((s) => s.terminalScrollback);
   const terminalRestoreScrollback = useSettingsStore((s) => s.terminalRestoreScrollback);
+  const terminalCopyContextLines = useSettingsStore((s) => s.terminalCopyContextLines);
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
@@ -918,6 +948,7 @@ export function SettingsWindow() {
   const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
   const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
   const terminalProgress = useSettingsStore((s) => s.terminalProgress);
+  const terminalKeepAwakeWhileAgentsWork = useSettingsStore((s) => s.terminalKeepAwakeWhileAgentsWork);
   const terminalControl = useSettingsStore((s) => s.terminalControl);
   const terminalControlTypeAndRead = useSettingsStore((s) => s.terminalControlTypeAndRead);
   const terminalControlOtherTerminals = useSettingsStore((s) => s.terminalControlOtherTerminals);
@@ -947,6 +978,7 @@ export function SettingsWindow() {
     terminalCursorBlink,
     terminalScrollback,
     terminalRestoreScrollback,
+    terminalCopyContextLines,
     terminalTheme,
     terminalSuggestions,
     terminalStickyHeader,
@@ -966,6 +998,7 @@ export function SettingsWindow() {
     terminalBellAttention,
     terminalAttentionFlashFocused,
     terminalProgress,
+    terminalKeepAwakeWhileAgentsWork,
     terminalControl,
     terminalControlTypeAndRead,
     terminalControlOtherTerminals,
@@ -1010,9 +1043,22 @@ export function SettingsWindow() {
   const monoPlaceholder = useMemo(() => readInheritedMonoStack(), [isOpen]);
   const detectedShells = useSystemStore((s) => s.shells);
   const homeDir = useSystemStore((s) => s.homeDir);
+  // Whether keep-awake works here, for its row: the app's one question
+  // (`keepAwakeSupport`), read when the window first opens.
+  const [keepAwake, setKeepAwake] = useState(null);
+  useEffect(() => {
+    if (!isOpen || keepAwake) return undefined;
+    let cancelled = false;
+    keepAwakeSupport().then((answer) => {
+      if (!cancelled) setKeepAwake(answer);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, keepAwake]);
   const ITEMS = useMemo(
-    () => buildItems(monoPlaceholder, detectedShells, homeDir),
-    [monoPlaceholder, detectedShells, homeDir]
+    () => buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake),
+    [monoPlaceholder, detectedShells, homeDir, keepAwake]
   );
 
   const validatedSignature = ITEMS.filter((i) => i.validate)

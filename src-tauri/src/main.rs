@@ -17,6 +17,7 @@ pub mod fs;
 pub mod menu;
 pub mod models;
 pub mod perf;
+pub mod power;
 pub mod pty;
 pub mod scrollback;
 
@@ -268,14 +269,19 @@ fn main() {
             commands::perf::perf_info,
             commands::perf::perf_counters,
             commands::perf::perf_write,
+            commands::power::power_set_keep_awake,
+            commands::power::power_keep_awake_support,
         ])
         .build(tauri::generate_context!())
         .expect("error while building nexterm application");
     // The control socket is removed as the app exits (src/control/unix.rs);
-    // a crash leaves it to the next start's sweep.
+    // a crash leaves it to the next start's sweep. Keep-awake is let go of
+    // here too, whichever way the app is left (src/power.rs); a crash leaves
+    // that to its helper, which ends with NexTerm.
     app.run(move |_, event| {
         if let tauri::RunEvent::Exit = event {
             control.shutdown();
+            power::release();
         }
     });
 }

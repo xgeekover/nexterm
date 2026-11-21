@@ -15,6 +15,7 @@ import {
   agentFromCommandLine,
   agentLabel,
   cleanAgentTitle,
+  forkCommand,
   isKnownAgent,
   isSessionIdFor,
   newSessionId,
@@ -260,6 +261,7 @@ describe('Resuming waits for the prompt', () => {
 
 describe('An agent typed by hand at the prompt', () => {
   const UUID = 'd4bef4d0-c043-40ef-b157-640fb31ac0ea';
+  const OTHER_UUID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
   const SES = 'ses_ef45006f5ffeAMtumN5ySj4VmT';
 
   test('AG-13: the plain ways to start one are recognised, with the conversation when the line names it', () => {
@@ -286,7 +288,10 @@ describe('An agent typed by hand at the prompt', () => {
       [`claude -r ${UUID} --model opus`, { kind: 'claude', sessionId: UUID }],
       [`claude --resume=${UUID}`, { kind: 'claude', sessionId: UUID }],
       [`claude --session-id ${UUID}`, { kind: 'claude', sessionId: UUID }],
-      [`claude --resume ${UUID} --fork-session`, { kind: 'claude', sessionId: null }],
+      // Both flags without a fork: the last one named, as it always was.
+      [`claude --resume ${UUID} --session-id ${OTHER_UUID}`, { kind: 'claude', sessionId: OTHER_UUID }],
+      [`claude --session-id ${OTHER_UUID} --resume ${UUID}`, { kind: 'claude', sessionId: UUID }],
+      // `--fork-session` lines are AG-22's.
       ['claude --dangerously-skip-permissions', { kind: 'claude', sessionId: null }],
     ];
     for (const [line, want] of cases) {
@@ -493,5 +498,87 @@ describe('An agent typed by hand at the prompt', () => {
     }
     assert.deepEqual(planOpencodeResume({ sessions: [], alone: true }), LATEST);
     assert.deepEqual(planOpencodeResume({ sessions: [], alone: false }), ASK);
+  });
+
+  test('AG-22: a typed Claude Code fork is the NEW conversation, `--session-id`\u{2019}s, with the one it was forked from beside it', () => {
+    const A = UUID;
+    const B = OTHER_UUID;
+    const FORK = { kind: 'claude', sessionId: B, forkOf: A };
+    const cases = [
+      [`claude --resume ${A} --fork-session --session-id ${B}`, FORK],
+      // The same flags in any order, and either spelling of each.
+      [`claude --fork-session --session-id ${B} --resume ${A}`, FORK],
+      [`claude --session-id ${B} --fork-session -r ${A}`, FORK],
+      [`claude --resume=${A} --fork-session --session-id=${B}`, FORK],
+      [`claude --session-id=${B} --resume ${A} --fork-session --model opus`, FORK],
+      [`CLAUDE_CODE_DISABLE_TERMINAL_TITLE=0 claude.exe -r ${A} --session-id ${B} --fork-session`, FORK],
+      // No id chosen: Claude Code makes one nobody here knows.
+      [`claude --resume ${A} --fork-session`, { kind: 'claude', sessionId: null }],
+      [`claude --fork-session --resume=${A}`, { kind: 'claude', sessionId: null }],
+      // From the folder's latest: the new id, and no source to name.
+      [`claude --continue --fork-session --session-id ${B}`, { kind: 'claude', sessionId: B }],
+      [`claude -c --fork-session --session-id=${B}`, { kind: 'claude', sessionId: B }],
+      [`claude --resume --fork-session --session-id ${B}`, { kind: 'claude', sessionId: B }],
+      // A source or a new id that is not an id never comes back.
+      [`claude --resume ${A} --fork-session --session-id "x; rm -rf ~"`, { kind: 'claude', sessionId: null }],
+      [`claude --resume "x; rm -rf ~" --fork-session --session-id ${B}`, { kind: 'claude', sessionId: B }],
+      [`claude --resume ${A.toUpperCase()} --fork-session --session-id ${B}`, { kind: 'claude', sessionId: B }],
+      [`claude --resume ${A} --fork-session --session-id ${B.toUpperCase()}`, { kind: 'claude', sessionId: null }],
+      [`claude --resume ${A} --fork-session --session-id`, { kind: 'claude', sessionId: null }],
+      [`claude --resume ${A} --fork-session --session-id ${SES}`, { kind: 'claude', sessionId: null }],
+      // Forked from itself names nothing it was forked from.
+      [`claude --resume ${A} --fork-session --session-id ${A}`, { kind: 'claude', sessionId: A }],
+    ];
+    for (const [line, want] of cases) {
+      assert.deepEqual(agentFromCommandLine(line), want, JSON.stringify(line));
+    }
+    // Still not an agent here: a one-off, a compound line.
+    for (const line of [
+      `claude -p --resume ${A} --fork-session --session-id ${B}`,
+      `claude --resume ${A} --fork-session --session-id ${B}; rm -rf ~`,
+      `claude --resume ${A} --fork-session --session-id $(id)`,
+    ]) {
+      assert.equal(agentFromCommandLine(line), null, JSON.stringify(line));
+    }
+    // Whatever was typed, nothing but an id is ever handed back.
+    let seed = 11;
+    const rand = (n) => (seed = (seed * 1103515245 + 12345) % 2147483648) % n;
+    const words = ['--resume', '-r', '--session-id', '--fork-session', '--continue', A, B, 'x', '"a b"', `--resume=${A}`, `--session-id=${B}`];
+    for (let i = 0; i < 500; i += 1) {
+      const line = ['claude', ...Array.from({ length: 1 + rand(7) }, () => words[rand(words.length)])].join(' ');
+      const got = agentFromCommandLine(line);
+      assert.ok(got && got.kind === 'claude', line);
+      for (const value of [got.sessionId, got.forkOf]) {
+        assert.ok(value === null || value === undefined || value === A || value === B, `${line} gave ${JSON.stringify(got)}`);
+      }
+      if ('forkOf' in got) {
+        assert.ok(isSessionIdFor('claude', got.sessionId) && got.forkOf !== got.sessionId && line.includes('--fork-session'), line);
+      }
+    }
+  });
+
+  test('AG-23: forkCommand types the source by id and chooses the fork\u{2019}s own id, and refuses anything that is not an id', () => {
+    const fork = forkCommand(UUID);
+    const id = fork.agent.sessionId;
+    assert.equal(UUID_V4.test(id), true, `not a v4 uuid: ${id}`);
+    assert.notEqual(id, UUID, 'a new conversation, not the source');
+    assert.equal(fork.command, `claude --resume ${UUID} --fork-session --session-id ${id}`);
+    assert.equal(fork.agent.kind, 'claude');
+    assert.equal(fork.agent.forkOf, UUID);
+    assert.equal(fork.agent.title, null);
+    assert.equal(Number.isFinite(fork.agent.startedAt), true);
+    assert.deepEqual(Object.keys(fork.agent).sort(), ['forkOf', 'kind', 'sessionId', 'startedAt', 'title']);
+    // Read back as a typed line, it is the same record; resumed, it is the fork.
+    assert.deepEqual(agentFromCommandLine(fork.command), { kind: 'claude', sessionId: id, forkOf: UUID });
+    assert.equal(resumeCommand(fork.agent), `claude --resume ${id}`);
+    // Two forks of one conversation are two conversations.
+    assert.notEqual(forkCommand(UUID).agent.sessionId, id);
+    for (const bad of [
+      UUID.toUpperCase(), 'd4bef4d0-c043-10ef-b157-640fb31ac0ea', 'd4bef4d0-c043-40ef-c157-640fb31ac0ea',
+      `${UUID}; rm -rf ~`, 'x; rm -rf ~', ` ${UUID}`, `${UUID}\n`, `${UUID} --dangerously-skip-permissions`,
+      '--dangerously-skip-permissions', SES, '', null, undefined, 42, {}, [UUID],
+    ]) {
+      assert.equal(forkCommand(bad), null, JSON.stringify(bad));
+    }
   });
 });

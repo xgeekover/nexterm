@@ -12,6 +12,7 @@ import {
   FolderPlus,
   Pin,
   Play,
+  GitFork,
   Plus,
   Rows2,
   Save,
@@ -51,6 +52,7 @@ import {
   agentGroupItems,
   agentSessionMoveItems,
   agentSessionRowItems,
+  agentSessionTooltip,
   agentSessionsHeaderItems,
   agentSessionsView,
   drawnAgentSessionKeys,
@@ -65,6 +67,8 @@ import { startupCommandOf, startupCount } from '../../lib/startupCommands.js';
 import { sortByAttention } from '../../lib/terminalStatus.js';
 import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
+import { copyContextItem } from '../../lib/copyContext.js';
+import { displayTitle } from '../../lib/tabTitle.js';
 
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
 const INDENT = 10;
@@ -200,6 +204,8 @@ export function TerminalsPanel() {
   const showAgent = useSettingsStore((s) => s.terminalsPanelAgent !== false);
   const showLastNote = useSettingsStore((s) => s.terminalsPanelLastNote !== false);
   const sorted = useSettingsStore((s) => s.terminalsPanelSortAttention === true);
+  // Copy Context's N (a row's Copy Last N Lines).
+  const copyContextLines = useSettingsStore((s) => s.terminalCopyContextLines);
   const setSetting = useSettingsStore((s) => s.setSetting);
   const twoLine = showBranch || showAgent || showLastNote;
 
@@ -234,6 +240,7 @@ export function TerminalsPanel() {
   const setStartupCommands = useTerminalStore((s) => s.setStartupCommands);
   const setWorkspaceStartupCommands = useTerminalStore((s) => s.setWorkspaceStartupCommands);
   const resumeFromHistory = useTerminalStore((s) => s.resumeFromHistory);
+  const forkConversation = useTerminalStore((s) => s.forkConversation);
   const setPaletteOpen = useSettingsStore((s) => s.setCommandPaletteOpen);
   // The agent session history, newest first, and which of its entries a
   // terminal of this window holds (agentHistoryStore.js) — the rows' badge.
@@ -568,6 +575,9 @@ export function TerminalsPanel() {
         disabledReason: !tab.cwd ? 'This terminal has no directory yet' : undefined,
         onSelect: () => copyText(tab.cwd),
       },
+      // Copy Context: the last N lines as plain text, secrets masked, read and
+      // copied inside this click; off for a terminal never shown.
+      copyContextItem({ tabId: tab.id, lines: copyContextLines }),
       { type: 'separator', key: 's2' },
       {
         key: 'move-group',
@@ -695,9 +705,12 @@ export function TerminalsPanel() {
     agentSessionRowItems(entry, {
       holder: agentHolders[entry.key] ?? null,
       readOnly: agentReadOnly,
-      icons: { resume: Play },
+      icons: { resume: Play, fork: GitFork },
       on: {
         resume: (key) => resumeAgentSession(key),
+        // A new conversation from this one, in a new terminal in its folder;
+        // anything that stops it is said in AgentHistoryNotice.
+        fork: (e) => forkConversation({ sessionId: e.sessionId, cwd: e.cwd }),
         copyId: (sessionId) => copyText(sessionId),
         pin: (key) => agentHistory().pin(key),
         unpin: (key) => agentHistory().unpin(key),
@@ -912,16 +925,8 @@ export function TerminalsPanel() {
     const when = Number.isFinite(shown.lastUsedAt) ? relativeTime(shown.lastUsedAt) : '';
     const group = groupOfEntry(entry, agentGroups);
     const editing = liveDraft?.kind === 'agent-session' && liveDraft.id === entry.key;
-    const tip = [
-      `${shown.label}: ${shown.title}`,
-      // A renamed row still tells what the agent calls it.
-      ...(shown.name && shown.autoTitle && shown.autoTitle !== shown.name ? [`Its own title: ${shown.autoTitle}`] : []),
-      ...(group ? [`In the group ${group.name}`] : []),
-      shown.folderPath,
-      `Last used ${when}`,
-      ...(holder ? [`${holder.state === 'open' ? 'Open' : 'Offered for resuming'} in a terminal of this window`] : []),
-      `${holder ? 'Double-click to show its terminal' : 'Double-click to resume in a new terminal'} · right-click for more`,
-    ].join('\n');
+    // A fork's names the conversation it was forked from (`agentSessionTooltip`).
+    const tip = agentSessionTooltip(entry, { entries: agentEntries, groups: agentGroups, holder, when });
     return (
       <div
         key={entry.key}
@@ -1094,7 +1099,7 @@ export function TerminalsPanel() {
         style={{ paddingLeft: padFor(level) }}
         // Same sentence the tab chip carries, from the same place, so the two
         // cannot describe one terminal differently.
-        title={status ? `${tab.cwd || tab.title} — ${status}` : tab.cwd || tab.title}
+        title={status ? `${tab.cwd || displayTitle(tab)} — ${status}` : tab.cwd || displayTitle(tab)}
         className={cn(
           twoLine ? TAB_ROW_TWO_LINE : ROW,
           'relative',
@@ -1115,7 +1120,7 @@ export function TerminalsPanel() {
                   <span aria-hidden="true" className="w-[6px] shrink-0 flex items-center">
                     <ActivityDot tab={tab} />
                   </span>
-                  <span className="truncate">{tab.title}</span>
+                  <span className="truncate">{displayTitle(tab)}</span>
                   {/* The lock (a password prompt) and the count, as the tab
                       chip draws them — on a line of fixed height. */}
                   <TabMarks tabId={tab.id} unread={unread} />
@@ -1140,7 +1145,7 @@ export function TerminalsPanel() {
             ) : (
               <>
                 <ActivityDot tab={tab} />
-                <span className="truncate">{tab.title}</span>
+                <span className="truncate">{displayTitle(tab)}</span>
                 <TabMarks tabId={tab.id} unread={unread} />
                 {/* With no second line, a program's status still shows. */}
                 <ProgramStatus tabId={tab.id} active={isActive} />

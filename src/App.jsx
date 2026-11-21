@@ -26,6 +26,7 @@ import { useProjectCommandsStore } from './stores/projectCommandsStore.js';
 import { mockBridge } from './lib/ipc.js';
 import { startPerfMode } from './lib/perf/perfMode.js';
 import { startControl } from './lib/controlBridge.js';
+import { startKeepAwake } from './lib/keepAwake.js';
 import { useControlLogStore } from './stores/controlLogStore.js';
 import { useAgentHistoryStore } from './stores/agentHistoryStore.js';
 
@@ -89,6 +90,11 @@ export default function App() {
   // and when something under `.nexterm` does, and the user's own commands
   // from Settings. Reading is all it does: nothing is ever run on its own.
   useEffect(() => useProjectCommandsStore.getState().start(), []);
+
+  // Settings ▸ Terminal ▸ Keep the Computer Awake While an Agent Works (off
+  // by default): the backend told only when a Claude Code terminal starts or
+  // stops Working, and told "off" on unmount / HMR. See src/lib/keepAwake.js.
+  useEffect(() => startKeepAwake({ store: useTerminalStore, settings: useSettingsStore }), []);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-vsc-editor text-vsc-fg font-ui">

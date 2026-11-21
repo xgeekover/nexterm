@@ -10,6 +10,7 @@
 //! (transport/): another user who created the name first must not collect it.
 
 mod args;
+mod guide;
 mod output;
 mod protocol;
 mod transport;
@@ -94,6 +95,19 @@ pub fn run(
         Ok(Parsed::Help(topic)) => {
             let _ = out.write_all(usage::help(topic).as_bytes());
             return exit::OK;
+        }
+        // Before the environment is looked at: the guide needs no NexTerm.
+        Ok(Parsed::Guide { topic }) => {
+            return match guide::text(topic.as_deref()) {
+                Ok(text) => {
+                    let _ = out.write_all(text.as_bytes());
+                    exit::OK
+                }
+                Err(message) => {
+                    let _ = err.write_all(message.as_bytes());
+                    exit::USAGE
+                }
+            };
         }
         Ok(Parsed::Version) => {
             let _ = writeln!(out, "nexterm-cli {}", env!("CARGO_PKG_VERSION"));
@@ -298,6 +312,60 @@ mod tests {
         let o = run_with(&["send", "--help"], &none, "", &link);
         assert_eq!(o.code, 0);
         assert!(o.out.starts_with("Usage: nexterm-cli send"), "{}", o.out);
+        assert!(link.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_guide_works_anywhere_and_never_connects() {
+        let link = FakeLink::answering(OK_NULL);
+        // Outside NexTerm, with only one of the variables, and inside: the
+        // same text, and nothing sent.
+        let envs = [
+            Env { control: None, token: None },
+            Env { control: Some(address().into()), token: None },
+            Env { control: Some("not an address".into()), token: Some("".into()) },
+            inside(),
+        ];
+        for env in &envs {
+            let o = run_with(&["guide"], env, "", &link);
+            assert_eq!((o.code, o.err.as_str()), (0, ""));
+            assert_eq!(o.out, guide::text(None).unwrap());
+            assert!(o.out.starts_with("nexterm-cli guide - "), "{}", o.out);
+            for topic in guide::TOPICS {
+                let o = run_with(&["guide", topic], env, "", &link);
+                assert_eq!((o.code, o.err.as_str()), (0, ""), "{topic}");
+                assert!(o.out.starts_with(&format!("nexterm-cli guide {topic} - ")), "{}", o.out);
+            }
+            let o = run_with(&["--json", "guide", "notify"], env, "", &link);
+            assert_eq!(o.code, 0);
+            assert_eq!(o.out, guide::text(Some("notify")).unwrap(), "--json changes nothing here");
+            let o = run_with(&["help", "guide"], env, "", &link);
+            assert_eq!(o.out, guide::text(None).unwrap());
+        }
+        assert!(link.sent.borrow().is_empty(), "the guide sent {:?}", link.sent.borrow());
+    }
+
+    #[test]
+    fn an_unknown_guide_topic_is_exit_2_listing_the_topics() {
+        let link = FakeLink::answering(OK_NULL);
+        for env in [Env { control: None, token: None }, inside()] {
+            let o = run_with(&["guide", "frob"], &env, "", &link);
+            assert_eq!(o.code, 2);
+            assert!(o.out.is_empty(), "{}", o.out);
+            assert_eq!(
+                o.err,
+                "nexterm-cli: unknown guide topic 'frob'\n\
+                 Topics: notify, set-status, set-title, set-progress, new-split, read-screen\n\
+                 Run 'nexterm-cli guide' for the index.\n"
+            );
+            let o = run_with(&["guide", "list"], &env, "", &link);
+            assert_eq!(o.code, 2);
+            assert!(o.err.contains("Topics: notify, set-status"), "{}", o.err);
+            let o = run_with(&["guide", "notify", "extra"], &env, "", &link);
+            assert_eq!(o.code, 2);
+            assert!(o.out.is_empty());
+            assert!(o.err.starts_with("nexterm-cli: guide takes one topic"), "{}", o.err);
+        }
         assert!(link.sent.borrow().is_empty());
     }
 

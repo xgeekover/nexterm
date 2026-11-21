@@ -114,6 +114,10 @@ function mockUtf8Bytes(text) {
  * which replays what `cargo test` recorded the backend answering
  * (tests/fixtures/agent-history.json). Every constant is the backend's.
  *
+ * An entry forked from another (Fork Conversation) has `forkOf`, that
+ * one's id, after its nine fields and only when there is one; it is not
+ * curated, so it alone never makes the file version 2.
+ *
  * What the user curated is kept the same way: an entry's `name`, `pinned`,
  * `archived` and `groupId`, after its nine fields and each only when it is
  * not at its default, and the `groups` after the entries — written as
@@ -290,23 +294,30 @@ function mockHistoryEntry(value) {
   if ((endedAt === null) !== (endReason === null)) {
     return { why: 'it has an endedAt without an endReason, or an endReason without an endedAt' };
   }
+  // Asked last, as there: the conversation a fork was forked from, of its kind's shape.
+  const forkOf = field('forkOf');
+  if (forkOf !== null && (typeof forkOf !== 'string' || !mockHistoryIdFits(kind, forkOf))) {
+    return { why: `its forkOf is not one that ${kind} gives a conversation` };
+  }
   return {
     entry: {
       key: mockHistoryKey(kind, sessionId, cwd, title),
-      kind, sessionId, cwd, title, startedAt, lastUsedAt, endedAt, endReason,
+      kind, sessionId, cwd, title, startedAt, lastUsedAt, endedAt, endReason, forkOf,
     },
   };
 }
 
 /**
  * An entry as the backend keeps and answers it (`Entry`): its nine fields in
- * their order, then each curated one only when it is not at its default.
+ * their order, then `forkOf` only when there is one, then each curated one
+ * only when it is not at its default.
  */
 function mockHistoryStored(e) {
   const out = {
     key: e.key, kind: e.kind, sessionId: e.sessionId, cwd: e.cwd, title: e.title,
     startedAt: e.startedAt, lastUsedAt: e.lastUsedAt, endedAt: e.endedAt, endReason: e.endReason,
   };
+  if (e.forkOf != null) out.forkOf = e.forkOf;
   if (e.name != null) out.name = e.name;
   if (e.pinned === true) out.pinned = true;
   if (e.archived === true) out.archived = true;
@@ -428,8 +439,10 @@ function mockHistorySort(entries) {
 
 /**
  * `merge`: `incoming`, then the entry under its key, then the one it
- * replaces. What the user curated comes from `others` only — the incoming
- * entry has none — and `unarchive` clears archived.
+ * replaces. The conversation it was forked from is the incoming one's, else
+ * the first of `others` that has one. What the user curated comes from
+ * `others` only — the incoming entry has none — and `unarchive` clears
+ * archived.
  */
 function mockHistoryMerge(incoming, others, unarchive = false) {
   const all = [incoming, ...others];
@@ -445,6 +458,7 @@ function mockHistoryMerge(incoming, others, unarchive = false) {
     lastUsedAt: newest.lastUsedAt,
     endedAt: newest.endedAt,
     endReason: newest.endReason,
+    forkOf: incoming.forkOf ?? others.find((e) => e.forkOf != null)?.forkOf ?? null,
     name: others.find((e) => e.name != null)?.name ?? null,
     pinned: others.some((e) => e.pinned === true),
     archived: !unarchive && others[0]?.archived === true,
@@ -804,6 +818,15 @@ class BrowserMockBridge {
     this.closeAcks = [];
     this.windowCloses = 0;
     this.quitRequests = 0;
+    // Keep-awake (src-tauri/src/power.rs): how the backend would hold the
+    // computer awake — 'none' here, as a browser holds nothing, so
+    // `power_set_keep_awake` answers false and Settings says it is not
+    // available; a suite that wants a supported backend names a method
+    // ('caffeinate', 'systemd-inhibit', 'SetThreadExecutionState'). What it
+    // was asked, oldest first, as booleans, and whether it holds now.
+    this.keepAwakeMethod = 'none';
+    this.keepAwakeCalls = [];
+    this.keepAwakeHeld = false;
     // What `fs_reveal_path` was asked to show, oldest first, as `{ path,
     // kind }`. There is no file manager here; the suites read this.
     this.revealed = [];
@@ -2058,7 +2081,26 @@ class BrowserMockBridge {
       }
       case 'app_quit': {
         this.quitRequests += 1;
+        // The backend lets the computer sleep again on every quit.
+        this.keepAwakeHeld = false;
         return null;
+      }
+      // Keep-awake (src-tauri/src/commands/power.rs). `on` a boolean, as
+      // Tauri takes it; the answer is whether it is held now: on twice holds
+      // once, and where unsupported nothing is held and on answers false.
+      case 'power_set_keep_awake': {
+        if (typeof args?.on !== 'boolean') {
+          throw mockInvalidArgs(command, 'on', args?.on === undefined
+            ? `command ${command} missing required key on`
+            : 'invalid type: expected a boolean');
+        }
+        this.keepAwakeCalls.push(args.on);
+        this.keepAwakeHeld = args.on && this.keepAwakeMethod !== 'none';
+        return this.keepAwakeHeld;
+      }
+      case 'power_keep_awake_support': {
+        const method = typeof this.keepAwakeMethod === 'string' ? this.keepAwakeMethod : 'none';
+        return { supported: method !== 'none', method };
       }
       // Whether a terminal's scrollback is waiting to be saved: the backend
       // then holds a window's close (never a macOS quit) and asks, as for an

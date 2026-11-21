@@ -5433,6 +5433,70 @@ check('RN-228', 'every separator: a 1px line, violet on hover and drag across a 
   expectThat(/Math\.min\(equalBound, pixelShares\[i\]\)/.test(split), 'a pixel minimum can exceed the equal-share bound');
 });
 
+// ---- A program's title for its terminal (set-title, A10b) ----------------------
+//
+// Who wins a terminal's label (`displayTitle`, src/lib/tabTitle.js): the
+// user's own name, then the title a program set, then the default name — on
+// the chip, the TERMINALS row and the hidden strip's handle alike.
+
+/** Three terminals: one a program titled, one the user named (a program titled it too), one plain. */
+function arrangeProgramTitles() {
+  reset();
+  useTerminalStore.setState({
+    tabs: [
+      tab('pt-1', { title: 'Terminal 1', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 }),
+      tab('pt-2', { title: 'build', defaultTitle: 'Terminal 2', programTitle: 'npm test', programTitleAt: 1 }),
+      tab('pt-3', { title: 'Terminal 3', defaultTitle: 'Terminal 3' }),
+    ],
+    activeTabId: 'pt-1',
+    groups: baseGroups(['pt-1', 'pt-2', 'pt-3']),
+    activeGroupId: 'group-1',
+  });
+}
+
+/** The text a chip or row draws as its name: its first `truncate` span. */
+const nameIn = (markup) => visibleText(/<span class="[^"]*\btruncate\b[^"]*">([^<]*)<\/span>/.exec(markup ?? '')?.[1] ?? '');
+
+scenario(
+  'RN-231',
+  "a program's title names an unnamed terminal on its chip and its TERMINALS row; a name the user gave wins over it; a plain one keeps its default",
+  arrangeProgramTitles,
+  (html) => {
+    for (const [id, want, not] of [
+      ['pt-1', 'vim notes.md', 'Terminal 1'],
+      ['pt-2', 'build', 'npm test'],
+      ['pt-3', 'Terminal 3', null],
+    ]) {
+      const chip = tabChip(html, id);
+      expectThat(chip, `no chip for ${id}`);
+      expectThat(nameIn(chip) === want, `the chip of ${id} says ${JSON.stringify(nameIn(chip))}, not ${JSON.stringify(want)}`);
+      const tip = attrOf(openingTag(chip), 'title') ?? '';
+      expectThat(tip.startsWith(`${want} — `), `the chip's tooltip of ${id} does not start with its label: ${JSON.stringify(tip)}`);
+      expectThat(attrOf(chip.match(/<button\b[^>]*aria-label="Close [^"]*"[^>]*>/)?.[0], 'aria-label') === `Close ${want}`, `the ✕ of ${id} does not name ${want}`);
+      const row = terminalRow(html, id);
+      expectThat(row, `no TERMINALS row for ${id}`);
+      expectThat(nameIn(row) === want, `the TERMINALS row of ${id} says ${JSON.stringify(nameIn(row))}, not ${JSON.stringify(want)}`);
+      if (not) expectThat(!chip.includes(`>${not}<`) && !row.includes(`>${not}<`), `${id} still draws ${JSON.stringify(not)}`);
+    }
+  }
+);
+
+scenario(
+  'RN-232',
+  "the hidden strip's handle names its terminal by the same rule: the program's title, or the user's name over it",
+  () => {
+    arrangeHidden({ extra: { tabs: [tab('t1', { title: 'Terminal 1', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 })] } });
+  },
+  (html) => {
+    const words = attrOf(openingTag(handleOf(paneMarkup(html, 'pane-1'))), 'aria-label') ?? '';
+    expectThat(words === 'vim notes.md. Show its tab strip', `the handle's words: ${JSON.stringify(words)}`);
+    // The same terminal, renamed: the user's name, whatever the program said.
+    arrangeHidden({ extra: { tabs: [tab('t1', { title: 'mine', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 })] } });
+    const named = attrOf(openingTag(handleOf(paneMarkup(renderArranged(), 'pane-1'))), 'aria-label') ?? '';
+    expectThat(named === 'mine. Show its tab strip', `the renamed handle's words: ${JSON.stringify(named)}`);
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

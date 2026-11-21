@@ -123,10 +123,17 @@ export function historyKey({ kind, sessionId = null, cwd, title = null }) {
  * The entry `agent`, a terminal's record (`tab.agent`), makes in the folder
  * `cwd` — every field the backend checks, as it checks them — or null for an
  * agent this build does not know. Times are the caller's.
+ *
+ * A fork's record (`forkCommand`, or a typed `--fork-session` line) names
+ * the conversation it was forked from, `agent.forkOf`: passed on as the
+ * entry's `forkOf` only when it is an id of the agent's shape — the backend
+ * refuses any other — and left out otherwise, so every other entry is the
+ * nine fields it always was. A later write without it keeps it (the
+ * backend's `merge`).
  */
 export function entryOfAgent(agent, cwd, { startedAt, lastUsedAt, endedAt = null, endReason = null }) {
   if (!agent || !isKnownAgent(agent.kind) || !isHistoryCwd(cwd)) return null;
-  return {
+  const entry = {
     kind: agent.kind,
     sessionId: isSessionIdFor(agent.kind, agent.sessionId) ? agent.sessionId : null,
     cwd,
@@ -139,6 +146,7 @@ export function entryOfAgent(agent, cwd, { startedAt, lastUsedAt, endedAt = null
     endedAt,
     endReason,
   };
+  return isSessionIdFor(agent.kind, agent.forkOf) ? { ...entry, forkOf: agent.forkOf } : entry;
 }
 
 /**
@@ -269,11 +277,14 @@ export function observeAgents(tracked, tabs, { now = Date.now(), os = null } = {
 
 /** `newer` with what `older`, an earlier write of the same entry, adds: the backend's merge for two events. */
 function foldedEntry(older, newer) {
-  return {
+  const folded = {
     ...newer,
     startedAt: Math.min(older.startedAt, newer.startedAt),
     title: newer.sessionId !== null ? (newer.title ?? older.title) : newer.title,
   };
+  // The conversation a fork came from, as the backend keeps it: the newer's, else the older's.
+  const forkOf = newer.forkOf ?? older.forkOf ?? null;
+  return forkOf !== null ? { ...folded, forkOf } : folded;
 }
 
 /**
@@ -476,6 +487,21 @@ export function historyDisplay(entry) {
     archived: entry?.archived === true,
     groupId: entryGroupId(entry),
   };
+}
+
+/**
+ * The line a forked entry's row adds to its tooltip — `Forked from <source>`,
+ * the source being the entry it was forked from (`forkOf`) as its row is
+ * called (`historyDisplay`'s title) when `entries`, the history's, lists it,
+ * else its short id — or null for an entry that is no fork, or whose
+ * `forkOf` is not an id of its agent's shape. Text only.
+ */
+export function forkedFromText(entry, entries = []) {
+  const kind = entry?.kind;
+  const from = entry?.forkOf;
+  if (!isSessionIdFor(kind, from)) return null;
+  const source = (Array.isArray(entries) ? entries : []).find((e) => e && e.kind === kind && e.sessionId === from);
+  return `Forked from ${source ? historyDisplay(source).title : shortSessionId(from)}`;
 }
 
 /**

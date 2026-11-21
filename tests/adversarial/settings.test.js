@@ -73,6 +73,10 @@ const SETTINGS_KEYS = [
   'terminalAttentionFlashFocused',
   'terminalBellAttention',
   'terminalProgress',
+  // Bundle 1: how many lines Copy Context copies (A3) and keeping the
+  // computer awake while an agent works (A4).
+  'terminalCopyContextLines',
+  'terminalKeepAwakeWhileAgentsWork',
   // Settings ▸ Terminal ▸ Control (stage 7, spec D5): what programs in
   // terminals may ask of NexTerm through nexterm-cli.
   'terminalControl',

@@ -15,6 +15,7 @@ import { shellKindFor } from './dropPaths.js';
 import { displayText, shellLabel } from './projectCommands.js';
 import { splitStartFor } from './terminalCwd.js';
 import { shellPathOf } from './terminalFileDrop.js';
+import { displayTitle } from './tabTitle.js';
 
 /**
  * Why "This terminal" cannot take the line — each short, said on the
@@ -110,7 +111,7 @@ export function runTargetView(state, pinned) {
     pinnedId: pinned.tabId,
     exists: Boolean(tab),
     sameSession: Boolean(tab) && (pinned.sessionId == null || tab.sessionId === pinned.sessionId),
-    title: tab ? String(tab.title || tab.defaultTitle || '') : null,
+    title: tab ? String(displayTitle(tab, '')) : null,
     shell: typeof tab?.shell === 'string' ? tab.shell : null,
     cwd: typeof tab?.cwd === 'string' ? tab.cwd : null,
     running: Boolean(tab?.running),

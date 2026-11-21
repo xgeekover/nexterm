@@ -15,6 +15,7 @@
 import { describe, test, beforeEach, afterEach, assert } from '../e2e/harness/testFramework.js';
 import { useTerminalStore } from '../../src/stores/terminalStore.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
+import { useAgentHistoryStore } from '../../src/stores/agentHistoryStore.js';
 import {
   activeLinesIn,
   chipsIn,
@@ -27,6 +28,7 @@ import {
 
 const T = useTerminalStore;
 const E = useEditorStore;
+const H = useAgentHistoryStore;
 
 const fileTab = (id) => ({ id, filePath: `/workspace/${id}.js`, fileName: `${id}.js`, content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' });
 const termTab = (id) => ({ id, title: `shell ${id}`, cwd: '/workspace' });
@@ -156,5 +158,73 @@ describe('Workbench render: editor panes inside the workbench tree (AC-C2, AC-C6
     assert.match(paneMarkup(html, 'pane-t1'), /title="Close Pane/, 'an empty terminal pane beside another terminal pane has its Close');
     assert.equal(ui.keptTerminalPaneOf(two), null);
     assert.equal(ui.keptTerminalPaneOf(terminalLeaf('pane-t9', [])), null, 'a group with no file keeps no pane');
+  });
+
+  test("WN-09: a terminal's chip draws the title its program set while the user has not named it, and the user's name once they have (AC16)", async () => {
+    arrange({ tree: mixedTree(), activePaneId: 'pane-t1', editorPaneId: 'pane-e1' });
+    T.setState({
+      tabs: [
+        { id: 't1', title: 'Terminal 1', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1, cwd: '/workspace' },
+        { id: 't2', title: 'build', defaultTitle: 'Terminal 2', programTitle: 'npm test', programTitleAt: 1, cwd: '/workspace' },
+      ],
+    });
+    const html = await drawWorkbench();
+    const one = paneMarkup(html, 'pane-t1');
+    const two = paneMarkup(html, 'pane-t2');
+    assert.match(one, />vim notes\.md<\/span>/, 'the unnamed terminal is called what its program said');
+    assert.match(one, /aria-label="Close vim notes\.md"/, 'its ✕ too');
+    assert.doesNotMatch(one, />Terminal 1</, 'not its default');
+    assert.match(two, />build<\/span>/, "the renamed one keeps the user's name");
+    assert.doesNotMatch(two, /npm test/, 'and its program title is drawn nowhere on it');
+  });
+
+  test('WN-08: the kept empty pane offers New Terminal, a New <agent> Terminal per agent and at most 3 recent agent sessions, newest first — archived and unknown agents left out, no recent section without any; still no Close (AC9, A2)', async () => {
+    const kept = { type: 'split', id: 's', direction: 'vertical', sizes: [60, 40], children: [editorLeaf('pane-e1', ['e1']), terminalLeaf('pane-t1', [])] };
+    const historyBefore = H.getState();
+    const session = (kind, sessionId, title, lastUsedAt, more = {}) => ({
+      key: `${kind}:${sessionId}`, kind, sessionId, cwd: `/workspace/${sessionId.slice(0, 4)}`, title, startedAt: 1, lastUsedAt, endedAt: lastUsedAt, endReason: 'closed', ...more,
+    });
+    const known = [
+      session('claude', '11111111-1111-4111-8111-111111111111', 'Login flow', 4000),
+      session('opencode', 'ses_2222222222222222222222', 'Parser', 3000),
+      session('claude', '33333333-3333-4333-8333-333333333333', null, 5000, { pinned: true }),
+      session('claude', '44444444-4444-4444-8444-444444444444', 'Oldest', 1000),
+    ];
+    const archived = session('claude', '55555555-5555-4555-8555-555555555555', 'Put away', 9000, { archived: true });
+    const unknown = session('codex', '66666666-6666-4666-8666-666666666666', 'Not ours', 8000);
+    const recentIn = (pane) => [...pane.matchAll(/data-launcher-session="([^"]+)"/g)].map((m) => m[1]);
+    /** The markup of the button with `attr="value"`, or ''. */
+    const buttonOf = (pane, attr, value) => new RegExp(`<button[^>]*${attr}="${value}"[^>]*>[\\s\\S]*?</button>`).exec(pane)?.[0] ?? '';
+    try {
+      arrange({ tree: kept, activePaneId: 'pane-t1', editorPaneId: 'pane-e1' }, { terminals: [] });
+      H.setState({ entries: [...known, archived, unknown], holders: {} });
+      let pane = paneMarkup(await drawWorkbench(), 'pane-t1');
+      assert.match(pane, /No terminal in this pane/);
+      assert.match(pane, />New Terminal</, 'New Terminal');
+      assert.deepEqual([...pane.matchAll(/data-launcher-agent="([^"]+)"/g)].map((m) => m[1]), ['claude', 'opencode'], 'one button per agent');
+      assert.match(buttonOf(pane, 'data-launcher-agent', 'claude'), /New Claude Code Terminal<\/button>$/, 'New Claude Code Terminal');
+      assert.match(buttonOf(pane, 'data-launcher-agent', 'opencode'), /New opencode Terminal<\/button>$/, 'New opencode Terminal');
+      assert.match(pane, /data-launcher-recent=""/, 'the recent section');
+      assert.match(pane, /Recent agent sessions/);
+      assert.deepEqual(recentIn(pane), [known[2].key, known[0].key, known[1].key], 'three, newest first; the archived and the codex ones, newer still, are not offered');
+      assert.match(buttonOf(pane, 'data-launcher-session', known[2].key), /<span class="[^"]*\bitalic\b[^"]*">/, 'the untitled one is drawn in italics');
+      assert.equal(/\bitalic\b/.test(buttonOf(pane, 'data-launcher-session', known[0].key)), false, 'a titled one is not');
+      assert.match(buttonOf(pane, 'data-launcher-session', known[0].key), /title="Claude Code: Login flow\n\/workspace\/1111\n/, 'a row tells its folder in full');
+      assert.match(buttonOf(pane, 'data-launcher-session', known[1].key), />Parser<\/span><span[^>]*>opencode<\/span><span[^>]*>ses_<\/span>/, 'its title, its agent and its folder');
+      assert.equal(/title="Close Pane/.test(pane), false, 'still no Close Pane');
+
+      H.setState({ entries: [], holders: {} });
+      pane = paneMarkup(await drawWorkbench(), 'pane-t1');
+      assert.match(pane, /New Claude Code Terminal/, 'the agents are offered with no history');
+      assert.equal(/data-launcher-recent/.test(pane), false, 'no recent section with an empty history');
+      assert.deepEqual(recentIn(pane), []);
+
+      H.setState({ entries: [archived, unknown], holders: {} });
+      pane = paneMarkup(await drawWorkbench(), 'pane-t1');
+      assert.equal(/data-launcher-recent/.test(pane), false, 'nor with only archived and unknown entries');
+      assert.equal(/title="Close Pane/.test(pane), false);
+    } finally {
+      H.setState(historyBefore, true);
+    }
   });
 });

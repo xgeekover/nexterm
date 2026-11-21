@@ -178,7 +178,9 @@ describe('An agent typed by hand is remembered like one NexTerm started', () => 
       assert.equal(t.agent?.kind, 'opencode');
       assert.equal(t.agent.sessionId, null, 'which conversation is not known yet');
       assert.equal(t.agentResumeOffered, false);
-      assert.deepEqual(t.agentTyped, { sessionId: tab.sessionId }, 'watched from this line on');
+      assert.equal(t.agentTyped?.sessionId, tab.sessionId, 'watched from this line on');
+      assert.equal(typeof t.agentTyped.since, 'number', 'from when (F17)');
+      assert.deepEqual(Object.keys(t.agentTyped).sort(), ['sessionId', 'since'], 'and nothing else');
       assert.equal(serializeAgent(t.agent).kind, 'opencode', 'what a restart would offer back');
 
       await started(tab);

@@ -16,6 +16,11 @@
  * which is how a row drawn again shows.
  */
 import { build } from 'esbuild';
+// Imported here, with the suite, not with import() in PM-20: in the
+// adversarial runner, suites loaded before this one register module hooks
+// (webgl/loader.mjs, render/jsxLoader.mjs) that send every `@xterm/*` loaded
+// from then on to a stand-in, and a dynamic import would get that.
+import headless from '@xterm/headless';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
@@ -180,7 +185,9 @@ const STAND_INS = {
     export const FilePen = icon('FilePen');
     export const ScrollText = icon('ScrollText');
     export const Bot = icon('Bot');
-    export const Trash2 = icon('Trash2');`,
+    export const Trash2 = icon('Trash2');
+    export const GitFork = icon('GitFork');
+    export const ClipboardCopy = icon('ClipboardCopy');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */
@@ -208,6 +215,8 @@ function loadPalette() {
         "export { historyEntries } from '../../lib/commandIndex.js';",
         "export { renders } from 'lucide-react';",
         "export { calls } from 'stand-in:calls';",
+        // The bundle's own copy of the module the registry registers its lookup in.
+        "export { setContextTerminalSource } from '../../lib/copyContext.js';",
       ].join('\n'),
       resolveDir: COMMAND_DIR,
       sourcefile: 'palette-under-test.js',
@@ -711,5 +720,61 @@ describe('Command palette, mounted: Enter held down', () => {
       assert.equal(reached, 1, 'after the key was let go, Enter no longer reached the terminal');
       terminal.removeEventListener('keydown', count);
     });
+  });
+});
+
+/**
+ * Copy Context (bundle 1, A3; AC11) picked with Enter: the clipboard is
+ * written before the Enter's handler returns — nothing awaited first, as
+ * macOS WebKit refuses a write outside the gesture (release check H9) — with
+ * the active terminal's last lines, masked. A terminal never shown is not
+ * offered.
+ */
+describe('Command palette, mounted: Copy Context', () => {
+  beforeEach(fresh);
+
+  test('PM-20: Enter on "Copy Last 200 Lines (Secrets Masked)" writes the clipboard in the same turn, masked; never shown, it is not listed', async () => {
+    const term = new headless.Terminal({ cols: 40, rows: 6, allowProposedApi: true });
+    const secret = `sk-${'Qw3rTy9Zx1'.repeat(3)}`;
+    await new Promise((resolve) => term.write(`make build\r\nusing ${secret} now\r\n\x1b[32mdone\x1b[0m\r\n`, resolve));
+    const written = [];
+    const before = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const unregister = ui.setContextTerminalSource((tabId) => (tabId === 't1' ? term : null));
+    try {
+      await onPage(async (p) => {
+        Object.defineProperty(globalThis, 'navigator', {
+          value: { clipboard: { writeText: async (text) => { written.push(text); } } },
+          configurable: true,
+          writable: true,
+        });
+        const { terminal } = workspace(p);
+        terminal.focus();
+        p.render(h(ui.CommandPalette));
+        await openPalette(p, 'all');
+        const at = rowTitles(p).indexOf('Copy Last 200 Lines (Secrets Masked)');
+        assert.ok(at >= 0, `listed: ${rowTitles(p).join(' | ')}`);
+        for (let i = 0; i < at; i += 1) p.keydown('ArrowDown');
+        // What the palette asked as it opened (its file list) is not the copy's.
+        const askedBefore = ui.bridge.asked.length;
+        p.keydown('Enter');
+        assert.equal(written.length, 1, 'the clipboard was not written inside the Enter');
+        await letItRun();
+        assert.deepEqual(written, ['make build\nusing sk-[hidden] now\ndone']);
+        assert.deepEqual(ui.bridge.asked.slice(askedBefore).map(([c]) => c), [], 'nothing through the backend — no file, no scrollback command');
+      });
+      unregister();
+      // Never shown: no xterm for the active terminal, and the command is not offered.
+      await onPage(async (p) => {
+        workspace(p);
+        p.render(h(ui.CommandPalette));
+        await openPalette(p, 'all');
+        assert.equal(rowTitles(p).filter((t) => /^Copy Last /.test(t ?? '')).length, 0, 'offered for a terminal never shown');
+      });
+    } finally {
+      unregister();
+      if (before) Object.defineProperty(globalThis, 'navigator', before);
+      else delete globalThis.navigator;
+      term.dispose();
+    }
   });
 });

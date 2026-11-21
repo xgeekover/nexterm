@@ -355,3 +355,66 @@ describe('Settings: Restore Scrollback says where, and Clear asks first', () => 
     assert.match(src, /setResetQuestion\(null\);\s*setClearAsked\(false\);/);
   });
 });
+
+describe('Settings: Copy Context Lines (bundle 1, A3)', () => {
+  test('SW-22: a number row in the terminal section, 1 to 10000, 200 by default, saying secrets are masked and nothing is written to a file', async () => {
+    const buildItems = await exported('buildItems');
+    const numberToCommit = await exported('numberToCommit');
+    const { SETTINGS_DEFAULTS } = await import('../../src/stores/settingsStore.js');
+    const rows = buildItems('', [], '');
+    const row = rows.find((r) => r.id === 'terminalCopyContextLines');
+    assert.ok(row, 'no Copy Context Lines row');
+    assert.equal(rows.filter((r) => r.key === 'terminalCopyContextLines').length, 1, 'one row for the setting');
+    assert.deepEqual(
+      [row.section, row.key, row.control, row.min, row.max, row.title],
+      ['terminal', 'terminalCopyContextLines', 'number', 1, 10000, 'Copy Context Lines']
+    );
+    assert.equal(SETTINGS_DEFAULTS[row.key], 200);
+    assert.match(row.description, /\[hidden\]/);
+    assert.match(row.description, /Nothing is written to a file/);
+    // Held to its range as it is committed; a blank or junk field keeps what was saved.
+    assert.equal(numberToCommit('0', row, 200), 1);
+    assert.equal(numberToCommit('-4', row, 200), 1);
+    assert.equal(numberToCommit('25000', row, 200), 10000);
+    assert.equal(numberToCommit('350', row, 200), 350);
+    assert.equal(numberToCommit('', row, 200), 200);
+    assert.equal(numberToCommit('lots', row, 200), 200);
+    // The window hands the row its value.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(src, /const terminalCopyContextLines = useSettingsStore\(\(s\) => s\.terminalCopyContextLines\);/);
+    assert.match(src, /const values = \{[^}]*\n    terminalCopyContextLines,\n/);
+  });
+});
+
+describe('Settings: Keep the Computer Awake While an Agent Works (bundle 1, A4)', () => {
+  test("SW-23: a checkbox row in the terminal section, off by default, saying the display may still sleep — and 'not available on this system' when unsupported", async () => {
+    const buildItems = await exported('buildItems');
+    const { SETTINGS_DEFAULTS } = await import('../../src/stores/settingsStore.js');
+    const rowFor = (support) => buildItems('', [], '', support).find((r) => r.id === 'terminalKeepAwakeWhileAgentsWork');
+    const row = rowFor(null);
+    assert.ok(row, 'no keep-awake row');
+    assert.equal(buildItems('', [], '').filter((r) => r.key === 'terminalKeepAwakeWhileAgentsWork').length, 1, 'one row for the setting');
+    assert.deepEqual(
+      [row.section, row.key, row.control, row.title],
+      ['terminal', 'terminalKeepAwakeWhileAgentsWork', 'checkbox', 'Keep the Computer Awake While an Agent Works']
+    );
+    assert.equal(SETTINGS_DEFAULTS[row.key], false, 'on by default');
+    // Not known yet, or supported: what it does, and that the display may still sleep.
+    for (const support of [null, { supported: true, method: 'caffeinate' }, { supported: true, method: 'SetThreadExecutionState' }]) {
+      const words = rowFor(support).description;
+      assert.match(words, /Claude Code terminal is working/);
+      assert.match(words, /The display may still turn off and lock\./);
+      assert.doesNotMatch(words, /not available/i, `unsupported while ${JSON.stringify(support)}`);
+    }
+    // Unsupported: said so, in the row itself.
+    const unsupported = rowFor({ supported: false, method: 'none' }).description;
+    assert.match(unsupported, /The display may still turn off and lock\./);
+    assert.match(unsupported, /Not available on this system\.$/);
+    // The window asks the shared support question when it opens, hands the answer to the rows, and the row its value.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(src, /keepAwakeSupport\(\)\.then\(\(answer\) => \{\s*if \(!cancelled\) setKeepAwake\(answer\);/);
+    assert.match(src, /buildItems\(monoPlaceholder, detectedShells, homeDir, keepAwake\),\s*\[monoPlaceholder, detectedShells, homeDir, keepAwake\]/);
+    assert.match(src, /const terminalKeepAwakeWhileAgentsWork = useSettingsStore\(\(s\) => s\.terminalKeepAwakeWhileAgentsWork\);/);
+    assert.match(src, /const values = \{[^}]*\n    terminalKeepAwakeWhileAgentsWork,\n/);
+  });
+});

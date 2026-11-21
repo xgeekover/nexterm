@@ -16,6 +16,8 @@ import { useSettingsStore, SETTINGS_DEFAULTS } from '../../src/stores/settingsSt
 import * as terminalStoreLib from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { SCHEMA_VERSION } from '../../src/lib/persistence.js';
+import { makeNote } from '../../src/lib/programNotifications.js';
+import { unreadCountByTab } from '../../src/lib/attention.js';
 
 const {
   STATUS_GLYPHS,
@@ -539,6 +541,29 @@ describe('Terminal status: the agent, from what the store records (S2, revised)'
       await startedIn(tabNow(opened.id));
       await promptIn(tabNow(opened.id), 0);
       assert.equal(agentLabel(tabNow(opened.id)), '');
+    });
+  });
+});
+
+describe('Terminal status: not waiting for an agent that has ended (F17, AC18)', () => {
+  test('TS-24: notes listed while the agent ran made the terminal Waiting; at the D that ends it they are read, and it is not', async () => {
+    await withStore(null, async () => {
+      const opened = await T.getState().createTab();
+      await promptIn(tabNow(opened.id));
+      await T.getState().startAgent(opened.id, 'claude');
+      await startedIn(tabNow(opened.id));
+      const away = Object.freeze({ focused: false, visible: true });
+      T.getState().notifyFromProgram(opened.id, makeNote('Claude Code', 'Claude needs your permission'), away);
+      T.getState().notifyFromProgram(opened.id, makeNote('Claude Code', 'Claude is waiting for your input'), away);
+      const unread = () => unreadCountByTab(T.getState().notifications)[opened.id] ?? 0;
+      assert.equal(unread(), 2, 'premise: two unread notes, and nothing else');
+      assert.equal(stateOf(tabNow(opened.id), { unread: unread() }), 'waiting', 'premise: the side bar says Waiting');
+
+      await promptIn(tabNow(opened.id), 0);
+      assert.equal(tabNow(opened.id).agent, null, 'premise: the agent ended');
+      assert.equal(unread(), 0, "the agent's notes are still unread");
+      assert.notEqual(stateOf(tabNow(opened.id), { unread: unread() }), 'waiting', 'the side bar still says Waiting for an agent that is gone');
+      assert.equal(T.getState().notifications.filter((n) => n.tabId === opened.id).length, 2, 'the notes are still listed, read');
     });
   });
 });

@@ -14,7 +14,8 @@
  * that they also run when the JS suite is run on its own: the cap, one entry
  * per conversation, `replaces`, remove and clear across a restart, a kind
  * this build does not know, the deleted- and corrupt-file hooks, and
- * Tauri's own refusals; AH-22 what the user curates (format version 2).
+ * Tauri's own refusals; AH-22 what the user curates (format version 2);
+ * AH-23 the `forkOf` of a forked conversation.
  * AH-20 checks the numbers and patterns against the Rust source and
  * src/lib/agents.js, and that the nine commands are registered; AH-21 does
  * the same on copies with a Windows checkout's CRLF line ends. AH-99 puts
@@ -235,6 +236,31 @@ describe('Agent session history: the browser mock against the backend', () => {
     const listed = fitted?.results?.at(-1)?.ok;
     assert.ok(Array.isArray(listed) && listed.length > 1 && listed.length < 90, 'and one that is held under the read cap by size');
     assert.ok(utf8(fitted.fileText) <= fixture.constants.maxReadBytes && utf8(fitted.fileText) > fixture.constants.maxReadBytes * 0.9);
+    // Fork Conversation: `forkOf` after the nine fields, only on a fork,
+    // kept by later events and curation, version 1 by itself; one of the
+    // wrong shape refused through the command and dropped from a file.
+    const forked = fixture.scenarios.find((s) => s.name === 'a fork keeps the conversation it was forked from');
+    assert.ok(forked, 'a sequence that records a fork');
+    const forkKey = `claude:${CLAUDE_B}`;
+    const firstList = forked.results[forked.ops.findIndex((o) => o.op === 'list')].ok;
+    const theFork = firstList.find((e) => e.key === forkKey);
+    assert.equal(theFork.forkOf, CLAUDE_A, 'kept through an end, a title and a resume that sent none');
+    assert.equal(theFork.title, 'From the transcript');
+    assert.ok(!('forkOf' in firstList.find((e) => e.key === `claude:${CLAUDE_A}`)), 'the source is left as it was');
+    const pinnedAt = forked.ops.findIndex((o) => o.op === 'update' && o.args.changes.pinned === true);
+    assert.equal(forked.results[pinnedAt].ok.forkOf, CLAUDE_A, 'and through a curation');
+    // The answers are recorded with their keys sorted; the file is as written.
+    const written = JSON.parse(forked.fileText);
+    assert.equal(written.version, 1, 'a fork alone never makes version 2');
+    assert.deepEqual(
+      Object.keys(written.entries.find((e) => e.key === forkKey)),
+      ['key', 'kind', 'sessionId', 'cwd', 'title', 'startedAt', 'lastUsedAt', 'endedAt', 'endReason', 'forkOf'],
+      'after the nine fields'
+    );
+    assert.ok(written.entries.filter((e) => e.key !== forkKey).some((e) => Object.keys(e).length === 9), 'an entry without one is the nine');
+    assert.ok(forked.results.some((r) => r?.error === `${fixture.constants.invalid}: its forkOf is not one that claude gives a conversation`));
+    const forkWhys = [...whys].filter((w) => w.includes('its forkOf'));
+    assert.ok(forkWhys.length >= 3, `the refusal rules of forkOf too: ${forkWhys}`);
   });
 });
 
@@ -475,6 +501,39 @@ describe('Agent session history: the mock alone', () => {
       await assert.rejects(() => call('update', { key: claude.key, changes: { pinned: true } }), /newer NexTerm/);
       assert.equal(mockBridge.agentHistoryFile(), newer, 'byte for byte');
       assert.equal(warned.filter((w) => w.includes('newer NexTerm')).length, 1, 'said once');
+    });
+  });
+
+  test('AH-23: a fork\u{2019}s forkOf — after the nine fields, kept by later events and curation, version 1 by itself, its shape checked', async () => {
+    await fresh(async () => {
+      const source = await upsert(entry('claude', CLAUDE_A, '/w', null, 1, 2));
+      const fork = await upsert({ ...entry('claude', CLAUDE_B, '/w', null, 3, 4), forkOf: CLAUDE_A });
+      assert.equal(fork.forkOf, CLAUDE_A);
+      assert.deepEqual(Object.keys(fork), ['key', 'kind', 'sessionId', 'cwd', 'title', 'startedAt', 'lastUsedAt', 'endedAt', 'endReason', 'forkOf']);
+      const text = mockBridge.agentHistoryFile();
+      assert.equal(JSON.parse(text).version, 1, 'not curated');
+      assert.ok(text.includes(`"endReason": null,\n      "forkOf": "${CLAUDE_A}"\n    }`), text);
+      // A later event of the fork names none: kept.
+      const later = await upsert({ ...entry('claude', CLAUDE_B, '/w', 'Its title', 3, 9), forkOf: null });
+      assert.equal(later.forkOf, CLAUDE_A);
+      const pinned = await call('update', { key: fork.key, changes: { pinned: true } });
+      assert.equal(pinned.forkOf, CLAUDE_A);
+      assert.ok(mockBridge.agentHistoryFile().includes(`"forkOf": "${CLAUDE_A}",\n      "pinned": true\n`), 'between the nine and the curated');
+      await call('update', { key: fork.key, changes: { pinned: false } });
+      assert.equal(JSON.parse(mockBridge.agentHistoryFile()).version, 1);
+      const listed = await list();
+      assert.deepEqual(listed.map((e) => [e.key, e.forkOf]), [[fork.key, CLAUDE_A], [source.key, undefined]], 'the source left as it was');
+      for (const bad of ['x; curl a | sh', CLAUDE_A.toUpperCase(), OPENCODE_A, '', 7]) {
+        await assert.rejects(
+          () => upsert({ ...entry('claude', CLAUDE_B, '/w', null, 3, 10), forkOf: bad }),
+          /^Error: Not a valid agent session: its forkOf is not one that claude gives a conversation$/,
+          JSON.stringify(bad)
+        );
+      }
+      await assert.rejects(
+        () => upsert({ ...entry('opencode', OPENCODE_A, '/w', null, 3, 10), forkOf: CLAUDE_A }),
+        /its forkOf is not one that opencode gives a conversation$/
+      );
     });
   });
 

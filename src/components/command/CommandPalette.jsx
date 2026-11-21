@@ -21,21 +21,25 @@ import {
   FilePen,
   ScrollText,
   Bot,
+  GitFork,
   Trash2,
+  ClipboardCopy,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
+import { useSystemStore } from '../../stores/systemStore.js';
 import { useProjectCommandsStore } from '../../stores/projectCommandsStore.js';
 import { useControlLogStore } from '../../stores/controlLogStore.js';
 import { useAgentHistoryStore } from '../../stores/agentHistoryStore.js';
 import { clearAgentHistory } from '../../stores/agentHistoryPromptStore.js';
 import { invoke, listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
-import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
+import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette, forkTargetOfTab } from '../../lib/paletteItems.js';
 import { commandHistory } from '../../lib/commandIndex.js';
 import { notifyTerminal } from '../../lib/terminalNotice.js';
+import { contextTerminalOf, copyContextOfTab } from '../../lib/copyContext.js';
 import { focusActivePane, focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { moveEditorToNewPane, toggleZoomActive } from '../../lib/workbenchCommands.js';
 import { swallowRepeatsOf } from '../../lib/heldKeys.js';
@@ -56,6 +60,9 @@ const FILE_LIST_LIMIT = 20000;
 const RELIST_DELAY_MS = 300;
 
 const count = (n) => n.toLocaleString('en-US');
+
+/** The terminal store's active terminal, or null. */
+const activeTabOf = (state) => (Array.isArray(state?.tabs) ? state.tabs.find((t) => t.id === state.activeTabId) ?? null : null);
 
 function iconFor(item) {
   if (item.type === 'project-command') return <Play size={16} />;
@@ -78,6 +85,8 @@ function iconFor(item) {
   if (item.command === 'show_control_log') return <ScrollText size={16} />;
   if (item.type === 'agent-session' || item.command === 'resume_agent_session') return <Bot size={16} />;
   if (item.command === 'clear_agent_session_history') return <Trash2 size={16} />;
+  if (item.command === 'fork_conversation') return <GitFork size={16} />;
+  if (item.command === 'copy_terminal_context') return <ClipboardCopy size={16} />;
   if (item.type === 'pane') return <PanelTop size={16} />;
   return <Terminal size={16} />;
 }
@@ -218,11 +227,19 @@ export function CommandPalette() {
   const closeTab = useTerminalStore((s) => s.closeTab);
   const typingHiddenNow = useTerminalStore((s) => s.typingHiddenNow);
   const resumeFromHistory = useTerminalStore((s) => s.resumeFromHistory);
+  const forkConversation = useTerminalStore((s) => s.forkConversation);
+  // What Fork Conversation would fork: the active terminal's Claude Code
+  // conversation, by id and folder, or null — then it is not listed.
+  const os = useSystemStore((s) => s.os);
+  const forkTarget = useTerminalStore(useShallow((s) => forkTargetOfTab(activeTabOf(s), os)));
   // The agent session history, newest first (agentHistoryStore.js). It
   // changes only when an agent in a terminal starts, is named or ends.
   const agentSessions = useAgentHistoryStore((s) => s.entries);
   // Its groups, for a row's subtitle and for a query naming a group (F28).
   const agentGroups = useAgentHistoryStore((s) => s.groups);
+  // Copy Context's N, and the terminal it would copy: the active one.
+  const copyContextLines = useSettingsStore((s) => s.terminalCopyContextLines);
+  const activeTabId = useTerminalStore((s) => s.activeTabId);
 
   // The folder's commands and the user's (spec D10). Each of these changes
   // only when a read finds other bytes, trust is given or taken, or the
@@ -361,9 +378,13 @@ export function CommandPalette() {
             projectCommands,
             agentSessions,
             agentGroups: Array.isArray(agentGroups) ? agentGroups : [],
+            // Listed while the active terminal has a screen to copy — asked
+            // of the registry as the palette opens, never made.
+            copyContext: activeTabId && contextTerminalOf(activeTabId) ? { lines: copyContextLines } : null,
+            forkTarget,
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions, agentGroups]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions, agentGroups, forkTarget, activeTabId, copyContextLines]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -498,6 +519,20 @@ export function CommandPalette() {
         // The dialog takes the keyboard, and gives it back to what had it
         // before the palette (`focusAfterPalette` says 'dialog').
         useControlLogStore.getState().setOpen(true);
+        return;
+      case 'fork_conversation': {
+        // The active terminal's conversation as it is now, in a new terminal
+        // in its folder; anything that stops it is said in AgentHistoryNotice.
+        const target = forkTargetOfTab(activeTabOf(useTerminalStore.getState()), useSystemStore.getState().os);
+        setActiveView('terminal');
+        if (target) await forkConversation?.(target);
+        return;
+      }
+      case 'copy_terminal_context':
+        // Read and copied now, before anything is awaited: the clipboard
+        // write must stay inside the Enter or click that picked it (macOS
+        // WebKit, release check H9). A terminal never shown copies nothing.
+        copyContextOfTab(useTerminalStore.getState().activeTabId, useSettingsStore.getState().terminalCopyContextLines);
         return;
       case 'clear_agent_session_history':
         // Asks first ("Clear Agent Session History?"), which takes the

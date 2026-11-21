@@ -188,6 +188,28 @@ export function startCommand(kind) {
 }
 
 /**
+ * The command that FORKS the Claude Code conversation `sourceSessionId`: a
+ * new conversation that starts with a copy of that one's, under an id NexTerm
+ * chooses — `claude --resume <source> --fork-session --session-id <new>`
+ * (Claude Code 2.0.73 and newer) — and the agent record to remember, whose
+ * `forkOf` is the source. The source is left as it was.
+ *
+ * Null for a source that is not a Claude Code id (`CLAUDE_SESSION_ID`): it is
+ * typed into a shell, and nothing else may reach one.
+ *
+ * @returns {{ command: string, agent: { kind: 'claude', sessionId: string, startedAt: number, title: null, forkOf: string } } | null}
+ */
+export function forkCommand(sourceSessionId) {
+  if (!isSessionIdFor('claude', sourceSessionId)) return null;
+  let sessionId = newSessionId();
+  while (sessionId === sourceSessionId) sessionId = newSessionId();
+  return {
+    command: `${AGENTS.claude.command} ${AGENTS.claude.resumeFlag} ${sourceSessionId} --fork-session --session-id ${sessionId}`,
+    agent: { kind: 'claude', sessionId, startedAt: Date.now(), title: null, forkOf: sourceSessionId },
+  };
+}
+
+/**
  * The command that CONTINUES the conversation an `agent` record describes, or
  * null when there is nothing to continue.
  *
@@ -367,23 +389,40 @@ function opencodeFromArgs(args) {
 
 function claudeFromArgs(args) {
   if (args.length > 0 && CLAUDE_SUBCOMMANDS.has(args[0])) return null;
+  // The last of either flag, as it always was: what a line without
+  // `--fork-session` names.
   let sessionId = null;
+  // Each flag's own value, for a fork: the new id and the conversation it
+  // continues from are never the same flag.
+  let newId = null;
+  let resumed = null;
   let fork = false;
   for (let i = 0; i < args.length; i += 1) {
     const [flag, inline] = flagParts(args[i]);
     if (['-p', '--print', '-h', '--help', '-v', '--version', '--bg', '--background'].includes(flag)) return null;
     if (flag === '--fork-session') fork = true;
-    if (flag === '--session-id') sessionId = inline !== undefined ? inline : args[(i += 1)] ?? null;
+    if (flag === '--session-id') {
+      sessionId = inline !== undefined ? inline : args[(i += 1)] ?? null;
+      newId = sessionId;
+    }
     if (flag === '-r' || flag === '--resume') {
       // The value is optional: without one claude shows its own picker.
       const value = inline !== undefined ? inline : args[i + 1];
       if (isSessionIdFor('claude', value)) {
         sessionId = value;
+        resumed = value;
         if (inline === undefined) i += 1;
       }
     }
   }
-  return { kind: 'claude', sessionId: !fork && isSessionIdFor('claude', sessionId) ? sessionId : null };
+  if (!fork) return { kind: 'claude', sessionId: isSessionIdFor('claude', sessionId) ? sessionId : null };
+  // `--fork-session` continues into a NEW conversation: its id is the one
+  // `--session-id` chose, when the line chose one, and nobody's otherwise.
+  // The one it was forked from is kept beside it only when both are known
+  // — a link from a conversation nobody can name leads nowhere.
+  const id = isSessionIdFor('claude', newId) ? newId : null;
+  const from = id !== null && isSessionIdFor('claude', resumed) && resumed !== id ? resumed : null;
+  return from !== null ? { kind: 'claude', sessionId: id, forkOf: from } : { kind: 'claude', sessionId: id };
 }
 
 /**
@@ -399,7 +438,15 @@ function claudeFromArgs(args) {
  *
  * `sessionId` is the conversation when the line names one — `opencode -s
  * ses_…`, `claude --resume <uuid>` or `--session-id <uuid>` — and null
- * otherwise, including a `--fork`, which continues into a new one.
+ * otherwise, including an opencode `--fork`, which continues into a new one.
+ *
+ * A Claude Code fork — `--fork-session`, in any order with the other flags —
+ * continues into a new conversation too, and its `sessionId` is that one's:
+ * the `--session-id <uuid>` the line chose, or null when it chose none
+ * (Claude Code then makes one nobody here can know). With both a valid
+ * `--session-id` and a valid `--resume <uuid>`, the record also has
+ * `forkOf`, the conversation it was forked from (`forkCommand` types such a
+ * line). A record without a fork has no `forkOf` at all.
  */
 export function agentFromCommandLine(line) {
   if (typeof line !== 'string' || line.length > 4096) return null;

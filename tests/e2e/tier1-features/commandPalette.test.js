@@ -66,9 +66,14 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'Show Control Log',
         // The agent session history (AGENT SESSIONS): the pick, and emptying it after asking.
         'Resume Agent Session…',
+        // Bundle 1: fork the active terminal's Claude Code conversation, and
+        // copy its last lines (the Copy Context Lines setting, 200 by default)
+        // with secrets masked.
+        'Fork Conversation',
+        'Copy Last 200 Lines (Secrets Masked)',
         'Clear Agent Session History…',
       ],
-      'The palette offers exactly the twenty commands the app implements'
+      'The palette offers exactly the twenty-two commands the app implements'
     );
   });
 

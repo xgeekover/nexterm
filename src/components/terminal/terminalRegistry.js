@@ -23,6 +23,7 @@ import '@xterm/xterm/css/xterm.css';
 import { listen, pathKinds } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { setTerminalNoticeSink } from '../../lib/terminalNotice.js';
+import { setContextTerminalSource } from '../../lib/copyContext.js';
 import {
   APP_THEME_TOKENS,
   getTerminalThemeEntry,
@@ -2050,6 +2051,13 @@ export function terminalClaimsMarkKeys(tabId) {
 // Let the store reach the screen without importing this module (it runs in
 // Node under the test suites, and xterm brings a stylesheet with it).
 setTerminalNoticeSink(writeNotice);
+
+// Copy Context (src/lib/copyContext.js) reads a terminal's screen from here,
+// at once and never after its output is written: the clipboard write must
+// stay inside the click or Enter that asked for it (macOS WebKit, release
+// check H9). So what it copies is what has been drawn — output held back by
+// pacing is not in it — and a terminal never shown has no xterm to read.
+setContextTerminalSource(existingTerminal);
 
 // NexTerm types an agent's start or resume line itself (`startAgent`,
 // `resumeAgent`), so no Enter of the user's comes through `noteMessageInput`

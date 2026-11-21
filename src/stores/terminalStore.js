@@ -48,6 +48,7 @@ import {
   claudeActivityOf,
   claudeTitleOf,
   cleanAgentTitle,
+  forkCommand,
   isKnownAgent,
   isSessionIdFor,
   opencodeTitleMatches,
@@ -60,7 +61,7 @@ import {
   startCommand,
 } from '../lib/agents.js';
 import { opencodeLaunchLine } from '../lib/opencodeLaunch.js';
-import { historyKeyOfTab, historyRecord } from '../lib/agentHistory.js';
+import { historyKeyOfTab, historyRecord, historyTitle } from '../lib/agentHistory.js';
 import {
   AGENT_IDLE_SETTLE_MS,
   NO_AGENT_ACTIVITY,
@@ -86,6 +87,7 @@ import { typingHidden, withoutSecret } from '../lib/secretInput.js';
 import { cleanStatusText } from '../lib/controlScope.js';
 import { LOST_LINE } from '../lib/suggestionLayer.js';
 import { isNetworkPath } from '../lib/terminalLinks.js';
+import { displayTitle, nexTermTitle } from '../lib/tabTitle.js';
 import {
   followCommandLine,
   normalizeSlotCommand,
@@ -1604,6 +1606,21 @@ export function onProgramSignal(listener) {
 export const NEVER_SAVED_NOTE = 'That Claude Code session had no saved conversation, so a new one was started.';
 
 /**
+ * What a Fork Conversation says when the conversation it was to fork was
+ * never saved — `claude --resume <id> --fork-session` could only fail — and
+ * a new one was started instead (`forkConversation`).
+ */
+export const FORK_NEVER_SAVED_NOTE =
+  'That Claude Code session had no saved conversation to fork, so a new one was started instead; it is not linked to that session.';
+
+/** What the terminal a fork opened says when it was asking for a password, so nothing was typed (`forkConversation`). */
+export const FORK_HIDDEN_NOTE =
+  'Not forked — this terminal is asking for a password, and NexTerm types nothing into a password prompt. Answer it, then fork the conversation again.';
+
+/** What it says when something was running in it by the time the fork was to be typed. */
+export const FORK_BUSY_NOTE = 'Not forked — something is running in this terminal, and the fork would have been typed into it. Fork the conversation again.';
+
+/**
  * Who wants to hear that a Resume started a NEW conversation in place of the
  * one it was asked for (`onAgentConversationReplaced`) — the agent session
  * history, which then drops the old one's entry: it can never be resumed.
@@ -1892,6 +1909,9 @@ let noticeSeq = 0;
 
 /** The history keys `resumeFromHistory` is opening a terminal for: one at a time each. */
 const resumingKeys = new Set();
+
+/** The Claude Code conversations `forkConversation` is forking: one fork at a time of each. */
+const forkingSources = new Set();
 
 /** Why lookups failed, as reported to the console this run: each reason once. */
 const reportedLookupFailures = new Set();
@@ -2557,6 +2577,49 @@ function withoutProgress(progress, tabIds) {
 const withoutTabs = withoutProgress;
 
 /**
+ * `tab` without the title a program gave it (`setProgramTitle`) — the same
+ * object when it had none. The program that set it is gone once its shell
+ * is (`pty-exit`, a write that finds the shell gone) or replaced
+ * (`restartShell`), so its title would name a terminal it no longer runs
+ * in, and the tab shows its default name, or the user's, again.
+ */
+const withoutProgramTitle = (tab) => {
+  if (!tab || (tab.programTitle == null && tab.programTitleAt == null)) return tab;
+  const { programTitle: _title, programTitleAt: _at, ...rest } = tab;
+  return rest;
+};
+
+/**
+ * Whether `entry` — a reported status, a note — was made at or after `since`
+ * (both wall-clock milliseconds). Neither a time missing nor one that is not
+ * a number counts: nothing is taken for the agent's without saying so.
+ */
+const reportedSince = (entry, since) =>
+  Number.isFinite(since) && Number.isFinite(entry?.at) && entry.at >= since;
+
+/**
+ * Whether `entry` — a reported status, a program title, as `{ at }` — said
+ * again unchanged in `tab` takes a new time: only while `tab` watches an
+ * agent (`agentTyped.since`) and the time kept is from before that agent
+ * started. The agent saying it again makes it the agent's, so it goes when
+ * the agent ends (AC18; review B-R1). With no agent watched, or a time from
+ * the agent's run already, the same text again is no write and keeps its
+ * time, as before.
+ */
+const restatedForAgent = (tab, entry) => {
+  const since = tab?.agentTyped?.since;
+  return Number.isFinite(since) && Number.isFinite(entry?.at) && entry.at < since;
+};
+
+/**
+ * `tab` without the title a program gave it at or after `since` — when the
+ * agent recorded then has ended (`pty-command-done`). The same object when
+ * there is none, or `since` is not a time; a title from before stays.
+ */
+const withoutAgentReports = (tab, since) =>
+  reportedSince({ at: tab?.programTitleAt }, since) ? withoutProgramTitle(tab) : tab;
+
+/**
  * What every shell waits for before it is started: settled once the backend
  * has been told what Settings ▸ Terminal ▸ Control allows (stage 7,
  * src/lib/controlBridge.js). The backend listens from its own start with
@@ -2978,6 +3041,11 @@ export const useTerminalStore = create((set, get, api) => {
    * every D it sees is one that came after the write. Without a prompt to go
    * by, nothing says where the typed line stands, so nothing is watched and
    * the record stays, as it always did.
+   *
+   * The watch keeps when it went on (`since`, the wall clock a reported
+   * status, a program's title and a note are stamped with): what a program
+   * reported from then on is the agent's, and goes when it ends
+   * (`pty-command-done`). Only `sessionId` says whether it is watched.
    */
   const recordAgent = (tabId, agent, atPrompt) => {
     // A new record has seen no title yet (`noteAgentTitle`).
@@ -2995,7 +3063,7 @@ export const useTerminalStore = create((set, get, api) => {
               agent,
               agentResumeOffered: false,
               agentResumeNotice: null,
-              agentTyped: atPrompt ? { sessionId: t.sessionId } : null,
+              agentTyped: atPrompt ? { sessionId: t.sessionId, since: Date.now() } : null,
             }
           : t
       ),
@@ -3062,7 +3130,10 @@ export const useTerminalStore = create((set, get, api) => {
     if (endsOf(tab.sessionId) === 0) return;
     const typed = agentFromCommandLine(line);
     if (!typed) return;
-    recordAgent(tab.id, { kind: typed.kind, sessionId: typed.sessionId, startedAt: Date.now(), title: null }, true);
+    // A fork typed by hand (`--fork-session`) names its source, as Fork
+    // Conversation's does, so the history links the two.
+    const forkOf = isSessionIdFor(typed.kind, typed.forkOf) ? { forkOf: typed.forkOf } : {};
+    recordAgent(tab.id, { kind: typed.kind, sessionId: typed.sessionId, startedAt: Date.now(), title: null, ...forkOf }, true);
   };
 
   /**
@@ -3115,7 +3186,7 @@ export const useTerminalStore = create((set, get, api) => {
   const sessionsHeldElsewhere = (state, tabId) => new Set(holdersElsewhere(state, tabId).keys());
 
   /** What to call a terminal that holds something, in a message. */
-  const nameOf = (tab) => tab?.title || tab?.defaultTitle || 'another terminal';
+  const nameOf = (tab) => displayTitle(tab, 'another terminal');
 
   /**
    * How many terminals in `tab`'s folder show `title` (or offer it back)
@@ -4384,8 +4455,10 @@ export const useTerminalStore = create((set, get, api) => {
      * The text is cleaned here, where it is kept: whoever calls, nothing else
      * is ever drawn. The same text and tone again is no write at all — a hook
      * saying "Running tests" before every test file redraws nothing — and
-     * keeps the time it was first said. Returns whether the terminal exists
-     * and the text left something to show.
+     * keeps the time it was first said; unless that time is from before the
+     * agent the terminal now watches started (`restatedForAgent`), when it
+     * takes the new one, so it goes when that agent ends. Returns whether the
+     * terminal exists and the text left something to show.
      */
     setReportedStatus: (tabId, status) => {
       if (!get().tabs.some((t) => t.id === tabId)) return false;
@@ -4401,10 +4474,47 @@ export const useTerminalStore = create((set, get, api) => {
       const tone = STATUS_TONES.has(status.tone) ? status.tone : 'info';
       set((s) => {
         const was = s.reportedStatus[tabId];
-        if (was && was.text === text && was.tone === tone) return s;
+        if (was && was.text === text && was.tone === tone && !restatedForAgent(s.tabs.find((t) => t.id === tabId), was)) {
+          return s;
+        }
         return { reportedStatus: { ...s.reportedStatus, [tabId]: { text, tone, at: Date.now() } } };
       });
       return true;
+    },
+
+    /**
+     * Set the title a program gave `tabId` (`nexterm-cli set-title`), or
+     * clear it (`null`). Kept on the tab as `programTitle`, with the time it
+     * was set as `programTitleAt`, and never written anywhere: the
+     * workspace, a saved group and a saved workspace take a tab field by
+     * field (`buildPersistedPayload`), and these fields are not among them.
+     * The text is cleaned here, where it is kept, as an agent's title is
+     * (`historyTitle`: one line, no control or bidi characters, secrets
+     * hidden, at most 200 characters), so nothing else is ever drawn. The
+     * same title again is no write at all and keeps its time, unless that
+     * time is from before the agent the terminal now watches started
+     * (`restatedForAgent`, as for a status). Returns the title kept (null
+     * once cleared), or undefined when there is no such terminal or nothing
+     * is left to show.
+     */
+    setProgramTitle: (tabId, text) => {
+      if (!get().tabs.some((t) => t.id === tabId)) return undefined;
+      if (text === null || text === undefined) {
+        set((s) => {
+          if (!s.tabs.some((t) => t.id === tabId && t.programTitle != null)) return s;
+          return { tabs: s.tabs.map((t) => (t.id === tabId ? withoutProgramTitle(t) : t)) };
+        });
+        return null;
+      }
+      const title = historyTitle(text);
+      if (!title) return undefined;
+      set((s) => {
+        const was = s.tabs.find((t) => t.id === tabId);
+        if (was?.programTitle === title && !restatedForAgent(was, { at: was.programTitleAt })) return s;
+        const at = Date.now();
+        return { tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, programTitle: title, programTitleAt: at } : t)) };
+      });
+      return title;
     },
 
     // ---- Controlled by another terminal's program (stage 7, spec D6) ------
@@ -4412,7 +4522,9 @@ export const useTerminalStore = create((set, get, api) => {
     // tab id -> `{ by, byTitle, cmd, at, n }`: a program in terminal `by`
     // typed into this one, read its screen or focused it, CONTROLLED_MARK_MS
     // ago at most. Drawn as a mark on its tab chip naming `byTitle`, the
-    // caller's name when it happened (it may be renamed or closed since).
+    // caller's name when it happened (it may be renamed or closed since):
+    // NexTerm's own name for it (`nexTermTitle`), never a title its program
+    // set, which could name another terminal (review A-R1).
     // Only for a terminal other than the caller's own: a program acting on
     // its own terminal is what it was started to do.
     controlled: {},
@@ -4428,7 +4540,7 @@ export const useTerminalStore = create((set, get, api) => {
       const state = get();
       if (!state.tabs.some((t) => t.id === tabId)) return false;
       const caller = state.tabs.find((t) => t.id === by);
-      const byTitle = caller ? caller.title || caller.defaultTitle || 'another terminal' : 'another terminal';
+      const byTitle = nexTermTitle(caller, 'another terminal');
       controlledCounter += 1;
       const n = controlledCounter;
       clearTimeout(controlledTimers.get(tabId));
@@ -6239,6 +6351,7 @@ export const useTerminalStore = create((set, get, api) => {
           // `set` from within an updater is how two writes to one store end up
           // racing each other.
           const raised = [];
+          const agentEnded = [];
           const nextTabs = state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // An end with no code — cmd's, whose PROMPT has no way to say —
@@ -6272,21 +6385,48 @@ export const useTerminalStore = create((set, get, api) => {
             // it exiting, and on cmd, which sends no C, an agent gone within
             // SUBMIT_GRACE_MS — a resume that fails at once — is not counted,
             // so its record stays for one more offer.
+            //
+            // This is what "the agent ends" means for what a program reported
+            // from inside it, too (`setReportedStatus`, `setProgramTitle`,
+            // `notifyFromProgram` — a hook, `nexterm-cli`, an OSC note):
+            // whatever was set at or after the record's `since` goes with it,
+            // in this same update. The status and the title are dropped, and
+            // the terminal's program notes from then on are marked read, so
+            // nothing keeps saying "Waiting" for an agent that is gone. Not
+            // NexTerm's own "finished a turn" note (`agentDone`): that one
+            // still has something to say. Anything from before the agent
+            // started stays. A record nothing watches (typed before the first
+            // prompt, a shell without OSC 133, an offer never taken) never
+            // ends this way, and keeps what it had, as before; a shell's exit
+            // or restart (`pty-exit`, `restartShell`) clears all of it anyway.
             const agentExited = tab.running && tab.agentTyped?.sessionId === session_id;
+            if (agentExited) agentEnded.push({ tabId: tab.id, since: tab.agentTyped.since });
             return {
-              ...tab,
+              ...withoutAgentReports(tab, agentExited ? tab.agentTyped.since : undefined),
               lastExitCode: code,
               running: false,
               runStartedAt: null,
               ...(agentExited ? { agent: null, agentResumeOffered: false, agentTyped: null } : {}),
             };
           });
-          return raised.length === 0
-            ? { tabs: nextTabs }
-            : {
-                tabs: nextTabs,
-                notifications: capNotifications([...raised, ...state.notifications], NOTIFICATION_LIMIT),
-              };
+          const reportedStatus = agentEnded.reduce(
+            (map, { tabId, since }) => (reportedSince(map[tabId], since) ? withoutTabs(map, [tabId]) : map),
+            state.reportedStatus
+          );
+          let notifications = agentEnded.reduce(
+            (list, { tabId, since }) =>
+              markRead(
+                list,
+                (n) => n.tabId === tabId && n.kind === 'program' && n.origin !== 'agent-done' && reportedSince(n, since)
+              ),
+            state.notifications
+          );
+          if (raised.length > 0) notifications = capNotifications([...raised, ...notifications], NOTIFICATION_LIMIT);
+          return {
+            tabs: nextTabs,
+            ...(reportedStatus === state.reportedStatus ? {} : { reportedStatus }),
+            ...(notifications === state.notifications ? {} : { notifications }),
+          };
         });
         // Behind the output the command printed, which may still be on its
         // way through xterm (`afterTerminalOutput`). An update still waiting
@@ -6345,9 +6485,10 @@ export const useTerminalStore = create((set, get, api) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember that this shell is gone. Without it the tab looked
             // alive — blinking cursor, full scrollback — while every
-            // keystroke went nowhere.
+            // keystroke went nowhere. A title its program set (`set-title`)
+            // went with that program.
             return {
-              ...tab,
+              ...withoutProgramTitle(tab),
               exited: { code: typeof exit_code === 'number' ? exit_code : null },
               // A shell killed mid-command never sends its "D" marker, so this
               // is the only thing that stops the tab pulsing forever.
@@ -7055,7 +7196,10 @@ export const useTerminalStore = create((set, get, api) => {
      *  3. A folder that is not there any more (`fs_dir_exists`) opens
      *     nothing either. The entry stays.
      *  4. Otherwise a terminal opens in the entry's folder, in the active
-     *     pane, and becomes the active one; its record is the entry's,
+     *     pane — or in `where.paneId` of `where.groupId` when the caller
+     *     names one (the empty pane's launcher, EmptyPaneLauncher.jsx;
+     *     anything but a string is ignored) — and becomes the active one;
+     *     its record is the entry's,
      *     offered (`agentResumeOffered`), and `resumeAgent` takes the offer.
      *     In that folder or nowhere (`createTab`'s `strictCwd`): one that
      *     cannot start there — gone since the look, or refusing the shell —
@@ -7073,7 +7217,11 @@ export const useTerminalStore = create((set, get, api) => {
      * 'opened' that started a new Claude Code conversation because the one
      * picked was never saved (`resumeAgent`): kind 'newConversation'.
      */
-    resumeFromHistory: async (key) => {
+    resumeFromHistory: async (key, where = {}) => {
+      // The pane to open in, when the caller has one (the empty pane's
+      // launcher, EmptyPaneLauncher.jsx); anything but a string is no pane.
+      const paneId = typeof where?.paneId === 'string' ? where.paneId : null;
+      const groupId = typeof where?.groupId === 'string' ? where.groupId : null;
       const say = (outcome, text, tabId = null) => {
         const notice = { kind: outcome, text, key, tabId, seq: (noticeSeq += 1) };
         set({ agentHistoryNotice: notice });
@@ -7131,7 +7279,7 @@ export const useTerminalStore = create((set, get, api) => {
         // In the entry's folder or not at all (`strictCwd`): a terminal that
         // fell back to another folder would resume that folder's
         // conversation — `claude --continue` there is another one.
-        const tab = await get().createTab({ cwd: entry.cwd, strictCwd: true });
+        const tab = await get().createTab({ cwd: entry.cwd, strictCwd: true, paneId, groupId });
         if (!tab) return say('failed', `No terminal could be started in ${entry.cwd}, so nothing was typed. The entry stays in the list.`);
         // Offered, as a restored terminal's record is, so `resumeAgent` takes
         // it with every rule it has. `agentHistoryKey` tells the history
@@ -7161,6 +7309,114 @@ export const useTerminalStore = create((set, get, api) => {
         return { outcome: 'opened', tabId: tab.id, typed, notice: null };
       } finally {
         resumingKeys.delete(key);
+      }
+    },
+
+    /**
+     * Fork a Claude Code conversation — `sessionId`, run in the folder `cwd`
+     * (an AGENT SESSIONS entry's, or the active terminal's for the palette) —
+     * into a NEW conversation, in a NEW terminal: `claude --resume <sessionId>
+     * --fork-session --session-id <new>` (`forkCommand`), so the source stays
+     * as it was and the new one is known by its id from the start.
+     *
+     * In order:
+     *  1. The id is checked again (`forkCommand`): anything but a Claude Code
+     *     id is refused, and nothing is typed anywhere ('notForked').
+     *  2. A folder that is not there any more (`fs_dir_exists`) opens nothing
+     *     ('missingFolder').
+     *  3. A terminal opens in that folder or nowhere (`strictCwd`), in the
+     *     active pane, and becomes the active one — ALWAYS a new one, even
+     *     when a terminal of this window holds the source: a fork is a second
+     *     conversation, not the same one twice. One that cannot start there
+     *     is 'failed'.
+     *  4. It waits for the shell (`untilTypingSafe`): typed into a password
+     *     prompt, the line would be taken as the password, so then nothing is
+     *     typed and the terminal says why (FORK_HIDDEN_NOTE). Nor into a
+     *     terminal that is running something by then (FORK_BUSY_NOTE).
+     *  5. Right before typing, Claude Code is asked whether it saved the
+     *     source (`claudeConversationSaved`). Never saved — the fork can only
+     *     fail — a new conversation is started instead (`startCommand`),
+     *     with no `forkOf`, and the terminal and a 'newConversation' notice
+     *     say so (FORK_NEVER_SAVED_NOTE). When it cannot tell — the lookup
+     *     failed or took too long — the fork is typed. After the lookup the
+     *     terminal is checked again as in 4: a password prompt that came up
+     *     meanwhile gets nothing either, and the same note.
+     *  6. The record goes on first (`recordAgent`, watched when the prompt
+     *     was ready), then one write of the line and a CR. The new id is the
+     *     terminal's record, `forkOf` the source, and the history records
+     *     `claude:<new>` with it; the source's entry is not touched.
+     *
+     * Resolves with `{ outcome, tabId, typed, notice }`: `outcome` 'opened'
+     * (`typed` whether anything was typed), 'missingFolder', 'notForked',
+     * 'failed' or 'busy' (a fork of this conversation is under way already).
+     * Every outcome but 'opened' and 'busy' sets `agentHistoryNotice`, and
+     * `notice` is that; so does an 'opened' that started a new conversation.
+     */
+    forkConversation: async ({ sessionId = null, cwd = null } = {}) => {
+      const key = isSessionIdFor('claude', sessionId) ? `claude:${sessionId}` : null;
+      const say = (outcome, text, tabId = null) => {
+        const notice = { kind: outcome, text, key, tabId, seq: (noticeSeq += 1) };
+        set({ agentHistoryNotice: notice });
+        return { outcome, tabId, typed: false, notice };
+      };
+      const fork = forkCommand(sessionId);
+      if (!fork) {
+        return say('notForked', 'NexTerm forks only a Claude Code conversation whose id it knows, so nothing was typed.');
+      }
+      if (forkingSources.has(sessionId)) return { outcome: 'busy', tabId: null, typed: false, notice: null };
+      forkingSources.add(sessionId);
+      // What an earlier pick said is not about this one.
+      if (get().agentHistoryNotice) set({ agentHistoryNotice: null });
+      try {
+        const folder = typeof cwd === 'string' && cwd.trim() ? cwd : null;
+        let exists = false;
+        try {
+          exists = folder !== null && (await invoke('fs_dir_exists', { path: folder })) === true;
+        } catch (_) {
+          exists = false;
+        }
+        if (!exists) {
+          return say('missingFolder', `${folder ?? 'Its folder'} is not there any more, so the Claude Code conversation cannot be forked in it.`);
+        }
+        const tab = await get().createTab({ cwd: folder, strictCwd: true });
+        if (!tab) return say('failed', `No terminal could be started in ${folder}, so nothing was typed.`);
+        const untyped = { outcome: 'opened', tabId: tab.id, typed: false, notice: null };
+        const notTypedHidden = () => {
+          if (!notifyTerminal(tab.id, FORK_HIDDEN_NOTE)) console.warn(`[TerminalStore] ${FORK_HIDDEN_NOTE}`);
+          return untyped;
+        };
+        const shell = get().tabs.find((t) => t.id === tab.id)?.sessionId;
+        const readiness = await untilTypingSafe(tab.id);
+        if (readiness === 'gone') return untyped;
+        if (readiness === 'hidden') return notTypedHidden();
+        const saved = await claudeConversationSaved(sessionId);
+        // The lookup can take a while (up to CLAUDE_LOOKUP_TIMEOUT_MS), and a
+        // password prompt may have come up meanwhile: the terminal is checked
+        // again, as the first time, right before anything is typed — as
+        // startAgent does after its probe (review A-R4).
+        const after = get().tabs.find((t) => t.id === tab.id);
+        const again = !after || after.sessionId !== shell || after.exited ? 'gone' : await untilTypingSafe(tab.id);
+        if (again === 'gone') return untyped;
+        if (again === 'hidden') return notTypedHidden();
+        const now = get().tabs.find((t) => t.id === tab.id);
+        // Gone, restarted, or an agent typed by hand meanwhile: nothing.
+        if (!now || now.sessionId !== shell || now.exited || now.agent) return untyped;
+        if (now.running) {
+          if (!notifyTerminal(tab.id, FORK_BUSY_NOTE)) console.warn(`[TerminalStore] ${FORK_BUSY_NOTE}`);
+          return untyped;
+        }
+        const fresh = saved === false;
+        const typed = fresh ? startCommand('claude') : fork;
+        if (fresh && !notifyTerminal(tab.id, FORK_NEVER_SAVED_NOTE)) console.warn(`[TerminalStore] ${FORK_NEVER_SAVED_NOTE}`);
+        recordAgent(tab.id, typed.agent, readiness === 'ready');
+        noteAgentLaunch(tab.id);
+        await get().writeRaw(tab.id, `${typed.command}\r`);
+        if (!fresh) return { outcome: 'opened', tabId: tab.id, typed: true, notice: null };
+        const notice = { kind: 'newConversation', text: FORK_NEVER_SAVED_NOTE, key, tabId: tab.id, seq: (noticeSeq += 1) };
+        set({ agentHistoryNotice: notice });
+        return { outcome: 'opened', tabId: tab.id, typed: true, notice };
+      } finally {
+        forkingSources.delete(sessionId);
       }
     },
 
@@ -7515,7 +7771,8 @@ export const useTerminalStore = create((set, get, api) => {
             tabs: state.tabs.map((t) => {
               if (t.id !== targetId || t.sessionId !== tab.sessionId || t.exited) return t;
               first = true;
-              return { ...t, exited: { code: null }, running: false, runStartedAt: null };
+              // And its program's title (`set-title`) with it, as at `pty-exit`.
+              return { ...withoutProgramTitle(t), exited: { code: null }, running: false, runStartedAt: null };
             }),
             // An exit as `pty-exit` would have said it: no program's status
             // outlives its shell.
@@ -7591,10 +7848,12 @@ export const useTerminalStore = create((set, get, api) => {
           secretInput: withoutSecret(state.secretInput, [tabId]),
           // Nor what a program in the old shell said it was doing.
           reportedStatus: withoutTabs(state.reportedStatus, [tabId]),
+          // Nor the title a program in it set (`set-title`): the new shell
+          // runs none of them yet.
           tabs: state.tabs.map((t) =>
             t.id === tabId
               ? {
-                  ...t,
+                  ...withoutProgramTitle(t),
                   sessionId: ptySession.session_id,
                   cwd: ptySession.cwd || t.cwd,
                   shell: ptySession.shell || t.shell,

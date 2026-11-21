@@ -16,7 +16,12 @@
  * stores, the storage and the mock back.
  */
 import { readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { build } from 'esbuild';
+import React from 'react';
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
+import { onPage, letItRun } from './react_page.js';
 import * as terminalStore from '../../src/stores/terminalStore.js';
 import { useAgentHistoryStore } from '../../src/stores/agentHistoryStore.js';
 import {
@@ -28,11 +33,12 @@ import {
 import { mockBridge } from '../../src/lib/ipc.js';
 import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
 import { copyText } from '../../src/lib/copyText.js';
-import { historyDisplay, historyTitle, renameChange } from '../../src/lib/agentHistory.js';
+import { entryOfAgent, forkedFromText, historyDisplay, historyTitle, renameChange } from '../../src/lib/agentHistory.js';
 import { agentSessionRows, buildPaletteGroups } from '../../src/lib/paletteItems.js';
 import { LIST_MENUS, resumeAgentSessionWith, subjectExists } from '../../src/components/terminal/statusBoardModel.js';
 import {
   AGENT_SESSIONS_SHOWN,
+  FORK_OPENCODE_REASON,
   NOTHING_TO_CLEAR_REASON,
   NOT_GROUPED_REASON,
   NO_SESSIONS_REASON,
@@ -44,12 +50,15 @@ import {
   agentGroupItems,
   agentSessionMoveItems,
   agentSessionRowItems,
+  agentSessionTooltip,
   agentSessionsHeaderItems,
   agentSessionsView,
   drawnAgentSessionKeys,
   droppedRenameNotice,
   groupOfEntry,
   isRunningHere,
+  LAUNCHER_SESSIONS_SHOWN,
+  launcherSessions,
   renameNotSavedText,
   renamePrefill,
 } from '../../src/components/terminal/agentSessionsModel.js';
@@ -164,26 +173,90 @@ async function fresh(fn) {
   }
 }
 
+// ---- The empty pane's launcher, mounted (bundle 1, A2) -------------------------
+// EmptyPaneLauncher.jsx bundled with esbuild and imported from a data: URL, as
+// workbench_bundle.js does: React and every plain module — the stores above
+// all — are the app's own, by file URL, so the launcher drives the very store
+// and mock these cases watch. lucide's icons are stood in for.
+const TERMINAL_DIR = fileURLToPath(new URL('../../src/components/terminal/', import.meta.url));
+
+/** The names `file` imports from lucide-react, each an icon that draws nothing. */
+function lucideStandIn(file) {
+  const names = new Set();
+  for (const m of readFileSync(file, 'utf8').matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]lucide-react['"]/g)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim().split(/\s+as\s+/)[0];
+      if (name) names.add(name);
+    }
+  }
+  return `const Icon = () => null; ${[...names].map((n) => `export const ${n} = Icon;`).join(' ')}`;
+}
+
+let launcherLoading = null;
+function loadLauncher() {
+  launcherLoading ??= build({
+    stdin: {
+      contents: "export { EmptyPaneLauncher } from './EmptyPaneLauncher.jsx';",
+      resolveDir: TERMINAL_DIR,
+      sourcefile: 'launcher-under-test.js',
+      loader: 'js',
+    },
+    bundle: true,
+    write: false,
+    format: 'esm',
+    platform: 'neutral',
+    jsx: 'automatic',
+    logLevel: 'silent',
+    plugins: [
+      {
+        name: 'launcher-modules',
+        setup(b) {
+          b.onResolve({ filter: /.*/ }, (args) => {
+            if (args.path === 'lucide-react') return { path: args.importer, namespace: 'lucide' };
+            if (args.path.endsWith('.jsx')) return undefined;
+            if (args.path.startsWith('.') && args.resolveDir) {
+              return { path: pathToFileURL(resolvePath(args.resolveDir, args.path)).href, external: true };
+            }
+            return { path: import.meta.resolve(args.path), external: true };
+          });
+          b.onLoad({ filter: /.*/, namespace: 'lucide' }, (args) => ({ contents: lucideStandIn(args.path), loader: 'js' }));
+        },
+      },
+    ],
+  }).then(({ outputFiles }) => import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`));
+  return launcherLoading;
+}
+
+/** Every leaf of the group on screen, as `{ id, tabIds }`. */
+function leavesOnScreen() {
+  const state = T.getState();
+  const group = state.groups.find((g) => g.id === state.activeGroupId);
+  const leaves = [];
+  const walk = (n) => (n?.type === 'leaf' ? leaves.push({ id: n.id, tabIds: [...n.tabIds] }) : n?.children?.forEach(walk));
+  walk(group?.tree);
+  return { groupId: group?.id ?? null, activePaneId: group?.activePaneId ?? null, leaves };
+}
+
 describe('AGENT SESSIONS menus: items, reasons, questions, palette (F25-F30)', () => {
   // ---- AC38: the menus ---------------------------------------------------------
 
-  test('ASM-01: a row’s menu — Resume or Show Its Terminal, Copy Session ID, Pin or Unpin, Rename…, Move to Group ▸, Archive or Unarchive, Delete…, with F26’s separators (AC38)', () => {
+  test('ASM-01: a row’s menu — Resume or Show Its Terminal, Fork Conversation, Copy Session ID, Pin or Unpin, Rename…, Move to Group ▸, Archive or Unarchive, Delete…, with F26’s separators (AC38, AC5)', () => {
     const { calls, on } = recorder();
     const items = agentSessionRowItems(E, { on });
-    assert.deepEqual(labels(items), ['Resume in New Terminal', '—', 'Copy Session ID', '—', 'Pin', 'Rename…', 'Move to Group ▸', '—', 'Archive', 'Delete…']);
+    assert.deepEqual(labels(items), ['Resume in New Terminal', 'Fork Conversation', '—', 'Copy Session ID', '—', 'Pin', 'Rename…', 'Move to Group ▸', '—', 'Archive', 'Delete…']);
     assert.deepEqual(items.filter((i) => i.type === 'separator').map((i) => i.key), ['s1', 's2', 's3'], 'separator keys are unique');
     assert.ok(items.every((i) => i.type === 'separator' || (!i.disabled && typeof i.onSelect === 'function')), 'all on');
     assert.deepEqual(items.filter((i) => i.danger).map((i) => i.label), ['Delete…'], 'only Delete… is dangerous');
     for (const i of items) i.onSelect?.();
-    assert.deepEqual(calls, [['resume', KEY], ['copyId', UUID], ['pin', KEY], ['rename', E], ['moveMenu', E], ['archive', KEY], ['remove', KEY]]);
+    assert.deepEqual(calls, [['resume', KEY], ['fork', E], ['copyId', UUID], ['pin', KEY], ['rename', E], ['moveMenu', E], ['archive', KEY], ['remove', KEY]]);
 
     calls.length = 0;
     const other = agentSessionRowItems({ ...E, pinned: true, archived: true }, { holder: { tabId: 't1', state: 'offered' }, icons: { resume: Marker }, on });
-    assert.deepEqual(labels(other), ['Show Its Terminal', '—', 'Copy Session ID', '—', 'Unpin', 'Rename…', 'Move to Group ▸', '—', 'Unarchive', 'Delete…']);
+    assert.deepEqual(labels(other), ['Show Its Terminal', 'Fork Conversation', '—', 'Copy Session ID', '—', 'Unpin', 'Rename…', 'Move to Group ▸', '—', 'Unarchive', 'Delete…']);
     assert.equal(other[0].icon, Marker);
     assert.equal(items[0].icon, undefined, 'no icon unless given');
     for (const i of other) i.onSelect?.();
-    assert.deepEqual(calls.map(([name]) => name), ['resume', 'copyId', 'unpin', 'rename', 'moveMenu', 'unarchive', 'remove']);
+    assert.deepEqual(calls.map(([name]) => name), ['resume', 'fork', 'copyId', 'unpin', 'rename', 'moveMenu', 'unarchive', 'remove']);
     assert.ok(!labels(items).concat(labels(other)).some((l) => /Remove from List|Clear Agent Session History/.test(l)), 'no Remove from List, no Clear on a row');
   });
 
@@ -710,6 +783,212 @@ describe('AGENT SESSIONS menus: items, reasons, questions, palette (F25-F30)', (
     assert.match(panel, /onBlur=\{commitDraft\}/, 'a blur commits');
     // The store's own words for a commit that reaches it with the old key (FX-4) stay its own.
     assert.doesNotMatch(panel, /ENTRY_GONE_TEXT/);
+  });
+
+  // ---- Fork (bundle 1, A1: F3, F4, F5) -----------------------------------------
+
+  test('ASM-19: a fork’s row tooltip names its source — the listed row’s name, else its short id; none for an entry that is no fork or names no valid id; entryOfAgent passes forkOf only when valid (AC4)', () => {
+    const SRC = '0b6a5c2e-7f41-4d3a-9c8e-2f1d0a9b8c7d';
+    const FORK = { ...E, key: `claude:${UUID}`, forkOf: SRC };
+    const srcEntry = { key: `claude:${SRC}`, kind: 'claude', sessionId: SRC, cwd: '/workspace/src', title: 'Login flow', startedAt: 1, lastUsedAt: 1 };
+    const named = { ...srcEntry, name: 'My login work' };
+    const lines = (tip) => tip.split('\n');
+
+    // Listed: what its row is called — its name over its title.
+    assert.equal(forkedFromText(FORK, [srcEntry, E]), 'Forked from Login flow');
+    assert.equal(forkedFromText(FORK, [named]), 'Forked from My login work');
+    const tip = agentSessionTooltip(FORK, { entries: [E, named], when: '5 minutes ago' });
+    assert.ok(lines(tip).includes('Forked from My login work'), tip);
+    assert.equal(lines(tip)[1], 'Forked from My login work', 'right after the first line');
+    // Not listed (deleted, or never recorded here): its short id.
+    const short = forkedFromText(FORK, [E]);
+    assert.equal(short, `Forked from ${SRC.slice(0, 8)}`);
+    assert.ok(lines(agentSessionTooltip(FORK, { entries: [] })).includes(short));
+    // Another agent's entry with the same id is not the source.
+    assert.equal(forkedFromText(FORK, [{ ...srcEntry, kind: 'opencode' }]), short);
+    // No fork, or a forkOf that is not its agent's id: no line at all.
+    const plain = agentSessionTooltip(E, { entries: [srcEntry], when: 'now' });
+    for (const bad of [undefined, null, '', 'x; rm -rf ~', SES, SRC.toUpperCase(), 42]) {
+      const e = { ...E, forkOf: bad };
+      assert.equal(forkedFromText(e, [srcEntry]), null, String(bad));
+      assert.equal(agentSessionTooltip(e, { entries: [srcEntry], when: 'now' }), plain, `no extra line for ${String(bad)}`);
+    }
+    assert.ok(!/Forked from/.test(plain));
+    assert.equal(forkedFromText({ ...E, kind: 'opencode', sessionId: SES, forkOf: SRC }, [srcEntry]), null, 'a Claude id is not an OpenCode fork source');
+    // The rest of the tooltip is the panel's, unchanged.
+    assert.deepEqual(lines(plain), ['Claude Code: Auto', '/workspace/src', 'Last used now', 'Double-click to resume in a new terminal · right-click for more']);
+    assert.match(source('../../src/components/terminal/TerminalsPanel.jsx'), /const tip = agentSessionTooltip\(entry, \{ entries: agentEntries, groups: agentGroups, holder, when \}\);/);
+
+    // entryOfAgent: forkOf passed on only when it is an id of the agent's shape.
+    const times = { startedAt: 10, lastUsedAt: 20 };
+    const agent = { kind: 'claude', sessionId: UUID, startedAt: 1, title: null };
+    assert.equal(entryOfAgent({ ...agent, forkOf: SRC }, '/workspace/src', times).forkOf, SRC);
+    const nine = entryOfAgent(agent, '/workspace/src', times);
+    assert.deepEqual(Object.keys(nine), ['kind', 'sessionId', 'cwd', 'title', 'startedAt', 'lastUsedAt', 'endedAt', 'endReason'], 'no forkOf key without a fork');
+    for (const bad of [null, '', 'x; rm -rf ~', SES, SRC.toUpperCase(), `${SRC} `, 7]) {
+      const e = entryOfAgent({ ...agent, forkOf: bad }, '/workspace/src', times);
+      assert.ok(!Object.prototype.hasOwnProperty.call(e, 'forkOf'), `forkOf ${String(bad)} left out`);
+      assert.deepEqual(e, nine);
+    }
+    assert.ok(!('forkOf' in entryOfAgent({ kind: 'opencode', sessionId: SES, startedAt: 1, title: 'x', forkOf: SRC }, '/w', times)), 'a Claude id is no OpenCode forkOf');
+  });
+
+  test('ASM-20: Fork Conversation in a row’s menu — after Resume, on for a Claude Code entry with an id (also read-only, also held), off with a reason for OpenCode and for no id (AC5)', () => {
+    const { calls, on } = recorder();
+    const items = agentSessionRowItems(E, { icons: { fork: Marker }, on });
+    const fork = byKey(items, 'fork');
+    assert.equal(items.indexOf(fork), 1, 'right after Resume');
+    assert.equal(fork.label, 'Fork Conversation');
+    assert.equal(fork.icon, Marker);
+    assert.ok(!fork.disabled && !fork.disabledReason);
+    fork.onSelect();
+    assert.deepEqual(calls, [['fork', E]], 'the entry, for its id and folder');
+    for (const holder of [null, { tabId: 't1', state: 'open' }, { tabId: 't1', state: 'offered' }]) {
+      for (const readOnly of [false, true]) {
+        const item = byKey(agentSessionRowItems({ ...E, pinned: true, archived: true }, { holder, readOnly, on }), 'fork');
+        assert.ok(!item.disabled, `on: ${JSON.stringify({ holder, readOnly })}`);
+      }
+    }
+    // OpenCode, with or without an id: off, saying why.
+    for (const sessionId of [SES, null]) {
+      const item = byKey(agentSessionRowItems({ ...E, key: `opencode:${sessionId}`, kind: 'opencode', sessionId }, { on }), 'fork');
+      assert.deepEqual([item.disabled, item.disabledReason], [true, 'OpenCode conversations cannot be forked here']);
+      assert.equal(FORK_OPENCODE_REASON, item.disabledReason);
+    }
+    // A Claude Code entry with no id, or one not of its shape: off with the no-id reason.
+    for (const sessionId of [null, '', 'x; rm -rf ~', UUID.toUpperCase()]) {
+      const item = byKey(agentSessionRowItems({ ...E, key: 'claude:~/w', sessionId }, { readOnly: true, on }), 'fork');
+      assert.deepEqual([item.disabled, item.disabledReason], [true, NO_SESSION_ID_REASON], String(sessionId));
+    }
+    // The panel wires it to the store's forkConversation, with the entry's id and folder.
+    const panel = source('../../src/components/terminal/TerminalsPanel.jsx');
+    assert.match(panel, /icons: \{ resume: Play, fork: GitFork \},/);
+    assert.match(panel, /fork: \(e\) => forkConversation\(\{ sessionId: e\.sessionId, cwd: e\.cwd \}\),/);
+    assert.match(panel, /const forkConversation = useTerminalStore\(\(s\) => s\.forkConversation\);/);
+  });
+
+  test('ASM-21: launcherSessions — at most 3 entries, newest lastUsedAt first, archived and unknown agents left out, pinned and grouped kept; the list is not changed (A2, F8)', () => {
+    const U = (n) => `${String(n).repeat(8)}-c043-40ef-b157-640fb31ac0ea`;
+    const at = (kind, sessionId, lastUsedAt, more = {}) => ({ key: `${kind}:${sessionId}`, kind, sessionId, cwd: `/w/${lastUsedAt}`, title: null, startedAt: 1, lastUsedAt, ...more });
+    const a = at('claude', U(1), 500);
+    const b = at('opencode', SES, 400, { pinned: true });
+    const c = at('claude', U(2), 300, { groupId: 'g1' });
+    const d = at('claude', U(3), 200);
+    const archived = at('claude', U(4), 900, { archived: true });
+    const unknown = at('codex', 'x1', 800);
+    const list = [d, unknown, b, archived, a, c];
+    const copy = structuredClone(list);
+    assert.equal(LAUNCHER_SESSIONS_SHOWN, 3);
+    assert.deepEqual(launcherSessions(list).map((e) => e.key), [a.key, b.key, c.key], 'newest first, three of them');
+    assert.deepEqual(list, copy, 'the list as it was');
+    assert.deepEqual(launcherSessions(list, 10).map((e) => e.key), [a.key, b.key, c.key, d.key], 'never an archived entry or an unknown agent');
+    assert.deepEqual(launcherSessions([archived, unknown]), [], 'nothing to offer');
+    assert.deepEqual(launcherSessions([]), []);
+    for (const junk of [null, undefined, 'x', {}, [null, 3, 'x', { kind: 'claude' }, { ...a, key: 7 }]]) {
+      assert.deepEqual(launcherSessions(junk), [], `nothing from ${JSON.stringify(junk)}`);
+    }
+    // The same time: the order they came in (the history's own, newest first).
+    const same = [at('claude', U(5), 100), at('claude', U(6), 100), at('claude', U(7), 100), at('claude', U(8), 100)];
+    assert.deepEqual(launcherSessions(same).map((e) => e.sessionId), [U(5), U(6), U(7)]);
+    assert.deepEqual(launcherSessions(list, 0), []);
+    assert.deepEqual(launcherSessions(list, -1), []);
+  });
+
+  test('ASM-22: the empty-pane launcher, mounted — drawn, it asks the backend nothing and types nothing; New Claude Code Terminal opens ONE terminal in its pane and starts the agent once; a recent session resumes that entry in that pane (AC10, F9)', async () => {
+    const ui = await loadLauncher();
+    await fresh(async () => {
+      await readyTerminal();
+      await remember(entry('claude', UUID, '/workspace/src', 'Login flow'));
+      await remember({ ...entry('claude', '0b6a5c2e-7f41-4d3a-9c8e-2f1d0a9b8c7d', '/workspace/old', 'Old'), lastUsedAt: 9000 });
+      await H.getState().load();
+      await H.getState().archive('claude:0b6a5c2e-7f41-4d3a-9c8e-2f1d0a9b8c7d');
+      // Two panes; the launcher is drawn for the one that is NOT active.
+      const { groupId, leaves: [paneA] } = leavesOnScreen();
+      await T.getState().splitPane(paneA.id, 'horizontal', groupId);
+      const paneB = leavesOnScreen().leaves.find((l) => l.id !== paneA.id);
+      assert.ok(paneB, 'setup: a second pane');
+      await prompt(tabById(paneB.tabIds[0]));
+      T.getState().setActivePane(paneA.id, groupId);
+      assert.equal(leavesOnScreen().activePaneId, paneA.id, 'setup: the other pane is the active one');
+
+      const real = { startAgent: T.getState().startAgent, resumeFromHistory: T.getState().resumeFromHistory };
+      const started = [];
+      const resumed = [];
+      T.setState({
+        startAgent: (...args) => (started.push(args), real.startAgent(...args)),
+        resumeFromHistory: (...args) => (resumed.push(structuredClone(args)), real.resumeFromHistory(...args)),
+      });
+      try {
+        await onPage(async (p) => {
+          const asked = log.length;
+          // What the launcher asked for: the setup's two shells are not counted.
+          const since = () => log.slice(asked);
+          p.render(React.createElement(ui.EmptyPaneLauncher, { paneId: paneB.id, groupId, newTerminalKeys: '⌃`' }));
+          await letItRun(30);
+          assert.deepEqual(log.slice(asked).map((c) => c.command), [], 'drawing the launcher asked the backend nothing');
+          assert.deepEqual([started, resumed], [[], []], 'and started or resumed nothing');
+
+          const agentButtons = p.document.querySelectorAll('[data-launcher-agent]');
+          assert.deepEqual(agentButtons.map((b) => b.getAttribute('data-launcher-agent')), ['claude', 'opencode']);
+          const rows = p.document.querySelectorAll('[data-launcher-session]');
+          assert.deepEqual(rows.map((r) => r.getAttribute('data-launcher-session')), [KEY], 'the archived entry is not offered');
+
+          // New Claude Code Terminal, clicked twice before the shell is up: one terminal.
+          const tabsBefore = new Set(T.getState().tabs.map((t) => t.id));
+          const claude = p.document.querySelector('[data-launcher-agent="claude"]');
+          p.click(claude);
+          p.click(claude);
+          await until(() => started.length === 1, 'startAgent');
+          const fresh1 = T.getState().tabs.filter((t) => !tabsBefore.has(t.id));
+          assert.equal(fresh1.length, 1, 'one new terminal');
+          const created = fresh1[0];
+          assert.deepEqual(started, [[created.id, 'claude']], 'the agent started once, in the new terminal');
+          let shown = leavesOnScreen();
+          assert.ok(shown.leaves.find((l) => l.id === paneB.id).tabIds.includes(created.id), 'in the launcher’s pane');
+          assert.ok(!shown.leaves.find((l) => l.id === paneA.id).tabIds.includes(created.id), 'not in the active one');
+          assert.equal(since().filter((c) => c.command === 'pty_spawn').length, 1, 'one shell started');
+          assert.deepEqual(since().filter((c) => c.command === 'pty_write'), [], 'nothing typed before its prompt');
+          await prompt(tabById(created.id));
+          await until(() => since().some((c) => c.command === 'pty_write'), 'the agent line');
+          const writes = since().filter((c) => c.command === 'pty_write');
+          assert.equal(writes.length, 1);
+          assert.equal(writes[0].args.session_id, tabById(created.id).sessionId);
+          assert.match(writes[0].args.data, /^claude --session-id [0-9a-f-]{36}\r$/);
+
+          // A recent session: resumed with that key and this pane, and opened there.
+          T.getState().setActivePane(paneA.id, groupId);
+          const tabsBefore2 = new Set(T.getState().tabs.map((t) => t.id));
+          p.click(p.document.querySelector(`[data-launcher-session="${KEY}"]`));
+          assert.deepEqual(resumed, [[KEY, { paneId: paneB.id, groupId }]], 'resumeFromHistory with the key and the pane');
+          await until(() => T.getState().tabs.some((t) => !tabsBefore2.has(t.id) && t.sessionId), 'the resumed terminal');
+          const opened = T.getState().tabs.find((t) => !tabsBefore2.has(t.id));
+          shown = leavesOnScreen();
+          assert.ok(shown.leaves.find((l) => l.id === paneB.id).tabIds.includes(opened.id), 'the terminal opened in that pane');
+          assert.ok(!shown.leaves.find((l) => l.id === paneA.id).tabIds.includes(opened.id));
+          await sleep(20);
+          await prompt(tabById(opened.id));
+          await until(() => since().filter((c) => c.command === 'pty_write').length === 2, 'the resume line');
+          const resumeWrite = since().filter((c) => c.command === 'pty_write')[1];
+          assert.deepEqual([resumeWrite.args.session_id, resumeWrite.args.data], [tabById(opened.id).sessionId, `claude --resume ${UUID}\r`]);
+          assert.equal(started.length, 1, 'still one start');
+        });
+      } finally {
+        T.setState(real);
+      }
+    });
+  });
+
+  test('ASM-23: the empty-pane launcher imports no terminal registry and no xterm module, so the workbench never loads xterm through it (review B-R4)', () => {
+    const launcher = source('../../src/components/terminal/EmptyPaneLauncher.jsx');
+    const imported = [...launcher.matchAll(/^\s*import\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/gm)].map((m) => m[1]);
+    assert.ok(imported.includes('react') && imported.includes('../../stores/terminalStore.js'), `premise: its imports are read: ${imported}`);
+    for (const spec of imported) {
+      assert.doesNotMatch(spec, /terminalRegistry/, `it imports ${spec}`);
+      assert.doesNotMatch(spec, /^@xterm\//, `it imports ${spec}`);
+    }
+    // Nor in any other form: a re-export, a dynamic import, a require.
+    assert.doesNotMatch(launcher, /['"`][^'"`\n]*(terminalRegistry|@xterm\/)[^'"`\n]*['"`]/, 'no module path names either');
+    assert.doesNotMatch(launcher, /\bimport\s*\(|\brequire\s*\(/, 'nothing loaded later');
   });
 
   test('ASM-99: teardown — the stores, the storage and the mock as the next suite expects', async () => {

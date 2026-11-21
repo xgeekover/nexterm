@@ -9,6 +9,7 @@ use std::ffi::OsString;
 pub const COMMANDS: &[&str] = &[
     "notify",
     "set-status",
+    "set-title",
     "set-progress",
     "list",
     "new-split",
@@ -26,6 +27,9 @@ pub const MAX_LINES: u16 = 2000;
 pub enum Parsed {
     /// Print the help (of one command, or all) and exit 0.
     Help(Option<&'static str>),
+    /// Print the guide's index or one topic (guide.rs): exit 0, or 2 for a
+    /// topic it does not have. Like the help, it needs no NexTerm.
+    Guide { topic: Option<String> },
     Version,
     Run { json: bool, command: Command },
 }
@@ -35,6 +39,8 @@ pub enum Command {
     Notify { title: String, body: Option<String>, occasion: Option<&'static str> },
     /// `text: None` clears the status.
     SetStatus { text: Option<String>, tone: Option<&'static str> },
+    /// `text: None` clears the title a program gave this terminal's tab.
+    SetTitle { text: Option<String> },
     SetProgress { state: &'static str, value: Option<u8> },
     List,
     NewSplit { direction: Option<&'static str>, cwd: Option<String>, command: Option<String> },
@@ -91,9 +97,20 @@ pub fn parse(argv: &[OsString]) -> Result<Parsed, UsageError> {
         return Err(UsageError::general("no command given"));
     };
     let rest = &args[i + 1..];
+    if name == "guide" {
+        // The topic is checked where the texts are (guide.rs), which lists
+        // the topics when it has no such one.
+        return match rest {
+            [] => Ok(Parsed::Guide { topic: None }),
+            [a] if a == "-h" || a == "--help" => Ok(Parsed::Guide { topic: None }),
+            [topic] => Ok(Parsed::Guide { topic: Some(topic.clone()) }),
+            _ => Err(UsageError::general("guide takes one topic; run 'nexterm-cli guide' for the list")),
+        };
+    }
     if name == "help" {
         return match rest {
             [] => Ok(Parsed::Help(None)),
+            [topic] if topic == "guide" => Ok(Parsed::Guide { topic: None }),
             [topic] => match known(topic) {
                 Some(cmd) => Ok(Parsed::Help(Some(cmd))),
                 None => Err(UsageError::general(format!("unknown command '{topic}'"))),
@@ -118,6 +135,7 @@ pub fn parse(argv: &[OsString]) -> Result<Parsed, UsageError> {
     let command = match cmd {
         "notify" => notify(&mut lx)?,
         "set-status" => set_status(&mut lx)?,
+        "set-title" => set_title(&mut lx)?,
         "set-progress" => set_progress(&mut lx)?,
         "list" => list(&mut lx)?,
         "new-split" => new_split(&mut lx)?,
@@ -314,6 +332,36 @@ fn set_status(lx: &mut Lexer) -> Result<Command, UsageError> {
         return Err(lx.err("the text is empty; --clear clears the status"));
     }
     Ok(Command::SetStatus { text: Some(text), tone })
+}
+
+fn set_title(lx: &mut Lexer) -> Result<Command, UsageError> {
+    let mut words = Vec::new();
+    let mut clear = false;
+    while let Some(t) = lx.next() {
+        match t {
+            Tok::Opt("--clear", v) => {
+                lx.no_value("--clear", v)?;
+                clear = true;
+            }
+            Tok::Opt(o, _) => return Err(lx.unknown(o)),
+            Tok::Word(w) => words.push(w),
+        }
+    }
+    if clear {
+        if !words.is_empty() {
+            return Err(lx.err("--clear takes no text"));
+        }
+        return Ok(Command::SetTitle { text: None });
+    }
+    // One line, as set-status makes it: `nexterm-cli set-title npm test`.
+    let text = words.join(" ");
+    if words.is_empty() {
+        return Err(lx.err("set-title needs a text, or --clear"));
+    }
+    if text.is_empty() {
+        return Err(lx.err("the text is empty; --clear clears the title"));
+    }
+    Ok(Command::SetTitle { text: Some(text) })
 }
 
 fn set_progress(lx: &mut Lexer) -> Result<Command, UsageError> {
@@ -548,6 +596,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn guide_is_parsed_like_help_and_its_topic_checked_later() {
+        let guide = |topic: Option<&str>| Ok(Parsed::Guide { topic: topic.map(s) });
+        assert_eq!(p(&["guide"]), guide(None));
+        assert_eq!(p(&["guide", "--help"]), guide(None));
+        assert_eq!(p(&["guide", "-h"]), guide(None));
+        assert_eq!(p(&["help", "guide"]), guide(None));
+        assert_eq!(p(&["--json", "guide"]), guide(None));
+        assert_eq!(p(&["guide", "read-screen"]), guide(Some("read-screen")));
+        // Any one word is a topic here; guide.rs says which are not.
+        assert_eq!(p(&["guide", "frob"]), guide(Some("frob")));
+        assert_eq!(p(&["guide", "--json"]), guide(Some("--json")));
+        let e = bad(&["guide", "notify", "set-title"]);
+        assert_eq!((e.message.as_str(), e.command), ("guide takes one topic; run 'nexterm-cli guide' for the list", None));
+        // `guide` is not a command sent to NexTerm, and global -h still wins.
+        assert!(!COMMANDS.contains(&"guide"));
+        assert_eq!(p(&["-h", "guide"]), Ok(Parsed::Help(None)));
+        assert_eq!(bad(&["help", "guide", "x"]).message, "help takes one command");
+    }
+
     #[cfg(unix)]
     #[test]
     fn arguments_that_are_not_text_are_a_usage_error() {
@@ -593,6 +661,26 @@ mod tests {
         assert!(bad(&["set-status", "--clear", "--tone", "info"]).message.contains("--tone"));
         assert!(bad(&["set-status", "x", "--tone", "loud"]).message.contains("info, warn, error"));
         assert!(bad(&["set-status", "--clear=yes"]).message.contains("takes no value"));
+    }
+
+    #[test]
+    fn set_title() {
+        assert_eq!(cmd(&["set-title", "npm test"]), Command::SetTitle { text: Some(s("npm test")) });
+        assert_eq!(cmd(&["set-title", "npm", "test"]), Command::SetTitle { text: Some(s("npm test")) });
+        assert_eq!(cmd(&["set-title", "빌드"]), Command::SetTitle { text: Some(s("빌드")) });
+        assert_eq!(cmd(&["set-title", "--", "--clear"]), Command::SetTitle { text: Some(s("--clear")) });
+        assert_eq!(cmd(&["set-title", "--clear"]), Command::SetTitle { text: None });
+        assert_eq!(p(&["set-title", "--clear", "--json"]), Ok(Parsed::Run { json: true, command: Command::SetTitle { text: None } }));
+        assert_eq!(p(&["help", "set-title"]), Ok(Parsed::Help(Some("set-title"))));
+        assert_eq!(p(&["set-title", "x", "--help"]), Ok(Parsed::Help(Some("set-title"))));
+        let e = bad(&["set-title"]);
+        assert_eq!(e.command, Some("set-title"));
+        assert!(e.message.contains("--clear"), "{}", e.message);
+        assert!(bad(&["set-title", ""]).message.contains("empty"));
+        assert!(bad(&["set-title", "--clear", "x"]).message.contains("no text"));
+        assert!(bad(&["set-title", "x", "--clear"]).message.contains("no text"));
+        assert!(bad(&["set-title", "--clear=yes"]).message.contains("takes no value"));
+        assert!(bad(&["set-title", "x", "--tone", "warn"]).message.contains("unknown option '--tone'"));
     }
 
     #[test]

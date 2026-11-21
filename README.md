@@ -219,7 +219,13 @@ group. Saved templates and workspaces stay terminal-only. Files from a version
 before this come back in the active group, above its terminals. A group that
 holds files keeps one terminal pane after its last terminal closes: it shows
 "No terminal in this pane" with a New Terminal button and no Close button, and
-it comes back that way after a relaunch. Unsaved edits are not kept across a
+it comes back that way after a relaunch. Any empty terminal pane also offers a
+New Claude Code Terminal and a New opencode Terminal button, which open a
+terminal in that pane and start the agent in it once the shell's prompt is up,
+and up to three recent agent sessions from AGENT SESSIONS, newest first
+(archived ones are left out). Clicking one resumes it in that pane; if a
+terminal of this window already has it, NexTerm switches to that terminal
+instead. Nothing runs until you click. Unsaved edits are not kept across a
 restart (there is no hot exit): quitting with unsaved files asks first.
 
 **Search across the files.** `⇧⌘F`, or the magnifying glass in the activity
@@ -367,6 +373,23 @@ every program. Paste with `⌘V` on macOS, `Ctrl+V` on Windows — see the table
 [Keyboard shortcuts](#keyboard-shortcuts). A program that asked for bracketed
 paste gets the text bracketed, so a
 multi-line paste into a shell or an agent is not run line by line.
+
+**Copy the last lines of a terminal, secrets masked.** Right-click a
+terminal's tab, or its row in TERMINALS, and pick *Copy Last 200 Lines (Secrets
+Masked)*; the Command Palette has the same command for the active terminal.
+The clipboard gets the terminal's last 200 lines as plain text, with no colours
+or escape codes, a wrapped line joined back into one and the blank rows under
+the last output left out. Strings that look like secrets (API keys, tokens,
+passwords after `NAME=`) are replaced with `[hidden]`, by the same masking as
+`nexterm-cli read-screen`. While a full-screen program is up, its screen is
+what is copied. Nothing is written to a file. The number is Settings ▸
+Terminal ▸ *Copy Context Lines* (1 to 10000), and the menu names it. Very
+long output is cut at `read-screen`'s 512 KiB cap, so the oldest of those
+lines are dropped, without a notice. A terminal that has never been on
+screen has no screen to copy: the item is greyed out and says so, and the
+palette does not offer it. What is copied is what the terminal has drawn, so
+output NexTerm still holds back for a busy background terminal is not
+included.
 
 **Find something in the scrollback.** `⌘F` opens a find bar over the focused
 terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
@@ -905,6 +928,18 @@ outside *Archived*.
 - Right-click a row for its menu:
   - *Resume in New Terminal*, or *Show Its Terminal* when a terminal in this
     window has it — the same as a double-click.
+  - *Fork Conversation* (Claude Code only) continues the conversation as a
+    **new** one and leaves the original as it was. It always opens a new
+    terminal in the entry's folder, even when another terminal has the
+    original, and once the shell shows its first prompt it types
+    `claude --resume <id> --fork-session --session-id <new id>`. The fork gets
+    its own row, and its tooltip says *Forked from* the original's name (or
+    its short id when the original is no longer listed). If Claude Code never
+    saved the original, a new conversation is started instead and the
+    terminal says so. Nothing is typed into a password prompt. It is off for
+    OpenCode entries and for an entry whose id NexTerm never learned, and it
+    stays on for a list a newer NexTerm wrote. A `--fork-session` line you type
+    yourself is recorded the same way.
   - *Copy Session ID* copies exactly the conversation's id, ready for
     `claude --resume <id>` or `opencode -s <id>` in any terminal. It is off for
     an entry whose id NexTerm never learned.
@@ -951,7 +986,10 @@ outside *Archived*.
   agent, folder or the start of an id; `Enter` resumes. In the ordinary
   palette, typing also shows up to five matching entries under *agent
   sessions*, never an archived one. *Clear Agent Session History…* is a
-  palette command too.
+  palette command too. So is *Fork Conversation*, listed while the active
+  terminal runs or offers back a Claude Code conversation: it forks that
+  conversation into a new terminal, as the row menu does. It has no default
+  shortcut.
 - When NexTerm cannot change the list (for instance a 201st entry pinned,
   renamed or put in a group), a notice in the bottom corner says why, and the
   list is read again.
@@ -1244,8 +1282,10 @@ in particular. Where to find each one:
 | select text inside Claude Code | just drag — see [Working in a terminal](#working-in-a-terminal) |
 | paste an image (Windows) | `Alt+V` in Claude Code; a right-click in OpenCode — see [Keyboard shortcuts](#keyboard-shortcuts) |
 | have its hooks tell NexTerm things | [`nexterm-cli`](#control-nexterm-from-a-terminal) |
+| keep the computer from sleeping while Claude Code works | Settings ▸ Terminal ▸ *Keep the Computer Awake While an Agent Works* (off by default; never the display) — see [Settings](#settings-and-themes) |
 | pick its conversation up after a restart | *Resume* — see [Sessions](#sessions-what-comes-back) |
 | go back to any conversation run here | AGENT SESSIONS in the TERMINALS panel, or *Resume Agent Session…* in the palette — see [Agent sessions](#agent-sessions-every-conversation-run-here) |
+| try another direction without losing a Claude Code conversation | *Fork Conversation* in an AGENT SESSIONS row's menu or in the palette — a new conversation in a new terminal; see [Agent sessions](#agent-sessions-every-conversation-run-here) |
 | start several at once | a [layout template](#sessions-what-comes-back) with `opencode -c` or `claude` |
 | run several without freezing the window | [Many terminals printing at once](#many-terminals-printing-at-once) |
 | leave OpenCode with `Ctrl+C` in cmd | [Safety nets](#safety-nets) — cmd's *Terminate batch job* question is answered |
@@ -1260,6 +1300,8 @@ can talk to NexTerm with `nexterm-cli`, which comes with the app and is on the
 ```sh
 nexterm-cli notify "Tests" "All 412 passed"     # a notification from this terminal
 nexterm-cli set-status "Running migrations"     # this terminal's line in the side bar
+nexterm-cli set-title "Deploy staging"         # what this terminal's tab is called
+nexterm-cli set-title --clear
 nexterm-cli set-progress 40                     # the progress bar on its tab
 nexterm-cli set-progress --clear
 nexterm-cli list                                # the terminals in this window
@@ -1279,12 +1321,87 @@ seconds after Claude Code shows ✳ can be refused as rate-limited, because
 NexTerm's own completion entry used that terminal's allowance first (see
 `notify` below).
 
+More hooks for the same file. `PermissionRequest` runs at once, when Claude
+Code asks for your permission, so you hear about it without waiting for the
+turn to end; `StopFailure` runs when a turn ends on an API error instead of
+finishing; `UserPromptSubmit` clears the line when you send your next
+message:
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          { "type": "command", "command": "nexterm-cli notify \"Claude Code\" \"Needs your permission\"" },
+          { "type": "command", "command": "nexterm-cli set-status --tone warn Waiting for permission" }
+        ]
+      }
+    ],
+    "StopFailure": [
+      { "hooks": [{ "type": "command", "command": "nexterm-cli set-status --tone error Stopped by an API error" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "nexterm-cli set-status --clear" }] }
+    ]
+  }
+}
+```
+
+Merge these entries into the `"hooks"` object your settings already have.
+JSON writes a double quote inside a string as `\"`; the command the shell gets
+has plain double quotes, and bash, PowerShell and cmd all read each quoted
+text as one argument. `set-status` joins its words, so its text needs no quotes at all.
+Each command is an entry of its own rather than two joined with `;` or `&&`,
+which cmd and PowerShell read differently, so `notify` being refused as
+rate-limited (exit 5) does not stop the status line. `nexterm-cli` prints
+nothing when it succeeds. Writing `$NEXTERM_CLI` (its full path, see above)
+instead of `nexterm-cli` is optional — for a hook whose `PATH` finds another
+one first.
+
+- **NexTerm never edits your Claude Code settings.** It does not write
+  `.claude/settings.json`, in your project or your home folder, nor any other
+  Claude Code file: these hooks are there only if you add them yourself.
+- **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` turns these hooks off.** With it
+  set, Claude Code removes `NEXTERM_CONTROL_TOKEN` from the environment its
+  hooks run in, so every `nexterm-cli` call in a hook exits 3 ("Not inside a
+  NexTerm terminal") and nothing is shown or set. NexTerm's own completion
+  entry (*Be told when Claude Code is done*) needs no token and still comes.
+- **When a status and a title go.** A status line (`set-status`) and a title
+  (`set-title`) stay until `--clear`, until the shell exits or a new shell
+  starts in that terminal, or until the terminal closes. And what a program
+  said while an agent ran goes when that agent ends: at the first command
+  end (OSC 133 D) the shell reports while the agent is running, NexTerm
+  drops the status and the title set since the agent was started — by
+  NexTerm (New Claude Code Terminal, Resume, Fork) or typed by hand at the
+  prompt — and marks that terminal's notes from then on read (`notify`, and
+  what its programs printed as OSC 9, 777 or 99), so its row no longer says
+  *Waiting*. NexTerm's own completion entry stays unread, and anything set
+  before the agent started stays. Two limits: Ctrl+Z suspending
+  the agent counts as it ending, and an agent NexTerm cannot watch — typed
+  before the shell drew its first prompt, in a shell without OSC 133 (fish,
+  sh), or offered back after a restart and never resumed — never ends this
+  way, so what it reported stays until one of the others.
+
 `nexterm-cli help <command>` explains each one; `--json` prints NexTerm's
 answer for scripts. It exits 0 when done, 2 for wrong usage (found by the
 tool or by NexTerm — nothing was done), 3 outside a NexTerm terminal, 4 when
 refused (not allowed, no such terminal), 5 when NexTerm is busy (a rate
 limit), not running, not answering, or has its control turned off — try
 again later.
+
+`nexterm-cli guide` is a short guide for agents and scripts: which command
+to use when (`notify` when the user is needed, `set-status` and
+`set-progress` while the agent works, `set-title` once per task,
+`new-split` for a server, `read-screen` and `send` with the switches they
+need below), with examples and what each exit code means for the caller.
+`nexterm-cli guide <topic>` prints one of `notify`, `set-status`,
+`set-title`, `set-progress`, `new-split` and `read-screen`; another word
+exits 2 and lists them. Like `help`, it comes from the tool itself: it
+needs no NexTerm and no `NEXTERM_CONTROL`, sends nothing and writes no
+file, so it works in any console, and you can tell an agent to run it
+instead of pasting the flags into its instructions. It is plain ASCII
+text, the same in cmd and PowerShell.
 
 - `notify` counts against the one allowance a terminal's notes have, which
   what its programs print uses too: once every 2 seconds, 10 times a minute.
@@ -1297,6 +1414,23 @@ again later.
   `exited`, `waiting`, `error`, `progress`, `working`, `idle`, `running`,
   `failed` or `none`. A Claude Code terminal reports `working` or `idle`
   once its title says which, where it used to report `running`.
+- `set-title` names the caller's own terminal: its tab, its TERMINALS row,
+  the handle of a hidden tab strip and its `title` in `list`. A name you gave
+  the tab yourself (Rename) always wins — the program's title shows only on a
+  tab you have not named, and clearing your name (an empty Rename) shows it
+  again. It lasts until `set-title --clear`, until the shell exits, until a
+  new shell starts in that terminal, or until the agent that was running
+  when it was set ends (see *When a status and a title go* above); each of
+  those brings back `Terminal N`.
+  One line, control characters dropped and secrets such as `*_TOKEN=...`
+  masked. A text over 200 characters is refused — `nexterm-cli` exits 2
+  (wrong usage, found by NexTerm) and nothing is set — and NexTerm may
+  shorten a title further when masking made it longer. It is never saved: a
+  restored workspace, a saved group and a saved workspace come back with
+  their own names. The mark of a terminal a program controlled and the
+  control log name the caller and the target by NexTerm's own names — yours,
+  else `Terminal N` — never by a title a program set, so a program cannot
+  pass as another terminal.
 - A new split opens beside the terminal that asked, in its folder and shell,
   and the keyboard stays where you are. At most 8 open at a time per
   terminal, 32 in all, 10 a minute.
@@ -1333,8 +1467,8 @@ started.
 
 | Setting | Default | Opens |
 | --- | --- | --- |
-| Let programs in terminals control NexTerm | on | notify, status, progress, list, new split, focus |
-| Let programs type into and read terminals | off | `send` and `read-screen` |
+| Let programs in terminals control NexTerm | on | notify, status, title, progress, list, new split, focus |
+| Let programs type into and read terminals | off | `send`, `read-screen` and a `new-split` that types a command (`-- …`) |
 | Let programs control other terminals | off | any terminal, not only the caller and the splits it opened; an unmasked `read-screen` |
 
 - **Only from NexTerm's own terminals.** Each shell NexTerm starts gets a token
@@ -1412,7 +1546,17 @@ scrollbar; on by default), and *Claude Code on the Normal Screen* (starts
 terminals with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` unless it is set
 already; on by default), and *OpenCode in Mini Mode* (starts and resumes
 OpenCode V1 1.17.10 and newer as `opencode --mini --no-replay`; on by
-default).
+default), and *Copy Context Lines* (how many lines *Copy Last N Lines (Secrets
+Masked)* copies; 200 by default, 1 to 10000; very long output is cut at
+`read-screen`'s 512 KiB cap, the oldest lines dropped), and *Keep the Computer Awake
+While an Agent Works* (off by default: while a Claude Code terminal is
+Working in the TERMINALS panel, the computer is kept from going to sleep on
+its own, and let go as soon as none is — the turn ends, the agent or the shell
+exits, the terminal closes or the setting is turned off. OpenCode terminals
+and progress bars do not count. The display may still turn off and lock, and
+closing the lid still sleeps as the system is set to. Where the system offers
+no way to do it, the setting says *Not available on this system*; see
+[Platform notes](#platform-notes)).
 
 **The colours.** NexTerm has one dark palette, ActionMacro's bluish greys with
 a violet accent: the side bars, the terminal and the title and status bars are
@@ -1566,6 +1710,9 @@ builds still reload, because that is the point of them.
 - A lock marks a password prompt ([Safety nets](#safety-nets)).
 - Quitting with `⌘Q`, the Dock or a logout does not wait for the last output
   to be saved ([Output after a restart](#output-after-a-restart)).
+- *Keep the Computer Awake While an Agent Works* runs `caffeinate -i` tied to
+  NexTerm's process, so it ends with NexTerm; `pmset -g assertions` lists it
+  while it holds.
 
 ### Windows
 
@@ -1584,6 +1731,9 @@ re-wrapped twice and does not lose lines.
   is reading hidden input. `nexterm-cli send` reads the prompt line instead.
 - The taskbar button shows progress, and flashes when a program asks for your
   attention.
+- *Keep the Computer Awake While an Agent Works* asks Windows itself
+  (`SetThreadExecutionState`, no extra process and never the display); an
+  elevated `powercfg /requests` lists NexTerm under SYSTEM while it holds.
 - Dropped files arrive as `C:/…` in Git Bash and `/mnt/c/…` in WSL; from WSL
   the control tool is `nexterm-cli.exe`.
 - What has been checked on a real Windows PC, and how, is in
@@ -1604,6 +1754,14 @@ macOS keeps its traffic lights and the system menu bar.
   Notification* another key in Settings ▸ Keyboard Shortcuts.
 - Desktop notifications need a running notification service.
 - A lock marks a password prompt, as on macOS.
+- *Keep the Computer Awake While an Agent Works* needs `systemd-inhibit` and
+  GNU coreutils `tail` on the PATH: the sleep lock lasts as long as
+  `tail --pid` waits on NexTerm, so it ends with NexTerm. Without either one
+  the setting says *Not available on this system*. A `tail` with no `--pid`
+  (busybox's) ends the lock as soon as it is taken; NexTerm reports the hold
+  as failed when the helper has already ended by the time it looks, but it
+  may end a moment later. `systemd-inhibit --list` shows the lock while it
+  holds.
 
 ## Troubleshooting
 

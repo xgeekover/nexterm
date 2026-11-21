@@ -57,6 +57,11 @@ pub fn build(command: &Command, stdin: &mut dyn Read) -> Result<Request, UsageEr
             }
             "set-status"
         }
+        Command::SetTitle { text } => {
+            // As set-status: `null` clears, so the key is always there.
+            put("text", text.as_ref().map_or(Value::Null, |t| json!(t)));
+            "set-title"
+        }
         Command::SetProgress { state, value } => {
             put("state", json!(state));
             if let Some(v) = value {
@@ -291,6 +296,8 @@ mod tests {
                 json!({"text": "Slow", "tone": "warn"}),
             ),
             (Command::SetStatus { text: None, tone: None }, "set-status", json!({"text": null})),
+            (Command::SetTitle { text: Some("npm test".into()) }, "set-title", json!({"text": "npm test"})),
+            (Command::SetTitle { text: None }, "set-title", json!({"text": null})),
             (Command::SetProgress { state: "normal", value: Some(40) }, "set-progress", json!({"state": "normal", "value": 40})),
             (Command::SetProgress { state: "indeterminate", value: None }, "set-progress", json!({"state": "indeterminate"})),
             (Command::SetProgress { state: "error", value: Some(3) }, "set-progress", json!({"state": "error", "value": 3})),

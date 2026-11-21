@@ -13,6 +13,9 @@ Commands:
   set-status <text> [--tone info|warn|error]
   set-status --clear
       Set or clear this terminal's line on the status board.
+  set-title <text>
+  set-title --clear
+      Name this terminal's tab, or stop naming it.
   set-progress <0-100> | --indeterminate | --error [n] | --warning [n] | --clear
       Show progress on this terminal's tab.
   list
@@ -25,6 +28,8 @@ Commands:
       Print what a terminal shows.
   focus [TARGET]
       Switch the window to a terminal.
+  guide [topic]
+      Which command to use when: a short guide for agents and scripts.
   help [command]
       Show help for a command.
 
@@ -74,6 +79,19 @@ optional. The line also goes when the shell exits or the terminal closes.
 
   --tone   info, warn or error: how the line is colored
   --clear  remove the line
+",
+        ),
+        "set-title" => (
+            "nexterm-cli set-title <text>\n       nexterm-cli set-title --clear",
+            "\
+Gives this terminal's tab a title, or removes it. The words are joined
+with spaces, so quoting is optional. A text over 200 characters is
+refused (exit 2) and nothing is set. Secrets such as *_TOKEN=... are
+masked, and NexTerm may shorten a title further when masking made it
+longer. A name you gave the tab yourself (Rename) stays: the title shows
+only on a tab you did not name.
+
+  --clear  remove the title
 ",
         ),
         "set-progress" => (
@@ -206,6 +224,14 @@ mod tests {
     }
 
     #[test]
+    fn the_overview_names_the_guide_and_the_help_after_the_commands() {
+        let guide = OVERVIEW.find("\n  guide [topic]\n      Which command to use when").expect("guide in the overview");
+        let help = OVERVIEW.find("\n  help [command]\n").unwrap();
+        let focus = OVERVIEW.find("\n  focus [TARGET]\n").unwrap();
+        assert!(focus < guide && guide < help, "{OVERVIEW}");
+    }
+
+    #[test]
     fn help_is_ascii_and_fits_80_columns() {
         let mut all = vec![help(None)];
         all.extend(COMMANDS.iter().map(|c| help(Some(c))));
@@ -246,6 +272,17 @@ mod tests {
         assert!(h.contains("One line break at\n                 its very end is pressed as Enter"), "{h}");
         assert!(h.contains("echo make | nexterm-cli send -"), "{h}");
         assert!(h.contains("send -- - (a dash)"), "{h}");
+    }
+
+    #[test]
+    fn set_title_help_names_clear_and_the_limit() {
+        let h = help(Some("set-title"));
+        assert!(h.starts_with("Usage: nexterm-cli set-title <text>\n       nexterm-cli set-title --clear\n"), "{h}");
+        assert!(h.contains("A text over 200 characters is\nrefused (exit 2) and nothing is set."), "{h}");
+        assert!(h.contains("NexTerm may shorten a title further when masking made it\nlonger."), "{h}");
+        assert!(h.contains("--clear  remove the title"), "{h}");
+        let e = UsageError::of("set-title", "set-title needs a text, or --clear");
+        assert!(usage_error(&e).contains("Run 'nexterm-cli help set-title' for more."));
     }
 
     #[test]

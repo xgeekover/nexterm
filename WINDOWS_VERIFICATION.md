@@ -1569,6 +1569,269 @@ real OpenCode/cmd session or the Korean IME. On a release build, each check on
 15. **V52-15:** A drag that starts on a tab and passes over Monaco text or an xterm selects no text and still lands.
 16. **V52-16:** (Q-C1, option A) In a group with files, close its last terminal. 'No terminal in this pane' with New Terminal remains, without a Close button.
 
+### V53 — Fork Conversation (bundle 1, A1)
+
+Covered under Node by tests/adversarial/agent_fork.test.js (FK-*),
+agents.test.js (AG-22, AG-23), agent_sessions_menus.test.js (ASM-19, ASM-20),
+agent_history_palette.test.js (AHP-14) and the agent_history.rs tests, all
+against the browser mock. Nothing there runs a real Claude Code (2.0.73 or
+newer is needed for `--fork-session`) or a real Windows shell. On a release
+build, in **PowerShell, cmd and Git Bash** each:
+
+1. **V53-1:** Start Claude Code in a terminal, send it a message, then
+   right-click its AGENT SESSIONS row → *Fork Conversation*. A **new** terminal
+   opens in the same folder, in the active pane, and after the prompt shows
+   exactly `claude --resume <id> --fork-session --session-id <new id>` is typed
+   once. Claude Code opens with the earlier messages, and the original
+   terminal is unchanged.
+2. **V53-2:** The new conversation has its own AGENT SESSIONS row. Its tooltip
+   says *Forked from* the original's name. Delete the original's row: the
+   fork's tooltip then shows the original's short id.
+3. **V53-3:** With the original's terminal active, open the palette and run
+   *Fork Conversation*. The same happens. In an OpenCode terminal or a plain
+   shell, the palette does not list *Fork Conversation*, and an OpenCode row's
+   menu item is off with "OpenCode conversations cannot be forked here".
+4. **V53-4:** Fork a row whose folder has been deleted. No terminal opens, and
+   a "Folder not found" notice names the folder.
+5. **V53-5:** Start Claude Code in a new terminal and quit it before sending
+   anything, then fork its row. `claude --session-id <new id>` is typed instead,
+   and the terminal and a "New conversation started" notice say why.
+6. **V53-6:** Type `claude --resume <id> --fork-session --session-id <uuid>`
+   yourself. The new row appears under the new id, *Forked from* the original.
+
+### V54 — the empty pane's launcher (bundle 1, A2)
+
+Covered under Node by tests/adversarial/agent_sessions_menus.test.js (ASM-21,
+ASM-22) and workbench_render.test.js (WN-05, WN-08), against the browser mock
+and a server render. Nothing there runs a real Claude Code or OpenCode, a real
+Windows shell or a real click in WebView2. On a release build, in
+**PowerShell, cmd and Git Bash** each:
+
+1. **V54-1:** Open a file so the group keeps a terminal pane, then close its
+   last terminal. The pane shows "No terminal in this pane", New Terminal with
+   its shortcut, New Claude Code Terminal and New opencode Terminal, and no
+   Close. Nothing is typed and no shell starts until you click.
+2. **V54-2:** Split a terminal pane, close the terminal in the new pane, make
+   the other pane active, then click *New Claude Code Terminal* twice quickly
+   in the empty pane. **One** terminal opens, in the empty pane, not the
+   active one. After the prompt shows, `claude --session-id <uuid>` is typed
+   once. Do the same with *New opencode Terminal*.
+3. **V54-3:** With at least four agent sessions in AGENT SESSIONS, one of them
+   archived and used most recently, the empty pane lists the three newest
+   that are not archived, newest first. Each row shows its title (in italics
+   when it has none), its agent and its folder, and its tooltip shows the full
+   folder.
+4. **V54-4:** Click a recent session. A terminal opens in that empty pane, in
+   the session's folder, and after the prompt shows `claude --resume <id>`
+   (or `opencode -s <id>`) is typed once. Click a session whose terminal is
+   already open: NexTerm switches to that terminal and opens none.
+5. **V54-5:** Archive every session, or clear the history. The empty pane
+   shows no "Recent agent sessions" section, and the agent buttons are still
+   offered.
+
+### V55 — Copy Context (bundle 1, A3)
+
+Covered under Node by tests/adversarial/copy_context.test.js (CC-*),
+palette_mounted.test.js (PM-20) and settings_window.test.js (SW-22), against
+`@xterm/headless` and a stand-in clipboard. Nothing there writes a real
+clipboard, so whether WebView2 (and, for the release check, macOS WebKit and
+Linux WebKitGTK) accepts the write inside the click or Enter is checked only
+here. On a release build, in **PowerShell, cmd and Git Bash** each:
+
+1. **V55-1:** Print 300 numbered lines (PowerShell: `1..300 | % { "line $_" }`;
+   cmd: `for /L %i in (1,1,300) do @echo line %i`; Git Bash: `seq -f 'line %g'
+   300`), then right-click the terminal's tab → *Copy Last 200 Lines (Secrets
+   Masked)* and paste into Notepad. Exactly 200 lines arrive, the numbered
+   ones and then the prompt line last, with no colours or escape codes.
+2. **V55-2:** Print a line longer than the terminal is wide, then
+   `echo key sk-AAAABBBBCCCCDDDDEEEEFFFF1234 here`, and copy again from the
+   TERMINALS row's menu. The long line arrives as one line, and the key line
+   arrives as `key sk-[hidden] here`.
+3. **V55-3:** Open the palette with the terminal active and run *Copy Last 200
+   Lines (Secrets Masked)*, with Enter and once with a click. Each time the
+   clipboard holds the lines; no "clipboard denied" message appears.
+4. **V55-4:** Set Settings ▸ Terminal ▸ *Copy Context Lines* to 5. The menu
+   item reads *Copy Last 5 Lines (Secrets Masked)* and copies 5 lines. Type 0:
+   the field becomes 1. Type 20000: it becomes 10000.
+5. **V55-5:** Restart NexTerm with two terminals in one pane, the second never
+   clicked. Right-click its tab: the item is greyed out, and its tooltip says
+   the terminal has not been shown yet. Click the tab, then the item works.
+6. **V55-6:** In Git Bash, open a file in `vim` and copy from the tab's menu:
+   the vim screen is what arrives. Turn Settings ▸ Terminal ▸ *Restore
+   Scrollback* off and copy again: it works the same, as it writes no file.
+
+### V56 — keep the computer awake while an agent works (bundle 1, A4)
+
+Covered under Node by tests/adversarial/keep_awake.test.js (KA-*) and
+settings_window.test.js (SW-23), against the real stores and a stand-in for
+the backend, and by src-tauri/src/power.rs's own tests against a fake OS call.
+Nothing there calls the real `SetThreadExecutionState`, so whether Windows
+lists NexTerm's request, and lets the computer sleep again, is checked only
+here. `powercfg /requests` needs an **elevated** PowerShell or cmd; run it
+from a window outside NexTerm. On a release build, with Power Options set to
+put the computer to sleep after a few minutes:
+
+1. **V56-1:** With the setting off (the default), start Claude Code in a
+   terminal and send it a message. While its TERMINALS row says Working,
+   `powercfg /requests` lists nothing for NexTerm.
+2. **V56-2:** Turn on Settings ▸ Terminal ▸ *Keep the Computer Awake While an
+   Agent Works*. Its description says the display may still turn off and
+   does not say *Not available on this system*. Send Claude Code a message:
+   while the row says Working, `powercfg /requests` lists `[PROCESS]` with
+   NexTerm's path under **SYSTEM**, and nothing for NexTerm under **DISPLAY**
+   or **AWAYMODE**. Task Manager shows no new process under NexTerm.
+3. **V56-3:** When the turn ends and the row says Idle, run
+   `powercfg /requests` again: NexTerm is gone from SYSTEM. Start another turn
+   and end it each of these ways in turn, checking the same after each: quit
+   Claude Code (`/exit`), type `exit` in the shell, close the terminal, turn
+   the setting off while it works, and quit NexTerm while it works.
+4. **V56-4:** Start OpenCode in a terminal and give it work, and in another
+   terminal run something that shows a progress bar (`winget upgrade --all`
+   or `winget install` of a small package). While either works,
+   `powercfg /requests` lists nothing for NexTerm.
+5. **V56-5:** With the setting on, give Claude Code a task that works longer
+   than the sleep timeout, and leave the PC alone. It does not sleep while the
+   row says Working; the display may turn off. After the turn ends, it sleeps
+   on its own timeout.
+
+### V57 — a program names its terminal: `nexterm-cli set-title` (bundle 1, A10)
+
+Covered under Node by tests/adversarial/tab_names.test.js (TN-09 to TN-14:
+which name wins, `list`, clearing on exit and restart, nothing saved),
+control_dispatcher.test.js (CD-55, CD-56), workbench_render.test.js (WN-09),
+tests/render/runner.js (RN-231, RN-232) and the nexterm-cli tests (args.rs,
+usage.rs, tests/cli.rs), all against the browser mock or a fake socket.
+Nothing there runs the real `nexterm-cli.exe` through a Windows shell's
+quoting or MSYS's path rewriting. On a release build, in **PowerShell, cmd
+and Git Bash** each, in a terminal you have not renamed:
+
+1. **V57-1:** Run `nexterm-cli set-title "Deploy staging"`. It exits 0 and
+   prints nothing. The tab chip and its tooltip, the ✕'s tooltip and the
+   terminal's TERMINALS row say *Deploy staging*; `nexterm-cli list`, run in
+   another terminal, names it so. With that terminal alone in its pane and
+   Settings ▸ Terminal ▸ *Hide the Tab Strip of a Single Terminal* on, the
+   handle above it says *Deploy staging. Show its tab strip* when hovered. The other terminals
+   keep their names.
+2. **V57-2:** Run `nexterm-cli set-title 배포 중 2단계` (no quotes): the tab says
+   *배포 중 2단계*. A 250-character title is refused: the command exits 2
+   and the tab keeps *배포 중 2단계*. A title
+   holding `MY_TOKEN=placeholder123` shows the value masked. In Git Bash,
+   `nexterm-cli set-title /deploy` shows a Windows path (MSYS rewrote it) and
+   `MSYS_NO_PATHCONV=1 nexterm-cli set-title /deploy` shows `/deploy`.
+3. **V57-3:** Rename the tab to *mine* (double-click its chip), then run
+   `nexterm-cli set-title other`. The tab, its row and `list` still say
+   *mine*. Rename it to nothing (clear the field, Enter): it says *other*.
+   Run `nexterm-cli set-title --clear`: it says *Terminal N* again.
+4. **V57-4:** Set a title, then type `exit`. The struck-through tab says
+   *Terminal N*, not the title. Press Enter for a new shell: still *Terminal
+   N*. Set a title again, quit NexTerm and start it: the restored terminal is
+   *Terminal N*, and a group saved (Save Group) while the title showed opens
+   with *Terminal N*, never the program's title.
+5. **V57-5:** Turn off Settings ▸ Terminal ▸ *Let Programs in Terminals
+   Control NexTerm*; its description names set-title. `nexterm-cli set-title
+   x` exits 5 and the tab does not change. Turn it back on. From WSL,
+   `nexterm-cli.exe set-title wsl` names the terminal as in V57-1.
+
+### V58 — a guide for agents: `nexterm-cli guide` (bundle 1, A9)
+
+Covered by the nexterm-cli tests (guide.rs, args.rs, main.rs, tests/cli.rs:
+exit 0 with `NEXTERM_CONTROL` and `NEXTERM_CONTROL_TOKEN` unset and no
+server, exit 2 listing the topics, every example a valid command line, an
+empty temporary HOME and folder still empty afterwards, plain ASCII of at
+most 80 columns). Nothing there runs the real `nexterm-cli.exe` in a Windows
+console. On a release build, in **PowerShell and cmd** each (read the exit
+code with `$LASTEXITCODE` in PowerShell, `%ERRORLEVEL%` in cmd):
+
+1. **V58-1:** In a NexTerm terminal, run `nexterm-cli guide`. It exits 0 and
+   prints the index: six topics (notify, set-status, set-title,
+   set-progress, new-split, read-screen), what each exit code 0 to 5 means
+   for the caller, and `nexterm-cli help <command>` for the exact flags. In
+   a window 80 columns wide no line wraps, and there is no stray character:
+   no colour codes, no `?`, no boxes.
+2. **V58-2:** Run `nexterm-cli guide <topic>` for each of the six topics:
+   each exits 0 and starts with `nexterm-cli guide <topic> - `. `guide
+   read-screen` names the three switches of Settings ▸ Terminal ▸ *Control*
+   as the Settings window does (*Let Programs in Terminals Control NexTerm*,
+   *Let Programs Type Into and Read Terminals*, *Let Programs Control Other
+   Terminals*), says the first is on and the other two off by default, and
+   that secrets are masked. `guide set-title` says a name given with Rename
+   always wins. `guide new-split` says a split with a command needs the
+   second switch.
+3. **V58-3:** Run `nexterm-cli guide frob`: it exits 2, prints nothing on
+   standard output, and its message lists the six topics. `nexterm-cli guide
+   notify extra` exits 2 too. `nexterm-cli help guide` prints the index and
+   exits 0.
+4. **V58-4:** In a NexTerm terminal run `$env:NEXTERM_CLI` (PowerShell) or
+   `echo %NEXTERM_CLI%` (cmd) for the tool's full path. Open a PowerShell
+   and a cmd window outside NexTerm (from the Start menu), `cd` into a new,
+   empty folder and run the tool there by that path with `guide` (in
+   PowerShell, `& "<path>" guide`). It exits 0 with the same text as in
+   V58-1, though neither variable is set. `dir` shows the folder still
+   empty. `& "<path>" guide notify | more` pages it, and
+   `"<path>" guide > guide.txt` in cmd writes the text, nothing more.
+5. **V58-5:** Turn off Settings ▸ Terminal ▸ *Let Programs in Terminals
+   Control NexTerm* and run `nexterm-cli guide` in a NexTerm terminal: it
+   still exits 0 with the same text (it never asks NexTerm). Turn it back
+   on. From WSL, `nexterm-cli.exe guide set-status` prints that topic.
+
+### V59 — the Claude Code hook examples, and what an agent's end clears (bundle 1, A11)
+
+Covered by the adversarial tests: agent_lifecycle AL-20 to AL-23 (a status,
+a title and notes made while an agent NexTerm started, or one typed by hand,
+ran go at the D that ends it; a D at a prompt, another terminal, an
+unwatched record, NexTerm's own completion entry and anything set before the
+agent started keep theirs; a shell's exit and restart still clear) and
+terminal_status TS-24 (the row no longer says *Waiting*). The README's JSON
+was parsed and each command line was run through the CLI's parser on macOS.
+Nothing there runs a hook in Claude Code, or `nexterm-cli.exe` from
+PowerShell or cmd. On a release build, with Claude Code installed, in a
+NexTerm terminal whose shell is **PowerShell, then cmd**:
+
+1. **V59-1:** At the prompt, type the commands of README *Control NexTerm
+   from a terminal* ▸ the `PermissionRequest`, `StopFailure` and
+   `UserPromptSubmit` example as they are inside the JSON, without the `\`
+   before each `"`: `nexterm-cli notify "Claude Code" "Needs your
+   permission"`, then `nexterm-cli set-status --tone warn Waiting for
+   permission`, then `nexterm-cli set-status --tone error Stopped by an API
+   error`, then `nexterm-cli set-status --clear`. Each exits 0
+   (`$LASTEXITCODE`, `%ERRORLEVEL%`) and prints nothing. The entry's title is
+   `Claude Code` (no quote mark left, not split in two), the row shows the
+   warning line in the warning colour, then the error line, then none.
+2. **V59-2:** In a test project, note the size and modified time of
+   `.claude\settings.json` (or that there is none), and of
+   `%USERPROFILE%\.claude\settings.json`. Start and quit Claude Code from
+   NexTerm (New Claude Code Terminal, then `/exit`), Resume it, and change a
+   few NexTerm settings. Neither file changed, and none was made: NexTerm
+   never edits Claude Code's settings.
+3. **V59-3:** Add the README example (with the `Stop` one) to the test
+   project's `.claude\settings.json` yourself and start Claude Code there in
+   NexTerm. Ask for something that needs your permission (a shell command).
+   With NexTerm in the background, the note *Needs your permission* comes as
+   soon as Claude Code asks, not at the end of the turn, and the row says
+   *Waiting for permission*. Answer, then send another message: the line
+   goes. If you can make a turn end on an API error (take the network away
+   during a turn), the row says *Stopped by an API error* in the error
+   colour.
+4. **V59-4:** With the hooks of V59-3, start Claude Code, let the
+   permission hook set its line and list its note, and leave the note
+   unread. Have Claude Code run `nexterm-cli set-title Hook title` (the tab
+   shows it) and finish one long turn, so NexTerm lists its own completion
+   entry. Then `/exit`. The warning line and `Hook title` go (the tab shows
+   `Terminal N` again), the hook's note is marked read and the row no longer
+   says *Waiting*; NexTerm's own completion entry is still unread. The same
+   with `claude` typed at the prompt by hand. Then, at the prompt, run
+   `nexterm-cli set-status Before` and `nexterm-cli set-title Before`, start
+   Claude Code and `/exit` it without sending anything: the line and the
+   title stay. Run `ping -n 2 localhost` with no agent: they stay after it
+   ends too.
+5. **V59-5:** Quit Claude Code, set the variable for that shell only
+   (PowerShell: `$env:CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1"`; cmd: `set
+   CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`), start `claude` and ask for a
+   permission again. No hook note and no hook line appear (the hooks' calls
+   exit 3 without `NEXTERM_CONTROL_TOKEN`); NexTerm's own completion entry
+   still comes after a long turn. Close that terminal afterwards so the
+   variable goes with it.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

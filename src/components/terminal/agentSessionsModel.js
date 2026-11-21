@@ -11,7 +11,8 @@
  * key }`. What an item does comes in `on`, one callback per action, so the
  * builders can be exercised without React or a store.
  */
-import { HISTORY_MAX_GROUPS, agentSessionSections, entryGroupId, historyDisplay, historyTitle } from '../../lib/agentHistory.js';
+import { HISTORY_MAX_GROUPS, agentSessionSections, entryGroupId, forkedFromText, historyDisplay, historyTitle } from '../../lib/agentHistory.js';
+import { isKnownAgent, isSessionIdFor } from '../../lib/agents.js';
 
 /**
  * How many rows the ungrouped list, and the Archived sub-list, draw before
@@ -32,6 +33,13 @@ export const NO_SESSION_ID_REASON = "NexTerm does not know this session's id";
 export const RUNNING_HERE_REASON = 'It is running in a terminal of this window; end the agent first';
 /** Why the entry's own group is off in Move to Group ▸ (F26). */
 export const SAME_GROUP_REASON = 'It is already in this group';
+/**
+ * Why Fork Conversation is off for an OpenCode entry (F5): only Claude Code
+ * forks a conversation by id here (`claude --resume <id> --fork-session`).
+ */
+export const FORK_OPENCODE_REASON = 'OpenCode conversations cannot be forked here';
+/** Why it is off for an entry of an agent this build does not know. */
+export const FORK_UNKNOWN_REASON = 'Only Claude Code conversations can be forked here';
 /** Why Remove from Group is off for an entry in no group (F26). */
 export const NOT_GROUPED_REASON = 'It is not in a group';
 /** Why New Group… is off at the backend's limit (F27; the backend's TOO_MANY_GROUPS says the same). */
@@ -40,6 +48,28 @@ export const TOO_MANY_GROUPS_REASON = `There can be at most ${HISTORY_MAX_GROUPS
 export const NO_SESSIONS_REASON = 'There are no agent sessions yet';
 /** Why Clear Agent Session History… is off with no entry and no group. */
 export const NOTHING_TO_CLEAR_REASON = 'There are no agent sessions to clear';
+
+/** How many recent agent sessions an empty terminal pane offers (bundle 1, A2, F8). */
+export const LAUNCHER_SESSIONS_SHOWN = 3;
+
+/**
+ * The agent sessions an empty terminal pane offers to resume (A2, F8): at
+ * most `max` entries of the store's `entries`, newest `lastUsedAt` first
+ * (entries used at the same time keep the order they came in), leaving out
+ * archived ones, agents this build does not know and anything without a
+ * key. Pinned and grouped entries count like the rest. The list is not
+ * changed. Nothing here runs or reads anything.
+ */
+export function launcherSessions(entries, max = LAUNCHER_SESSIONS_SHOWN) {
+  const limit = Number.isInteger(max) && max > 0 ? max : 0;
+  if (limit === 0 || !Array.isArray(entries)) return [];
+  return entries
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => e && typeof e === 'object' && typeof e.key === 'string' && e.key !== '' && e.archived !== true && isKnownAgent(e.kind))
+    .sort((a, b) => (Number(b.e.lastUsedAt) || 0) - (Number(a.e.lastUsedAt) || 0) || a.i - b.i)
+    .slice(0, limit)
+    .map(({ e }) => e);
+}
 
 /** `item`, off with `reason` when there is one. */
 const off = (item, reason) => (reason ? { ...item, disabled: true, disabledReason: reason } : item);
@@ -56,6 +86,32 @@ export function groupOfEntry(entry, groups) {
   const id = entryGroupId(entry);
   if (id === null || !Array.isArray(groups)) return null;
   return groups.find((g) => g?.id === id) ?? null;
+}
+
+/**
+ * The tooltip of `entry`'s AGENT SESSIONS row, line by line: the agent and
+ * what the row is called, the agent's own title of a renamed row, the
+ * conversation a fork was forked from (`forkedFromText`, by `entries`, the
+ * history's), its group (among `groups`), its folder, when it was last used
+ * (`when`, already in words), whether a terminal of this window holds it
+ * (`holder`, the history store's `holders[key]`), and what a double-click
+ * does.
+ */
+export function agentSessionTooltip(entry, { entries = [], groups = [], holder = null, when = '' } = {}) {
+  const shown = historyDisplay(entry);
+  const group = groupOfEntry(entry, groups);
+  const forked = forkedFromText(entry, entries);
+  return [
+    `${shown.label}: ${shown.title}`,
+    // A renamed row still tells what the agent calls it.
+    ...(shown.name && shown.autoTitle && shown.autoTitle !== shown.name ? [`Its own title: ${shown.autoTitle}`] : []),
+    ...(forked ? [forked] : []),
+    ...(group ? [`In the group ${group.name}`] : []),
+    shown.folderPath,
+    `Last used ${when}`,
+    ...(holder ? [`${holder.state === 'open' ? 'Open' : 'Offered for resuming'} in a terminal of this window`] : []),
+    `${holder ? 'Double-click to show its terminal' : 'Double-click to resume in a new terminal'} · right-click for more`,
+  ].join('\n');
 }
 
 /**
@@ -165,8 +221,11 @@ export function droppedRenameNotice(draft, drawn) {
 /**
  * A row's menu (F26), for `entry` as listed. `holder` is the history store's
  * `holders[entry.key]` (a terminal of this window holding it, or null),
- * `readOnly` the store's (a newer file), `icons.resume` the Resume item's
- * icon. `on`: `resume(key)`, `copyId(sessionId)`, `pin(key)`, `unpin(key)`,
+ * `readOnly` the store's (a newer file), `icons.resume` and `icons.fork` the
+ * Resume and Fork items' icons. `on`: `resume(key)`, `fork(entry)` (Fork
+ * Conversation: on for a Claude Code entry with an id — not curation, so a
+ * read-only list and a held one fork too — off with a reason otherwise),
+ * `copyId(sessionId)`, `pin(key)`, `unpin(key)`,
  * `rename(entry)`, `moveMenu(entry)` (the drill-down), `archive(key)`,
  * `unarchive(key)`, `remove(key)` (Delete…, which asks first).
  */
@@ -175,11 +234,20 @@ export function agentSessionRowItems(entry, { holder = null, readOnly = false, i
   const key = entry?.key ?? null;
   const sessionId = typeof entry?.sessionId === 'string' && entry.sessionId ? entry.sessionId : null;
   const ro = readOnly ? READ_ONLY_REASON : null;
+  const notForked =
+    entry?.kind === 'claude'
+      ? isSessionIdFor('claude', sessionId)
+        ? null
+        : NO_SESSION_ID_REASON
+      : entry?.kind === 'opencode'
+        ? FORK_OPENCODE_REASON
+        : FORK_UNKNOWN_REASON;
   return [
     withIcon(
       { key: 'resume', label: holder ? 'Show Its Terminal' : 'Resume in New Terminal', onSelect: () => on.resume?.(key) },
       icons.resume
     ),
+    withIcon(off({ key: 'fork', label: 'Fork Conversation', onSelect: () => on.fork?.(entry) }, notForked), icons.fork),
     { type: 'separator', key: 's1' },
     off({ key: 'copy-id', label: 'Copy Session ID', onSelect: () => on.copyId?.(sessionId) }, sessionId ? null : NO_SESSION_ID_REASON),
     { type: 'separator', key: 's2' },

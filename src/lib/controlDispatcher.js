@@ -58,6 +58,7 @@ import { expandHome } from './paths.js';
 import { agentRuns, terminalStatus } from './terminalStatus.js';
 import { unreadCountByTab } from './attention.js';
 import { utf8Length } from './scrollbackSnapshot.js';
+import { displayTitle, nexTermTitle } from './tabTitle.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useSystemStore } from '../stores/systemStore.js';
@@ -162,8 +163,20 @@ function placeOf(state, tabId) {
   return null;
 }
 
-/** A terminal's name as the UI shows it. */
-const titleOf = (tab) => (tab ? tab.title || tab.defaultTitle || 'Terminal' : '');
+/**
+ * A terminal's name in `list`, as the UI shows it (`displayTitle`: the user's
+ * name, else the title a program set, else its default), so a program calls
+ * a terminal what its chip does.
+ */
+const listedTitle = (tab) => (tab ? displayTitle(tab) : '');
+
+/**
+ * A terminal's name in the control log, which says who asked and of whom:
+ * NexTerm's own name for it (`nexTermTitle`: the user's name, else its
+ * default), never a title a program set — with one, a program could have the
+ * log name another terminal as the one that typed (review A-R1).
+ */
+const loggedTitle = (tab) => (tab ? nexTermTitle(tab) : '');
 
 /** A path in an error message: the caller's own text, but short and on one line. */
 const shown = (path) => {
@@ -321,7 +334,7 @@ export function createControlDispatcher({
     const resolved = target(caller, args.target, scope);
     if (resolved.error) return resolved;
     entry.target = resolved.self ? 'self' : resolved.tabId;
-    entry.targetTitle = titleOf(store.getState().tabs.find((t) => t.id === resolved.tabId));
+    entry.targetTitle = loggedTitle(store.getState().tabs.find((t) => t.id === resolved.tabId));
     return resolved;
   };
 
@@ -376,6 +389,18 @@ export function createControlDispatcher({
       return { result: { text, tone } };
     },
 
+    // The caller's own tab only, and only its label: no tab, pane or group
+    // is switched (the store cleans, masks and cuts it as an agent title).
+    'set-title': ({ caller, args }) => {
+      if (args.text === null) {
+        store.getState().setProgramTitle(caller.id, null);
+        return { result: { title: null } };
+      }
+      const title = store.getState().setProgramTitle(caller.id, args.text);
+      if (typeof title !== 'string') return fail(BAD_REQUEST, 'set-title: nothing is left to show once control characters are removed');
+      return { result: { title } };
+    },
+
     'set-progress': ({ caller, args }) => {
       if (settings.getState().terminalProgress === false) return fail(DISABLED, 'Progress Bars is off (Settings ▸ Terminal)');
       store.getState().setTabProgress(caller.id, { state: args.state, value: args.value ?? null });
@@ -405,7 +430,7 @@ export function createControlDispatcher({
         const tab = byId.get(id);
         return {
           id,
-          title: titleOf(tab),
+          title: listedTitle(tab),
           cwd: typeof tab.cwd === 'string' ? tab.cwd : null,
           group: groupOf.get(id)?.name ?? null,
           active: state.activeTabId === id,
@@ -474,7 +499,7 @@ export function createControlDispatcher({
       childrenBySession.get(caller.sessionId).add(tabId);
       openedByApi.add(tabId);
       entry.target = tabId;
-      entry.targetTitle = titleOf(store.getState().tabs.find((t) => t.id === tabId));
+      entry.targetTitle = loggedTitle(store.getState().tabs.find((t) => t.id === tabId));
       // Marked as the caller's doing, as every terminal a program acts on is.
       seen(tabId, caller, 'new-split');
       // Typed as a startup command is (stage 5): once the new shell has drawn
@@ -623,8 +648,8 @@ export function createControlDispatcher({
    * the backend's `deadline_at`, or this page's own budget if sooner — and
    * nothing is carried out past it (integration review 2). `late` is asked
    * right before the handler runs, which covers every handler that acts
-   * without awaiting anything first (notify, set-status, set-progress,
-   * focus); one that awaits asks again right before it acts (`new-split`
+   * without awaiting anything first (notify, set-status, set-title,
+   * set-progress, focus); one that awaits asks again right before it acts (`new-split`
    * after its folder check, `send` in `typeForProgram`, before the write).
    */
   const carryOut = async (payload, entry, deadline, ctx) => {
@@ -646,7 +671,7 @@ export function createControlDispatcher({
     // left to be asking. Should a request still arrive, it speaks for nobody.
     if (caller.exited) return fail(UNAUTHORIZED, 'the shell that asked has ended');
     entry.caller = caller.id;
-    entry.callerTitle = titleOf(caller);
+    entry.callerTitle = loggedTitle(caller);
     const scope = allowed(settings.getState(), payload);
     if (!scope.enabled) return fail(DISABLED, 'programs controlling NexTerm is off (Settings ▸ Terminal ▸ Control)');
     const valid = validateRequest(payload.cmd, payload.args);

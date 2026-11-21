@@ -35,6 +35,7 @@ import {
   FileCode2,
   Pencil,
   Copy,
+  ClipboardCopy,
   Files,
   LayoutGrid,
   Sparkles,
@@ -62,6 +63,7 @@ import {
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { TerminalView } from './TerminalView.jsx';
 import { AgentResumeBanner } from './AgentResumeBanner.jsx';
+import { EmptyPaneLauncher } from './EmptyPaneLauncher.jsx';
 import { AGENT_IDS, agentLabel } from '../../lib/agents.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { cn } from '../../lib/utils.js';
@@ -80,11 +82,13 @@ import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
 import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { copyText } from '../../lib/copyText.js';
+import { copyContextItem } from '../../lib/copyContext.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
 import { pathDropLabel } from '../../lib/terminalFileDrop.js';
 import { ControlledBadge, LockBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
 import { headerCloseGestures, stripShown, useRefocusAfterMenu, useStripOverlay } from './stripReveal.js';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
+import { displayTitle } from '../../lib/tabTitle.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -872,6 +876,8 @@ function TerminalPane({
   // pane keeps its strip: its "Zoomed" chip is what says other panes are
   // hidden and still running.
   const hideSingleStrip = useSettingsStore((s) => s.terminalHideSingleTabStrip === true);
+  // Copy Context's N (the chip menu's Copy Last N Lines).
+  const copyContextLines = useSettingsStore((s) => s.terminalCopyContextLines);
   const stripHidden = hideSingleStrip && paneTabs.length === 1 && !zoomed;
   const paneRef = useRef(null);
   const overlayRef = useRef(null);
@@ -1045,8 +1051,8 @@ function TerminalPane({
               // "why is that one red" should be answerable by hovering.
               title={
                 status
-                  ? `${tab.title} — ${status}`
-                  : `${tab.title} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
+                  ? `${displayTitle(tab)} — ${status}`
+                  : `${displayTitle(tab)} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
               }
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
@@ -1110,7 +1116,7 @@ function TerminalPane({
                   tab.exited && 'line-through opacity-60'
                 )}
               >
-                {tab.title}
+                {displayTitle(tab)}
               </span>
               {/* In line, after the title and before the ✕: over the corner
                   it covered the ✕ and sat beside the next tab's title,
@@ -1152,7 +1158,7 @@ function TerminalPane({
                   }}
                   onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
                   title="Close Terminal"
-                  aria-label={`Close ${tab.title}`}
+                  aria-label={`Close ${displayTitle(tab)}`}
                   className={cn(
                     'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover hover:text-vsc-error',
                     'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
@@ -1238,7 +1244,7 @@ function TerminalPane({
         <StripHandle
           paneId={paneId}
           tabId={boundTab?.id ?? null}
-          title={boundTab?.title ?? 'Terminal'}
+          title={displayTitle(boundTab)}
           tabs={paneTabs}
           unread={boundTab ? unreadOf(boundTab.id) : 0}
           open={overlayShown}
@@ -1288,6 +1294,9 @@ function TerminalPane({
                     if (target?.cwd) copyText(target.cwd);
                   },
                 },
+                // Copy Context: the last N lines as plain text, secrets masked,
+                // read and copied inside this click (src/lib/copyContext.js).
+                copyContextItem({ tabId: chipMenu.tabId, lines: copyContextLines, icon: ClipboardCopy }),
                 // Where the opened strip of a hidden one (which has no ✕)
                 // lets a terminal be closed: a menu, two deliberate clicks.
                 { type: 'separator', key: 'close-sep' },
@@ -1404,17 +1413,9 @@ function TerminalPane({
             </div>
           </div>
         ) : (
-          <div className="h-full flex flex-col items-center justify-center gap-2 text-ui-sm text-vsc-muted select-none">
-            <p className="m-0">No terminal in this pane</p>
-            <button
-              type="button"
-              onClick={() => createTab(null, { paneId, groupId })}
-              className="px-3 py-1 rounded-sm bg-vsc-button-secondary border border-vsc-input-border hover:bg-vsc-item-hover text-vsc-fg transition"
-            >
-              New Terminal
-              <span className="ml-2 text-vsc-muted font-mono">{shortcut('new-terminal')}</span>
-            </button>
-          </div>
+          // New Terminal, the agents and the recent agent sessions; nothing
+          // runs until a click, and no Close (Q-C1).
+          <EmptyPaneLauncher paneId={paneId} groupId={groupId} newTerminalKeys={shortcut('new-terminal')} />
         )}
         {/* While dragging, swallow pointer events so the xterm cannot eat them. */}
         {drag?.active && <div aria-hidden="true" className="absolute inset-0 z-10" />}
@@ -1655,7 +1656,8 @@ function SplitNode({ node, groupId, activePaneId, onSplit, onClose, canClose, on
 /**
  * The group's one terminal leaf when the group also holds files and that
  * leaf is empty — the pane B's rule keeps (`pruneTerminalLeaves`), drawn as
- * "No terminal in this pane" with New Terminal and no Close (Q-C1, option A).
+ * "No terminal in this pane" with New Terminal and no Close (Q-C1, option A),
+ * plus the agents and recent agent sessions (EmptyPaneLauncher.jsx).
  * Null otherwise.
  */
 export function keptTerminalPaneOf(tree) {
@@ -2111,7 +2113,7 @@ export function TerminalSplitContainer({ headerSlot = null }) {
         kind: 'tab',
         tabKind: TERMINAL_KIND,
         tabId: tab.id,
-        title: tab.title,
+        title: displayTitle(tab),
         startX: e.clientX,
         startY: e.clientY,
         x: e.clientX,

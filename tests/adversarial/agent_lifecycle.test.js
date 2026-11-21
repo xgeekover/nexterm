@@ -43,6 +43,7 @@ import { startCommand } from '../../src/lib/agents.js';
 import * as terminalStore from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { SCHEMA_VERSION } from '../../src/lib/persistence.js';
+import { makeNote } from '../../src/lib/programNotifications.js';
 
 const T = terminalStore.useTerminalStore;
 const { PERSIST_KEY } = terminalStore;
@@ -606,6 +607,249 @@ describe("A shell's first prompt is never missed", () => {
         await started(tab);
         await prompt(tab);
         assert.equal(tabById(tab.id).agent, null, 'the agent exited and the record stayed');
+      } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+});
+
+// ---- What a program reported from inside the agent (F17, AC18) ------------
+
+/** The window is not focused: a program's note is listed as an entry. */
+const BACKGROUND = Object.freeze({ focused: false, visible: true });
+
+/** The entry of `word`'s note in `tab`, or undefined. */
+const noteOf = (tab, word) => T.getState().notifications.find((n) => n.tabId === tab.id && n.body === `${word} note`);
+
+/**
+ * A program in `tab` reports `word` every way it can: a status line
+ * (`nexterm-cli set-status`), a title (`set-title`) and a note (`notify`, an
+ * OSC 9/777/99 message).
+ */
+function report(tab, word) {
+  const s = T.getState();
+  assert.equal(s.setReportedStatus(tab.id, { text: `${word} status`, tone: 'warn' }), true, 'setup: the status is kept');
+  assert.equal(s.setProgramTitle(tab.id, `${word} title`), `${word} title`, 'setup: the title is kept');
+  s.notifyFromProgram(tab.id, makeNote('Claude Code', `${word} note`, 'always'), BACKGROUND);
+  assert.equal(noteOf(tab, word)?.read, false, 'setup: the note is listed, unread');
+}
+
+/** What is left in `tab` of `word`'s report: the status, the title, whether the note is unread. */
+const reportOf = (tab, word) => ({
+  status: T.getState().reportedStatus[tab.id]?.text ?? null,
+  title: tabById(tab.id)?.programTitle ?? null,
+  unread: noteOf(tab, word)?.read === false,
+});
+const KEPT = (word) => ({ status: `${word} status`, title: `${word} title`, unread: true });
+const CLEARED = Object.freeze({ status: null, title: null, unread: false });
+
+/** NexTerm's own "finished a turn" entry for `tab` (`agentDone`), unread; its id. */
+function agentDoneEntry(tab) {
+  const id = `agent-${tab.id}-al`;
+  const entry = {
+    id, kind: 'program', origin: 'agent-done', agent: 'claude', tabId: tab.id, tabTitle: 'Terminal',
+    title: 'Claude Code', body: 'Finished a turn', durationMs: 60_000, at: Date.now(), read: false,
+  };
+  T.setState((s) => ({ notifications: [entry, ...s.notifications] }));
+  return id;
+}
+const doneUnread = (id) => T.getState().notifications.find((n) => n.id === id)?.read === false;
+
+describe('What a program reported while the agent ran goes when it ends (F17, AC18)', () => {
+  test("AL-20: started by NexTerm — status, title and notes go at the D that ends it; a D at a prompt, another terminal and NexTerm's own entry keep theirs", async () => {
+    await onWindows(false, async () => {
+      const tab = await freshTerminal();
+      const other = await T.getState().createTab(); // no agent in this one
+      try {
+        await prompt(tab);
+        await prompt(other);
+        await holdingWrites(async () => {
+          assert.ok(await T.getState().startAgent(tab.id, 'claude'), 'setup: the agent started');
+        });
+        assert.equal(typeof tabById(tab.id).agentTyped?.since, 'number', 'the watch keeps when it went on');
+        report(tab, 'Agent');
+        report(other, 'Other');
+        const done = agentDoneEntry(tab);
+
+        // A D at a prompt — nothing running yet — is not the agent ending.
+        await prompt(tab);
+        assert.ok(tabById(tab.id).agent, 'premise: the record stays');
+        assert.deepEqual(reportOf(tab, 'Agent'), KEPT('Agent'), 'a D at a prompt cleared what the agent reported');
+
+        // A command in the terminal with no agent runs and ends.
+        await started(other);
+        await prompt(other, 1);
+        assert.deepEqual(reportOf(other, 'Other'), KEPT('Other'), 'a terminal with no agent lost what it was told');
+
+        // claude runs, then exits.
+        await started(tab);
+        await prompt(tab);
+        assert.equal(tabById(tab.id).agent, null, 'premise: the agent ended');
+        assert.deepEqual(reportOf(tab, 'Agent'), CLEARED, 'what the agent reported outlived it');
+        assert.equal('programTitleAt' in tabById(tab.id), false, "the title's time stayed behind");
+        assert.equal(doneUnread(done), true, "NexTerm's own entry was marked read");
+        assert.deepEqual(reportOf(other, 'Other'), KEPT('Other'), "this terminal's agent ending cleared another's");
+      } finally {
+        await T.getState().closeTab(tab.id);
+        await T.getState().closeTab(other.id);
+      }
+    });
+  });
+
+  test('AL-21: typed by hand — the same at the D that ends it', async () => {
+    await onWindows(false, async () => {
+      const tab = await freshTerminal();
+      try {
+        await prompt(tab);
+        await holdingWrites(() => T.getState().writeRaw(tab.id, 'opencode\r'));
+        await sleep(10);
+        assert.equal(tabById(tab.id).agent?.kind, 'opencode', 'setup: the agent typed by hand is recorded');
+        assert.equal(typeof tabById(tab.id).agentTyped?.since, 'number', 'and watched from then on');
+        await started(tab);
+        report(tab, 'Typed');
+        const done = agentDoneEntry(tab);
+        await prompt(tab, 0);
+        assert.equal(tabById(tab.id).agent, null, 'premise: the agent ended');
+        assert.deepEqual(reportOf(tab, 'Typed'), CLEARED, 'what the typed agent reported outlived it');
+        assert.equal(doneUnread(done), true, "NexTerm's own entry was marked read");
+      } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+
+  test('AL-22: what came before the agent stays, and so does what an agent nothing watches was told', async () => {
+    await onWindows(false, async () => {
+      const tab = await freshTerminal();
+      try {
+        await prompt(tab);
+        report(tab, 'Before');
+        await sleep(5); // the agent starts in a later millisecond
+        await holdingWrites(async () => {
+          assert.ok(await T.getState().startAgent(tab.id, 'claude'), 'setup: the agent started');
+        });
+        await started(tab);
+        await prompt(tab);
+        assert.equal(tabById(tab.id).agent, null, 'premise: the agent ended');
+        assert.deepEqual(reportOf(tab, 'Before'), KEPT('Before'), 'what was reported before the agent started went with it');
+      } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+
+    // Typed with no prompt to go by: nothing watches it, so nothing ends it.
+    await onWindows(false, () =>
+      withPromptWait(60, async () => {
+        const tab = await freshTerminal();
+        try {
+          await holdingWrites(async () => {
+            assert.ok(await T.getState().startAgent(tab.id, 'claude'), 'setup: typed once the wait was up');
+          });
+          assert.equal(tabById(tab.id).agentTyped, null, 'premise: typed blind, unwatched');
+          report(tab, 'Blind');
+          await prompt(tab); // the late first prompt
+          await started(tab);
+          await prompt(tab, 0);
+          assert.equal(tabById(tab.id).agent?.kind, 'claude', 'premise: the record outlives it, as before');
+          assert.deepEqual(reportOf(tab, 'Blind'), KEPT('Blind'), 'an unwatched record "ended" after all');
+        } finally {
+          await T.getState().closeTab(tab.id);
+        }
+      })
+    );
+  });
+
+  test('AL-23: a shell that exits, or is restarted, still takes the status and the title with it — from before the agent too', async () => {
+    await onWindows(false, async () => {
+      const tab = await freshTerminal();
+      try {
+        await prompt(tab);
+        report(tab, 'Before');
+        await sleep(5);
+        await holdingWrites(async () => {
+          assert.ok(await T.getState().startAgent(tab.id, 'claude'), 'setup: the agent started');
+        });
+        await started(tab);
+        report(tab, 'Agent');
+        await mockBridge.emit('pty-exit', { session_id: tab.sessionId, exit_code: 0 });
+        assert.equal(T.getState().reportedStatus[tab.id], undefined, 'the status outlived the shell');
+        assert.equal(tabById(tab.id).programTitle, undefined, 'the title outlived the shell');
+
+        // Set again while exited (no program could), as CD-08 does: the
+        // restart itself must clear them. The real backend has no session
+        // left to kill by then.
+        T.setState((s) => ({
+          reportedStatus: { ...s.reportedStatus, [tab.id]: { text: 'stale', tone: 'info', at: Date.now() } },
+          tabs: s.tabs.map((t) => (t.id === tab.id ? { ...t, programTitle: 'stale', programTitleAt: Date.now() } : t)),
+        }));
+        mockBridge.ptySessions.delete(tab.sessionId);
+        assert.equal(await T.getState().restartShell(tab.id), true, 'setup: the shell restarted');
+        assert.equal(T.getState().reportedStatus[tab.id], undefined, 'the status outlived the restart');
+        assert.equal(tabById(tab.id).programTitle, undefined, 'the title outlived the restart');
+      } finally {
+        await T.getState().closeTab(tab.id);
+      }
+    });
+  });
+
+  test('AL-24: a status and a title set before the agent and said again unchanged by it become its own and go at its end; said again with no agent, or again within its run, they write nothing and keep their time (review B-R1)', async () => {
+    await onWindows(false, async () => {
+      const tab = await freshTerminal();
+      const s = () => T.getState();
+      const say = () => {
+        assert.equal(s().setReportedStatus(tab.id, { text: 'Same status', tone: 'warn' }), true, 'setup: the status is kept');
+        assert.equal(s().setProgramTitle(tab.id, 'Same title'), 'Same title', 'setup: the title is kept');
+      };
+      /** How many store writes `say` makes. */
+      const writesOfSay = () => {
+        let wrote = 0;
+        const stop = T.subscribe(() => {
+          wrote += 1;
+        });
+        try {
+          say();
+        } finally {
+          stop();
+        }
+        return wrote;
+      };
+      const times = () => ({ status: s().reportedStatus[tab.id]?.at, title: tabById(tab.id)?.programTitleAt });
+      try {
+        await prompt(tab);
+        say();
+        const first = times();
+        await sleep(5);
+        assert.equal(writesOfSay(), 0, 'no agent: the same again is no write');
+        assert.deepEqual(times(), first, 'and keeps its time');
+
+        await sleep(5); // the agent starts in a later millisecond
+        await holdingWrites(async () => {
+          assert.ok(await s().startAgent(tab.id, 'claude'), 'setup: the agent started');
+        });
+        const since = tabById(tab.id).agentTyped?.since;
+        assert.equal(typeof since, 'number', 'premise: the agent is watched');
+        assert.ok(first.status < since && first.title < since, 'premise: both were set before it');
+        await started(tab);
+
+        // The agent's hook says the same again: from now on it is the agent's.
+        await sleep(5);
+        assert.ok(writesOfSay() > 0, 'said again by the agent: written');
+        const restated = times();
+        assert.ok(restated.status >= since, `the status kept its time from before the agent (${restated.status} < ${since})`);
+        assert.ok(restated.title >= since, `the title kept its time from before the agent (${restated.title} < ${since})`);
+        assert.deepEqual([s().reportedStatus[tab.id].text, s().reportedStatus[tab.id].tone, tabById(tab.id).programTitle], ['Same status', 'warn', 'Same title']);
+
+        // Said again within the run: no write, the agent's time kept.
+        await sleep(5);
+        assert.equal(writesOfSay(), 0, 'within the run: the same again is no write');
+        assert.deepEqual(times(), restated);
+
+        // The agent ends: both go with it.
+        await prompt(tab);
+        assert.equal(tabById(tab.id).agent, null, 'premise: the agent ended');
+        assert.equal(s().reportedStatus[tab.id], undefined, 'the status the agent said again outlived it');
+        assert.equal(tabById(tab.id).programTitle, undefined, 'the title the agent said again outlived it');
       } finally {
         await T.getState().closeTab(tab.id);
       }

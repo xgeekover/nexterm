@@ -8,6 +8,8 @@
  * its Panels. Keeping the rules here lets them be checked directly.
  */
 
+import { displayTitle } from '../../lib/tabTitle.js';
+
 /** Percentage-point slack before a stored layout counts as "different". */
 export const SIZE_EPSILON = 0.25;
 
@@ -295,9 +297,11 @@ export function swapChoices(tree, tabs, fromPaneId) {
   const leaves = leavesIn(tree);
   const rects = paneRects(tree);
   // An editor leaf is named by the file it shows (sibling C: the pane menu
-  // offers panes of both kinds); `tabs` then holds the files too.
+  // offers panes of both kinds); `tabs` then holds the files too. A
+  // terminal is named as its chip names it (`displayTitle`); a file, which
+  // has no default name, by its own.
   const titleOf = (leaf) =>
-    tabs.find((t) => t.id === (leaf.activeTabId ?? leaf.tabIds?.[0]))?.title ??
+    displayTitle(tabs.find((t) => t.id === (leaf.activeTabId ?? leaf.tabIds?.[0])), null) ??
     (leafKind(leaf) === EDITOR_KIND ? 'No file open' : 'No terminal');
   return leaves
     .map((leaf, index) => ({

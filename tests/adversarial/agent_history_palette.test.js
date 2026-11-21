@@ -23,6 +23,7 @@ import {
   agentSessionRows,
   buildPaletteGroups,
   focusAfterPalette,
+  forkTargetOfTab,
   paletteCommands,
 } from '../../src/lib/paletteItems.js';
 import { useAgentHistoryStore } from '../../src/stores/agentHistoryStore.js';
@@ -132,6 +133,49 @@ describe('Agent session history in the palette: what it lists', () => {
     assert.equal(cut.more, 3, 'the rest counted');
     assert.equal(pick(buildPaletteGroups({ mode: 'files', query: 'login', agentSessions: [LOGIN] })), null);
     assert.equal(pick(buildPaletteGroups({ mode: 'all', query: 'login' })), null, 'a caller without the history lists none');
+  });
+
+  test('AHP-14: Fork Conversation — listed while the active terminal runs or offers back a Claude Code conversation by id, not for OpenCode, a plain or an id-less terminal; dispatched to forkConversation with that target (AC8)', () => {
+    const fork = paletteCommands().find((c) => c.command === 'fork_conversation');
+    assert.equal(fork?.title, 'Fork Conversation');
+    assert.equal(fork.hint, undefined, 'no default chord');
+    assert.equal(focusAfterPalette(fork), 'opener');
+    const forkRows = (forkTarget, query = '') =>
+      (buildPaletteGroups({ mode: 'all', query, forkTarget }).find((g) => g.label === 'commands')?.items ?? []).filter(
+        (c) => c.command === 'fork_conversation'
+      );
+    const claude = (extra = {}) => ({ id: 't1', cwd: '/work/web', agent: { kind: 'claude', sessionId: UUID, startedAt: 1, title: null }, ...extra });
+    // Running, and offered back after a restart: listed, and found by name.
+    for (const tab of [claude(), claude({ agentResumeOffered: true })]) {
+      const target = forkTargetOfTab(tab);
+      assert.deepEqual(target, { sessionId: UUID, cwd: '/work/web' });
+      assert.equal(forkRows(target).length, 1);
+      assert.equal(forkRows(target, 'fork')[0]?.title, 'Fork Conversation', 'typing "fork" finds it');
+    }
+    // OpenCode, plain, no id, a bad id, no folder: not listed.
+    for (const tab of [
+      claude({ agent: { kind: 'opencode', sessionId: 'ses_abcdefgh1234567', startedAt: 1, title: 'x' } }),
+      claude({ agent: null }),
+      claude({ agent: { kind: 'claude', sessionId: null, startedAt: 1, title: null } }),
+      claude({ agent: { kind: 'claude', sessionId: 'x; rm -rf ~', startedAt: 1, title: null } }),
+      claude({ cwd: '' }),
+      null,
+    ]) {
+      const target = forkTargetOfTab(tab);
+      assert.equal(target, null, JSON.stringify(tab));
+      assert.deepEqual(forkRows(target, 'fork'), [], `not listed for ${JSON.stringify(tab?.agent ?? null)}`);
+    }
+    assert.deepEqual(forkRows({ sessionId: 'not-an-id', cwd: '/w' }), [], 'a target that is no id is none');
+    assert.equal(forkRows(undefined).length, 1, 'a caller that says nothing of a target lists the built-ins as they are');
+    // CommandPalette.jsx: the active terminal's target goes into the list and the dispatch.
+    const palette = readFileSync(new URL('../../src/components/command/CommandPalette.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(palette, /const forkTarget = useTerminalStore\(useShallow\(\(s\) => forkTargetOfTab\(activeTabOf\(s\), os\)\)\);/);
+    assert.match(palette, /\n\s*forkTarget,\n\s*\}\)/, 'passed to buildPaletteGroups');
+    assert.match(
+      palette,
+      /case 'fork_conversation': \{\n[^]*?const target = forkTargetOfTab\(activeTabOf\(useTerminalStore\.getState\(\)\), useSystemStore\.getState\(\)\.os\);\n[^]*?if \(target\) await forkConversation\?\.\(target\);/
+    );
+    assert.match(palette, /const forkConversation = useTerminalStore\(\(s\) => s\.forkConversation\);/);
   });
 
   test("AHP-05: the side bar's menu on an entry closes when the entry goes, and holds a sorted order while open", () => {

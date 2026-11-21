@@ -35,6 +35,12 @@ export const SETTINGS_DEFAULTS = {
    * See src/lib/scrollbackSession.js.
    */
   terminalRestoreScrollback: true,
+  /**
+   * How many of a terminal's last lines Copy Context puts on the clipboard
+   * (bundle 1, A3): 1 to 10000, read through `clampContextLines`
+   * (src/lib/copyContext.js), so a value a hand edit broke copies 200.
+   */
+  terminalCopyContextLines: 200,
   terminalTheme: 'dark-modern',
   /**
    * Terminal themes the user imported in the gallery (spec P5): at most 20
@@ -240,6 +246,13 @@ export const SETTINGS_DEFAULTS = {
    * See src/lib/terminalProgress.js.
    */
   terminalProgress: true,
+  /**
+   * Keep the computer from going to sleep on its own while a Claude Code
+   * terminal is Working (bundle 1, A4): the side bar's Working, nothing else
+   * — not OpenCode, not a progress bar. Never the display. Off by default:
+   * nothing is held until the user asks for it. See src/lib/keepAwake.js.
+   */
+  terminalKeepAwakeWhileAgentsWork: false,
   /**
    * Settings ▸ Terminal ▸ Control (stage 7, spec D5): what a program running
    * in a terminal NexTerm started may ask of NexTerm through `nexterm-cli` —

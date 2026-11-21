@@ -695,8 +695,9 @@ fn read_login_shell_path() -> Option<OsString> {
 
 /// A command that opens no console window: on Windows a console program
 /// started by a GUI app gets one of its own unless told not to, and opencode
-/// is one (see `git` in src/fs/git.rs, which met this first).
-fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+/// is one (see `git` in src/fs/git.rs, which met this first). Keep-awake's
+/// child starts through it too (src/power.rs).
+pub(crate) fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     // Changed only on Windows.
     #[allow(unused_mut)]
     let mut command = Command::new(program);

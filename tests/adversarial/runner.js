@@ -187,6 +187,12 @@ import './workbench_commands.test.js';
 import './workbench_focus_headless.test.js';
 import './workbench_features.test.js';
 import './monaco_chunk.test.js';
+// Fork Conversation (bundle 1, A1): a new terminal, one fork line, the history linked; FK-99 tears down.
+import './agent_fork.test.js';
+// Copy Context (bundle 1, A3): the last N lines, plain, secrets masked, copied in the gesture; CC-99 tears down.
+import './copy_context.test.js';
+// Keep-awake (bundle 1, A4): the backend told only when a Claude Code terminal starts or stops Working; KA-99 tears down.
+import './keep_awake.test.js';
 
 async function run() {
   console.log('====================================================');

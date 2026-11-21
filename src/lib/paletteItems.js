@@ -12,7 +12,9 @@ import { basename, isInside, relativeTo, stripTrailingSep, toPosix } from './pat
 import { isMac } from './platform.js';
 import { DEFAULT_RESOLVED, shortcutLabel } from './keybindings.js';
 import { COMMANDS_FILE } from './projectCommands.js';
-import { historyDisplay, historyMatches } from './agentHistory.js';
+import { historyCwd, historyDisplay, historyMatches } from './agentHistory.js';
+import { isSessionIdFor } from './agents.js';
+import { COPY_CONTEXT_DEFAULT_LINES, copyContextLabel } from './copyContext.js';
 
 /**
  * The most files the palette lists for one query. An empty query matches
@@ -230,6 +232,28 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       // A pick of the entries, in the palette (mode 'agent-sessions').
       opens: 'agent-sessions',
     },
+    // Fork the active terminal's Claude Code conversation into a new one, in
+    // a new terminal (`forkConversation`). Listed only while the active
+    // terminal holds one (`forkTargetOfTab`); no default chord.
+    {
+      type: 'command',
+      id: 'cmd-fork-conversation',
+      command: 'fork_conversation',
+      title: 'Fork Conversation',
+      subtitle: "Continue the active terminal's Claude Code conversation as a new one in a new terminal; the original stays as it is",
+    },
+    // Copy Context (bundle 1, A3): the active terminal's last N lines on the
+    // clipboard, plain, secrets masked (src/lib/copyContext.js). N is the
+    // Copy Context Lines setting, named in the title (`buildPaletteGroups`);
+    // listed only while the active terminal has been shown. No default chord.
+    {
+      type: 'command',
+      id: 'cmd-copy-terminal-context',
+      command: 'copy_terminal_context',
+      title: copyContextLabel(COPY_CONTEXT_DEFAULT_LINES),
+      subtitle:
+        "Copy Context: the active terminal's last lines on the clipboard as plain text, wrapped lines joined, API keys, tokens and passwords replaced with [hidden]",
+    },
     {
       type: 'command',
       id: 'cmd-clear-agent-session-history',
@@ -427,6 +451,20 @@ export function canHaveFocusBack(opener, { body, onPage }) {
 }
 
 /**
+ * What the palette's Fork Conversation forks for `tab`, the active terminal
+ * (`forkConversation`'s argument): `{ sessionId, cwd }` when it runs or
+ * offers back a Claude Code conversation by a valid id, in a folder the
+ * history can keep (`historyCwd`, by `os`), else null — an OpenCode
+ * terminal, a plain one, one whose Claude Code record has no id.
+ */
+export function forkTargetOfTab(tab, os = null) {
+  const agent = tab?.agent;
+  if (agent?.kind !== 'claude' || !isSessionIdFor('claude', agent.sessionId)) return null;
+  const cwd = historyCwd(tab, os);
+  return cwd ? { sessionId: agent.sessionId, cwd } : null;
+}
+
+/**
  * The palette's result groups for `query`, in display order.
  *
  * `mode` is 'all' (⌘K — files and commands), 'files' (⌘P — files only),
@@ -445,6 +483,15 @@ export function canHaveFocusBack(opener, { body, onPage }) {
  * which stops five levels down. At most `limit` are listed, best match
  * first; the files group says how many `more` matched, and whether the list
  * it came from was `truncated`.
+ *
+ * `forkTarget` is what Fork Conversation would fork (`forkTargetOfTab` of
+ * the active terminal): the command is listed only when it is one. A caller
+ * that says nothing of it (undefined) lists the built-ins as they are.
+ *
+ * `copyContext` is what Copy Context would copy: `{ lines }` (the Copy
+ * Context Lines setting, named in its title) while the active terminal has
+ * been shown, null while there is none or it never was — then it is not
+ * listed. Undefined lists it as it is, with the default 200.
  */
 export function buildPaletteGroups({
   fileTree = [],
@@ -461,6 +508,8 @@ export function buildPaletteGroups({
   projectCommands = null,
   agentSessions = [],
   agentGroups = [],
+  forkTarget = undefined,
+  copyContext = undefined,
   limit = FILE_RESULT_LIMIT,
 } = {}) {
   const q = (query || '').toLowerCase().trim();
@@ -579,7 +628,15 @@ export function buildPaletteGroups({
   // (spec D10). Without word from the store (`projectCommands`) — a caller
   // that lists the built-ins alone — every command is listed.
   const offered = paletteCommands(bindings).filter(
-    (cmd) => cmd.command !== 'stop_trusting_project_commands' || !projectCommands || projectCommands.trust === 'trusted'
+    (cmd) =>
+      (cmd.command !== 'stop_trusting_project_commands' || !projectCommands || projectCommands.trust === 'trusted') &&
+      // Fork Conversation only while the active terminal holds a conversation to fork.
+      (cmd.command !== 'fork_conversation' || forkTarget === undefined || isSessionIdFor('claude', forkTarget?.sessionId)) &&
+      // Copy Context only while the active terminal has a screen to copy.
+      (cmd.command !== 'copy_terminal_context' || copyContext === undefined || Boolean(copyContext))
+  ).map((cmd) =>
+    // Its title names the N it copies.
+    cmd.command === 'copy_terminal_context' && copyContext ? { ...cmd, title: copyContextLabel(copyContext.lines) } : cmd
   );
   const commands = mode === 'files' ? [] : matchingCommands(offered, q);
   // After NexTerm's own commands, in a group of their own (spec D10) —

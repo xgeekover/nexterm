@@ -24,6 +24,7 @@ import { renderToString } from 'react-dom/server';
 import { useTerminalStore } from '../../src/stores/terminalStore.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
+import { useAgentHistoryStore } from '../../src/stores/agentHistoryStore.js';
 
 const TERMINAL_DIR = fileURLToPath(new URL('../../src/components/terminal/', import.meta.url));
 
@@ -97,7 +98,8 @@ export function loadWorkbench() {
   return loading;
 }
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore];
+// The agent session history too: the empty pane's launcher draws its recent entries.
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useAgentHistoryStore];
 
 /**
  * The workbench as a server render draws it, with the stores as they are now.
