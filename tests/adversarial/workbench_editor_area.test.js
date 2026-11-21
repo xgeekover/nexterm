@@ -41,7 +41,9 @@ import { chipsIn, drawWorkbench, editorPanesIn, loadWorkbench, terminalPanesIn }
 const T = useTerminalStore;
 const E = useEditorStore;
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
-const read = (rel) => readFileSync(join(SRC, rel), 'utf8');
+// LF whatever the checkout has: a Windows one has CRLF, and the checks below
+// are written against `\n` (PZ-31 failed on windows-latest for v0.33.0 on that).
+const read = (rel) => readFileSync(join(SRC, rel), 'utf8').replace(/\r\n/g, '\n');
 
 const fileTab = (id) => ({ id, filePath: `/workspace/${id}.js`, fileName: `${id}.js`, content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' });
 const termTab = (id) => ({ id, title: `shell ${id}`, cwd: '/workspace' });

@@ -20,12 +20,28 @@ import { loadState, loadVersionedState, SCHEMA_VERSION } from '../../src/lib/per
 
 // --- localStorage shim (Node has none) -----------------------------------
 const backing = new Map();
-globalThis.localStorage = {
+const ownStorage = {
   getItem: (k) => (backing.has(k) ? backing.get(k) : null),
   setItem: (k, v) => backing.set(k, String(v)),
   removeItem: (k) => backing.delete(k),
   clear: () => backing.clear(),
 };
+globalThis.localStorage = ownStorage;
+
+/**
+ * Put this file's storage back in place before a case reads or seeds it.
+ *
+ * The shim above is installed when the module is evaluated, but this file's
+ * cases run much later: the top-level await below makes it register after
+ * every file without one, so ~500 suites run between the two. Any of them
+ * that leaves its own shim installed — pane_zoom did on windows-latest for
+ * v0.33.0, when its last case (PZ-31) failed and skipped its afterEach — had
+ * the store reading that shim while these cases seeded `backing`: 26 TG
+ * failures. Each case's fresh start takes the storage back instead (TG-08).
+ */
+function takeStorageBack() {
+  globalThis.localStorage = ownStorage;
+}
 
 const WORKSPACE_KEY = 'nexterm.terminal.workspace';
 const SAVED_KEY = 'nexterm.terminal.savedGroups';
@@ -92,6 +108,7 @@ const flushPersist = () => wait(400);
  * stamps the current one).
  */
 async function relaunch({ keepStorage = false, seed = null, savedGroups = null } = {}) {
+  takeStorageBack();
   S.getState().dispose(); // also kills any pending persist timer from a prior case
   if (!keepStorage) backing.clear();
   if (seed) {
@@ -284,6 +301,7 @@ describe('Terminal groups: v1 → v2 migration', () => {
   });
 
   test('TG-05: loadState would have thrown the v1 payload away — loadVersionedState is what saves it', () => {
+    takeStorageBack();
     backing.clear();
     backing.set(WORKSPACE_KEY, JSON.stringify(v1Workspace()));
     assert.equal(loadState(WORKSPACE_KEY, 'FALLBACK'), 'FALLBACK', 'the version gate rejects v1');
@@ -313,6 +331,36 @@ describe('Terminal groups: v1 → v2 migration', () => {
     assert.deepEqual(groups().map((g) => g.name), ['Group 1', 'Build'], 'names and switcher order survive');
     assert.equal(S.getState().tabs.length, 2, 'one terminal per group is respawned');
     assertInvariants('TG-07');
+  });
+
+  // The v0.33.0 Windows failure, as this file meets it: an earlier suite's
+  // shim still installed, holding a workspace of its own (see takeStorageBack).
+  test('TG-08: a storage shim an earlier suite left installed is not the one these cases read', async () => {
+    const left = new Map([[WORKSPACE_KEY, JSON.stringify({ version: SCHEMA_VERSION, data: { groups: [], tabs: [] } })]]);
+    const leftBehind = {
+      getItem: (k) => (left.has(k) ? left.get(k) : null),
+      setItem: (k, v) => left.set(k, String(v)),
+      removeItem: (k) => left.delete(k),
+      clear: () => left.clear(),
+    };
+    const leftBefore = JSON.stringify([...left]);
+    globalThis.localStorage = leftBehind;
+    try {
+      await relaunch({ seed: { [WORKSPACE_KEY]: v1Workspace() } });
+      assert.equal(globalThis.localStorage, ownStorage, "the fresh start puts this file's storage back");
+      assert.equal(groups().length, 2, 'the v1 seed is what init read: one group per v1 leaf');
+      assert.deepEqual(groups().map((g) => g.tree.id), ['pane-11', 'pane-12']);
+      S.getState().renameGroup(groups()[0].id, 'Saved here');
+      await flushPersist();
+      const saved = JSON.parse(backing.get(WORKSPACE_KEY));
+      assert.equal(saved.version, SCHEMA_VERSION, "the store saves into this file's storage");
+      assert.ok(saved.data.groups.some((g) => g.name === 'Saved here'), 'the rename is what was saved');
+      assert.equal(JSON.stringify([...left]), leftBefore, 'and never into the one left behind');
+      assertInvariants('TG-08');
+    } finally {
+      // Whatever this case found, the cases after it start from this file's storage.
+      takeStorageBack();
+    }
   });
 });
 

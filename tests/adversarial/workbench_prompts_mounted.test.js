@@ -39,7 +39,9 @@ const h = React.createElement;
 const E = useEditorStore;
 const T = useTerminalStore;
 const LAYOUT_DIR = fileURLToPath(new URL('../../src/components/layout/', import.meta.url));
-const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+// LF whatever the checkout has: a Windows one has CRLF, and the checks below
+// are written against `\n` (PZ-31 failed on windows-latest for v0.33.0 on that).
+const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
 /** Bundled as they are: the layout and what draws the prompts. */
 const BUNDLED = [/^\.\/PanelLayout\.jsx$/, /\/editor\/EditorPrompts\.jsx$/, /\/common\/ConfirmDialog\.jsx$/];

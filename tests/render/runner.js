@@ -5032,7 +5032,9 @@ check('RN-221', "a change of Claude Code's state redraws its own line, never the
 // states only exist in a browser. The human checks what these cannot
 // (WebView2 and WKWebView, forced colours, scaling).
 
-const readSource = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8');
+// LF whatever the checkout has: a Windows one has CRLF, and checks here are
+// written against `\n` (PZ-31 failed on windows-latest for v0.33.0 on that).
+const readSource = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 /** The :root value of `--vsc-<name>` as written, or null. */
 const rootToken = (css, name) => new RegExp(`--vsc-${name}:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? null;
 /** Every .js/.jsx/.css file under a source directory, as [path, text]. */

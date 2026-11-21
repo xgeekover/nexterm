@@ -58,6 +58,21 @@ function teardown() {
   shimInstalled = false;
 }
 
+// --- the source checks ------------------------------------------------------
+// A Windows checkout has CRLF line endings (the repo has no .gitattributes),
+// and a check written against `\n` must read the same code there: PZ-31 failed
+// on windows-latest for v0.33.0 on its `\n` alone. So every source this file
+// reads is read with its line endings as LF, and PZ-32 holds the checks to that.
+const lf = (text) => text.replace(/\r\n/g, '\n');
+const readSource = (rel) => lf(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8'));
+
+/** CommandPalette.jsx's toggle_pane_zoom case goes through workbenchCommands.toggleZoomActive (C2 review S-01). */
+const paletteZoomsThroughWorkbench = (palette) =>
+  /case 'toggle_pane_zoom':\n(?:(?!\s*case\s)[^\n]*\n)*?\s*toggleZoomActive\(\);/.test(lf(palette));
+/** workbenchCommands.toggleZoomActive zooms with the store and then hands the keyboard to the active pane. */
+const toggleZoomActiveHandsOn = (commands) =>
+  /export function toggleZoomActive\(\) \{[^}]*togglePaneZoom\?\.\(\);[^}]*focusActivePane\(\);/.test(lf(commands));
+
 /** A pristine store, as if the app had just launched. */
 async function freshStart({ keepStorage = false } = {}) {
   S.getState().dispose();
@@ -460,7 +475,7 @@ describe('Pane zoom: the ways in', () => {
     // And the native menu declares the same id, with the accelerator the
     // frontend would send (NM-01 compares every item against `cargo test`'s
     // fixture where one exists; this holds even where it does not).
-    const menuRs = readFileSync(fileURLToPath(new URL('../../src-tauri/src/menu.rs', import.meta.url)), 'utf8');
+    const menuRs = readSource('../../src-tauri/src/menu.rs');
     assert.ok(
       /custom\("toggle-pane-zoom", "Toggle Pane Zoom", "CmdOrCtrl\+Shift\+Enter"\)/.test(menuRs),
       'menu.rs declares Toggle Pane Zoom with CmdOrCtrl+Shift+Enter'
@@ -481,17 +496,75 @@ describe('Pane zoom: the ways in', () => {
 
     // CommandPalette.jsx is a component the suites cannot click; its dispatch
     // must name the row's command, or the row is one that does nothing.
-    const palette = readFileSync(
-      fileURLToPath(new URL('../../src/components/command/CommandPalette.jsx', import.meta.url)),
-      'utf8'
-    );
+    const palette = readSource('../../src/components/command/CommandPalette.jsx');
     // Through the workbench's own command, as the keys and the menu go: it
     // zooms THE active pane and hands it the keyboard (C2 review S-01).
-    assert.ok(/case 'toggle_pane_zoom':\n(?:(?!\s*case\s)[^\n]*\n)*?\s*toggleZoomActive\(\);/.test(palette), 'CommandPalette dispatches toggle_pane_zoom through toggleZoomActive');
-    const commands = readFileSync(fileURLToPath(new URL('../../src/lib/workbenchCommands.js', import.meta.url)), 'utf8');
+    assert.ok(paletteZoomsThroughWorkbench(palette), 'CommandPalette dispatches toggle_pane_zoom through toggleZoomActive');
+    const commands = readSource('../../src/lib/workbenchCommands.js');
     assert.ok(
-      /export function toggleZoomActive\(\) \{[^}]*togglePaneZoom\?\.\(\);[^}]*focusActivePane\(\);/.test(commands),
+      toggleZoomActiveHandsOn(commands),
       'toggleZoomActive zooms with the store and then hands the keyboard to the active pane'
     );
+  });
+
+  // v0.33.0 failed on windows-latest: the checkout there has CRLF line
+  // endings, and PZ-31's `\n` never matched. Its checks are held here to the
+  // same answer for both line endings, and still to "no" for the cycle 2
+  // palette, which called the store's togglePaneZoom directly (C2 review S-01).
+  test('PZ-32: PZ-31 reads a CRLF checkout as it reads an LF one, and still refuses the cycle 2 palette', () => {
+    const raw = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+    const crlf = (text) => text.replace(/\r?\n/g, '\r\n');
+    const palette = raw('../../src/components/command/CommandPalette.jsx');
+    const commands = raw('../../src/lib/workbenchCommands.js');
+    for (const [name, text] of [['CommandPalette.jsx', palette], ['workbenchCommands.js', commands]]) {
+      assert.ok(crlf(text).includes('\r\n') && !/[^\r]\n/.test(crlf(text)), `the copy of ${name} has CRLF endings and no bare LF`);
+    }
+
+    assert.equal(paletteZoomsThroughWorkbench(palette), true, 'CommandPalette.jsx as checked out here');
+    assert.equal(paletteZoomsThroughWorkbench(lf(palette)), true, 'CommandPalette.jsx with LF endings');
+    assert.equal(paletteZoomsThroughWorkbench(crlf(palette)), true, 'CommandPalette.jsx with CRLF endings, as on Windows');
+    assert.equal(toggleZoomActiveHandsOn(commands), true, 'workbenchCommands.js as checked out here');
+    assert.equal(toggleZoomActiveHandsOn(lf(commands)), true, 'workbenchCommands.js with LF endings');
+    assert.equal(toggleZoomActiveHandsOn(crlf(commands)), true, 'workbenchCommands.js with CRLF endings, as on Windows');
+
+    // The cycle 2 case, put back into today's file: the store's action, then
+    // the view — nothing that hands the keyboard on.
+    const zoomCase = /( *)case 'toggle_pane_zoom':\n(?:(?!\s*case\s)[^\n]*\n)*/.exec(lf(palette));
+    assert.ok(zoomCase, 'the toggle_pane_zoom case is found to replace');
+    const pad = zoomCase[1];
+    const cycle2Case = [
+      `${pad}case 'toggle_pane_zoom':`,
+      `${pad}  // The active pane of the group on screen, as the shortcut does.`,
+      `${pad}  togglePaneZoom?.();`,
+      `${pad}  setActiveView('terminal');`,
+      `${pad}  return;`,
+      '',
+    ].join('\n');
+    const cycle2 = lf(palette).replace(zoomCase[0], cycle2Case);
+    assert.notEqual(cycle2, lf(palette), 'the cycle 2 case is in place');
+    assert.equal(paletteZoomsThroughWorkbench(cycle2), false, 'the cycle 2 palette, LF');
+    assert.equal(paletteZoomsThroughWorkbench(crlf(cycle2)), false, 'the cycle 2 palette, CRLF');
+    // Nor does a toggleZoomActive() in the case after it count for this one.
+    const borrowed = cycle2.replace(cycle2Case, `${cycle2Case}${pad}case 'next_one':\n${pad}  toggleZoomActive();\n${pad}  return;\n`);
+    assert.equal(paletteZoomsThroughWorkbench(borrowed), false, 'the next case\'s call, LF');
+    assert.equal(paletteZoomsThroughWorkbench(crlf(borrowed)), false, 'the next case\'s call, CRLF');
+    // And a toggleZoomActive that no longer hands the keyboard on is refused, either way.
+    const noFocus = lf(commands).replace(/\n\s*focusActivePane\(\);(\n\s*return zoomed;)/, '$1');
+    assert.notEqual(noFocus, lf(commands), 'the focus call is taken out');
+    assert.equal(toggleZoomActiveHandsOn(noFocus), false, 'no focusActivePane, LF');
+    assert.equal(toggleZoomActiveHandsOn(crlf(noFocus)), false, 'no focusActivePane, CRLF');
+  });
+});
+
+// A case that fails skips its afterEach, so the last case of this file
+// failing left this file's storage shim installed for every suite after it:
+// on Windows, PZ-31 did, and terminal_groups (which registers late, through a
+// top-level await) then read this shim instead of its own — 26 TG failures.
+describe('Pane zoom: teardown', () => {
+  test('PZ-99: the store disposed and the storage handed back, however the cases before ended', () => {
+    teardown();
+    assert.equal(shimInstalled, false, 'the shim is no longer installed');
+    if (previousLocalStorage === undefined) assert.equal('localStorage' in globalThis, false, 'no storage, as the file found it');
+    else assert.equal(globalThis.localStorage, previousLocalStorage, 'the storage the file found');
   });
 });
