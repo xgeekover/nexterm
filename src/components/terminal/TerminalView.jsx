@@ -620,7 +620,7 @@ export function TerminalView({ tabId, active = false }) {
           // the row it describes — every one does — but it has to cover it.
           className="absolute top-0 left-0 right-0 z-10 px-2 py-[2px] flex items-center gap-2 pointer-events-none bg-vsc-panel border-b border-vsc-border text-ui-sm font-mono text-vsc-muted"
         >
-          <span className="shrink-0 text-vsc-accent">❯</span>
+          <span className="shrink-0 text-vsc-accent-text">❯</span>
           <span className="truncate">{stickyCommand}</span>
         </div>
       )}
@@ -642,7 +642,7 @@ export function TerminalView({ tabId, active = false }) {
           )}
           {suggestState.items.length > 1 && (
             <div
-              className="absolute bg-vsc-quickinput border border-vsc-widget-border shadow-widget"
+              className="absolute bg-vsc-quickinput border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
               style={{ left: suggestState.left, top: suggestState.top + suggestState.cellHeight }}
             >
               {suggestState.items.map((item, i) => (

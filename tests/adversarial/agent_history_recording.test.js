@@ -479,7 +479,7 @@ describe('Agent session history: what the recorder records', () => {
       assert.deepEqual(fileEntries().map((e) => e.key), [`opencode:${SES_A}`]);
 
       // A newer file refuses every write.
-      mockBridge.agentHistoryCorruptFile(JSON.stringify({ version: 2, entries: [] }));
+      mockBridge.agentHistoryCorruptFile(JSON.stringify({ version: 3, entries: [] }));
       const warn = console.warn;
       const warned = [];
       console.warn = (...args) => warned.push(args.join(' '));
@@ -495,7 +495,7 @@ describe('Agent session history: what the recorder records', () => {
       }
       assert.equal(warned.filter((w) => w.includes('[AgentHistory]')).length, 1, 'said once');
       assert.match(H.getState().error, /newer NexTerm/);
-      assert.equal(JSON.parse(mockBridge.agentHistoryFile()).version, 2, 'the newer file is left as it is');
+      assert.equal(JSON.parse(mockBridge.agentHistoryFile()).version, 3, 'the newer file is left as it is');
     });
   });
 

@@ -24,8 +24,6 @@ const emptyEditor = () => ({
   activeTabId: null,
   pendingClose: null,
   pendingOverwrite: null,
-  editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-  activeEditorPaneId: 'editor-pane-root',
 });
 
 /** The backend and the page's save, as the guard calls them: everything, in order. */

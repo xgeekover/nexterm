@@ -157,9 +157,10 @@ function makeSender(socket, defaultTimeoutMs = 15000) {
 /**
  * Serve the repo, open `fixture` (a path from the repo root) in a session
  * named after `prefix`, and wait until `readyExpression` evaluates to true on
- * the page. Returns `{ evalJs, send, teardown }`: `evalJs(expression)` awaits
- * a promise and returns the value; `send(method, params)` is a raw CDP call on
- * the page's session.
+ * the page. Returns `{ evalJs, send, onEvent, teardown }`: `evalJs(expression)`
+ * awaits a promise and returns the value; `send(method, params)` is a raw CDP
+ * call on the page's session, and `onEvent(method, callback)` hears its
+ * events (it returns the function that stops it).
  *
  * `session`, when given, is the agent-browser session to use instead of the
  * one agent-browser names for this worktree — which two runs at once share,
@@ -253,13 +254,25 @@ export async function openHarness(fixture, { prefix, readyExpression, session = 
       return r.result.value;
     };
 
+    // `onEvent(method, callback)`: every CDP event `method` of the page's
+    // session — `Fetch.requestPaused`, for one — handed its params, until the
+    // function it returns is called.
+    const onEvent = (method, callback) => {
+      const listener = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.method === method && msg.sessionId === pageSessionId) callback(msg.params);
+      };
+      ws.addEventListener('message', listener);
+      return () => ws.removeEventListener('message', listener);
+    };
+
     // The harness module awaits its own setup; give it a few seconds.
     const deadline = Date.now() + 15000;
     while ((await evalJs(readyExpression)) !== true) {
       if (Date.now() > deadline) throw new Error('the harness module did not finish loading');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return { evalJs, send, teardown, pageErrors: () => errors.slice() };
+    return { evalJs, send, onEvent, teardown, pageErrors: () => errors.slice() };
   } catch (err) {
     teardown();
     throw err;

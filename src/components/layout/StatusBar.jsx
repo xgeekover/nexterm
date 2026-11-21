@@ -12,6 +12,9 @@ import { cn } from '../../lib/utils.js';
 
 const ICONS = { folder: Folder, terminal: TerminalSquare, x: XCircle, branch: GitBranch };
 
+/** The items holding a path: they give way first, truncating, so the right end (the bell) stays. */
+const SHRINKS = new Set(['workspace', 'cwd']);
+
 /**
  * One chip. An item carrying an `action` is a real control and renders as a
  * button; everything else is a read-out and stays a div, so nothing on this
@@ -21,9 +24,10 @@ const ICONS = { folder: Folder, terminal: TerminalSquare, x: XCircle, branch: Gi
 function StatusItem({ item }) {
   const Icon = item.icon ? ICONS[item.icon] : null;
   const className = cn(
-    'h-full px-2 flex items-center gap-1 shrink-0 whitespace-nowrap',
+    'h-full px-2 flex items-center gap-1 whitespace-nowrap',
+    SHRINKS.has(item.id) ? 'min-w-0' : 'shrink-0',
     item.action ? 'cursor-pointer' : 'cursor-default',
-    item.kind === 'accent' && 'bg-vsc-accent text-vsc-accent-fg font-medium',
+    item.kind === 'accent' && 'bg-vsc-accent-solid text-vsc-accent-fg font-medium',
     item.kind === 'error' && 'bg-vsc-error text-white',
     item.kind === 'plain' && 'text-vsc-fg hover:bg-vsc-item-hover'
   );
@@ -135,13 +139,13 @@ export function StatusBar() {
       role="status"
       className="h-statusbar shrink-0 flex items-center justify-between bg-vsc-statusbar border-t border-vsc-border text-[12px] text-vsc-fg select-none overflow-hidden"
     >
-      <div className="flex items-center h-full min-w-0">
+      <div className="flex-1 min-w-0 flex items-center h-full overflow-hidden">
         {left.map((it) => (
           <StatusItem key={it.id} item={it} />
         ))}
       </div>
 
-      <div className="flex items-center h-full min-w-0">
+      <div className="shrink-0 flex items-center h-full">
         {right.map((it) => (
           <StatusItem key={it.id} item={it} />
         ))}

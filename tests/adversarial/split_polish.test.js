@@ -771,7 +771,8 @@ describe('Split polish: settings and commands', () => {
     assert.match(palette, /case 'close_terminal':[^\n]*\n[^]*?closeTab\(/);
     assert.match(palette, /case 'rename_terminal':\n[^]*?requestTabRename\?\.\(\)/);
     assert.match(palette, /item\.type === 'pane'[^]*?swapActivePane\?\.\(item\.paneId\)/);
-    assert.match(palette, /swapTargets\?\.\(\)/, 'the pick asks the store what to offer, and why not');
+    // With the editor's tabs since editor placement C2: they name the editor panes it offers too.
+    assert.match(palette, /swapTargets\?\.\(/, 'the pick asks the store what to offer, and why not');
     const hook = read('../../src/hooks/useKeybindings.js');
     assert.match(hook, /equalizeSplits,/, 'the keyboard hands the store action over');
   });

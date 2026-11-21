@@ -264,7 +264,7 @@ export function AgentResumeBanner({
           // Same button the empty pane uses for New Terminal; `vsc-button`
           // is not a token this theme defines and would have styled nothing.
           // Disabled, the hover must not light it up as if it were clickable.
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-sm bg-vsc-button-secondary hover:bg-vsc-item-hover text-vsc-fg transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-vsc-button-secondary"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-sm bg-vsc-button-secondary border border-vsc-input-border hover:bg-vsc-item-hover text-vsc-fg transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-vsc-button-secondary"
         >
           <Play size={12} />
           Resume

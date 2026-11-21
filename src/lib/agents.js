@@ -212,6 +212,25 @@ export function resumeCommand(agent) {
 }
 
 /**
+ * What NexTerm adds to an opencode line for OpenCode V1's mini mode (1.17.10
+ * and newer): the conversation on the normal screen, in the scrollback, and
+ * nothing printed again on a resize. Fixed literals only.
+ */
+export const OPENCODE_MINI_FLAGS = '--mini --no-replay';
+
+/**
+ * `command` with OPENCODE_MINI_FLAGS right after a leading `opencode` word
+ * (`opencode`, `opencode -s <id>`, `opencode --continue`), and any other line
+ * — a claude line, one that names `--mini` already — unchanged. Pure: when to
+ * use it is opencodeLaunch.js's to say, right before the line is typed.
+ */
+export function withOpencodeMini(command) {
+  if (typeof command !== 'string' || !/^opencode(?=$|\s)/.test(command)) return command;
+  if (/(?:^|\s)--mini(?=$|\s)/.test(command)) return command;
+  return `opencode ${OPENCODE_MINI_FLAGS}${command.slice('opencode'.length)}`;
+}
+
+/**
  * How certain the resume is, which decides what the banner may promise.
  *
  * `exact` — the record holds the conversation's own id: claude's because
@@ -414,6 +433,49 @@ export function opencodeTitleOf(windowTitle) {
   if (typeof windowTitle !== 'string') return null;
   const match = /^OC \| (.+)$/s.exec(windowTitle);
   return match ? match[1] : null;
+}
+
+// ---- Which Claude Code conversation a terminal shows --------------------------
+
+/**
+ * A terminal title Claude Code set: one status glyph — ✳ (U+2733) waiting,
+ * ◐ ◑ ◒ ◓ (U+25D0-U+25D3) working, either maybe followed by U+FE0F — one
+ * space, then the conversation's title (as Claude Code 2.1.323 sets it).
+ */
+const CLAUDE_WINDOW_TITLE = /^[\u2733\u25d0-\u25d3]\ufe0f? (.+)$/s;
+/** What Claude Code shows before its conversation has a title of its own. */
+const CLAUDE_DEFAULT_TITLE = 'Claude Code';
+
+/**
+ * The conversation title in a terminal title Claude Code set (`✳ <title>`,
+ * `◐ <title>`), trimmed, or null: for its default `Claude Code`, and for
+ * any other title — no glyph, empty, a glyph only, opencode's `OC | …`, or
+ * another program's. Not cleaned or masked: the history does that
+ * (`historyTitle`).
+ */
+export function claudeTitleOf(windowTitle) {
+  if (typeof windowTitle !== 'string') return null;
+  const match = CLAUDE_WINDOW_TITLE.exec(windowTitle);
+  const title = match ? match[1].trim() : '';
+  return title && title !== CLAUDE_DEFAULT_TITLE ? title : null;
+}
+
+/** Claude Code's working glyphs, ◐ ◑ ◒ ◓ (U+25D0-U+25D3), and its idle one, ✳ (U+2733). */
+const CLAUDE_IDLE_GLYPH = '\u2733';
+
+/**
+ * What a terminal title Claude Code set says the agent is doing: 'working'
+ * for a spinner glyph (◐ ◑ ◒ ◓), 'idle' for ✳ — its default `✳ Claude Code`
+ * too — in the shape `claudeTitleOf` reads (one glyph, maybe U+FE0F, one
+ * space, then text that is not blank). Null for anything else: not a
+ * string, empty, a glyph alone or not followed by a space, a glyph and
+ * blanks, opencode's `OC | …`, a shell's title, another program's spinner.
+ */
+export function claudeActivityOf(windowTitle) {
+  if (typeof windowTitle !== 'string') return null;
+  const match = CLAUDE_WINDOW_TITLE.exec(windowTitle);
+  if (!match || !match[1].trim()) return null;
+  return windowTitle.startsWith(CLAUDE_IDLE_GLYPH) ? 'idle' : 'working';
 }
 
 /**

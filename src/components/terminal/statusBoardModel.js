@@ -89,7 +89,7 @@ function tabsIn(s, tabIds) {
  * a count does.
  */
 export function summaryCounts(s, tabIds) {
-  const { waiting, running, failed } = groupStatus(tabsIn(s, tabIds), unreadCountByTab(s.notifications), s.progress);
+  const { waiting, running, failed } = groupStatus(tabsIn(s, tabIds), unreadCountByTab(s.notifications), s.progress, s.agentActivity);
   return { waiting, running, failed };
 }
 
@@ -112,7 +112,13 @@ function tabRanksOf(s) {
   const ranks = {};
   for (const tab of s.tabs || []) {
     if (!tab) continue;
-    ranks[tab.id] = attentionRank(terminalStatus(tab, { unread: counts[tab.id] ?? 0, progress: s.progress?.[tab.id] ?? null }));
+    ranks[tab.id] = attentionRank(
+      terminalStatus(tab, {
+        unread: counts[tab.id] ?? 0,
+        progress: s.progress?.[tab.id] ?? null,
+        activity: s.agentActivity?.[tab.id] ?? null,
+      })
+    );
   }
   return ranks;
 }
@@ -137,7 +143,7 @@ export function useGroupRanks(enabled, entries) {
       const counts = unreadCountByTab(s.notifications);
       const ranks = {};
       for (const { group, tabIds } of entries) {
-        ranks[group.id] = groupAttentionRank(tabsIn(s, tabIds), counts, s.progress);
+        ranks[group.id] = groupAttentionRank(tabsIn(s, tabIds), counts, s.progress, s.agentActivity);
       }
       return ranks;
     })
@@ -172,6 +178,21 @@ export function useRanksHeldWhile(hold, ranks) {
 export const secondaryText = (active) => (active ? 'text-vsc-fg' : 'text-vsc-muted');
 
 /**
+ * What terminal `tabId` is doing in state `s`, as its TERMINALS row says it
+ * (`terminalStatus`, with its unread count, its bar and its Claude Code's
+ * state), or NONE's empty word for a terminal that is not there.
+ */
+export function terminalStatusIn(s, tabId) {
+  const tab = (s.tabs || []).find((t) => t?.id === tabId);
+  if (!tab) return terminalStatus(null);
+  return terminalStatus(tab, {
+    unread: unreadCountByTab(s.notifications)[tabId] ?? 0,
+    progress: s.progress?.[tabId] ?? null,
+    activity: s.agentActivity?.[tabId] ?? null,
+  });
+}
+
+/**
  * The summary in words as a group's row says it: what it counts is
  * TERMINALS ("terminals: 2 waiting, 1 failed"), where the unread pill beside
  * it counts NOTIFICATIONS — two numbers side by side that must not be read
@@ -202,13 +223,15 @@ export function keepUserOrderItems(items, sorted) {
 }
 
 /** The menus opened from the list (not the workspace bar's), which hold a sorted order still while open. */
-export const LIST_MENUS = new Set(['group', 'pane', 'tab', 'saved', 'empty', 'agent-session', 'agent-sessions']);
+export const LIST_MENUS = new Set(['group', 'pane', 'tab', 'saved', 'empty', 'agent-session', 'agent-group', 'agent-sessions']);
 
 /**
  * Whether the subject of a menu opened from the side bar, or of a name being
  * edited in it, still exists: `kind` and `id` as the panel keeps them, `has`
  * the panel's lookups `{ tab(id), group(id), pane(id), saved(id),
- * workspace(id), agentSession(key) }`. Kinds with no subject (the list's empty space, the
+ * workspace(id), agentSession(key), agentGroup(id) }` — `agent-group` an
+ * AGENT SESSIONS group header's menu or its name being edited. Kinds with no
+ * subject (the list's empty space, the
  * workspace bar and its lists, the workspace's own name) always do.
  *
  * WHY. Either one holds a sorted order still, and either one can lose its
@@ -231,6 +254,8 @@ export function subjectExists(kind, id, has) {
       return Boolean(has.workspace(id));
     case 'agent-session':
       return Boolean(has.agentSession?.(id));
+    case 'agent-group':
+      return Boolean(has.agentGroup?.(id));
     default:
       return true;
   }

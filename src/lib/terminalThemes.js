@@ -15,7 +15,7 @@
  *
  * Every palette here is a DARK one, and that is the point. `light-modern` and
  * `solarized-light` used to sit in this list, which let a user put a white
- * terminal inside a window whose every other surface is #181818 — the app
+ * terminal inside a window whose every other surface is #0E1014 — the app
  * lighting one rectangle differently from itself, with no light shell to go
  * with it. They are gone. A settings file still naming one is not an error:
  * `getTerminalThemeEntry` falls back to the default for any unknown id, which
@@ -41,7 +41,10 @@
 
 export const TERMINAL_THEMES = {
   'dark-modern': {
-    label: 'Dark Modern',
+    // Called "Dark Modern" until the app moved to its own palette: its colours
+    // are no longer VS Code's, so the id stays (saved settings name it) and
+    // the label says whose they are.
+    label: 'NexTerm Dark',
     // No literal palette: terminalRegistry.js's readTheme() supplies the
     // live --vsc-* values at apply time, which is exactly today's terminal
     // behaviour — this is what makes it the default. The app has no light

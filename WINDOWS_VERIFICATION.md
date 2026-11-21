@@ -1292,6 +1292,283 @@ check is for.
 Note in `%TEMP%\nexterm-qa\report.md` each command's output and exit code
 (`echo %ERRORLEVEL%`), and anything refused that should not have been.
 
+### V47 — the UI refresh: violet, bluish greys, one focus rule, panels that fit
+
+Only the render suite read the stylesheet and the class strings; nothing was
+looked at in a real window. Check on Windows (WebView2, at 100%, 125% and 150%
+scaling) and on macOS (WKWebView), side by side with v0.28.1 where it says so.
+
+- **H1 fields.** Click into each field: the palette (from *Search NexTerm*),
+  the terminal find bar, the Explorer filter, Search, the Settings fields,
+  select and search, the project-command and startup-command fields, the key
+  capture in Keyboard Shortcuts, and every rename (terminal tab, group,
+  TERMINALS row, Explorer). Only the field's own 1px border turns violet: no
+  inner rectangle, no outline outside it, no text moving by a pixel.
+- **H2 the keyboard ring.** A mouse click on a button, tab or chip shows no
+  ring. Tab and the arrow keys through the title bar, the dialogs, Settings
+  and the theme cards show a light-violet 2px ring on each. On macOS try with
+  System Settings ▸ Keyboard ▸ Keyboard navigation off and on, and write down
+  which controls Tab reaches in each.
+- **H3 active and attention.** With three panes, the active one has a violet
+  line; ring a bell in it and the orange ring shows inside the violet line,
+  and the two read as two things.
+- **H4 no stray blue.** Primary buttons, the status bar's folder item,
+  progress bars, activity dots, drop overlays, a separator under the pointer
+  and while dragged, and the marks of the activity bar, the region tabs and
+  the editor tabs are violet. Blue is left only on info icons.
+- **H5 selection.** A selected row is a readable violet tint in the palette,
+  the context menu, the ☰ menu, the Explorer, TERMINALS, terminal text,
+  editor text and selected text in a field.
+- **H6 High Contrast** (Night sky and Desert). A focused field shows a
+  Highlight outline; the active pane's line and the attention ring differ; the
+  keyboard ring is visible.
+- **H7 reduced motion** (the OS setting on macOS and Windows, and NexTerm's
+  own). Colour changes on fields, buttons and separators are instant.
+- **H8 at 960×640** with both side bars open and a long folder name: the pill
+  and the folder name do not overlap; ☰ and the window buttons work; the empty
+  title bar still drags the window; the bell stays with a long terminal
+  folder; the bottom panel at its smallest shows three or more terminal rows;
+  each separator is easy to grab, shows the resize cursor a few pixels either
+  side, and is a violet line while dragged; 1px lines are crisp, not doubled,
+  at 125% and 150%.
+- **H9 native controls.** The Settings select and checkboxes are violet and
+  readable on Windows.
+- **H10 corners.** Menus, the palette, dialogs and notices have 8px corners
+  and nothing is cut off at them; menu rows are inset with corners of their
+  own; secondary buttons have an edge.
+- **H11 the gallery.** The chosen card has a violet border; the NexTerm Dark
+  card shows the new colours; the other 8 cards look as in v0.28.1.
+- **H12 side by side with v0.28.1.** The terminal (background, how bright the
+  text is, `ls --color`, `git diff`, cmd.exe, the OpenCode and Claude Code
+  screens, dim and bright-black text, blue text) and the editor (syntax
+  colours, selection, line numbers, indent guides, the find widget, Monaco's
+  context menu). Write down anything that reads worse, looks purple on this
+  monitor, or is too bright.
+- **H13 an imported theme** imported before the change looks as before, but
+  for the colours it left out: one Windows Terminal scheme and one Ghostty
+  file.
+
+### V48 — prompt marks on the scrollbar
+
+The tracker ran against xterm's headless build and the ruler, the click, the
+find colours, the selection and the alternate screen in headless Chromium
+(tests/adversarial/prompt_marks.test.js and prompt_marks_headless.test.js);
+no shell and no WebView2 or WKWebView was involved. On a release build,
+Windows with cmd first:
+
+- **H1 cmd.** A new cmd tab: its first prompt has a mark. Run `dir` three
+  times: one mark per prompt, empty Enters included. Scroll to the top and
+  click the second mark: that prompt is on the top row.
+- **H2 clear.** `cls`, then a few commands: the marks from before `cls` are
+  gone and the new prompts have theirs. *Terminal: Clear* (`Ctrl+L` outside a
+  terminal, or the palette): one mark is left, on the prompt you are at.
+- **H3 PowerShell.** As H1 and H2 in powershell.exe and pwsh, then
+  `1..20000 | % { "line $_" }` (more than the scrollback): prompts that left
+  the top have no mark, and every mark left lands on its prompt when clicked.
+- **H4 OpenCode from cmd.** While OpenCode is up the marks and the scrollbar
+  are hidden; after it exits the old marks are back, the scrollbar shows at
+  rest again, and the new prompt has one.
+- **H5 Claude Code.** The prompt Claude Code was launched from has a mark, and
+  so has each message sent to it (blue; V49); the prompt after it exits has
+  one.
+- **H6 resize.** Drag a separator to make a cmd pane narrower, then wider, and
+  click a mark each time: it lands on its prompt. Write down any drift, in
+  rows (Windows 10 ConPTY repaints after a resize).
+- **H7 High Contrast** (Night sky and Desert): prompt marks in the Highlight
+  colour, message marks in LinkText, the box visible with its outline at rest
+  as well as with the pointer over the terminal.
+- **H8 motion.** With Windows' *Animation effects* off, and with NexTerm's
+  reduced-motion setting: the box is shown at rest and nothing fades; on a
+  full-screen program it is hidden at once.
+- **H9 the keys.** `Ctrl+Shift+↑` / `Ctrl+Shift+↓` step through the prompts in
+  cmd and in PowerShell (PSReadLine keeps its own keys otherwise); in OpenCode
+  the keys reach OpenCode. Rebind one in Settings ▸ Keyboard and try again.
+- **H10 restore.** Restart with Restore Scrollback on: the restored text has no
+  marks; the new shell's prompts, below the separator, do.
+- **H11 the setting.** Settings ▸ Terminal ▸ *Prompt Marks on Scrollbar* off
+  and on: the marks go and come back at once, and the text does not reflow
+  (the column count in the status bar or `mode con` stays the same).
+- **H12 four terminals flooding** (the V43 scenario) with marks on: no freeze,
+  typing still answers, and the marks are on their prompts afterwards.
+
+On macOS with zsh: H1, H2 and H9 with `⌘⇧↑` / `⌘⇧↓`; a two-line prompt, with
+starship or powerlevel10k: write down which line of it each mark is on, over a
+few prompts (the first line, or the empty line above it, when the prompt is
+drawn after the signal; the line you type on when both come together;
+prompt_marks.test.js PRM-26); and that the box shows at rest in WKWebView,
+brighter on hover.
+
+### V49 — Claude Code's messages on the scrollbar, and the scrollbar at rest
+
+The rules were built from Claude Code 2.1.327 recorded in a pty
+(tests/adversarial/fixtures/claude_code/, replayed in
+agent_message_marks.test.js) and checked in headless Chromium
+(prompt_marks_headless.test.js PMB-14 to PMB-21); no real Claude Code ran in
+a NexTerm build. On a release build with real Claude Code, Windows first
+(cmd and PowerShell), then macOS:
+
+- **C1 the variable.** In a new terminal, `echo %CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN%`
+  (cmd) or `$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` (PowerShell) prints
+  `1`. `claude` starts on the normal screen, and its conversation scrolls with
+  the wheel and with the slider.
+- **C2 the marks.** Send a short message, a Korean message long enough to
+  wrap, and a pasted multi-line block: each has a blue mark on its `❯` row,
+  the input box never has one, a click on each puts that message on the top
+  row, and `Ctrl+Shift+↑` / `Ctrl+Shift+↓` step through the messages and the
+  launch prompt in order.
+- **C3 while it works.** A message sent while Claude Code is still working,
+  with a todo list or tool progress visible above the box, is marked when it
+  shows in the transcript, with no stray mark. Write down any such message
+  that gets no mark.
+- **C4 commands.** `/model`, `/help` and an empty Enter: write down what is
+  marked.
+- **C5 redraws.** Make the pane narrower and wider, maximise the window,
+  `Ctrl+O` and back, `/compact`, `/clear`: write down whether the marks still
+  land on their messages, and any duplicates or drift. Then resize the pane
+  while a message waits for its echo (sent while Claude Code works, not yet in
+  the transcript): write down whether it gets its mark once it shows.
+- **C6 exit.** `/exit`: the marks stay, the next shell prompt has its mark,
+  and a second `claude` run is marked as well.
+- **C7 the setting.** Settings ▸ Terminal ▸ *Claude Code on the Normal Screen*
+  off: in a new terminal the variable is absent, Claude Code runs fullscreen,
+  and there are no marks. With the setting on and the variable set to `0` by
+  you before NexTerm starts: write down what Claude Code does.
+- **C8 /tui.** `/tui fullscreen` with the setting on: write down the result.
+- **C9 flicker.** A long streamed answer, compared with fullscreen: acceptable
+  or not.
+- **C10 restore.** Restart with Restore Scrollback on: the restored text has
+  no marks, and new messages do.
+- **C11 WSL.** `wsl`, then `claude` there: the variable arrives (`echo
+  $CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`) and the scrollback works; no marks
+  are expected.
+- **C12 OpenCode**: see V50 (mini mode). With *OpenCode in Mini Mode* off
+  it is as in v0.30.0: the keys reach it, and the scrollbar is hidden while
+  it is up.
+- **C13 High Contrast and motion.** The box is visible at rest with its
+  outline, and the two kinds of marks can be told apart; with reduced motion
+  nothing fades.
+- **The right-hand strip.** The scrollbar now takes the pointer in the right
+  10 px of a terminal on the normal screen at all times: start a selection
+  drag there, and click there in a program that reports the mouse on the
+  normal screen (for example `fzf --height=40%`): write down whether the drag
+  selects text and the click reaches the program, or the scrollbar takes them.
+
+On macOS: C1 to C6 with `⌘⇧↑` / `⌘⇧↓`, and the box at rest in WKWebView.
+
+### V50 — OpenCode in mini mode, and its messages on the scrollbar
+
+The rules were built from opencode-ai 1.18.34 (V1) recorded in a pty
+(tests/adversarial/fixtures/opencode_mini/, replayed in
+opencode_mini_marks.test.js); no real OpenCode ran in a NexTerm build. On a
+release build with real OpenCode V1, Windows first, then macOS:
+
+- **O1 the start.** New OpenCode Terminal types `opencode --mini --no-replay`;
+  mini starts on the normal screen, and the wheel and the slider scroll the
+  conversation.
+- **O2 the marks.** A short message, a Korean message long enough to wrap,
+  and a paste each get a mark on their `›` echo. The composer and the footer
+  never do, a click puts the message on the top row, and `Ctrl+Shift+↑` /
+  `Ctrl+Shift+↓` step through the messages and the shell prompts.
+- **O3 while it works.** A message sent while OpenCode works is marked when
+  its echo appears.
+- **O4 an empty line.** A message with an empty line in it (`Shift+Enter`
+  twice): write down whether it is marked.
+- **O5 resize.** Pane narrower and wider, and the window maximised: the marks
+  stay on their echoes; write down anything mini erases, and whether the
+  session survives (Windows issue #51167).
+- **O6 exit.** `/exit`: the marks stay, the session block shows, the next
+  prompt is marked, and a second run is marked too.
+- **O7 restart.** Quit NexTerm while mini runs, then Restore and Resume:
+  write down what is typed. No two terminals share a conversation, and a
+  session resumed with `-s` stays exact.
+- **O8 the setting off.** *OpenCode in Mini Mode* off: plain `opencode`, the
+  full TUI as in v0.31.0, and the keys reach OpenCode.
+- **O9 by hand.** `opencode` typed by hand gives the full TUI. `opencode
+  --mini` typed by hand is marked; resize it and write down what happens with
+  replay on.
+- **O10 notifications.** A turn that finishes, and a permission request,
+  while the window is unfocused: write down whether a toast shows, in mini
+  and in the full TUI (the v0.28.1 report).
+- **O11 themes.** Another OpenCode theme (a light one): the echoes are still
+  marked; write down their colour.
+- **O12 `-s` resume.** Write down whether mini prints earlier messages; none
+  of them gets a mark. Then Resume again, type a message and press Enter
+  right away, before mini has drawn: write down any mark on the history
+  (none is expected; that message itself may get none).
+- **O13 other versions.** If possible, an OpenCode older than 1.17.10, or V2:
+  NexTerm types plain `opencode`.
+  - **O13a upgraded mid-run.** Start OpenCode once, then upgrade or replace
+    opencode while NexTerm runs (to V2, if possible) and start it again: the
+    answer is kept for the run, so NexTerm still types the flags it chose
+    first. Write down what that opencode does; after a NexTerm restart, or
+    with the setting off, it gets plain `opencode`.
+  - **O13b a folder-pinned version.** In a folder where nvm, mise, asdf or
+    volta (or a PowerShell alias) gives another opencode than the login
+    PATH: write down `opencode --version` there and what NexTerm types.
+
+On macOS: O1 to O3, O6, O8 and O10 with `⌘⇧↑` / `⌘⇧↓`.
+
+### V51 — open files belong to terminal groups (editor placement, part B)
+
+The store and the restore are covered by tests/adversarial/workbench_*.test.js
+under Node. Nothing there runs in a real webview or a real upgrade. On a
+release build, Windows first, then macOS:
+
+- **B1 per-group files.** Open two files in Group 1, make Group 2, open a
+  third file there. Switching groups shows only that group's files, and a
+  group with none shows no editor area. Switching back shows the first two
+  again, with the caret, scroll and undo where they were.
+- **B2 reveal in another group.** In Group 2, click one of Group 1's files in
+  the Explorer: Group 1 comes on screen, showing it, and no second tab opens.
+  The same holds for Go to File (`⌘P` / `Ctrl+P`), a search result and a
+  file link in a terminal.
+- **B3 group close.** Type in a file of Group 2 without saving, then close
+  Group 2. The prompt names the file. Cancel leaves the group, its files and
+  its terminals running. Don't Save closes them. Save writes the file, then
+  closes the group.
+- **B4 relaunch.** Two groups, files split in two editor panes in one of
+  them, custom pane sizes: quit and start again. Every terminal, every file,
+  its group, its pane, the sizes and the active file come back.
+- **B5 upgrade.** With files open in v0.32.0, install this build over it.
+  Every terminal comes back as it was. Every file comes back in the active
+  group, above its terminals, with its splits.
+- **B6 Restore Open Files off.** Settings ▸ Editor ▸ Restore Open Files off,
+  quit, start again: no file comes back, and the terminals do.
+- **B7 the webview.** Drag an editor tab within its strip, onto another
+  editor pane, and onto a pane's edge; drag a terminal tab the same way. Both
+  behave as in v0.32.0. Then switch groups and type Hangul in a file with the
+  IME: the composition is not lost or doubled.
+- **B8 downgrade.** Run v0.32.0 again on what this build saved: every terminal
+  and every file comes back. Only which group each file was in is lost.
+- **B9 last terminal.** Close the last terminal of a group that holds files:
+  the group stays, its terminal area shows "No terminal in this pane" with a
+  New Terminal button, and it comes back that way after a relaunch.
+
+### V52 — editors and terminals in one layout (editor placement, part C)
+
+Covered under Node by tests/adversarial/workbench_*.test.js and in headless
+Chromium by workbench_drag_headless, workbench_focus_headless and
+editor_models_headless. Nothing there runs in WebView2 or WKWebView, with a
+real OpenCode/cmd session or the Korean IME. On a release build, each check on
+**Windows** (WebView2: cmd, OpenCode, Korean IME) **and on macOS** (WKWebView):
+
+1. **V52-1:** With only terminals, open a file from EXPLORER. It opens above the terminals at about 60/40 in the same area. There is no separate editor area and no Maximize Panel button.
+2. **V52-2:** Drag a file tab onto the left, right, top and bottom edge of a terminal pane. The indicator names the edge, and the drop splits there. The terminal keeps its scrollback and a running OpenCode/cmd session without a restart.
+3. **V52-3:** Drag a terminal tab onto each edge of an editor pane. Over the editor's tab strip, and over the middle of the other kind's pane, only edges are offered, and releasing on the strip changes nothing.
+4. **V52-4:** Drag a file tab onto another group's chip. The file moves there.
+5. **V52-5:** Type in a file, move it beside a terminal, then Ctrl+Z. The text is restored and the cursor is where it was. Korean IME composition in Monaco works after the move.
+6. **V52-6:** Click an editor, then a terminal. Exactly one accent line is shown. Ctrl+S saves the file when the editor is active. Ctrl+W in an editor closes the file tab (with a prompt if it is unsaved); on the last tab the pane goes; in a terminal, Ctrl+W closes the pane. Ctrl+F opens Monaco's find in an editor and the terminal find bar in a terminal. Ctrl+Alt+D (Windows) or ⌘D outside Monaco (macOS) splits the editor into an empty editor pane; ⌘D inside Monaco still adds the next match.
+7. **V52-7:** Focus Next/Previous Pane goes through editors and terminals, and typing goes to the focused one (nothing typed after landing on a file reaches the shell).
+8. **V52-8:** Toggle Pane Zoom on an editor hides every other pane. Unzoom restores the sizes. The keyboard stays in the zoomed pane. Two more checks, on both release builds: (a) Inside Monaco, press the zoom chord (Ctrl+Shift+Enter on Windows, ⌘⇧Enter on macOS). It inserts a line above and does not zoom: the native menu's accelerator must not take the key first. (b) With the keyboard in a file, run Toggle Pane Zoom from the command palette, then run it again. The file pane zooms and unzooms, and each time the keyboard stays in its editor: what you type goes into the file.
+9. **V52-9:** Resize the split between an editor and a terminal, then relaunch. Sizes, files per pane, the active pane and the active group come back.
+10. **V52-10:** In a small window (1024x640 or a half-screen snap) with 6 panes, no pane collapses, and every terminal keeps its strip and about 3 rows.
+11. **V52-11:** Toggle Terminal Panel hides the files too. Opening a file from EXPLORER while it is hidden shows the area again.
+12. **V52-12:** Move the Terminal view to the right side bar. The editors move with it and keep undo.
+13. **V52-13:** With an unsaved file in a group that is not on screen, Quit or close the window. One visible prompt appears, and Don't Save quits.
+14. **V52-14:** Upgrade from v0.32.0 with saved files and terminals. Everything comes back, with the files above the terminals.
+15. **V52-15:** A drag that starts on a tab and passes over Monaco text or an xterm selects no text and still lands.
+16. **V52-16:** (Q-C1, option A) In a group with files, close its last terminal. 'No terminal in this pane' with New Terminal remains, without a Close button.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

@@ -159,7 +159,7 @@ export function PaneFrame({ active, unread, flash }) {
         <div
           aria-hidden="true"
           data-active-pane=""
-          className={cn(FRAME_LINE, 'inset-0 ring-1 ring-inset ring-vsc-focus')}
+          className={cn(FRAME_LINE, 'inset-0 ring-1 ring-inset ring-vsc-accent')}
         />
       )}
       {unread && (

@@ -72,8 +72,8 @@ export function ChordRecorder({ title, refusal, refusalId, onKeyDown, onBlur }) 
       onKeyDown={onKeyDown}
       onBlur={onBlur}
       className={cn(
-        'w-[150px] bg-vsc-input border rounded-sm px-2 py-0.5 text-ui-sm text-vsc-fg outline-none',
-        refusal ? 'border-vsc-error' : 'border-vsc-focus'
+        'ui-field w-[150px] px-2 py-0.5 text-ui-sm text-vsc-fg',
+        refusal && 'ui-field-invalid'
       )}
     />
   );

@@ -23,6 +23,7 @@ import {
   readFailureIsFinal,
   whenTabsRestored,
 } from '../../src/stores/editorStore.js';
+import { setEditorLayout, editorTree, editorPane, setEditorPaneTabIds } from '../e2e/harness/workbench.js';
 import { collapseDots } from '../../src/lib/paths.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { useSystemStore } from '../../src/stores/systemStore.js';
@@ -83,13 +84,12 @@ function emptyStore() {
     rootPath: '/workspace',
     rootResolved: false,
     expandedFolders: new Set(),
-    editorSplitTree: emptyTree(),
-    activeEditorPaneId: 'editor-pane-root',
     pendingClose: null,
     pendingOverwrite: null,
     openFailure: null,
     pendingReveal: null,
   });
+  setEditorLayout();
 }
 
 /**
@@ -146,7 +146,7 @@ function storeRaw(data, version = SCHEMA_VERSION) {
 }
 
 const st = () => E.getState();
-function leaves(node = st().editorSplitTree, acc = []) {
+function leaves(node = editorTree(), acc = []) {
   if (node.type === 'leaf') acc.push(node);
   else node.children.forEach((child) => leaves(child, acc));
   return acc;
@@ -158,7 +158,7 @@ function picture() {
   const ls = leaves();
   return {
     groups: ls.map((leaf) => ({ files: leaf.tabIds.map(pathOf), shown: pathOf(leaf.activeTabId) })),
-    activeGroup: ls.findIndex((leaf) => leaf.id === st().activeEditorPaneId),
+    activeGroup: ls.findIndex((leaf) => leaf.id === editorPane()),
     activeFile: pathOf(st().activeTabId),
   };
 }
@@ -326,8 +326,8 @@ describe('Editor tabs come back per folder', () => {
     await relaunch(A);
 
     assert.deepEqual(picture(), before, 'the editor did not come back as it was');
-    assert.equal(st().editorSplitTree.type, 'split');
-    assert.equal(st().editorSplitTree.direction, 'horizontal');
+    assert.equal(editorTree().type, 'split');
+    assert.equal(editorTree().direction, 'horizontal');
     assert.equal(tabOf(c).content, '// c.js on disk\n', 'a restored tab holds the file as it is on disk');
     assert.equal(tabOf(c).isDirty, false);
     assert.equal(st().openFailure, null);
@@ -417,7 +417,7 @@ describe('Editor tabs come back per folder', () => {
     assert.deepEqual(picture().groups, [{ files: [a], shown: a }], 'the groups were not cut down to what still opens');
     assert.equal(st().tabs.length, 1);
     assert.equal(st().activeTabId, tabOf(a).id, 'the active tab went with a skipped file and nothing replaced it');
-    assert.equal(st().activeEditorPaneId, leaves()[0].id);
+    assert.equal(editorPane(), leaves()[0].id);
     assert.equal(st().openFailure, null, 'a skipped file put up a notice');
     assert.equal(warnings.length, 1, `expected one quiet line, got ${JSON.stringify(warnings)}`);
     for (const name of ['x.js', 'y.js', 'z.bin']) assert.ok(warnings[0].includes(name), `the line does not name ${name}`);
@@ -436,8 +436,8 @@ describe('Editor tabs come back per folder', () => {
 
     const warnings = await warningsDuring(() => relaunch(A));
 
-    assert.deepEqual(st().editorSplitTree, emptyTree());
-    assert.equal(st().activeEditorPaneId, 'editor-pane-root');
+    assert.deepEqual(editorTree(), emptyTree());
+    assert.equal(editorPane(), 'editor-pane-root');
     assert.equal(st().activeTabId, null);
     assert.equal(st().openFailure, null);
     assert.equal(warnings.length, 1);
@@ -768,7 +768,7 @@ describe('Editor tabs come back per folder', () => {
         { id: 't3', filePath: `${A}/3.js` },
         { id: 'orphan', filePath: `${A}/orphan.js` }, // in no group
       ],
-      editorSplitTree: {
+      editorTree: {
         type: 'split',
         id: 's',
         direction: 'vertical',
@@ -778,7 +778,7 @@ describe('Editor tabs come back per folder', () => {
           { type: 'leaf', id: 'p3', tabIds: ['t3'], activeTabId: 't3' },
         ],
       },
-      activeEditorPaneId: 'p3',
+      editorPane: 'p3',
       activeTabId: 't3',
     };
     const recency = { t1: 1, t2: 2, t3: 3 };
@@ -799,7 +799,7 @@ describe('Editor tabs come back per folder', () => {
       misses: {},
     });
     assert.deepEqual(normalizeSession(JSON.parse(JSON.stringify(session))), session, 'what is saved does not read back');
-    assert.equal(serializeSession({ ...state, editorSplitTree: emptyTree() }), null, 'nothing open is no session');
+    assert.equal(serializeSession({ ...state, editorTree: emptyTree() }), null, 'nothing open is no session');
     assert.equal(serializeSession({ ...state, rootPath: null }), null, 'no folder is no session');
 
     let n = 0;
@@ -1062,8 +1062,8 @@ describe('Editor tabs come back per folder', () => {
         { id: 't1', filePath: 'C:\\Proj\\a.js' },
         { id: 't2', filePath: 'C:\\Proj\\A.JS' },
       ],
-      editorSplitTree: { type: 'leaf', id: 'p', tabIds: ['t1', 't2'], activeTabId: 't2' },
-      activeEditorPaneId: 'p',
+      editorTree: { type: 'leaf', id: 'p', tabIds: ['t1', 't2'], activeTabId: 't2' },
+      editorPane: 'p',
       activeTabId: 't2',
     };
     const recency = (id) => (id === 't2' ? 2 : 1);
@@ -1161,7 +1161,7 @@ describe('Editor tabs come back per folder', () => {
       activeGroup: 1,
       activeFile: b,
     });
-    assert.equal(st().activeEditorPaneId, right);
+    assert.equal(editorPane(), right);
     assert.equal(st().pendingReveal, null, 'the keyboard was asked for, though it was not in the editor');
   });
 
@@ -1280,11 +1280,11 @@ describe('Editor tabs come back per folder', () => {
       reads.releaseAll();
       await whenTabsRestored();
 
-      assert.equal(st().editorSplitTree.type, 'leaf', 'the group the user was typing in was replaced');
-      assert.equal(st().editorSplitTree.id, 'editor-pane-root');
-      assert.equal(st().activeEditorPaneId, 'editor-pane-root');
+      assert.equal(editorTree().type, 'leaf', 'the group the user was typing in was replaced');
+      assert.equal(editorTree().id, 'editor-pane-root');
+      assert.equal(editorPane(), 'editor-pane-root');
       assert.equal(st().activeTabId, mine.id, 'the tab being typed in is no longer the active one');
-      assert.equal(st().editorSplitTree.activeTabId, mine.id, 'its group no longer shows it');
+      assert.equal(editorTree().activeTabId, mine.id, 'its group no longer shows it');
       assert.deepEqual(picture().groups[0].files, [u, a, b], 'the restored tabs did not join its group, in the saved order');
       assert.equal(tabOf(u).content, 'abc');
       assert.deepEqual(st().pendingReveal, { filePath: u, line: null, column: null }, 'the keyboard was not handed back');
@@ -1361,7 +1361,11 @@ describe('Editor tabs come back per folder', () => {
     st().setActiveEditorPane(leaves()[0].id);
     flush();
 
-    assert.deepEqual(stored()[0].tree, saved, 'the files not read were saved somewhere else');
+    // `pane` (sibling B) names the workbench leaf the files were in; this
+    // suite restores no terminal layout, so the leaves are new ones now.
+    const withoutPane = (node) =>
+      node.type === 'leaf' ? (({ pane: _pane, ...rest }) => rest)(node) : { ...node, children: node.children.map(withoutPane) };
+    assert.deepEqual(withoutPane(stored()[0].tree), withoutPane(saved), 'the files not read were saved somewhere else');
     assert.deepEqual(stored()[0].misses, { [k1]: 1, [k2]: 1, [k3]: 1 });
   });
 
@@ -1451,10 +1455,8 @@ describe('Editor tabs come back per folder', () => {
 
       // Two tabs on one file in two cases, however they came about: saved once.
       const extra = { ...tabOf(a), id: 'tab-upper', filePath: upper };
-      E.setState((state) => ({
-        tabs: [...state.tabs, extra],
-        editorSplitTree: { ...state.editorSplitTree, tabIds: [...state.editorSplitTree.tabIds, extra.id] },
-      }));
+      E.setState((state) => ({ tabs: [...state.tabs, extra] }));
+      setEditorPaneTabIds((tabIds) => [...tabIds, extra.id]);
       flush();
       assert.equal(stored()[0].recent.length, 1, 'one file saved twice');
 
@@ -1534,10 +1536,9 @@ describe('Editor tabs come back per folder', () => {
       rootPath: '/workspace',
       rootResolved: true,
       expandedFolders: new Set(['/workspace']),
-      editorSplitTree: emptyTree(),
-      activeEditorPaneId: 'editor-pane-root',
       openFailure: null,
     });
+    setEditorLayout();
     assert.equal(st().tabs.length, 0);
   });
 });

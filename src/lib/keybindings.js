@@ -42,6 +42,16 @@ import { chordFromEvent, chordMatches, displayChord, parseChord, stringifyChord 
  * - `windowsOnly`  in force on Windows alone — off it, never run and never
  *                  reported as taking a chord (`findConflicts`).
  */
+/**
+ * Whether the prompt commands take their key: a terminal has focus and the
+ * registry claims the keys for it (`ctx.terminalClaimsMarkKeys`,
+ * `terminalClaimsMarkKeys` in terminalRegistry.js) — today, while it shows
+ * its normal buffer.
+ */
+function promptKeysClaimed(ctx) {
+  return Boolean(ctx?.isInTerminal) && Boolean(ctx?.terminalClaimsMarkKeys?.());
+}
+
 export const COMMANDS = {
   'quick-open': {
     title: 'Go to File…',
@@ -100,7 +110,12 @@ export const COMMANDS = {
   },
   'close-pane': {
     title: 'Close Pane',
-    passThrough: (ctx) => ctx.isInMonacoEditor,
+    // Claimed inside Monaco too (the human's Q5, editor placement C2): there
+    // it closes the file tab the pane shows, asking first when it is
+    // unsaved — Monaco binds nothing to ⌘W / Ctrl+W, and stepping aside left
+    // the key to the browser. Which pane and which kind is decided in
+    // workbenchCommands.js (`closeActive`), the keyboard's place first, so
+    // the key pressed in a file never closes a shell.
     run: (ctx) => ctx.closeActivePane?.(),
   },
   'focus-next-pane': {
@@ -216,6 +231,29 @@ export const COMMANDS = {
     title: 'Clear Terminal',
     run: (ctx) => ctx.clearTerminal?.(),
   },
+  // The prompt marks on the scrollbar, from the keyboard (promptMarks.js):
+  // the newest mark above the top row, or the first one below it, scrolled
+  // to the top — a shell prompt or a message sent to Claude Code
+  // (agentMessageMarks.js), whichever is nearer. Claimed over a focused terminal, since that is the only place
+  // they mean anything, and only while it shows its normal buffer: in vim,
+  // less or OpenCode the key is the program's. Anywhere else the key is let
+  // through too — ⌘⇧↑ selects to the top of a text field on macOS. Matched
+  // all the same, so a chord given to another command is still reported as
+  // taken (`findConflicts`). Palette commands; menu.rs has no entry for them.
+  'terminal-previous-prompt': {
+    title: 'Terminal: Go to Previous Prompt',
+    menuId: null,
+    overTerminal: true,
+    passThrough: (ctx) => !promptKeysClaimed(ctx),
+    run: (ctx) => ctx.jumpToPrompt?.('previous'),
+  },
+  'terminal-next-prompt': {
+    title: 'Terminal: Go to Next Prompt',
+    menuId: null,
+    overTerminal: true,
+    passThrough: (ctx) => !promptKeysClaimed(ctx),
+    run: (ctx) => ctx.jumpToPrompt?.('next'),
+  },
   'search-in-files': {
     title: 'Search in Files',
     // The terminal has no use for ⇧⌘F, and off macOS Ctrl+Shift+F is not a
@@ -285,6 +323,10 @@ export const COMMANDS = {
     // shortcuts a user can now change in Settings. On macOS nothing is given
     // up — ⌘ never reaches the pty.
     overTerminal: true,
+    // Inside Monaco the key is Monaco's own find (editor placement C2,
+    // FC10). Anywhere else it is the active pane's: a file pane's Monaco
+    // find, a terminal pane's find bar (workbenchCommands.js `findActive`).
+    passThrough: (ctx) => ctx.isInMonacoEditor,
     run: (ctx) => ctx.openFind?.(),
   },
   'zoom-in': {
@@ -400,6 +442,9 @@ export const DEFAULT_KEYBINDINGS = [
   { command: 'toggle-secondary', key: 'mod+alt+b' },
   { command: 'toggle-sidebar', key: 'mod+b' },
   { command: 'clear-terminal', key: 'mod+l' },
+  // Ctrl+Shift+Up/Down, ⌘⇧↑/↓ on macOS (the human's choice, 2026-11-18).
+  { command: 'terminal-previous-prompt', key: 'mod+shift+up' },
+  { command: 'terminal-next-prompt', key: 'mod+shift+down' },
   { command: 'search-in-files', key: 'mod+shift+f' },
   { command: 'command-history', key: 'mod+shift+h' },
   // U for unread. Mark All Notifications Read has no chord: it is one click
@@ -751,6 +796,9 @@ export function dispatchKeydownCapture(e, ctx) {
 export function dispatchKeydownOverTerminal(e, ctx) {
   const binding = findBinding(e, ctx);
   if (!binding?.spec?.overTerminal) return null;
+  // Matched, but the terminal's program keeps the key (the prompt commands
+  // on the alternate screen): neither swallowed nor stopped.
+  if (binding.spec.passThrough?.(ctx, binding)) return `pass:${binding.command}`;
   if (binding.spec.preventDefault !== false) e.preventDefault();
   // The point of running in capture: xterm must not also see this and turn it
   // into a control byte.

@@ -53,6 +53,9 @@ const STAND_INS = {
     export const useSystemStore = create(() => ({ os: 'macos', defaultShell: '/bin/zsh' }));`,
   terminalStore: `
     import { create } from 'zustand';
+    // What workspaceFocus.js asks of a group (editor placement C2): terminal-only here.
+    export const activePaneOf = (group) => group?.activePaneId ?? null;
+    export const activeKindOf = () => 'terminal';
     export const useTerminalStore = create((set, get) => ({
       tabs: [],
       activeTabId: null,
@@ -264,7 +267,7 @@ describe('Run dialog, mounted: the terminal it was opened over', () => {
       assert.equal(typeButton(p).textContent, 'Type');
       assert.ok(runButton(p).hasAttribute('disabled'), 'Run (with Enter) into a terminal already open');
       assert.match(p.document.querySelector('[data-run-mode]').textContent, /typed and left for you to press Enter — NexTerm cannot be sure its prompt is empty/);
-      assert.match(typeButton(p).getAttribute('class'), /bg-vsc-accent/, 'Type is not the button to press');
+      assert.match(typeButton(p).getAttribute('class'), /bg-vsc-accent-solid/, 'Type is not the button to press');
       await letItRun(560);
       p.document.querySelector('[id="project-blank-who"]').focus();
       p.keydown('Enter');

@@ -347,6 +347,13 @@ fn leading_line_len(data: &[u8]) -> usize {
 /// (kitty's) or `osc9` (iTerm2's).
 const OPENTUI_NOTIFICATION_PROTOCOL: &str = "OPENTUI_NOTIFICATION_PROTOCOL";
 
+/// The variable that keeps Claude Code on the terminal's normal screen (its
+/// classic renderer), so its conversation goes to the scrollback, scrolls
+/// with the scrollbar and has a mark for every message sent
+/// (src/lib/agentMessageMarks.js). Per Claude Code's docs it wins over
+/// `CLAUDE_CODE_NO_FLICKER` and its `tui` setting.
+const CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: &str = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN";
+
 /// What NexTerm adds to the environment a shell inherits from the app.
 ///
 /// A function of its own so that a test can start a real shell with exactly
@@ -369,7 +376,14 @@ const OPENTUI_NOTIFICATION_PROTOCOL: &str = "OPENTUI_NOTIFICATION_PROTOCOL";
 /// None of the three is ever inherited: a NexTerm started from inside
 /// another's terminal (`tauri dev`, say) would otherwise hand its shells the
 /// other's address and token, and with the API off they would talk to it.
-fn set_session_env(cmd: &mut CommandBuilder, control: Option<&SessionEnv>) {
+///
+/// With `claude_normal_screen` (Settings ▸ Terminal ▸ Claude Code on the
+/// Normal Screen, on unless turned off) `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`
+/// as well, unless the shell would inherit a variable of that name already —
+/// any value, the empty one too, and on Windows in any case: the user's own
+/// wins. When NexTerm sets it on Windows, `WSLENV` gains its name once,
+/// whether or not the control API is on, so `wsl` passes it on.
+fn set_session_env(cmd: &mut CommandBuilder, control: Option<&SessionEnv>, claude_normal_screen: bool) {
     // ConPTY (Windows) ignores TERM/COLORTERM; harmless to set anyway.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -403,6 +417,18 @@ fn set_session_env(cmd: &mut CommandBuilder, control: Option<&SessionEnv>) {
     // already: one the user made wins.
     if cmd.get_env(OPENTUI_NOTIFICATION_PROTOCOL).is_none() {
         cmd.env(OPENTUI_NOTIFICATION_PROTOCOL, "osc99");
+    }
+
+    // Claude Code draws on the alternate screen by default, where a terminal
+    // keeps no scrollback: nothing to scroll back to, no slider, no marks.
+    // This asks it for the normal screen, unless the user chose already.
+    if claude_normal_screen && cmd.get_env(CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).is_none() {
+        cmd.env(CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, "1");
+        #[cfg(windows)]
+        {
+            let wslenv = cmd.get_env("WSLENV").map(|v| v.to_string_lossy().into_owned());
+            cmd.env("WSLENV", control::wslenv_with_names(wslenv.as_deref(), &[CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN]));
+        }
     }
 
     // Opened from the Finder, the app inherits launchd's environment, which
@@ -573,6 +599,7 @@ impl PtyManager {
         rows: u16,
         cwd: Option<String>,
         shell: Option<String>,
+        claude_normal_screen: bool,
     ) -> Result<PtySessionInfo, String> {
         let session_id = format!("pty-{}", self.counter.fetch_add(1, Ordering::SeqCst));
         let shell_path = Self::resolve_shell(shell.as_deref());
@@ -592,7 +619,7 @@ impl PtyManager {
         }
         let control_env = self.control.as_ref().and_then(|c| c.issue(&session_id));
         let issued = IssuedToken { control: self.control.as_deref().filter(|_| control_env.is_some()), session_id: &session_id };
-        set_session_env(&mut cmd, control_env.as_ref());
+        set_session_env(&mut cmd, control_env.as_ref(), claude_normal_screen);
         let integration = shell_integration::for_shell(&shell_path);
         for (key, value) in integration.env {
             cmd.env(key, value);
@@ -1105,8 +1132,8 @@ mod tests {
         let body = &src[src.find("    pub fn spawn(").expect("spawn is gone")..];
         let body = &body[..body.find("\n    pub fn write(").expect("write is gone")];
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("spawn no longer has {needle:?}"));
-        assert!(at("c.issue(&session_id)") < at("set_session_env(&mut cmd, control_env.as_ref())"));
-        assert!(at("let issued = IssuedToken { control: self.control.as_deref()") < at("set_session_env(&mut cmd, control_env.as_ref())"));
+        assert!(at("c.issue(&session_id)") < at("set_session_env(&mut cmd, control_env.as_ref(), claude_normal_screen)"));
+        assert!(at("let issued = IssuedToken { control: self.control.as_deref()") < at("set_session_env(&mut cmd, control_env.as_ref(), claude_normal_screen)"));
         // Kept only once the session is where `kill` will find it.
         assert!(at(".insert(session_id.clone(), session.clone())") < at("issued.kept()"));
         assert!(at("issued.kept()") < at("let reader_thread"));
@@ -2048,7 +2075,7 @@ mod session_env_tests {
     fn opencode_is_told_to_notify_with_osc_99() {
         let mut cmd = CommandBuilder::new("sh");
         cmd.env_remove(OPENTUI_NOTIFICATION_PROTOCOL);
-        set_session_env(&mut cmd, None);
+        set_session_env(&mut cmd, None, true);
         assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc99"));
     }
 
@@ -2058,7 +2085,7 @@ mod session_env_tests {
         for inherited in ["osc9", "osc99", "", "something-newer"] {
             let mut cmd = CommandBuilder::new("sh");
             cmd.env("OPENTUI_NOTIFICATION_PROTOCOL", inherited);
-            set_session_env(&mut cmd, None);
+            set_session_env(&mut cmd, None, true);
             assert_eq!(
                 value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(),
                 Some(inherited),
@@ -2073,14 +2100,113 @@ mod session_env_tests {
             let mut cmd = CommandBuilder::new("cmd.exe");
             cmd.env_remove(OPENTUI_NOTIFICATION_PROTOCOL);
             cmd.env("opentui_notification_protocol", "osc9");
-            set_session_env(&mut cmd, None);
+            set_session_env(&mut cmd, None, true);
             assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc9"));
         }
+    }
+
+    const CLAUDE: &str = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN";
+
+    #[test]
+    fn claude_code_is_asked_for_the_normal_screen_when_nothing_is_inherited() {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.env_remove(CLAUDE);
+        set_session_env(&mut cmd, None, true);
+        assert_eq!(value(&cmd, CLAUDE).as_deref(), Some("1"));
+        // The control API on or off makes no difference.
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.env_remove(CLAUDE);
+        set_session_env(&mut cmd, Some(&super::control_env_tests::given()), true);
+        assert_eq!(value(&cmd, CLAUDE).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_claude_code_choice_the_shell_inherits_is_left_exactly_as_it_is() {
+        // Empty and "0" are choices too: whatever Claude Code makes of them.
+        for inherited in ["1", "0", "", "false"] {
+            for control in [None, Some(super::control_env_tests::given())] {
+                let mut cmd = CommandBuilder::new("sh");
+                cmd.env(CLAUDE, inherited);
+                let wslenv = value(&cmd, "WSLENV");
+                set_session_env(&mut cmd, control.as_ref(), true);
+                assert_eq!(value(&cmd, CLAUDE).as_deref(), Some(inherited), "{CLAUDE}={inherited:?} did not survive");
+                if control.is_none() {
+                    assert_eq!(value(&cmd, "WSLENV"), wslenv, "WSLENV untouched for an inherited value");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_the_setting_off_the_variable_is_not_set_and_an_inherited_one_is_untouched() {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.env_remove(CLAUDE);
+        let wslenv = value(&cmd, "WSLENV");
+        set_session_env(&mut cmd, None, false);
+        assert_eq!(value(&cmd, CLAUDE), None);
+        assert_eq!(value(&cmd, "WSLENV"), wslenv, "WSLENV untouched");
+        for inherited in ["1", "0", ""] {
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.env(CLAUDE, inherited);
+            set_session_env(&mut cmd, None, false);
+            assert_eq!(value(&cmd, CLAUDE).as_deref(), Some(inherited));
+        }
+        // Still told nothing about it, OpenCode's protocol is set as before.
+        assert_eq!(value(&cmd, "OPENTUI_NOTIFICATION_PROTOCOL").as_deref(), Some("osc99"));
+    }
+
+    /// Windows: a name spelt in lower case is the same variable and wins; a
+    /// value NexTerm sets goes to WSL through `WSLENV`, named there once.
+    #[cfg(windows)]
+    #[test]
+    fn windows_a_lower_case_name_wins_and_wslenv_names_it_once() {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env_remove(CLAUDE);
+        cmd.env("claude_code_disable_alternate_screen", "0");
+        cmd.env_remove("WSLENV");
+        set_session_env(&mut cmd, None, true);
+        assert_eq!(value(&cmd, CLAUDE).as_deref(), Some("0"));
+        assert_eq!(value(&cmd, "WSLENV"), None, "nothing set, nothing for WSL");
+
+        // Control off: only this name.
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env_remove(CLAUDE);
+        cmd.env_remove("WSLENV");
+        set_session_env(&mut cmd, None, true);
+        assert_eq!(value(&cmd, "WSLENV").as_deref(), Some(CLAUDE));
+
+        // Control on: after the API's two names.
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env_remove(CLAUDE);
+        cmd.env_remove("WSLENV");
+        set_session_env(&mut cmd, Some(&super::control_env_tests::given()), true);
+        assert_eq!(
+            value(&cmd, "WSLENV").as_deref(),
+            Some("NEXTERM_CONTROL:NEXTERM_CONTROL_TOKEN:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+        );
+
+        // Listed already (a parent NexTerm, the user), in any case: not again.
+        for listed in ["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "GOPATH/l:claude_code_disable_alternate_screen/u"] {
+            let mut cmd = CommandBuilder::new("cmd.exe");
+            cmd.env_remove(CLAUDE);
+            cmd.env("WSLENV", listed);
+            set_session_env(&mut cmd, None, true);
+            assert_eq!(value(&cmd, "WSLENV").as_deref(), Some(listed));
+        }
+
+        // The setting off: WSLENV is what it was.
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env_remove(CLAUDE);
+        cmd.env("WSLENV", "GOPATH/l");
+        set_session_env(&mut cmd, None, false);
+        assert_eq!(value(&cmd, "WSLENV").as_deref(), Some("GOPATH/l"));
     }
 }
 
 /// What the control API gives a shell (src/control/), set up by the same
-/// code `spawn` uses.
+/// code `spawn` uses — with Claude Code's normal-screen variable left out
+/// (`false`), so each case is about the API alone; session_env_tests has the
+/// two together.
 #[cfg(test)]
 mod control_env_tests {
     use super::*;
@@ -2122,7 +2248,7 @@ mod control_env_tests {
         let mut cmd = CommandBuilder::new("sh");
         cmd.env("PATH", path_of(&[a, b]));
         cmd.env_remove("WSLENV");
-        set_session_env(&mut cmd, Some(&env));
+        set_session_env(&mut cmd, Some(&env), false);
         assert_eq!(value(&cmd, "NEXTERM_CONTROL"), Some(env.address.to_string_lossy().into_owned()));
         assert_eq!(value(&cmd, "NEXTERM_CONTROL_TOKEN"), Some(env.token.clone()));
         let cli = env.cli.clone().unwrap();
@@ -2146,7 +2272,7 @@ mod control_env_tests {
         parent(&mut cmd);
         let path = value(&cmd, "PATH");
         let wslenv = value(&cmd, "WSLENV");
-        set_session_env(&mut cmd, None);
+        set_session_env(&mut cmd, None, false);
         for key in ["NEXTERM_CONTROL", "NEXTERM_CONTROL_TOKEN", "NEXTERM_CLI"] {
             assert_eq!(value(&cmd, key), None, "{key} was left in");
         }
@@ -2156,7 +2282,7 @@ mod control_env_tests {
         // On, a parent's are replaced by this instance's own.
         let mut cmd = CommandBuilder::new("sh");
         parent(&mut cmd);
-        set_session_env(&mut cmd, Some(&given()));
+        set_session_env(&mut cmd, Some(&given()), false);
         assert_eq!(value(&cmd, "NEXTERM_CONTROL_TOKEN"), Some(given().token));
     }
 
@@ -2165,7 +2291,7 @@ mod control_env_tests {
         let env = SessionEnv { cli: None, path_dir: None, ..given() };
         let mut cmd = CommandBuilder::new("sh");
         let path = value(&cmd, "PATH");
-        set_session_env(&mut cmd, Some(&env));
+        set_session_env(&mut cmd, Some(&env), false);
         assert_eq!(value(&cmd, "NEXTERM_CLI"), None);
         assert_eq!(value(&cmd, "PATH"), path);
         assert!(value(&cmd, "NEXTERM_CONTROL").is_some() && value(&cmd, "NEXTERM_CONTROL_TOKEN").is_some());
@@ -2180,7 +2306,7 @@ mod control_env_tests {
         let env = SessionEnv { cli: Some(real.clone()), path_dir: None, ..given() };
         let mut cmd = CommandBuilder::new("sh");
         let path = value(&cmd, "PATH");
-        set_session_env(&mut cmd, Some(&env));
+        set_session_env(&mut cmd, Some(&env), false);
         assert_eq!(value(&cmd, "NEXTERM_CLI"), Some(real.to_string_lossy().into_owned()));
         assert_eq!(value(&cmd, "PATH"), path);
     }
@@ -2193,7 +2319,7 @@ mod control_env_tests {
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.env_remove("WSLENV");
         cmd.env("wslenv", "GOPATH/l:NEXTERM_CONTROL");
-        set_session_env(&mut cmd, Some(&given()));
+        set_session_env(&mut cmd, Some(&given()), false);
         assert_eq!(value(&cmd, "WSLENV").as_deref(), Some("GOPATH/l:NEXTERM_CONTROL:NEXTERM_CONTROL_TOKEN"));
     }
 }
@@ -2212,7 +2338,7 @@ mod control_env_shell_tests {
         let env = super::control_env_tests::given();
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", r#"printf 'nx=%s|%s|%s|%s=nx\n' "$NEXTERM_CONTROL" "$NEXTERM_CONTROL_TOKEN" "$NEXTERM_CLI" "${PATH%%:*}""#]);
-        set_session_env(&mut cmd, Some(&env));
+        set_session_env(&mut cmd, Some(&env), true);
         let pair = native_pty_system()
             .openpty(PtySize { rows: 24, cols: 500, pixel_width: 0, pixel_height: 0 })
             .expect("openpty");
@@ -2288,7 +2414,7 @@ mod locale_tests {
     #[test]
     fn a_shell_that_inherits_no_locale_is_given_lang_and_nothing_else() {
         let mut cmd = without_a_locale("/bin/sh");
-        set_session_env(&mut cmd, None);
+        set_session_env(&mut cmd, None, true);
         let vars = locale_vars(&cmd);
         // LANG is the weakest of the three, so a locale set by the user's own
         // rc files still wins over it.
@@ -2308,7 +2434,7 @@ mod locale_tests {
         ] {
             let mut cmd = without_a_locale("/bin/sh");
             cmd.env(key, value);
-            set_session_env(&mut cmd, None);
+            set_session_env(&mut cmd, None, true);
             assert_eq!(
                 locale_vars(&cmd),
                 vec![(key.to_string(), value.to_string())],
@@ -2366,7 +2492,7 @@ mod locale_tests {
         cmd.env("PS1", "nexterm-ready> ");
         // macOS's bash 3.2 otherwise opens with a paragraph about zsh.
         cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
-        set_session_env(&mut cmd, None);
+        set_session_env(&mut cmd, None, true);
         let lang = cmd.get_env("LANG").map(|v| v.to_string_lossy().into_owned());
 
         let pair = native_pty_system()

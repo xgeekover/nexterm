@@ -410,7 +410,12 @@ export function createControlDispatcher({
           group: groupOf.get(id)?.name ?? null,
           active: state.activeTabId === id,
           agent: agentRuns(tab) ? tab.agent.kind : null,
-          status: terminalStatus(tab, { unread: unread[id] ?? 0, progress: state.progress?.[id] ?? null }).state,
+          // Claude Code's 'working' and 'idle' by the side bar's own rule.
+          status: terminalStatus(tab, {
+            unread: unread[id] ?? 0,
+            progress: state.progress?.[id] ?? null,
+            activity: state.agentActivity?.[id] ?? null,
+          }).state,
           self: id === caller.id,
           child: kids.has(id),
         };

@@ -8,6 +8,7 @@
 
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
+import { setEditorLayout, editorTree, editorPane, EMPTY_EDITOR_ROOT } from '../e2e/harness/workbench.js';
 import { invoke, mockBridge } from '../../src/lib/ipc.js';
 
 const S = useEditorStore;
@@ -52,9 +53,8 @@ describe('Leaving while a save is still writing', () => {
       tabs: [],
       activeTabId: null,
       pendingClose: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
+    setEditorLayout();
   });
 
   test("ES-13: Don't Save on a newer prompt waits for the older prompt's Save to finish writing", async () => {
@@ -102,9 +102,8 @@ describe('Closing an editor tab with unsaved edits', () => {
       tabs: [],
       activeTabId: null,
       pendingClose: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
+    setEditorLayout();
   });
 
   test('a clean tab closes immediately', async () => {
@@ -177,7 +176,7 @@ describe('Closing an editor tab with unsaved edits', () => {
     const a = await openDirtyFile('a', 'a edited');
     const b = await openDirtyFile('b', 'b');           // clean
     const c = await openDirtyFile('c', 'c edited');
-    const paneId = S.getState().activeEditorPaneId;
+    const paneId = editorPane();
 
     S.getState().requestCloseEditorPane(paneId);
 
@@ -190,7 +189,7 @@ describe('Closing an editor tab with unsaved edits', () => {
 
   test('a group with nothing unsaved closes immediately', async () => {
     await openDirtyFile('x', 'x');
-    const paneId = S.getState().activeEditorPaneId;
+    const paneId = editorPane();
 
     S.getState().requestCloseEditorPane(paneId);
 
@@ -286,8 +285,6 @@ const emptyEditor = () => ({
   activeTabId: null,
   pendingClose: null,
   pendingOverwrite: null,
-  editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-  activeEditorPaneId: 'editor-pane-root',
 });
 
 const tabOf = (id) => S.getState().tabs.find((t) => t.id === id);
@@ -301,6 +298,7 @@ const tabOf = (id) => S.getState().tabs.find((t) => t.id === id);
 describe('Saving while typing', () => {
   beforeEach(() => {
     S.setState(emptyEditor());
+    setEditorLayout();
   });
 
   test('ES-01: what is typed while a save is under way stays unsaved, and the next save writes it', async () => {
@@ -375,6 +373,7 @@ describe('Saving while typing', () => {
 describe('Saving from the close prompt into a file that changed on disk', () => {
   beforeEach(() => {
     S.setState(emptyEditor());
+    setEditorLayout();
   });
 
   test('ES-03: the overwrite question replaces the close question — never both open at once', async () => {
@@ -436,6 +435,7 @@ describe('Opening another folder with unsaved tabs', () => {
   beforeEach(() => {
     delete mockBridge.root;
     S.setState({ ...emptyEditor(), rootPath: ROOT, expandedFolders: new Set([ROOT]) });
+    setEditorLayout();
   });
 
   test('ES-05: Open Recent asks first, and Cancel keeps the folder, the tab and the edit', async () => {
@@ -548,6 +548,7 @@ describe('Opening another folder with unsaved tabs', () => {
   test('ES-12: teardown', () => {
     delete mockBridge.root;
     S.setState({ ...emptyEditor(), rootPath: ROOT, expandedFolders: new Set([ROOT]) });
+    setEditorLayout();
     assert.equal(S.getState().rootPath, ROOT);
   });
 });

@@ -79,8 +79,6 @@ const emptyEditor = () => ({
   pendingClose: null,
   pendingOverwrite: null,
   openFailure: null,
-  editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-  activeEditorPaneId: 'editor-pane-root',
 });
 
 // ---- Opening ---------------------------------------------------------------

@@ -411,7 +411,8 @@ describe('Tab reorder UI: the slot under the pointer', () => {
   test('UI-11: a drop on a pane\'s body splits or joins by quarter, and scrolls nothing', () => {
     const { doc } = paneFixture({ ids: ['a', 'b'], chips: [box(14, 105), box(107, 196)] });
     // The body is 10..370 x 66..366.
-    assert.deepEqual(UI.dropTargetAtPoint(190, 216, doc), { paneId: 'p1', zone: 'center', row: null });
+    // Sibling C: the one hit test names the pane's kind too (mechanical).
+    assert.deepEqual(UI.dropTargetAtPoint(190, 216, doc), { paneId: 'p1', paneKind: 'terminal', zone: 'center', row: null });
     assert.equal(UI.dropTargetAtPoint(20, 216, doc).zone, 'left');
     assert.equal(UI.dropTargetAtPoint(360, 216, doc).zone, 'right');
     assert.equal(UI.dropTargetAtPoint(190, 356, doc).zone, 'bottom');

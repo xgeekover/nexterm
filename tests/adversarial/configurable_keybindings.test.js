@@ -542,7 +542,9 @@ describe('Configurable keybindings: what the old recorder left behind', () => {
   // through in the editor came before the reload guard — and in the editor
   // the key went on, and WebView2 reloaded the page.
   test('CK-30: a key a command lets through in the editor still never reloads the page', () => {
-    const { bindings } = resolveKeybindings({ 'close-pane': 'f5' });
+    // Find, not Close Pane, since editor placement C2: Close Pane is claimed
+    // inside Monaco now (Q5), and Find is the command that steps aside there.
+    const { bindings } = resolveKeybindings({ 'find-in-terminal': 'f5' });
     const press = () => {
       const e = ev({ key: 'F5', code: 'F5' });
       e.defaultPrevented = false;
@@ -551,9 +553,9 @@ describe('Configurable keybindings: what the old recorder left behind', () => {
       };
       return e;
     };
-    assert.equal(COMMANDS['close-pane'].passThrough?.({ isInMonacoEditor: true }), true, 'setup: close-pane lets keys through in the editor');
+    assert.equal(COMMANDS['find-in-terminal'].passThrough?.({ isInMonacoEditor: true }), true, 'setup: find-in-terminal lets keys through in the editor');
     const packaged = press();
-    assert.equal(dispatchKeydown(packaged, ctx(packaged, 'windows', { bindings, blockReload: true, isInMonacoEditor: true })), 'pass:close-pane');
+    assert.equal(dispatchKeydown(packaged, ctx(packaged, 'windows', { bindings, blockReload: true, isInMonacoEditor: true })), 'pass:find-in-terminal');
     assert.equal(packaged.defaultPrevented, true, 'the reload is still blocked');
     const dev = press();
     dispatchKeydown(dev, ctx(dev, 'windows', { bindings, blockReload: false, isInMonacoEditor: true }));
@@ -585,7 +587,7 @@ describe('Configurable keybindings: what the old recorder left behind', () => {
 
     // A command bound to Ctrl+R and let through in the editor still never
     // reloads on Windows — CK-30's rule, for Ctrl+R's guard too.
-    const { bindings: passing } = resolveKeybindings({ 'close-pane': 'ctrl+r' });
+    const { bindings: passing } = resolveKeybindings({ 'find-in-terminal': 'ctrl+r' });
     const inEditor = (platform, isWindows) => {
       const e = press();
       e.defaultPrevented = false;
@@ -593,7 +595,7 @@ describe('Configurable keybindings: what the old recorder left behind', () => {
         e.defaultPrevented = true;
       };
       const fired = dispatchKeydown(e, ctx(e, platform, { bindings: passing, blockReload: true, isWindows, isInMonacoEditor: true }));
-      assert.equal(fired, 'pass:close-pane');
+      assert.equal(fired, 'pass:find-in-terminal');
       return e.defaultPrevented;
     };
     assert.equal(inEditor('windows', true), true, 'Windows: the reload is still blocked');

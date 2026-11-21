@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import {
   BellRing,
   ChartPie,
+  Circle,
   CircleAlert,
   CirclePause,
   CirclePlay,
@@ -38,6 +39,7 @@ import {
   secondaryText,
   summaryCounts,
   summaryWords,
+  terminalStatusIn,
 } from './statusBoardModel.js';
 import { cn } from '../../lib/utils.js';
 
@@ -72,12 +74,24 @@ const STATE_ICON = Object.freeze({
   progress: [ChartPie, 'text-vsc-info'],
   paused: [CirclePause, 'text-vsc-warn'],
   working: [LoaderCircle, 'text-vsc-info'],
+  // Claude Code waiting for you: an empty ring, as quiet as the line's text.
+  idle: [Circle, 'text-vsc-muted'],
   running: [CirclePlay, 'text-vsc-info'],
   exited: [CircleStop, 'text-vsc-muted'],
 });
 
 /** `[Icon, colour]` for a status (`terminalStatus`'s), a paused bar being its own. */
 const iconOf = (status) => STATE_ICON[status.paused ? 'paused' : status.state] ?? null;
+
+/**
+ * A status's icon, in its colour, hidden from screen readers (the word beside
+ * it is what is read) and drawn in CanvasText in forced colours
+ * (`data-status-icon`); nothing for a state without one.
+ */
+function StateIcon({ status, size = 12 }) {
+  const [Icon, colour] = iconOf(status) ?? [null, ''];
+  return Icon ? <Icon size={size} aria-hidden="true" data-status-icon="" className={cn('shrink-0', colour)} /> : null;
+}
 
 /**
  * The icon of a status a program reported (`nexterm-cli set-status --tone`),
@@ -90,6 +104,32 @@ const TONE_ICON = Object.freeze({
   error: [OctagonAlert, 'text-vsc-error', 'error: '],
 });
 
+
+// ---- An agent session held open in a terminal (AGENT SESSIONS) -------------------
+
+/**
+ * The badge of an AGENT SESSIONS row whose conversation is open in terminal
+ * `tabId`: what that terminal's TERMINALS row says it is doing — its icon
+ * and word (Working, Idle, Waiting, Running…) — or 'open' when that is
+ * nothing, or the terminal is not found. Subscribed to that terminal's
+ * entries alone, compared field by field, so a spinner frame or another
+ * terminal's change redraws nothing; not tied to 'Show Agent and Status'.
+ */
+export const AgentSessionState = memo(function AgentSessionState({ tabId }) {
+  const status = useTerminalStore(useShallow((s) => terminalStatusIn(s, tabId)));
+  const words = statusText(status);
+  return (
+    <span
+      data-agent-holder="open"
+      data-agent-state={status.state}
+      title={`Open in a terminal of this window: ${words || 'open'}`}
+      className="px-1 rounded-sm border border-vsc-border text-vsc-fg leading-[14px] flex items-center gap-[3px]"
+    >
+      {words && <StateIcon status={status} size={11} />}
+      {words || 'open'}
+    </span>
+  );
+});
 
 // ---- What a program says its terminal is doing (stage 7) -------------------------
 
@@ -247,6 +287,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const tabId = tab.id;
   const unread = useTerminalStore((s) => (showAgent ? unreadCountByTab(s.notifications)[tabId] ?? 0 : 0));
   const bar = useTerminalStore((s) => (showAgent ? s.progress?.[tabId] ?? null : null));
+  // Whether its Claude Code works or waits: this tab's entry alone.
+  const activity = useTerminalStore((s) => (showAgent ? s.agentActivity?.[tabId] ?? null : null));
   const note = useTerminalStore((s) => (showLastNote ? lastNoteOf(s.notifications, tabId) : null));
   const reported = useTerminalStore((s) => s.reportedStatus?.[tabId] ?? null);
   const os = useSystemStore((s) => s.os);
@@ -254,7 +296,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const lineRef = useRef(null);
 
   const agent = showAgent ? agentLabel(tab) : '';
-  const status = showAgent ? terminalStatus(tab, { unread, progress: bar }) : null;
+  const status = showAgent ? terminalStatus(tab, { unread, progress: bar, activity }) : null;
   const words = status ? statusText(status) : '';
   const shortWords = status ? compactStatusText(status) : '';
   const branchName = showBranch ? branchLabel(branch) : '';
@@ -286,7 +328,6 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
     );
   }
   if (words) {
-    const [Icon, colour] = iconOf(status) ?? [null, ''];
     items.push(
       <span
         key="status"
@@ -294,7 +335,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
         data-status-value={status.value}
         className="shrink-0 flex items-center gap-[3px] whitespace-nowrap"
       >
-        {Icon && <Icon size={12} aria-hidden="true" data-status-icon="" className={cn('shrink-0', colour)} />}
+        <StateIcon status={status} />
         {shortWords === words ? (
           <span className="tabular-nums">{words}</span>
         ) : (

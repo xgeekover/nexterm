@@ -7,10 +7,11 @@
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
+import { setEditorLayout, editorTree, editorPane, EMPTY_EDITOR_ROOT } from '../e2e/harness/workbench.js';
 import { invoke } from '../../src/lib/ipc.js';
 
 const S = useEditorStore;
-const tree = () => S.getState().editorSplitTree;
+const tree = () => editorTree();
 
 function leaves(node = tree(), acc = []) {
   if (!node) return acc;
@@ -45,9 +46,8 @@ describe('Editor layout: tab groups and drag-drop placement', () => {
     S.setState({
       tabs: [],
       activeTabId: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
+    setEditorLayout();
     files = await makeScratchFiles(5);
   });
 
@@ -72,7 +72,7 @@ describe('Editor layout: tab groups and drag-drop placement', () => {
     // Dropped on the right → the new group is the second child.
     assert.deepEqual(tree().children[0].tabIds, [a]);
     assert.deepEqual(tree().children[1].tabIds, [b]);
-    assert.equal(S.getState().activeEditorPaneId, tree().children[1].id);
+    assert.equal(editorPane(), tree().children[1].id);
   });
 
   test('EL-03: "left"/"top" place the dragged tab before the target', async () => {
@@ -125,7 +125,7 @@ describe('Editor layout: tab groups and drag-drop placement', () => {
     S.getState().closeTab(b);
     assert.equal(leaves().length, 1, 'emptied group is removed');
     assert.deepEqual(leaves()[0].tabIds, [a]);
-    assert.ok(leaves().some((l) => l.id === S.getState().activeEditorPaneId), 'active pane still exists');
+    assert.ok(leaves().some((l) => l.id === editorPane()), 'active pane still exists');
   });
 
   test('EL-08: closing a pane removes only the tabs no other group shows', async () => {
@@ -160,7 +160,7 @@ describe('Editor layout: tab groups and drag-drop placement', () => {
     assert.equal(reopened.id, a, 'must return the existing tab, not a new one');
     assert.equal(leaves().length, 2, 'must not move the tab into a new group');
     assert.equal(leafOf(a).id, leftPane, 'tab stays in the group that already showed it');
-    assert.equal(S.getState().activeEditorPaneId, leftPane, 'focus follows the revealed tab');
+    assert.equal(editorPane(), leftPane, 'focus follows the revealed tab');
   });
 
   test('EL-11: every tab lives in exactly one group after a shuffle', async () => {
@@ -194,9 +194,8 @@ describe('Editor layout: the group being typed in is the one Save writes', () =>
     S.setState({
       tabs: [],
       activeTabId: null,
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-      activeEditorPaneId: 'editor-pane-root',
     });
+    setEditorLayout();
     files = await makeScratchFiles(3);
   });
 
@@ -233,7 +232,7 @@ describe('Editor layout: the group being typed in is the one Save writes', () =>
     // An empty group, just split off and focused: nothing in it to save.
     const empty = S.getState().splitEditorPane(right, 'vertical');
     S.getState().setActiveEditorPane(empty);
-    assert.equal(S.getState().activeEditorPaneId, empty);
+    assert.equal(editorPane(), empty);
     assert.equal(S.getState().activeTabId, null, 'no file in the focused group, so none is active');
     S.getState().editBuffer(a, 'unsaved');
     await pressSave();
@@ -245,9 +244,9 @@ describe('Editor layout: the group being typed in is the one Save writes', () =>
     const b = (await S.getState().openFile(files[1])).id;
     // The tab strip falls back to the first tab when its own is not there.
     S.setState({
-      editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [a, b], activeTabId: 'tab-gone' },
       activeTabId: null,
     });
+    setEditorLayout({ type: 'leaf', id: 'editor-pane-root', tabIds: [a, b], activeTabId: 'tab-gone' });
     S.getState().setActiveEditorPane('editor-pane-root');
     assert.equal(S.getState().activeTabId, a);
 
@@ -276,7 +275,7 @@ describe('Editor layout: the group being typed in is the one Save writes', () =>
     assert.equal(S.getState().activeTabId, b2);
 
     S.getState().closeTab(b2);
-    assert.equal(S.getState().activeEditorPaneId, right);
+    assert.equal(editorPane(), right);
     assert.equal(S.getState().activeTabId, b1, 'the right group shows b1 now, and b1 is what Save writes');
 
     // Open again and closed again: the one active is the one the group draws.

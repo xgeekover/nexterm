@@ -12,6 +12,7 @@ const HEADINGS = {
   unreadable: 'Agent session history not read',
   failed: 'No terminal could be started',
   clearFailed: 'Agent session history not cleared',
+  curationFailed: 'Agent session not changed',
   newConversation: 'New conversation started',
 };
 
@@ -25,7 +26,9 @@ const INFORMATIONAL = new Set(['focused', 'newConversation']);
  * `resumeFromHistory`, which sets `agentHistoryNotice`) — or, for a Claude
  * Code conversation that was never saved, that a new one was started in the
  * terminal it opened ('newConversation'). And a Clear Agent
- * Session History… that failed (`showAgentHistoryNotice`, 'clearFailed').
+ * Session History… that failed (`showAgentHistoryNotice`, 'clearFailed'),
+ * or a pin, rename, group, archive or delete the history refused or could
+ * not save ('curationFailed', in the backend's words).
  *
  * Drawn as OpenFailureNotice is, over the corner of the window above the
  * status bar: the palette has closed by the time the answer comes, and the
@@ -44,7 +47,7 @@ export function AgentHistoryNotice() {
       role={informational ? 'status' : 'alert'}
       data-agent-history-notice={notice.kind}
       className={
-        'fixed bottom-statusbar mb-2 z-40 w-[400px] max-w-[calc(100vw-16px)] flex items-start gap-2 px-3 py-2 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-ui text-vsc-fg ' +
+        'fixed bottom-statusbar mb-2 z-40 w-[400px] max-w-[calc(100vw-16px)] flex items-start gap-2 px-3 py-2 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-ui text-vsc-fg ' +
         (besideOpenFailure ? 'right-[416px]' : 'right-2')
       }
     >

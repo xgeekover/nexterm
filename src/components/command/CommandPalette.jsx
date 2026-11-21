@@ -36,7 +36,8 @@ import { cn } from '../../lib/utils.js';
 import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette } from '../../lib/paletteItems.js';
 import { commandHistory } from '../../lib/commandIndex.js';
 import { notifyTerminal } from '../../lib/terminalNotice.js';
-import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { focusActivePane, focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { moveEditorToNewPane, toggleZoomActive } from '../../lib/workbenchCommands.js';
 import { swallowRepeatsOf } from '../../lib/heldKeys.js';
 import { handDialogReturn } from '../../lib/dialogReturn.js';
 
@@ -166,7 +167,7 @@ const PaletteRow = memo(function PaletteRow({ item, index, selected, onPick, onH
       onClick={() => onPick(item)}
       onMouseEnter={() => onHover(index)}
       className={cn(
-        'h-[22px] px-2 flex items-center gap-2 text-ui cursor-pointer',
+        'h-[22px] px-2 rounded-control flex items-center gap-2 text-ui cursor-pointer',
         selected ? 'bg-vsc-selection text-vsc-selection-fg' : 'text-vsc-fg'
       )}
     >
@@ -208,7 +209,6 @@ export function CommandPalette() {
 
   const createTerminalTab = useTerminalStore((s) => s.createTab);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
-  const togglePaneZoom = useTerminalStore((s) => s.togglePaneZoom);
   const goToLatestUnread = useTerminalStore((s) => s.goToLatestUnread);
   const markAllNotificationsRead = useTerminalStore((s) => s.markAllNotificationsRead);
   const writeRaw = useTerminalStore((s) => s.writeRaw);
@@ -221,6 +221,8 @@ export function CommandPalette() {
   // The agent session history, newest first (agentHistoryStore.js). It
   // changes only when an agent in a terminal starts, is named or ends.
   const agentSessions = useAgentHistoryStore((s) => s.entries);
+  // Its groups, for a row's subtitle and for a query naming a group (F28).
+  const agentGroups = useAgentHistoryStore((s) => s.groups);
 
   // The folder's commands and the user's (spec D10). Each of these changes
   // only when a read finds other bytes, trust is given or taken, or the
@@ -304,7 +306,7 @@ export function CommandPalette() {
   const swap = useMemo(
     () =>
       isOpen && paletteMode === 'swap-pane'
-        ? useTerminalStore.getState().swapTargets?.() ?? { panes: [], note: null }
+        ? useTerminalStore.getState().swapTargets?.(null, useEditorStore.getState().tabs) ?? { panes: [], note: null }
         : null,
     [isOpen, paletteMode]
   );
@@ -358,9 +360,10 @@ export function CommandPalette() {
             panesNote: swap?.note ?? null,
             projectCommands,
             agentSessions,
+            agentGroups: Array.isArray(agentGroups) ? agentGroups : [],
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions, agentGroups]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -403,10 +406,14 @@ export function CommandPalette() {
       return;
     }
     if (item.type === 'pane') {
-      // The active pane's terminals trade places with this pane's; the
-      // keyboard follows the terminal it was in (see `swapPanes`).
-      swapActivePane?.(item.paneId);
+      // The active pane's contents trade places with this pane's, and THE
+      // active pane follows them (see `swapPanes`). The palette has already
+      // given the keyboard back to what had it, which a swap across kinds
+      // remounts — a file pane's Monaco — so the keyboard is handed on to
+      // the active pane in its new place (`focusActivePane`, C2 review S-01).
+      const swapped = swapActivePane?.(item.paneId);
       setActiveView('terminal');
+      if (swapped) focusActivePane();
       return;
     }
     // A project or user command opens its run dialog, which shows the exact
@@ -428,10 +435,19 @@ export function CommandPalette() {
       case 'clear_terminal':
         clearTerminal();
         return;
+      case 'terminal_previous_prompt':
+      case 'terminal_next_prompt':
+        // The active terminal, as the keys do (the store's `jumpToPrompt`).
+        await useTerminalStore.getState().jumpToPrompt?.(item.command === 'terminal_previous_prompt' ? 'previous' : 'next');
+        return;
       case 'toggle_pane_zoom':
-        // The active pane of the group on screen, as the shortcut does.
-        togglePaneZoom?.();
+        // THE active pane of the group on screen, as the shortcut and the
+        // menu do (`toggleZoomActive`): the zoom remounts a file pane's
+        // Monaco, the one the palette has just given the keyboard back to,
+        // so the keyboard is handed on to the pane zoomed or unzoomed (C2
+        // review S-01).
         setActiveView('terminal');
+        toggleZoomActive();
         return;
       case 'go_to_unread_notification':
         // As the shortcut does — the Terminal view brought on screen wherever
@@ -440,6 +456,17 @@ export function CommandPalette() {
         return;
       case 'mark_notifications_read':
         markAllNotificationsRead?.();
+        return;
+      case 'move_editor_new_pane_right':
+      case 'move_editor_new_pane_down':
+        // The file the active editor pane shows (else the editor's active
+        // tab), split out beside it (FC11). The palette has already given the
+        // keyboard back to what had it — the old pane's editor, or a
+        // terminal — so the move hands it on to the new pane, THE active one
+        // now (`focusActivePane`, C2 review N-01), as the keys and a file
+        // chip's menu do.
+        setActiveView('terminal');
+        moveEditorToNewPane(item.command === 'move_editor_new_pane_down' ? 'vertical' : 'horizontal');
         return;
       case 'equalize_splits':
         // The group on screen, nested splits included.
@@ -567,11 +594,11 @@ export function CommandPalette() {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="absolute top-[8px] left-1/2 -translate-x-1/2 w-[600px] max-w-[90vw] bg-vsc-quickinput border border-vsc-widget-border shadow-widget rounded-[6px] overflow-hidden"
+        className="absolute top-[8px] left-1/2 -translate-x-1/2 w-[600px] max-w-[90vw] bg-vsc-quickinput border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
       >
         {/* Search Input Bar */}
         <div className="p-2 border-b border-vsc-widget-border">
-          <div className="flex items-center gap-2 h-[30px] px-2 rounded-[3px] bg-vsc-input border border-vsc-input-border focus-within:border-vsc-focus transition-colors">
+          <div className="ui-field flex items-center gap-2 h-[30px] px-2">
             <Search size={16} className="text-vsc-muted flex-shrink-0" />
             <input
               ref={inputRef}
@@ -590,7 +617,7 @@ export function CommandPalette() {
                     : paletteMode === 'project-commands'
                       ? 'Run a project or user command…'
                       : paletteMode === 'agent-sessions'
-                        ? 'Resume an agent session — agent, title, folder or id…'
+                        ? 'Resume an agent session — name, title, group, agent, folder or id…'
                         : 'Type a command or search files…'
               }
               className="flex-1 min-w-0 bg-transparent border-none outline-none text-ui text-vsc-fg placeholder:text-vsc-placeholder"
@@ -599,7 +626,7 @@ export function CommandPalette() {
         </div>
 
         {/* Results List */}
-        <div className="max-h-[400px] overflow-auto py-1">
+        <div className="max-h-[400px] overflow-auto p-1">
           {groups.length > 0 ? (
             groups.map((group) => (
               <div key={group.label}>

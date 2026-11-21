@@ -6,9 +6,11 @@ import { focusBack } from '../../lib/dialogReturn.js';
 import { focusWorkspace } from '../../lib/workspaceFocus.js';
 
 /**
- * "Clear Agent Session History?" — asked before the AGENT SESSIONS list is
- * emptied (src/stores/agentHistoryPromptStore.js), from the side bar's menu
- * or the palette.
+ * The AGENT SESSIONS questions (src/stores/agentHistoryPromptStore.js), each
+ * drawn from the prompt's own `question` (title, message, confirmLabel):
+ * "Clear Agent Session History?" before the list is emptied, from the side
+ * bar's header menu or the palette; "Delete Agent Session?" before a row's
+ * Delete…; "Delete Group?" before a group header's Delete Group….
  *
  * The guards of Settings' Clear Saved Scrollback: it cannot be undone, so
  * Cancel has the keyboard and the click that chose it cannot land on Clear.
@@ -21,7 +23,8 @@ export function AgentHistoryClearDialog() {
   const prompt = useAgentHistoryPromptStore((s) => s.prompt);
   const answer = useAgentHistoryPromptStore((s) => s.answer);
   if (!prompt) return null;
-  const question = clearAgentHistoryQuestion(prompt.count);
+  // A prompt without its words (none is made so) gets Clear's, as before.
+  const question = prompt.question ?? clearAgentHistoryQuestion(prompt.count);
   const returnTo = prompt.returnTo;
   return createPortal(
     <ConfirmDialog

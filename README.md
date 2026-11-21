@@ -130,6 +130,17 @@ Keys are written the macOS way. On Windows and Linux press `Ctrl` for `⌘` and
 | Status bar | the open folder, its git branch, the active terminal's folder, shell and size, the last exit code, the text size when it is not the default, and the bell | |
 | Title bar | on Windows and Linux NexTerm's own, with the ☰ menu; macOS keeps its traffic lights and menu bar | |
 
+**Drag any boundary.** Every line between the side bars, the editor, the
+terminal panel and the split panes resizes what is on either side of it. The
+line turns violet under the pointer and while it is dragged, and it can be
+grabbed a few pixels either side of it; Tab also reaches it, and the arrow keys
+move it. Nothing gets too small to use:
+the window is at least 960×640, the side bars keep 170px (left) and 220px
+(right), the editor keeps its tabs and three lines, and the terminal panel its
+header, the pane strip and three rows. A long folder name in the title bar or
+the status bar is cut short with its whole path in the tooltip, so the search
+box and the bell always stay in view.
+
 The words this README uses:
 
 - **Terminal** — one shell, shown as one tab.
@@ -159,11 +170,57 @@ list the Explorer shows when nothing is open. A folder that has since been
 moved or deleted is refused by the backend and drops out of the list rather
 than staying as a row that fails every time it is clicked.
 
-**Open a file.** Click a file in the Explorer. The Monaco editor opens above the
-terminal panel as a normal tab; the terminals keep running underneath. Close
-the last file and you are back to a pure terminal window. Monaco is loaded the
-first time the editor is shown, not at launch, and it and its workers are
-bundled locally — nothing is fetched from a CDN at runtime.
+#### Editors and terminals in one layout
+
+**Open a file.** Click a file in the Explorer. It opens in the same area as the
+terminals, in an editor pane above them (about 60/40) — there is no separate
+editor area and no Maximize Panel button. Close the last file and you are back
+to a pure terminal window. Monaco is loaded the first time a file is shown, not
+at launch, and it and its workers are bundled locally — nothing is fetched from
+a CDN at runtime.
+
+**One active pane.** Panes of both kinds sit side by side, and one of them is
+the active pane, drawn with the accent line. The pane commands act on it:
+`⌘S`/`Ctrl+S` saves the file the active editor pane shows; `⌘W`/`Ctrl+W` in an
+editor pane closes its file tab (asking first when it is unsaved), and on its
+last tab the pane goes; in a terminal pane it closes the pane, as before.
+`⌘F`/`Ctrl+F` is Monaco's find in an editor pane and the terminal's find bar in
+a terminal pane. Split Right/Down from an editor pane makes an empty editor
+pane; `⌘D` inside Monaco is still Monaco's "add next match", and `Ctrl+Alt+D`
+splits. Toggle Pane Zoom, Equalize Splits and Swap Pane With… work across both
+kinds; inside Monaco the zoom chord is left to Monaco (`⌘⇧Enter` is its Insert
+Line Above), so an editor pane is zoomed from its ⤢ button, Terminal → *Toggle
+Pane Zoom* or the command palette. Focus Next/Previous Pane (`⌥⌘→`/`⌥⌘←`, `Ctrl+Alt+→`/`Ctrl+Alt+←`)
+goes through editors and terminals in screen order, and the keyboard goes with
+it: what you type next lands in the pane that is now active. New Terminal,
+Clear Terminal and the prompt jumps always act on the group's terminal.
+
+#### Moving editors
+
+Drag a file tab onto the left, right, top or bottom edge of any pane — a
+terminal included — to split there, or onto another editor pane's strip to move
+it in. A terminal tab can be dragged onto the edge of an editor pane the same
+way. Across kinds only the edges are offered: dropping on the other kind's
+strip or middle changes nothing. Drop a file tab on another group's chip to move
+it to that group. "Move Editor to New Pane Right/Down" (a file tab's right-click
+menu, or the command palette) splits the file out beside its pane. Moving a file
+keeps its text, undo history and caret; moving a terminal keeps its program and
+scrollback.
+
+#### Restoring the layout
+
+**Open files belong to a terminal group.** A file opens in the terminal group
+on screen, where it is already open if it is open somewhere, else in the last
+editor pane you used. Switch groups and you see the other group's files and
+terminals; nothing has closed. Closing a group that holds unsaved files asks
+first (Save / Don't Save / Cancel). A relaunch puts back every pane of both
+kinds — the split sizes, the files in each pane, the active pane and the active
+group. Saved templates and workspaces stay terminal-only. Files from a version
+before this come back in the active group, above its terminals. A group that
+holds files keeps one terminal pane after its last terminal closes: it shows
+"No terminal in this pane" with a New Terminal button and no Close button, and
+it comes back that way after a relaunch. Unsaved edits are not kept across a
+restart (there is no hot exit): quitting with unsaved files asks first.
 
 **Search across the files.** `⇧⌘F`, or the magnifying glass in the activity
 bar, opens a search over the open folder — match case, whole word, regular
@@ -325,6 +382,124 @@ only repeat what is on screen, and never appears over a full-screen program
 like vim or htop. Settings ▸ Terminal ▸ *Sticky Command Header* turns it off —
 it covers the top row, which is occasionally the row you scrolled up to read.
 
+**Prompt marks on the scrollbar.** The terminal's scrollbar is a map of the
+scrollback: a violet mark at every shell prompt, a blue mark at every message
+you sent to Claude Code, and a translucent box for the part on screen. The
+thin scrollbar and its box are always visible on a terminal's normal screen,
+faintly, also with the pointer elsewhere and with nothing to scroll yet (then
+the box fills the track); over the box it is a little brighter. A full-screen
+program (vim, less, OpenCode, Claude Code in fullscreen) has no scrollback,
+so there the scrollbar stays hidden, as before. The marks stay. Click a mark
+of either kind and that row scrolls to the top of the pane, without
+hovering first; a click anywhere else on the scrollbar, and dragging the box,
+work as before. `Ctrl+Shift+↑` / `Ctrl+Shift+↓` (`⌘⇧↑` / `⌘⇧↓` on macOS), or
+*Terminal: Go to Previous Prompt* / *Go to Next Prompt* in the palette, step
+through both kinds in buffer order; past the last mark, next goes to the
+bottom. On a terminal's normal screen these keys belong to NexTerm, also where there
+are no marks (fish, ssh, WSL), so the shell does not get them; they can be
+given other keys in Settings ▸ Keyboard Shortcuts. A mark comes from the "a
+prompt is here" signal (OSC 133 D) the shell integration prints in front of
+every prompt, the first one included: **cmd**, **PowerShell** (Windows
+PowerShell and pwsh), **zsh**, **bash** and **Git Bash** all send it, so every
+prompt gets a mark, an empty Enter included. Which row of the prompt is marked
+depends on the shell. In cmd and PowerShell the signal is part of the prompt
+string, so the mark is on the row you type on, the second line of a two-line
+prompt. zsh and bash print the signal just before they draw the prompt: when
+the prompt text arrives after it, which a prompt that takes a moment to build
+(starship, powerlevel10k) makes likely, the mark is on the row the prompt
+starts on, the first line of a two-line prompt or the empty line above a
+prompt that begins with one; when both arrive together, it is the row you type
+on. A one-line prompt is marked on its row either way. A batch file run with
+`echo on` marks each line cmd prints its prompt for; cmd's `More?` gets none.
+A shell or program that sends no such signal — fish without its own OSC 133,
+sh, nushell, WSL, a shell on the far end of ssh — shows the box and no marks:
+the only other clue, the line where Enter was pressed, cannot tell a prompt
+from a REPL, a password prompt or an agent's input box.
+
+**Claude Code's messages on the scrollbar.** Every message you send to
+Claude Code gets a blue mark on its `❯` row in the conversation: a short one,
+one that wraps over several rows (Korean included), a pasted block, and a
+slash command that Claude Code echoes as a `❯ /…` row. The input box at the
+bottom never has one, nor has an empty Enter. NexTerm reads what the box
+holds when you press Enter and marks the row once Claude Code has drawn that
+text above the box, so a message you send while Claude Code is still working
+is marked when it shows in the transcript. For that Claude Code must draw on
+the normal screen, where its conversation goes into the scrollback: every
+terminal NexTerm starts gets `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, unless
+the variable is already set (any value you set wins, also one exported in a
+shell rc file), and on Windows its name is added to `WSLENV`. Per Claude
+Code's documentation the variable wins over `CLAUDE_CODE_NO_FLICKER` and its
+`tui` setting, so `/tui fullscreen` and `tui: fullscreen` do not bring the
+fullscreen renderer back in NexTerm's terminals. The trade: the classic
+renderer may flicker a little more in long streamed answers and has no mouse
+scrolling of its own, and in return the conversation scrolls with the wheel
+and the scrollbar and has its marks. Settings ▸ Terminal ▸ *Claude Code on
+the Normal Screen* (on by default) turns this off for terminals started or
+restarted afterwards; so does setting the variable yourself. Fullscreen
+Claude Code has no marks: with the setting off, background sessions (agent
+view, `claude attach`), Claude Code over ssh or on another machine, or a
+version that ignores the variable, it draws on the alternate screen, where
+there is no scrollback, the map is hidden and the keys go to Claude Code.
+Marks also need NexTerm to know Claude Code runs there: started or resumed
+from NexTerm, or `claude` typed at an integrated shell prompt (cmd,
+PowerShell, zsh, bash). `npx`, an alias, a path to the binary, a shell
+without the prompt signal (fish, sh, WSL) and ssh get no message marks.
+Conversation history that a resumed Claude Code prints is not marked. The
+rules were measured on Claude Code 2.1.327; a later version that draws its
+messages differently gets no marks rather than wrong ones. A message may also
+go without a mark, never with a wrong one, when it is sent while a todo list
+or tool progress shows above the box, or when the pane is resized while it
+waits for its echo.
+
+**OpenCode's messages on the scrollbar.** OpenCode's full TUI draws on the
+alternate screen, which has no scrollback, so NexTerm starts and resumes
+OpenCode in its mini mode instead: New OpenCode Terminal types `opencode
+--mini --no-replay`, and Resume types `opencode --mini --no-replay -s <id>`
+or `opencode --mini --no-replay --continue`. Mini prints the conversation on
+the normal screen, where it scrolls with the wheel and the scrollbar, and
+every message you send gets a blue mark on its `›` row, wrapped and Korean
+messages and pastes included; the composer and the footer at the bottom never
+have one. The flags are added only when Settings ▸ Terminal ▸ *OpenCode in
+Mini Mode* is on (the default) and `opencode --version` says OpenCode V1
+1.17.10 or newer; any other OpenCode (older, or V2), one NexTerm cannot find
+or ask, and the setting off all get plain `opencode`, the full TUI, as
+before. NexTerm asks once per run and keeps a yes until it quits, so if
+opencode is upgraded or replaced while NexTerm runs (to V2, say), restart
+NexTerm or turn the setting off. It asks the `opencode` the login shell's
+PATH finds, which can differ from the one a folder pins with nvm, mise, asdf
+or volta, or from a PowerShell alias; such a folder may get the flags for an
+opencode that has none. Typing `opencode` yourself always gives the
+full TUI, as does a layout template's `opencode -c`; `opencode --mini`
+typed yourself is marked too. NexTerm finds an echo by the text the
+composer held at Enter, never by its colour, so other OpenCode themes work.
+The limits: no marks in the full TUI, in V2, over ssh or in WSL;
+a message whose text has an empty
+line in it may get no mark; with replay on (`opencode --mini` without
+`--no-replay`) the marks go when a resize makes mini print the conversation
+again, and the reprint is not marked unless a message was still waiting for
+its echo then. History a resumed conversation may print is meant to get no
+mark, and a message typed before mini has drawn gets none; this is still to
+be checked against a real resume (WINDOWS_VERIFICATION.md V50 O12). Mini
+sets no terminal title, so a new mini conversation does not learn its id
+while it runs: after a NexTerm restart it resumes through the
+usual lookup, `--continue` (with the mini flags) when it is the only OpenCode
+terminal in reach and otherwise the list in the banner, never into a
+conversation another terminal has; one started with `-s <id>` stays exact.
+Its side-bar title is no longer `OC | …`.
+
+Marks leave with their text — the
+oldest lines leaving a full scrollback, `clear` / `cls` / Ctrl+L, a redraw of
+Claude Code's screen, and *Clear Terminal*, after which the prompt you are at
+keeps its mark and every message mark goes. When Claude Code exits its marks
+stay. At most 500 of each kind per terminal, kept apart, so neither pushes the
+other out. A tab never shown has no marks for what it printed before it
+first appeared. Settings ▸ Terminal ▸ *Prompt Marks on Scrollbar* turns both
+kinds of marks off without changing the terminal's width; a click on the
+scrollbar is then the scrollbar's own everywhere, and the keys work either
+way. In Windows High Contrast prompt marks are drawn in the Highlight colour
+and message marks in the LinkText colour, and the box keeps an outline,
+also at rest; with reduced motion nothing fades.
+
 **Run something again.** `⌘⇧H` opens the command history: every command line
 this machine has run, newest first, with the directory it ran in. Typing
 narrows it by plain substring — a command line is not a filename — and `Enter`
@@ -381,7 +556,7 @@ says so and clicking it resets.
 
 ### Knowing what every terminal is doing
 
-**See what the other terminals are doing.** A tab shows a blue dot while a
+**See what the other terminals are doing.** A tab shows a violet dot while a
 command is running in it and a red one when the last command failed, and a
 group's chip shows the same for every terminal inside it. The point is the ones
 you are not looking at: switching groups replaces the whole arrangement, so
@@ -394,6 +569,23 @@ bell — name, exit code, how long it took — and clicking it takes you to that
 terminal. Nothing is said about a command you watched finish, and nothing is
 said about a quick one; the threshold is Settings ▸ Terminal ▸ Notify After,
 and 0 turns it off.
+
+**Be told when Claude Code is done.** Claude Code puts a spinner (◐ ◑ ◒ ◓) in
+front of its terminal's title while it works and ✳ while it waits for you.
+When a turn of at least ten seconds ends in a terminal you are NOT typing
+into, NexTerm puts one entry in the bell — *Waiting for you after 2m 5s of
+work*, and the conversation's title — and, while NexTerm is in the
+background, shows a desktop notification. It reads the title, so it needs no
+Claude Code setting. The turn has to stay idle for one and a half seconds
+before it counts, so a stray ✳ between two frames is not taken for the end.
+When Claude Code also notifies or rings the bell itself as it finishes, you
+still get one entry for that moment, not two. Until Claude Code starts working
+again, NexTerm's entry also takes what that terminal says next: a further
+note from it — Claude Code's own, a hook's or any other program's — updates
+that entry instead of adding one or a desktop notification, and an entry you
+have read stays read; a ring there is not listed. Once that entry is gone
+from the bell, such a note shows nothing. The threshold is Settings ▸
+Terminal ▸ *Notify When an Agent Is Done*, and 0 turns it off.
 
 #### Notifications from programs
 
@@ -428,6 +620,13 @@ Neither program does this until you tell it to:
   terminal for your attention (see below) and never makes a desktop
   notification.
 
+  This channel is no longer needed to hear that Claude Code is done: NexTerm
+  reads that from its title (*Notify When an Agent Is Done*, above), with no
+  Claude Code setting. It is still how Claude Code says it needs permission
+  in the middle of a turn. With both on, a turn's end makes one entry: what
+  Claude Code sent itself, or NexTerm's own entry taking Claude Code's words
+  when they arrive after it.
+
 A desktop notification needs the operating system to allow it — on macOS
 System Settings ▸ Notifications, on Windows Settings ▸ System ▸ Notifications,
 on Linux a running notification service. On Windows, toasts are for the
@@ -458,8 +657,9 @@ command palette too, and both can be given other keys in Settings ▸ Keyboard S
 On Linux the input method (IBus) may take `Ctrl+Shift+U` for itself; bind
 another key if it does nothing.
 
-Three things make an entry: a long command finishing (see *Be told when
-something finishes*), a program's notification (above), and the terminal bell
+Four things make an entry: a long command finishing (see *Be told when
+something finishes*), a Claude Code turn ending (see *Be told when Claude
+Code is done*), a program's notification (above), and the terminal bell
 — the `BEL` character a program prints, which Claude Code's *Terminal Bell*
 channel sends. Repeated bells from one terminal add up in one entry, and a bell
 is never a desktop notification. Settings ▸ Terminal ▸ *Terminal Bell* turns
@@ -468,7 +668,7 @@ bells off. Nothing is recorded for the terminal you are typing into; with
 
 **Progress.** A program can report how far along it is with OSC 9;4, the
 sequence Windows Terminal and ConEmu understand. NexTerm draws it as a thin bar
-under the terminal's tab — blue while it runs, red for an error, yellow when
+under the terminal's tab — violet while it runs, red for an error, yellow when
 paused, a sliding segment when the program cannot say how far. The group's
 chip, and on Windows the taskbar button, show one bar for several terminals: an
 error wins over a pause, a pause over normal progress, and among equals the one
@@ -487,7 +687,12 @@ printf '\033]9;4;1;40\033\\'; sleep 5
 One limit applies to all of this: a terminal is read only once it has been on
 screen. A background tab of a restored session that you have not opened since
 launch raises nothing until you first show it, and what it printed before that
-is replayed as history, without bells or progress.
+is replayed as history, without bells or progress. Claude Code's *Working* and
+*Idle* and its completion entry are the exception, as they come from the
+terminal's title, which NexTerm reads even before the terminal is first shown;
+what Claude Code itself printed while it waited after a turn is still read
+only when you show the terminal, and then goes into that turn's entry instead
+of being listed a second time.
 
 #### The TERMINALS panel as a status board
 
@@ -501,14 +706,22 @@ what it is doing right now:
   nothing is guessed), *Error*, *In progress 40%*, *Paused 40%* and *Working*
   from the program's progress report, *Running* while a command runs,
   *Failed* when the last one exited with an error, *Exited* when the shell is
-  gone.
+  gone. For Claude Code, its own title says more than *Running*: *Working*
+  while it shows a spinner (◐ ◑ ◒ ◓) and *Idle* (○) once it shows ✳ and waits
+  for you. Until its title says either, the row shows what it would for any
+  command. *Waiting* still comes first, then a progress report's *Error*,
+  *In progress* or *Paused*, then Claude Code's *Working* or *Idle*, then the
+  rest. An idle Claude Code is not *Waiting*: a finished turn's entry in the
+  bell is what makes it wait, until you have seen it.
 - **The git branch of its folder**, or *detached* and the commit when the head
   is detached.
 - **The last notification**, dimmed once read. Hover it for the whole text
   and how long ago it came.
 
 Each group's row counts its terminals that are waiting, running and failed,
-and a group chip says the same when you hover it.
+and a group chip says the same when you hover it. A working Claude Code counts
+as running; an idle one is not running and counts nowhere, and sorts with the
+quiet terminals.
 
 The branch is read from the folder's `.git/HEAD` file. No git program runs
 for it, so nothing a repository configures can run, and there is no process
@@ -656,27 +869,92 @@ OpenCode and Claude Code conversation run in a NexTerm terminal is also kept
 in a list, so one from last week can be picked up too.
 
 **AGENT SESSIONS** sits in the TERMINALS panel, below SAVED, with its count in
-the header. Newest first, each row shows the conversation's title (the one
-OpenCode or Claude Code gave it; or the start of its id; or *most recent in
-folder* for one whose id was never known), which agent ran it, the folder (the
-full path is in the tooltip) and
-when it was last used. *open* or *offered* marks one that a terminal in this
-window has running or is offering to resume. The first 15 are listed; *Show
-all (N)…* opens the rest in the palette.
+the header (archived entries are not counted). Each row shows the
+conversation's name (the one you gave it; else the title OpenCode or Claude
+Code gave it; else the start of its id; else *most recent in folder* for one
+whose id was never known), which agent ran it, the folder (the full path is in
+the tooltip) and when it was last used. *offered* marks one that a terminal in
+this window is offering to resume. One that a terminal in this window has
+open says what that terminal's row in TERMINALS says — *Working*, *Idle*,
+*Waiting*, *Running* and so on, with the same symbol — or *open* when that
+says nothing. From top to
+bottom the section shows:
+
+1. **Pinned** entries, newest first, each with a pin. A pinned entry in a
+   group names its group on its second line.
+2. Each **group**, in the order they were made, as a header with its name and
+   the number of rows under it; a click folds or unfolds it, and NexTerm
+   remembers that across restarts. Under the header, one level deeper, are its
+   members that are neither pinned nor archived, newest first. An empty group
+   shows 0.
+3. The **other** entries, newest first. The first 15 are listed; *Show all
+   (N)…* opens every entry in the palette.
+4. **Archived (n)**, when anything is archived: closed each time the
+   TERMINALS view opens, which is when NexTerm starts and also when you go to
+   another side-bar view and come back; a click opens it and lists the
+   archived entries, newest first.
+
+The hint about how the list fills shows when there is no group and no entry
+outside *Archived*.
 
 - A click selects a row. A double-click or `Enter` resumes it in a **new
   terminal** in the active pane, started in the entry's folder. Once the shell
   shows its first prompt, NexTerm types `claude --resume <id>` or
   `opencode -s <id>`. An entry without an id follows the rules of *Resume*
   above, `opencode --continue` included.
-- Right-click a row for *Resume in New Terminal*, *Remove from List* and
-  *Clear Agent Session History…*, which asks first. Removing or clearing only
-  changes NexTerm's list. The conversation itself stays with its agent, and
-  one that is still running is listed again when it next does something.
-- In the command palette, *Resume Agent Session…* lists every entry. Type to
-  filter by agent, title, folder or the start of an id; `Enter` resumes. In the
-  ordinary palette, typing also shows up to five matching entries under
-  *agent sessions*. *Clear Agent Session History…* is a palette command too.
+- Right-click a row for its menu:
+  - *Resume in New Terminal*, or *Show Its Terminal* when a terminal in this
+    window has it — the same as a double-click.
+  - *Copy Session ID* copies exactly the conversation's id, ready for
+    `claude --resume <id>` or `opencode -s <id>` in any terminal. It is off for
+    an entry whose id NexTerm never learned.
+  - *Pin* / *Unpin* moves the entry into or out of the pinned area.
+  - *Rename…* edits its name in place: `Enter` or clicking away keeps it,
+    `Escape` leaves it as it was. Your name beats every title the agent
+    gives it; the agent's titles keep being recorded underneath (the tooltip
+    shows the agent's own), and renaming it to nothing brings back the newest
+    one. A name is kept the way a title is (see *Privacy*).
+    If the session leaves the list or its row is hidden while you type (an
+    OpenCode session learning its id, or another NexTerm changing the list),
+    the editor closes without saving and a notice in the bottom corner shows
+    the name that was not saved.
+  - *Move to Group ▸* lists every group with its count (the entry's own is
+    off), *New Group…* — a group named *New Group* (or *New Group 2*, …) with
+    the entry in it, its name ready to type — and *Remove from Group*.
+  - *Archive* hides the entry from the lists above and puts it under
+    *Archived*, keeping its name, pin and group; *Unarchive* puts it back as
+    it was. Resuming an archived entry — from the list, the palette or a
+    restored terminal's *Resume* — unarchives it, and so does the same
+    conversation starting again in a terminal (for an entry without an id, its
+    agent started again in its folder); a new title or the agent exiting does
+    not. Archiving alone does not keep a session: an archived session that is
+    not pinned, named or in a group leaves the list like any other once 200
+    newer sessions that are not pinned, named or in a group are listed (at the
+    next recorded session event), so pin it, name it or put it in a group to
+    keep it.
+  - *Delete…* asks, then removes the entry from NexTerm's list only. The
+    conversation stays with Claude Code or OpenCode, and NexTerm deletes none
+    of their files. It is off while a terminal in this window is running that
+    conversation, which would only list it again.
+- Right-click a group's header for *Rename Group…* (an empty name keeps the
+  old one) and *Delete Group…*, which asks, then deletes only the group: its
+  sessions go back to the list.
+- Right-click the AGENT SESSIONS header for *Resume Agent Session…*, *New
+  Group…* (an empty group, its name ready to type; at most 50 groups) and
+  *Clear Agent Session History…*, which asks first and empties the whole list,
+  archived entries and every group included. Clearing only changes NexTerm's
+  list, and a conversation that is still running is listed again when it next
+  does something.
+- In the command palette, *Resume Agent Session…* lists the pinned entries
+  first, then the rest newest first, then *archived agent sessions*. A grouped
+  row names its group after the folder. Type to filter by name, title, group,
+  agent, folder or the start of an id; `Enter` resumes. In the ordinary
+  palette, typing also shows up to five matching entries under *agent
+  sessions*, never an archived one. *Clear Agent Session History…* is a
+  palette command too.
+- When NexTerm cannot change the list (for instance a 201st entry pinned,
+  renamed or put in a group), a notice in the bottom corner says why, and the
+  list is read again.
 
 **Already open: switch, don't open twice.** If a terminal in this window
 already has that conversation, running or offered, NexTerm switches to that
@@ -693,7 +971,11 @@ as ended again, not as running.
 
 **Claude Code titles.** A Claude Code entry is named the way Claude Code names
 the conversation in its own list: by the title Claude Code generated for it,
-or, before it has one, by the last prompt sent. NexTerm reads these from
+or, before it has one, by the last prompt sent. While Claude Code runs in a
+NexTerm terminal, the row follows the title Claude Code puts in the terminal's
+title (`✳ <title>` while waiting, `◐ <title>` while working), as soon as that
+text changes and with no quit needed; its default *Claude Code* is not a
+title, and a working spinner writes nothing. NexTerm also reads titles from
 Claude Code's own transcript (`projects/<folder>/<id>.jsonl` in
 `CLAUDE_CONFIG_DIR` when NexTerm's own environment sets it, otherwise in
 `~/.claude`, `%USERPROFILE%\.claude` on Windows). It does so when the list is
@@ -724,7 +1006,9 @@ restored terminal's *Resume*, it checks Claude Code's transcripts:
 
 When the list is loaded, an entry whose conversation was never saved, by the
 same test, is removed from it, unless a terminal in this window is running or
-offering it.
+offering it, or it is pinned, renamed or in a group. When a resume starts a
+new conversation in place of such an entry, the new one takes over its name,
+pin and group.
 
 **Where it is kept.** `agent-sessions.json` in NexTerm's local data folder:
 
@@ -734,20 +1018,48 @@ offering it.
 | Windows | `%LOCALAPPDATA%\com.nexterm.ide\` (local, not the roaming profile: the conversations exist only on this machine) |
 | Linux | `$XDG_DATA_HOME/com.nexterm.ide/` (usually `~/.local/share/com.nexterm.ide/`) |
 
-It holds at most **200** entries; past that, the least recently used are
-dropped. The file is also kept under **1 MiB**, the most NexTerm will read, by
-dropping the least recently used entries, never the one just written.
+The list keeps the **200** most recently used sessions, plus up to **200** that
+are pinned, renamed or in a group, which are never dropped for the count. An
+older session that is unpinned, has its name cleared or is taken out of its
+group (also by *Delete Group…*) leaves the list the next time NexTerm records a
+session event, if it is then beyond the 200 most recent. Archiving does not
+count: an archived session that is not pinned, named or in a group leaves the
+list like any other once 200 newer sessions that are not pinned, named or in a
+group are listed (at the next recorded session event); pin it, name it or put
+it in a group to keep it. The file is also kept
+under **1 MiB**, the most NexTerm will read, by dropping the least recently
+used entries that are not pinned, renamed or grouped first, never the one just
+written.
+
+While there is no group and no entry is pinned, renamed, grouped or archived,
+the file has format version 1, exactly as NexTerm 0.26.0 writes it. Anything
+of these makes it version 2; once none is left (or after *Clear Agent Session
+History…*), it is version 1 again.
 
 **When the file is lost or damaged.** If the file was deleted, the list starts
 empty again. If it cannot be read (not valid JSON, cut short, over 1 MiB), it
 is moved aside as `agent-sessions.json.bad-<time>` and a new, empty list is
 started. Only the three newest copies are kept. *Clear Agent Session History…*
 deletes those copies too. If a newer NexTerm wrote the file, this one reads it
-but changes nothing.
+but changes nothing: the list is shown, and *Pin*, *Rename…*, *Move to Group
+▸*, *Archive*, *Delete…*, *New Group…*, *Rename Group…*, *Delete Group…* and
+*Clear Agent Session History…* are off and say why; the palette's *Clear Agent
+Session History…* then asks nothing and only shows a notice saying why. A click
+on a group header still folds or unfolds it, but only on screen: whenever the
+TERMINALS view opens again (as for *Archived* above), each group is shown as
+the file has it.
 
-**Privacy.** A title, OpenCode's or Claude Code's, is kept as one line of at
-most 200 characters, after the same secret masking as saved scrollback, so a
-token in a title is stored as `[hidden]`. Of Claude Code's transcript, NexTerm
+**Going back to an older NexTerm.** NexTerm 0.26.0 reads a version 2 file as
+one written by a newer NexTerm: it shows the newest 200 entries, without their
+names, pins, groups or archive; the others stay in the file, which it does not
+change. It records no new sessions until NexTerm is updated again, so nothing
+curated is lost. A list with nothing curated stays version 1 and keeps working
+in 0.26.0 as before.
+
+**Privacy.** A title, OpenCode's or Claude Code's, and a name you give an
+entry, is kept as one line of at most 200 characters (a group's name, at most
+100), after the same secret masking as saved scrollback, so a token in a title
+is stored as `[hidden]`. Of Claude Code's transcript, NexTerm
 reads only the title records described above, and nothing else from it is
 kept, logged or shown. On macOS and Linux the file can be read only by you
 (`0600`). It holds folder paths, conversation ids, titles and times, and
@@ -774,7 +1086,10 @@ what it printed last time, under a dim line:
 - **It reads like any output.** It rewraps when the pane is resized, ⌘F /
   `Ctrl+F` finds in it, and file names and URLs in it can be clicked
   (resolved from the terminal's folder). Links a program sent as OSC 8,
-  command marks and the sticky command line do not come back. Each restart
+  command marks, the sticky command line and the prompt marks on the
+  scrollbar do not come back, nor do the marks of messages sent to Claude
+  Code; marks start again at the new shell's first prompt, below the
+  separator, and new messages are marked again. Each restart
   adds its own separator; the oldest lines leave as the scrollback fills.
 - **Only the session's own terminals.** Opening a saved group, a layout
   template or a workspace, a new tab or a split starts empty.
@@ -958,6 +1273,12 @@ A Claude Code hook that says when it is done, in `.claude/settings.json`:
 { "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "nexterm-cli notify 'Claude Code' 'Done'" }] }] } }
 ```
 
+NexTerm now tells you when Claude Code is done without any hook (see *Be told
+when Claude Code is done*). A hook like this one that runs more than 1.5
+seconds after Claude Code shows ✳ can be refused as rate-limited, because
+NexTerm's own completion entry used that terminal's allowance first (see
+`notify` below).
+
 `nexterm-cli help <command>` explains each one; `--json` prints NexTerm's
 answer for scripts. It exits 0 when done, 2 for wrong usage (found by the
 tool or by NexTerm — nothing was done), 3 outside a NexTerm terminal, 4 when
@@ -965,6 +1286,17 @@ refused (not allowed, no such terminal), 5 when NexTerm is busy (a rate
 limit), not running, not answering, or has its control turned off — try
 again later.
 
+- `notify` counts against the one allowance a terminal's notes have, which
+  what its programs print uses too: once every 2 seconds, 10 times a minute.
+  NexTerm telling you that Claude Code is done there uses it as well, so a
+  `notify` from that terminal within 2 seconds of that completion is refused
+  as rate-limited (exit 5). One that gets through later, before Claude Code
+  works again, only updates NexTerm's entry for that completion, if it listed
+  one.
+- `list` gives each terminal's `status`, the state its TERMINALS row shows:
+  `exited`, `waiting`, `error`, `progress`, `working`, `idle`, `running`,
+  `failed` or `none`. A Claude Code terminal reports `working` or `idle`
+  once its title says which, where it used to report `running`.
 - A new split opens beside the terminal that asked, in its folder and shell,
   and the keyboard stays where you are. At most 8 open at a time per
   terminal, 32 in all, 10 a minute.
@@ -1074,9 +1406,27 @@ and only until you type something else. Settings ▸ Terminal turns it off.
 **Change settings.** The gear in the activity bar opens a VS Code-style settings
 window — editor font, terminal font/size/line-height, cursor style and blinking,
 scrollback, colour theme, command suggestions, copy on select, what a
-right-click does, and mouse reporting.
+right-click does, mouse reporting, *Prompt Marks on Scrollbar* (the marks
+at each shell prompt and each message sent to Claude Code on the terminal's
+scrollbar; on by default), and *Claude Code on the Normal Screen* (starts
+terminals with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` unless it is set
+already; on by default), and *OpenCode in Mini Mode* (starts and resumes
+OpenCode V1 1.17.10 and newer as `opencode --mini --no-replay`; on by
+default).
 
-**9 terminal themes, all dark.** Dark Modern, Monokai, Material, Dracula,
+**The colours.** NexTerm has one dark palette, ActionMacro's bluish greys with
+a violet accent: the side bars, the terminal and the title and status bars are
+the darkest, the editor a step lighter, menus and dialogs lighter again, and
+fields lighter still. Violet marks what is active (the selected tab's line, the
+active pane, the activity bar, the selection in a list, progress bars and drop
+targets) and fills the button to press. A text field shows that it has the
+keyboard by its own border turning violet, with no outline around it. Buttons,
+tabs, chips and theme cards show a light-violet ring only when you reach them
+with Tab or the arrow keys, never after a click. Every pair of colours is held
+to WCAG contrast (4.5:1 for text, 3:1 for lines and marks) by the test suite.
+
+**9 terminal themes, all dark.** NexTerm Dark (the default, drawn in the
+app's own colours), Monokai, Material, Dracula,
 Solarized Dark, Nord, One Dark, Gruvbox Dark and Tomorrow Night — and up to 20
 of your own, imported (below).
 
@@ -1116,6 +1466,8 @@ when there are any.
 | `⌥⌘B` | Toggle the terminals side bar |
 | `⌘L` | Clear the active terminal |
 | `⌘F` | Find in the active terminal's scrollback |
+| `⌘⇧↑` | Scroll the active terminal to the previous prompt or message sent to Claude Code (`Ctrl+Shift+↑` off macOS) |
+| `⌘⇧↓` | Scroll the active terminal to the next prompt or message sent to Claude Code, or the bottom past the last (`Ctrl+Shift+↓` off macOS) |
 | `⌘⇧H` | Command history |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / default text |
 | `⌘S` | Save the active editor file |
@@ -1267,7 +1619,9 @@ build (`setup.exe` or `.msi`); the portable `NexTerm.exe` may never show one.
 
 **A background tab never said anything.** A terminal is read only once it has
 been on screen: a tab of the restored session that you have not opened since
-launch stays quiet until you first show it.
+launch stays quiet until you first show it. Claude Code's *Working* and *Idle*
+and its completion entry are the exception: they come from the terminal's
+title, which NexTerm reads even before the terminal is first shown.
 
 **`Ctrl+Shift+U` does nothing (Linux).** IBus takes it. Bind *Go to Latest
 Unread Notification* to another key in Settings ▸ Keyboard Shortcuts.

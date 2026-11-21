@@ -1,0 +1,48 @@
+{
+  "version": 2,
+  "data": {
+    "workspaceName": "Work",
+    "groups": [
+      {
+        "id": "group-1",
+        "name": "Build",
+        "createdAt": 1763000000000,
+        "activePaneId": "pane-3",
+        "tree": {
+          "type": "split",
+          "id": "split-1",
+          "direction": "horizontal",
+          "children": [
+            { "type": "leaf", "id": "pane-1", "tabIds": ["tab-term-1", "tab-term-2"], "activeTabId": "tab-term-2" },
+            {
+              "type": "split",
+              "id": "split-2",
+              "direction": "vertical",
+              "children": [
+                { "type": "leaf", "id": "pane-2", "tabIds": ["tab-term-3"], "activeTabId": "tab-term-3" },
+                { "type": "leaf", "id": "pane-3", "tabIds": ["tab-term-4"], "activeTabId": "tab-term-4" }
+              ],
+              "sizes": [35, 65]
+            }
+          ],
+          "sizes": [62.5, 37.5]
+        }
+      },
+      {
+        "id": "group-2",
+        "name": "Logs",
+        "createdAt": 1763000000500,
+        "activePaneId": "pane-4",
+        "tree": { "type": "leaf", "id": "pane-4", "tabIds": ["tab-term-5"], "activeTabId": "tab-term-5" }
+      }
+    ],
+    "activeGroupId": "group-1",
+    "tabs": [
+      { "id": "tab-term-1", "title": "Terminal 1", "cwd": "/work/app", "agent": null },
+      { "id": "tab-term-2", "title": "server", "cwd": "/work/app", "agent": null },
+      { "id": "tab-term-3", "title": "Terminal 3", "cwd": "/work/app/src", "agent": null },
+      { "id": "tab-term-4", "title": "tests", "cwd": "/work/app", "agent": null },
+      { "id": "tab-term-5", "title": "Terminal 5", "cwd": "/work/logs", "agent": null }
+    ]
+  }
+}

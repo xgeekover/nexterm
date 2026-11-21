@@ -44,8 +44,6 @@ const emptyEditor = () => ({
   activeTabId: null,
   pendingClose: null,
   pendingOverwrite: null,
-  editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
-  activeEditorPaneId: 'editor-pane-root',
 });
 
 async function openFile(content, edited = content) {

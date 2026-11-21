@@ -1,0 +1,406 @@
+<!doctype html>
+<!--
+  Headless-Chromium harness for tests/adversarial/workbench_drag_headless.test.js.
+
+  The app's own workbench (src/components/terminal/TerminalSplitContainer.jsx)
+  filling the window, with the app's own stores, REAL @xterm/xterm terminals
+  (the app's terminalRegistry, through TerminalView), REAL Monaco in the
+  editor panes and the app's stylesheet, mounted under React.StrictMode as
+  src/main.jsx mounts the app. The page is not inside Tauri: the files and
+  the shells come from the browser mock (src/lib/ipc.js).
+
+  Everything is driven through `window.__w`:
+
+    setup()               four terminals in one pane and four files, opened
+                          the way the Explorer opens them: [files 60 | terminals 40]
+    ids                   the tab and pane ids setup made
+    mixed()               the group put back to [files a b c d | terminals t1..t4],
+                          a.js and t2 shown, ids kept, so the next drag starts
+                          from the same place
+    layout(tree)          the group's tree put as given (settled by the store)
+    state()               the group's tree, its active pane, its zoom
+    rect(selector)        the box of the first element matching `selector`
+    chip(kind, tabId)     the box of a tab's chip, in its strip
+    body(kind, paneId)    the box of a pane's body
+    indicator()           the drop indicator on screen: its zone and the pane
+                          (and kind) it is drawn over, or null
+    holdXterm(tabId)      remembers the `.xterm` node of a terminal
+    xterm(tabId)          whether it is the node held, connected, and which
+                          pane body it is drawn in
+    type(path, text)      an edit in the editor showing `path`, its own undo step
+    holdModel(path) / model(path)
+                          a file's Monaco model: whether it is the one held,
+                          and canUndo
+    splits()              for every split of the group on screen: its
+                          direction, the length its Group measures, and each
+                          child's size along it and the floor the pixel
+                          minimums give it there (PANE_MIN_PX through
+                          `minSharesOf`, never above the equal-share bound —
+                          FC7)
+    leafBoxes()           every pane's box, by id and kind
+    logs()                what reached console.warn and console.error
+    focused()             where the keyboard is: the pane body (and kind)
+                          holding document.activeElement, and whether it is
+                          inside Monaco or an xterm (workbench_focus_headless)
+    written(tabId)        what reached the PTY of a terminal (`pty_write`
+                          through the browser mock), as one string
+    text(path)            a file's model text
+    menu(id)              a menu item run as the native menu runs it
+    isMac                 whether the app modifier is ⌘ here (platform.js)
+    prompt(tabId, output) output and a finished command for a terminal, as
+                          the backend sends them: a prompt mark
+    marks(tabId)          its prompt marks: lines, and how many are painted
+    notify(tabId)         an unread notification for a terminal
+    setting(key, value)   a setting changed, as Settings changes it
+    terminalFeatures(paneId)
+                          what a terminal pane draws of its own: the hidden
+                          strip's handle, the attention ring
+    palette(mode)         the command palette opened, as its chord opens it
+                          (what has the keyboard then is what it gives it
+                          back to)
+    paletteState()        whether it is open, whether its search box has the
+                          keyboard, and the title of the row Enter would run
+    menuItem(label)       the box of the open menu's row reading `label`
+
+  The app's keyboard layer (useKeybindings) and its command palette are
+  mounted beside the workbench, so a chord pressed through CDP runs the
+  command a user's would.
+
+  Not part of the app's own routes; loaded only by that test, over the vite
+  dev server it starts on its own scratch config.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; }
+      #root { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: flex; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      // What reached the console, in the page's words — before anything else
+      // is loaded, so the library's own warnings are caught too.
+      const consoleLines = [];
+      for (const level of ['warn', 'error']) {
+        const original = console[level].bind(console);
+        console[level] = (...args) => {
+          consoleLines.push(`${level}: ${args.map((a) => (a instanceof Error ? a.stack || a.message : String(a))).join(' ')}`);
+          original(...args);
+        };
+      }
+
+      const React = (await import('react')).default;
+      const { createRoot } = await import('react-dom/client');
+      const monaco = await import('monaco-editor');
+      await import('@xterm/xterm/css/xterm.css');
+      await import('../../../src/styles/index.css');
+      const { mockBridge } = await import('../../../src/lib/ipc.js');
+      const { useEditorStore, registerEditorBridge } = await import('../../../src/stores/editorStore.js');
+      const { useTerminalStore, __settleLayout, activePaneOf } = await import('../../../src/stores/terminalStore.js');
+      const { useSettingsStore } = await import('../../../src/stores/settingsStore.js');
+      const { existingTerminal, getOrCreateTerminal } = await import('../../../src/components/terminal/terminalRegistry.js');
+      const { TerminalSplitContainer } = await import('../../../src/components/terminal/TerminalSplitContainer.jsx');
+      const { minSharesOf, panelMinSizeOf, sizesOf } = await import('../../../src/components/terminal/splitLayout.js');
+      const { useKeybindings } = await import('../../../src/hooks/useKeybindings.js');
+      const { CommandPalette } = await import('../../../src/components/command/CommandPalette.jsx');
+      const { runMenuAction } = await import('../../../src/lib/menuActions.js');
+      const { isMac } = await import('../../../src/lib/platform.js');
+
+      // Every byte a terminal sends its program, by session: what typing in a
+      // focused xterm reaches (workbench_focus_headless.test.js).
+      const ptyWrites = [];
+      const realInvoke = mockBridge.invoke.bind(mockBridge);
+      mockBridge.invoke = (command, args = {}) => {
+        if (command === 'pty_write') ptyWrites.push({ sessionId: args.session_id, data: String(args.data ?? '') });
+        return realInvoke(command, args);
+      };
+
+      const E = useEditorStore;
+      const T = useTerminalStore;
+      const FILES = ['a', 'b', 'c', 'd'].map((n) => `/workspace/${n}.js`);
+      FILES.forEach((path, i) => mockBridge.files.set(path, `export const v${i} = ${i};\nconst second = 2;\n`));
+      mockBridge.directories.add('/workspace');
+
+      useSettingsStore.setState({
+        terminalFontFamily: 'monospace',
+        terminalFontSize: 12,
+        terminalLineHeight: 1,
+        terminalScrollback: 1000,
+      });
+      E.setState({ rootPath: '/workspace', rootResolved: true, tabs: [], activeTabId: null });
+      registerEditorBridge();
+      const GROUP = 'group-wh';
+      T.setState({
+        groups: [{ id: GROUP, name: 'Group 1', createdAt: 1, tree: { type: 'leaf', id: 'pane-wh-terminal', tabIds: [], activeTabId: null }, activePaneId: 'pane-wh-terminal' }],
+        activeGroupId: GROUP,
+        activeTabId: null,
+        tabs: [],
+      });
+
+      const ids = {};
+      const group = () => T.getState().groups.find((g) => g.id === T.getState().activeGroupId);
+      const leaves = (node, acc = []) => {
+        if (!node) return acc;
+        if (node.type === 'leaf') acc.push(node);
+        else node.children.forEach((c) => leaves(c, acc));
+        return acc;
+      };
+      const splitsOf = (node, acc = []) => {
+        if (node?.type === 'split') {
+          acc.push(node);
+          node.children.forEach((c) => splitsOf(c, acc));
+        }
+        return acc;
+      };
+      const boxOf = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+      };
+      const bodySelector = (kind, paneId) => (kind === 'editor' ? `[data-editor-pane-body="${paneId}"]` : `[data-pane-body="${paneId}"]`);
+      const modelOf = (path) => monaco.editor.getModel(monaco.Uri.file(path));
+      const live = () => monaco.editor.getEditors().filter((e) => e.getContainerDomNode().isConnected);
+      const xterms = new Map();
+      const models = new Map();
+      const put = (tree) => {
+        T.setState((s) =>
+          __settleLayout(s, {
+            groups: s.groups.map((g) => (g.id === GROUP ? { ...g, tree, zoomedPaneId: undefined } : g)),
+          })
+        );
+      };
+
+      window.__w = {
+        ready: false,
+        ids,
+
+        async setup() {
+          for (let i = 1; i <= 4; i += 1) {
+            const tab = await T.getState().createTab({ paneId: 'pane-wh-terminal', groupId: GROUP });
+            ids[`t${i}`] = tab.id;
+          }
+          for (const [i, path] of FILES.entries()) {
+            const tab = await E.getState().openFile(path);
+            ids['abcd'[i]] = tab.id;
+          }
+          const all = leaves(group().tree);
+          ids.terminalPane = all.find((l) => l.tabIds.includes(ids.t1)).id;
+          ids.editorPane = all.find((l) => l.tabIds.includes(ids.a)).id;
+          window.__w.mixed();
+          return { ...ids };
+        },
+        mixed() {
+          put({
+            type: 'split',
+            id: 'split-wh-root',
+            direction: 'vertical',
+            sizes: [60, 40],
+            children: [
+              { type: 'leaf', kind: 'editor', id: ids.editorPane, tabIds: [ids.a, ids.b, ids.c, ids.d], activeTabId: ids.a },
+              { type: 'leaf', id: ids.terminalPane, tabIds: [ids.t1, ids.t2, ids.t3, ids.t4], activeTabId: ids.t2 },
+            ],
+          });
+          return null;
+        },
+        layout(tree) {
+          put(tree);
+          return null;
+        },
+        state() {
+          const g = group();
+          return { tree: g.tree, activePane: activePaneOf(g), activePaneId: g.activePaneId, zoomedPaneId: g.zoomedPaneId ?? null };
+        },
+        rect(selector) {
+          return boxOf(document.querySelector(selector));
+        },
+        chip(kind, tabId) {
+          const strip = kind === 'editor' ? '[data-editor-tab-strip]' : '[data-tab-strip]';
+          return boxOf(document.querySelector(`${strip} [data-tab-chip="${tabId}"]`));
+        },
+        body(kind, paneId) {
+          return boxOf(document.querySelector(bodySelector(kind, paneId)));
+        },
+        indicator() {
+          const shown = [...document.querySelectorAll('[data-drop-zone]')];
+          if (shown.length === 0) return null;
+          const el = shown[0];
+          const terminal = el.closest('[data-pane-body]');
+          const editor = el.closest('[data-editor-pane-body]');
+          return {
+            count: shown.length,
+            zone: el.getAttribute('data-drop-zone'),
+            paneId: terminal?.getAttribute('data-pane-body') ?? editor?.getAttribute('data-editor-pane-body') ?? null,
+            paneKind: terminal ? 'terminal' : editor ? 'editor' : null,
+            label: el.textContent,
+          };
+        },
+        holdXterm(tabId) {
+          const node = existingTerminal(tabId)?.element ?? null;
+          xterms.set(tabId, node);
+          return node != null && node.classList.contains('xterm') && node.isConnected;
+        },
+        xterm(tabId) {
+          const node = existingTerminal(tabId)?.element ?? null;
+          return {
+            same: node != null && node === xterms.get(tabId),
+            connected: Boolean(node?.isConnected),
+            pane: node?.closest('[data-pane-body]')?.getAttribute('data-pane-body') ?? null,
+          };
+        },
+        type(path, text) {
+          const editor = live().find((e) => e.getModel() === modelOf(path));
+          editor.focus();
+          editor.pushUndoStop();
+          editor.trigger('keyboard', 'type', { text });
+          return editor.getModel().getValue();
+        },
+        holdModel(path) {
+          models.set(path, modelOf(path));
+          return models.get(path) != null;
+        },
+        model(path) {
+          const model = modelOf(path);
+          return {
+            exists: model != null,
+            same: model != null && model === models.get(path),
+            canUndo: model?.canUndo() ?? false,
+            editors: live().filter((e) => e.getModel() === model && model != null).length,
+          };
+        },
+        shown(path) {
+          return live().some((e) => e.getModel() === modelOf(path));
+        },
+        splits() {
+          return splitsOf(group().tree).map((node) => {
+            const first = document.getElementById(node.children[0].id);
+            const box = first?.parentElement;
+            const horizontal = node.direction !== 'vertical';
+            const length = box ? Math.round(horizontal ? box.clientWidth : box.clientHeight) : null;
+            const shares = length ? minSharesOf(node, length) : [];
+            const bound = Number(panelMinSizeOf(node));
+            return {
+              id: node.id,
+              direction: horizontal ? 'horizontal' : 'vertical',
+              length,
+              stored: sizesOf(node),
+              children: node.children.map((child, i) => {
+                const r = boxOf(document.getElementById(child.id));
+                return {
+                  id: child.id,
+                  size: r ? (horizontal ? r.width : r.height) : null,
+                  floor: length ? (Math.min(shares[i], bound) / 100) * length : null,
+                  scaled: length ? (shares[i] / 100) * length : null,
+                };
+              }),
+            };
+          });
+        },
+        leafBoxes() {
+          return leaves(group().tree).map((leaf) => ({
+            id: leaf.id,
+            kind: leaf.kind === 'editor' ? 'editor' : 'terminal',
+            box: boxOf(document.getElementById(leaf.id)) ?? boxOf(document.querySelector(bodySelector(leaf.kind, leaf.id))),
+          }));
+        },
+        logs() {
+          return consoleLines.slice();
+        },
+        isMac,
+        focused() {
+          const el = document.activeElement;
+          const terminal = el?.closest?.('[data-pane-body]');
+          const editor = el?.closest?.('[data-editor-pane-body]');
+          return {
+            tag: el?.tagName ?? null,
+            paneId: terminal?.getAttribute('data-pane-body') ?? editor?.getAttribute('data-editor-pane-body') ?? null,
+            paneKind: terminal ? 'terminal' : editor ? 'editor' : null,
+            inMonaco: Boolean(el?.closest?.('.monaco-editor')),
+            inXterm: Boolean(el?.closest?.('.xterm')),
+          };
+        },
+        written(tabId) {
+          const sessionId = T.getState().tabs.find((t) => t.id === tabId)?.sessionId;
+          return ptyWrites.filter((w) => w.sessionId === sessionId).map((w) => w.data).join('');
+        },
+        text(path) {
+          return modelOf(path)?.getValue() ?? null;
+        },
+        menu(id) {
+          runMenuAction(id);
+          return null;
+        },
+        async prompt(tabId, output) {
+          // Written to the terminal itself, then its D — as prompt_marks_harness.html does.
+          const sessionId = T.getState().tabs.find((t) => t.id === tabId)?.sessionId;
+          const term = existingTerminal(tabId);
+          const write = (data) => new Promise((resolve) => term.write(data, resolve));
+          await write(output);
+          await mockBridge.emit('pty-command-done', { session_id: sessionId, exit_code: 0 });
+          await write('');
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          return window.__w.marks(tabId);
+        },
+        marks(tabId) {
+          // The registry's entry, which an existing terminal is handed back as.
+          const entry = existingTerminal(tabId) ? getOrCreateTerminal(tabId) : null;
+          return {
+            lines: entry?.promptMarks?.lines?.slice() ?? [],
+            painted: entry?.promptMarks?.marks?.filter((m) => m.decoration).length ?? 0,
+          };
+        },
+        notify(tabId) {
+          T.setState((s) => ({
+            notifications: [{ id: `n-${tabId}-${Date.now()}`, tabId, read: false, kind: 'bell', title: 'Bell', body: '', createdAt: Date.now() }, ...(s.notifications ?? [])],
+          }));
+          return null;
+        },
+        setting(key, value) {
+          useSettingsStore.getState().setSetting(key, value);
+          return null;
+        },
+        terminalFeatures(paneId) {
+          const frame = document.getElementById(paneId) ?? document.querySelector(`[data-pane-body="${paneId}"]`)?.parentElement;
+          return {
+            handle: Boolean(document.querySelector(`[data-strip-handle="${paneId}"]`)),
+            strip: Boolean(document.querySelector(`[data-tab-strip="${paneId}"]`)),
+            ring: [...(frame?.querySelectorAll?.('[data-attention-ring]') ?? [])].map((el) => el.getAttribute('data-attention-ring')),
+          };
+        },
+        palette(mode = 'all') {
+          useSettingsStore.getState().setCommandPaletteOpen(true, mode);
+          return null;
+        },
+        paletteState() {
+          const input = document.querySelector('input[placeholder="Type a command or search files…"]');
+          const first = document.querySelector('[data-palette-row="0"] .truncate');
+          return {
+            open: useSettingsStore.getState().isCommandPaletteOpen === true,
+            inputFocused: Boolean(input) && document.activeElement === input,
+            first: first?.textContent ?? null,
+          };
+        },
+        menuItem(label) {
+          return boxOf([...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((el) => el.textContent.trim() === label));
+        },
+      };
+
+      const root = createRoot(document.getElementById('root'));
+      function Keys() {
+        useKeybindings();
+        return null;
+      }
+      root.render(
+        React.createElement(
+          React.StrictMode,
+          null,
+          React.createElement(Keys),
+          React.createElement(TerminalSplitContainer),
+          React.createElement(CommandPalette)
+        )
+      );
+      window.__w.ready = true;
+    </script>
+  </body>
+</html>

@@ -1567,7 +1567,10 @@ describe('The first shells wait for the backend to know the settings', () => {
   test('CD-35: every pty_spawn goes through the gate — a fresh start, a restore, a new terminal, a split and a restart alike — and a backend that never answers costs a bounded wait', async () => {
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.equal((store.match(/invoke\('pty_spawn'/g) || []).length, 1, 'a pty_spawn that does not wait for the settings');
-    assert.match(store, /async function spawnPty\(args\) \{\n\s*if \(spawnGate\) await spawnGate;\n\s*return invoke\('pty_spawn', args\);/);
+    // The args go out with the Claude Code normal-screen flag added
+    // (`withClaudeNormalScreen`, Settings ▸ Terminal ▸ Claude Code on the
+    // Normal Screen); the gate is still waited for first.
+    assert.match(store, /async function spawnPty\(args\) \{\n\s*if \(spawnGate\) await spawnGate;\n\s*return invoke\('pty_spawn', withClaudeNormalScreen\(args\)\);/);
     assert.ok((store.match(/spawnPty\(\{/g) || []).length >= 5, 'the five places a shell is started');
     const bridge = readFileSync(new URL('../../src/lib/controlBridge.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.match(bridge, /const stopReporting = reportControlSettings\(\);\n\s*holdSpawnsUntil\(controlSettingsReported\(\)\);/);
@@ -1586,6 +1589,84 @@ describe('The first shells wait for the backend to know the settings', () => {
       } finally {
         terminalStore.holdSpawnsUntil(previous);
       }
+    });
+  });
+});
+
+// Editor placement C2 (FC12, AC-C11): the control API beside editor panes.
+// Editor leaves hold editor tab ids only, so every handler that finds a
+// terminal by its tab id (`placeOf`) is unchanged; these pin it.
+describe('Control requests beside editor panes (editor placement C2)', () => {
+  const withEditors = async (fn) => {
+    const before = terminalStore.__editorBridge();
+    terminalStore.setEditorBridge({ tabIds: () => new Set(['e1', 'e2']), closeTabs: () => {} });
+    try {
+      await inStore(fn);
+    } finally {
+      terminalStore.setEditorBridge(before);
+    }
+  };
+  const leavesIn = (node, acc = []) => {
+    if (node?.type === 'leaf') acc.push(node);
+    else node?.children?.forEach((c) => leavesIn(c, acc));
+    return acc;
+  };
+  const parentIn = (node, id) => {
+    if (!node || node.type !== 'split') return null;
+    for (const child of node.children) {
+      if (child.id === id) return node;
+      const found = parentIn(child, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  test('CD-C2-01: list returns the terminals only, in screen order, with file panes beside the caller', async () => {
+    await withEditors(async () => {
+      const [a, b, c] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      assert.ok(filePane, 'setup: a file pane above the terminals');
+      S.getState().placeEditorTab('e2', { paneId: filePane });
+      const { ask } = harness();
+      const answer = await ask(a, 'list', {});
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      assert.deepEqual(answer.result.map((r) => r.id), [a, b, c], 'no file, no editor pane');
+    });
+  });
+
+  test("CD-C2-02: new-split splits beside the caller's pane, whatever its neighbours; the file pane is left as it was", async () => {
+    await withEditors(async () => {
+      const [a] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      const callerPane = leavesIn(S.getState().getActiveGroup().tree).find((l) => l.tabIds.includes(a)).id;
+      const { ask } = harness();
+      const answer = await ask(a, 'new-split', { direction: 'right' });
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      const tree = S.getState().getActiveGroup().tree;
+      const childPane = leavesIn(tree).find((l) => l.tabIds.includes(answer.result.id));
+      const around = parentIn(tree, childPane.id);
+      assert.equal(around.direction, 'horizontal', 'split right');
+      assert.deepEqual(around.children.map((n) => n.id), [callerPane, childPane.id], "beside the caller's pane");
+      const file = leavesIn(tree).find((l) => l.id === filePane);
+      assert.deepEqual({ kind: file.kind, tabIds: file.tabIds }, { kind: 'editor', tabIds: ['e1'] }, 'the file pane is untouched');
+    });
+  });
+
+  test('CD-C2-03: focus never moves the keyboard (round 4) — with a file pane as THE active pane it stays the active pane, and the target is marked', async () => {
+    await withEditors(async () => {
+      const [a] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      S.getState().setActivePane(filePane);
+      const group = () => S.getState().getActiveGroup();
+      assert.equal(terminalStore.activeKindOf(group()), 'editor', 'setup: the file pane is THE active pane');
+      const { ask, focusedViews } = harness();
+      const answer = await ask(a, 'focus', {});
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      assert.deepEqual(answer.result, { switched: false });
+      assert.equal(terminalStore.activePaneOf(group()), filePane, 'the file pane is still THE active pane');
+      assert.equal(terminalStore.activeKindOf(group()), 'editor');
+      assert.deepEqual(focusedViews, [], 'no terminal is handed the keyboard');
+      assert.equal(S.getState().controlled[a]?.cmd, 'focus', 'the target is marked');
     });
   });
 });

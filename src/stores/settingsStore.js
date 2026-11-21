@@ -56,6 +56,38 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalStickyHeader: true,
   /**
+   * Draw a mark on each terminal's scrollbar at every shell prompt, the row
+   * the next command is typed on, from the OSC 133 "D" every integrated shell
+   * prints in front of its prompt (src/lib/promptMarks.js), and at every
+   * message sent to Claude Code, on its echoed `❯` row
+   * (src/lib/agentMessageMarks.js). A click on a mark scrolls that row to the
+   * top. Off, only the marks go: they are still tracked, so they come back at
+   * once, and the scrollbar stays 10px wide, so no terminal reflows. The
+   * previous/next prompt commands step through both kinds either way.
+   */
+  terminalPromptMarks: true,
+  /**
+   * Start every shell with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 unless it
+   * inherits that variable already (src-tauri/src/pty/manager.rs), so Claude
+   * Code draws on the normal screen: its conversation goes to the scrollback,
+   * scrolls with the scrollbar, and each message sent gets a mark. The trade:
+   * no fullscreen renderer (a little more flicker, no mouse scrolling of its
+   * own). Read when a shell starts, so a change applies to terminals started
+   * or restarted afterwards.
+   */
+  terminalClaudeNormalScreen: true,
+  /**
+   * Start and resume OpenCode V1 as `opencode --mini --no-replay` (with `-s
+   * <id>` or `--continue` on resume) when `opencode --version` says 1.17.10
+   * or newer (src/lib/opencodeLaunch.js), so its conversation is printed on
+   * the normal screen: it scrolls with the scrollbar and every message sent
+   * gets a mark. The trade: not the full-screen TUI's own layout and mouse.
+   * Any other OpenCode, and this off, get plain `opencode` as before; typing
+   * `opencode` yourself always gives the full TUI. Read when NexTerm types
+   * the line, so a change applies to the next start or resume.
+   */
+  terminalOpencodeMini: true,
+  /**
    * Copy a selection to the clipboard the moment the mouse makes it — a drag,
    * a double- or triple-click. Warp's default, and the reason a selection can
    * be pasted elsewhere without a second key. Only mouse selections: a find
@@ -164,6 +196,15 @@ export const SETTINGS_DEFAULTS = {
    * minute, and one per two-minute build is the entire reason it exists.
    */
   terminalNotifyAfterSeconds: 10,
+  /**
+   * Tell me when Claude Code in a terminal I am not looking at stops working
+   * and waits for me, once it has worked at least this long — read from the
+   * title Claude Code sets, so it needs no Claude Code setting. 0 turns it off.
+   * Its own setting rather than Notify After's: turning finished commands off
+   * must not silence the agent, nor the reverse. Ten seconds for Notify
+   * After's reason: below it, you are most likely still watching.
+   */
+  terminalAgentDoneAfterSeconds: 10,
   /**
    * Show what a program in a terminal asks to tell you — OpenCode's "Session
    * done" or "Permission needs input", Claude Code waiting for you — in the

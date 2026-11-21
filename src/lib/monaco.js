@@ -33,31 +33,43 @@ self.MonacoEnvironment = {
   },
 };
 
-// Editor themes that share the app's VS Code Modern palette (see styles/index.css).
+// The editor's theme. Monaco cannot read CSS custom properties, so each
+// colour below is a copy of its src/styles/index.css token (named beside it);
+// RN-229 (tests/render/runner.js) fails the build when the two drift apart.
+// The three that have no token of their own are derived from the palette:
+// the text selection is a violet as light as the old #264f78, the current-line
+// border a 1.14 step on the editor, and the scrollbar slider --vsc-scrollbar's
+// #9BA3AF at its two alphas.
 monaco.editor.defineTheme('nexterm-dark', {
   base: 'vs-dark',
   inherit: true,
   rules: [],
   colors: {
-    'editor.background': '#1f1f1f',
-    'editor.foreground': '#cccccc',
-    'editorLineNumber.foreground': '#6e7681',
-    'editorLineNumber.activeForeground': '#cccccc',
-    'editor.lineHighlightBorder': '#282828',
-    'editor.selectionBackground': '#264f78',
-    'editorIndentGuide.background1': '#404040',
-    'editorIndentGuide.activeBackground1': '#707070',
-    'editorGutter.background': '#1f1f1f',
-    'editorWidget.background': '#202020',
-    'editorWidget.border': '#313131',
-    'editorCursor.foreground': '#aeafad',
-    'scrollbarSlider.background': '#79797966',
-    'scrollbarSlider.hoverBackground': '#646464b3',
-    'focusBorder': '#0078d4',
-    'input.background': '#313131',
-    'input.border': '#3c3c3c',
-    'list.hoverBackground': '#2a2d2e',
-    'list.activeSelectionBackground': '#04395e',
+    'editor.background': '#15171C', // --vsc-editor-bg
+    'editor.foreground': '#E7E9EE', // --vsc-fg
+    'editorLineNumber.foreground': '#6B7280', // --vsc-line-number
+    'editorLineNumber.activeForeground': '#E7E9EE', // --vsc-line-number-active
+    'editor.lineHighlightBorder': '#1F232B',
+    'editor.selectionBackground': '#523F8A',
+    'editorIndentGuide.background1': '#3A4150', // --vsc-indent-guide
+    'editorIndentGuide.activeBackground1': '#6B7280', // --vsc-indent-guide-active
+    'editorGutter.background': '#15171C', // --vsc-editor-bg
+    'editorWidget.background': '#1B1E25', // --vsc-widget-bg
+    'editorWidget.border': '#3A4150', // --vsc-widget-border
+    'editorCursor.foreground': '#E7E9EE', // --vsc-fg
+    'scrollbarSlider.background': '#9BA3AF47',
+    'scrollbarSlider.hoverBackground': '#9BA3AF73',
+    'focusBorder': '#8B5CF6', // the focused-field border token
+    'input.background': '#232731', // --vsc-input-bg
+    'input.border': '#3A4150', // --vsc-input-border
+    'inputOption.activeBorder': '#8B5CF6', // --vsc-accent
+    'list.hoverBackground': '#232731', // --vsc-hover
+    'list.activeSelectionBackground': '#3B2C5B', // --vsc-selection
+    // Monaco's own context menu; without these it keeps vs-dark's grey.
+    'menu.background': '#1B1E25', // --vsc-menu-bg
+    'menu.foreground': '#E7E9EE', // --vsc-fg
+    'menu.selectionBackground': '#3B2C5B', // --vsc-selection
+    'menu.border': '#3A4150', // --vsc-widget-border
     'diffEditor.insertedTextBackground': '#9ccc2c33',
     'diffEditor.removedTextBackground': '#ff000033',
   },

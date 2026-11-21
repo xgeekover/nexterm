@@ -45,6 +45,8 @@ import {
 import {
   agentFromCommandLine,
   agentLabel,
+  claudeActivityOf,
+  claudeTitleOf,
   cleanAgentTitle,
   isKnownAgent,
   isSessionIdFor,
@@ -57,10 +59,29 @@ import {
   serializeAgent,
   startCommand,
 } from '../lib/agents.js';
+import { opencodeLaunchLine } from '../lib/opencodeLaunch.js';
 import { historyKeyOfTab, historyRecord } from '../lib/agentHistory.js';
+import {
+  AGENT_IDLE_SETTLE_MS,
+  NO_AGENT_ACTIVITY,
+  agentDoneBody,
+  agentDoneDecision,
+  inAgentPeriod,
+  nextAgentActivity,
+  settleAgentActivity,
+  withAgentSignal,
+} from '../lib/agentActivity.js';
 import { claudeConversationSaved } from '../lib/claudeConversations.js';
 import { stripTrailingSep, toPosix } from '../lib/paths.js';
-import { equalizeAll, equalizeLineOf, swapChoices } from '../components/terminal/splitLayout.js';
+import {
+  EDITOR_KIND,
+  TERMINAL_KIND,
+  equalizeAll,
+  equalizeLineOf,
+  leafKind,
+  projectTree,
+  swapChoices,
+} from '../components/terminal/splitLayout.js';
 import { typingHidden, withoutSecret } from '../lib/secretInput.js';
 import { cleanStatusText } from '../lib/controlScope.js';
 import { LOST_LINE } from '../lib/suggestionLayer.js';
@@ -167,6 +188,112 @@ function bumpGroupCounter(groupId) {
   if (next > groupCounter) groupCounter = next;
 }
 
+// --- The editor bridge (editor placement, sibling B) ----------------------
+//
+// A group's tree is the workbench: besides terminal leaves it holds editor
+// leaves (`kind: 'editor'`, see splitLayout.js), whose tab ids are file tabs
+// of editorStore. This store never imports editorStore — editorStore imports
+// this one — so it learns which editor tab ids exist, and closes the ones a
+// layout change leaves in no leaf, through a bridge editorStore registers at
+// load (the pattern of `setAgentLaunchObserver`). With no bridge there are no
+// editor tabs: editor leaves are kept, empty.
+
+const NO_EDITOR_IDS = new Set();
+const NO_EDITORS = Object.freeze({
+  /** The editor tab ids that exist, as a Set (or any iterable). */
+  tabIds: () => NO_EDITOR_IDS,
+  /** Close these editor tabs, with no prompt: they are in no leaf any more. */
+  closeTabs: () => {},
+  /** The ids among `tabIds` with unsaved changes. */
+  dirtyTabIds: () => [],
+  /**
+   * Ask Save / Don't Save / Cancel about the dirty tabs among `tabIds` before
+   * `kind` closes them; resolves true to go on, false to leave everything as
+   * it is. Null: nothing is ever dirty, go on.
+   */
+  confirmClose: null,
+});
+let editorBridge = NO_EDITORS;
+
+/** Register (or, with null, remove) the editor bridge — editorStore does, at load. */
+export function setEditorBridge(bridge) {
+  editorBridge = bridge && typeof bridge === 'object' ? { ...NO_EDITORS, ...bridge } : NO_EDITORS;
+}
+
+/** The registered bridge — what the test harness puts back between cases. */
+export function __editorBridge() {
+  return editorBridge;
+}
+
+/** The editor tab ids that exist right now, as a Set. */
+function editorTabIds() {
+  try {
+    const ids = editorBridge.tabIds();
+    return ids instanceof Set ? ids : new Set(ids || []);
+  } catch {
+    return NO_EDITOR_IDS;
+  }
+}
+
+/**
+ * Editor leaves waiting for the editor restore (sibling B, FB8): a saved
+ * layout's editor leaves come back empty and are kept until the editor
+ * session of the open folder fills them — or the deadline passes. Transient:
+ * never persisted. Empty editor leaves are pruned by the editor actions that
+ * empty them; a waiting leaf is never one of those.
+ */
+const waitingEditorLeaves = new Set();
+
+/** Releases the waiting editor leaves however long the editor restore takes. */
+let editorWaitTimer = null;
+
+/** How long waiting editor leaves are kept at most: editorStore's RESTORE_DEADLINE_MS, through the bridge. */
+const DEFAULT_EDITOR_WAIT_MS = 15000;
+
+/** Whether editor leaf `paneId` is waiting for the editor restore. */
+export function isWaitingEditorLeaf(paneId) {
+  return waitingEditorLeaves.has(paneId);
+}
+
+/** A fresh workbench id — 'pane' or 'split' — for leaves editorStore builds (the restore). */
+export function newWorkbenchId(kind) {
+  return kind === 'split' ? makeSplitId() : makePaneId();
+}
+
+/** The ids of the editor leaves waiting for the editor restore (a copy). */
+export function __waitingEditorLeaves() {
+  return new Set(waitingEditorLeaves);
+}
+
+const isEditorLeaf = (leaf) => leafKind(leaf) === EDITOR_KIND;
+
+/** `leaf` marked as `kind`: an editor leaf says so, a terminal leaf carries no `kind` at all. */
+function withLeafKind(leaf, kind) {
+  if (kind === EDITOR_KIND) return leaf.kind === EDITOR_KIND ? leaf : { ...leaf, kind: EDITOR_KIND };
+  if (!('kind' in leaf)) return leaf;
+  const { kind: _dropped, ...rest } = leaf;
+  return rest;
+}
+
+/** Which kind of tab `tabId` is: a terminal of `state.tabs`, an editor tab the bridge knows, or null. */
+function kindOfTab(state, tabId) {
+  if (!tabId) return null;
+  if (state.tabs.some((t) => t.id === tabId)) return TERMINAL_KIND;
+  return editorTabIds().has(tabId) ? EDITOR_KIND : null;
+}
+
+/** Where a file opened into a group with no editor leaf goes: a vertical split, editors first. */
+export const EDITOR_WRAP_SIZES = Object.freeze([60, 40]);
+
+/** `tree` wrapped in a vertical split under `leaf`: [leaf 60, tree 40] (FB4). */
+function wrapWithEditorLeaf(tree, leaf) {
+  if (!tree) return leaf;
+  return { type: 'split', id: makeSplitId(), direction: 'vertical', children: [leaf, tree], sizes: [...EDITOR_WRAP_SIZES] };
+}
+
+/** An empty editor leaf, with a pane id from the same counter as terminal panes (ids stay unique across kinds). */
+const emptyEditorLeaf = () => ({ type: 'leaf', kind: EDITOR_KIND, id: makePaneId(), tabIds: [], activeTabId: null });
+
 // --- Tree helpers (all operate on ONE group's tree) ----------------------
 
 /** Visit every node (splits included) of a tree. */
@@ -178,11 +305,13 @@ function walkNodes(node, fn) {
   }
 }
 
-/** Walks a tree and returns the id of its first pane (DOM order). */
-function firstLeafId(node) {
-  if (!node) return null;
-  if (node.type === 'leaf') return node.id;
-  return firstLeafId(node.children[0]);
+/**
+ * The id of a tree's first pane of `kind` in DOM order — a terminal pane
+ * unless asked otherwise, because every caller hands it to `activePaneId`,
+ * which names a terminal leaf (sibling B, FB2). Null when there is none.
+ */
+function firstLeafId(node, kind = TERMINAL_KIND) {
+  return collectLeaves(node).find((leaf) => leafKind(leaf) === kind)?.id ?? null;
 }
 
 /** Collects every pane of a tree, in DOM order. */
@@ -294,6 +423,58 @@ function leafHoldingTab(node, tabId) {
   return collectLeaves(node).find((leaf) => leaf.tabIds.includes(tabId)) || null;
 }
 
+// --- The one active pane (sibling C, FC1) ----------------------------------
+//
+// A group has ONE active pane of either kind. B's two fields keep their
+// meaning — `activePaneId` the last active terminal leaf, which every
+// terminal command and reader acts on, and `editorPaneId` the last active
+// editor leaf, whose shown tab is editorStore's `activeTabId` — and the
+// optional `activeKind: 'editor'` says the editor one is THE active pane.
+// Absent, the terminal one is. Coexisting fields rather than one merged id:
+// `activePaneId` is read as a terminal leaf throughout this file and beyond
+// (createTab, closeActivePane, workspaceFocus, controlDispatcher), and each
+// of those stays right untouched.
+
+/**
+ * The fields that make terminal leaf `paneId` its group's active pane.
+ * `activeKind: undefined` is dropped by `settle`, which every writer of
+ * these goes through.
+ */
+const terminalFocus = (paneId) => ({ activePaneId: paneId, activeKind: undefined });
+
+/** The fields that make editor leaf `paneId` its group's active pane. */
+const editorFocus = (paneId) => ({ editorPaneId: paneId, activeKind: EDITOR_KIND });
+
+/**
+ * The id of `group`'s one active pane, of either kind: its editor pane while
+ * `activeKind` is 'editor' and that leaf is in the tree, else its terminal
+ * active pane. Read defensively, as `zoomedPaneOf` is, so a hand-made or
+ * half-restored group never names a pane that is not there. Null without a
+ * group.
+ */
+export function activePaneOf(group) {
+  if (!group) return null;
+  if (group.activeKind === EDITOR_KIND && group.editorPaneId) {
+    const leaf = collectLeaves(group.tree).find((l) => l.id === group.editorPaneId);
+    if (leaf && isEditorLeaf(leaf)) return leaf.id;
+  }
+  return group.activePaneId ?? null;
+}
+
+/**
+ * The kind of `group`'s one active pane: 'editor' or 'terminal'. 'editor'
+ * only when the group says so and its editor pane is the one `activePaneOf`
+ * names (C1 review M-02): compared with `activePaneId` instead, a group
+ * with no terminal active pane yet (`activePaneId` undefined, `activePaneOf`
+ * null) answered 'editor' with no editor pane in it.
+ */
+export function activeKindOf(group) {
+  if (!group) return TERMINAL_KIND;
+  return group.activeKind === EDITOR_KIND && group.editorPaneId != null && activePaneOf(group) === group.editorPaneId
+    ? EDITOR_KIND
+    : TERMINAL_KIND;
+}
+
 // --- Zoom ----------------------------------------------------------------
 
 /**
@@ -332,6 +513,20 @@ export function panesOnScreen(group) {
 }
 
 /**
+ * The TERMINAL tab ids a zoom of `group` hides — what the zoom chip counts
+ * unread attention over (FC8). A zoom hides panes of both kinds now, but
+ * attention is a terminal's alone, and a file tab id is no terminal's.
+ * Empty when the group is not zoomed.
+ */
+export function hiddenTabIdsOf(group) {
+  const zoomed = zoomedPaneOf(group);
+  if (!zoomed) return [];
+  return collectLeaves(group.tree)
+    .filter((leaf) => leaf.id !== zoomed.id && !isEditorLeaf(leaf))
+    .flatMap((leaf) => leaf.tabIds);
+}
+
+/**
  * Why `group`'s panes cannot be swapped right now, in words for the palette
  * and the pane menu — or null when they can.
  *
@@ -339,10 +534,12 @@ export function panesOnScreen(group) {
  * nothing on screen to choose from or to see change, and a swap made blind
  * would only show itself when the zoom ended. Unzooming first is one key.
  */
-export function swapBlockedReason(group) {
+export function swapBlockedReason(group, kind = null) {
   if (!group?.tree) return 'No group is on screen';
   if (zoomedPaneOf(group)) return 'Unavailable while a pane is zoomed: the other panes are hidden. Unzoom it first (Toggle Pane Zoom).';
-  if (collectLeaves(group.tree).length < 2) return 'This group has one pane: there is no other pane to swap it with.';
+  // `kind`: count only panes of that kind — what a view of one kind offers (sibling B).
+  const panes = collectLeaves(group.tree).filter((leaf) => !kind || leafKind(leaf) === kind);
+  if (panes.length < 2) return 'This group has one pane: there is no other pane to swap it with.';
   return null;
 }
 
@@ -381,12 +578,12 @@ function removeTabFromTree(node, tabId) {
  * carrying the surviving children's `sizes` through. Returns null when the
  * whole tree is empty.
  */
-function pruneTree(node) {
+function pruneTree(node, keepEmpty = null) {
   if (!node) return null;
-  if (node.type === 'leaf') return node.tabIds.length > 0 ? node : null;
+  if (node.type === 'leaf') return node.tabIds.length > 0 || keepEmpty?.(node) ? node : null;
   const kept = [];
   node.children.forEach((child, i) => {
-    const pruned = pruneTree(child);
+    const pruned = pruneTree(child, keepEmpty);
     if (pruned) kept.push({ node: pruned, i });
   });
   if (kept.length === 0) return null;
@@ -416,17 +613,26 @@ function removePane(node, paneId) {
   };
 }
 
-/** Append a tab to a pane (falling back to the first pane) and make it active there. */
-function addTabToPane(node, paneId, tabId) {
+/**
+ * Append a tab of `kind` to a pane of that kind (falling back to the first
+ * pane of that kind) and make it active there. A tree with no pane of the
+ * kind gets one: an editor leaf wrapped above it (FB4), a terminal leaf below.
+ */
+function addTabToPane(node, paneId, tabId, kind = TERMINAL_KIND) {
   let placed = false;
   const next = replaceNode(node, paneId, (n) => {
-    if (n.type !== 'leaf') return n;
+    if (n.type !== 'leaf' || leafKind(n) !== kind) return n;
     placed = true;
     return { ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId };
   });
   if (placed) return next;
-  const first = collectLeaves(node)[0];
-  if (!first) return { type: 'leaf', id: paneId || makePaneId(), tabIds: [tabId], activeTabId: tabId };
+  const first = collectLeaves(node).find((leaf) => leafKind(leaf) === kind);
+  if (!first) {
+    const leaf = withLeafKind({ type: 'leaf', id: node ? makePaneId() : paneId || makePaneId(), tabIds: [tabId], activeTabId: tabId }, kind);
+    if (!node) return leaf;
+    if (kind === EDITOR_KIND) return wrapWithEditorLeaf(node, leaf);
+    return { type: 'split', id: makeSplitId(), direction: 'vertical', children: [node, leaf], sizes: [...EDITOR_WRAP_SIZES] };
+  }
   return replaceNode(node, first.id, (n) => ({
     ...n,
     tabIds: [...n.tabIds, tabId],
@@ -492,6 +698,90 @@ const sameOrder = (a, b) => a.length === b.length && a.every((x, i) => x === b[i
 const emptyPane = () => ({ type: 'leaf', id: makePaneId(), tabIds: [], activeTabId: null });
 
 /** A brand-new single-pane group holding `tabIds`. */
+/**
+ * `tree` with its empty terminal leaves pruned and every editor leaf kept,
+ * empty or not (FB1) — except that a tree with editor leaves keeps one
+ * terminal leaf (FB2): `preferredPaneId` when it is one, else the first, and
+ * when it has none at all an empty one is put below the editors. So the
+ * terminal view, New Terminal, Ctrl+W and the control API always have a
+ * terminal pane to act on in a group that shows files.
+ */
+function pruneTerminalLeaves(tree, preferredPaneId) {
+  const pruned = pruneTree(tree, isEditorLeaf);
+  if (!pruned || collectLeaves(pruned).some((leaf) => !isEditorLeaf(leaf))) return pruned;
+  const terminals = collectLeaves(tree).filter((leaf) => !isEditorLeaf(leaf));
+  const keep = terminals.find((leaf) => leaf.id === preferredPaneId) ?? terminals[0];
+  if (keep) return pruneTree(tree, (leaf) => isEditorLeaf(leaf) || leaf.id === keep.id);
+  return { type: 'split', id: makeSplitId(), direction: 'vertical', children: [pruned, emptyPane()], sizes: [...EDITOR_WRAP_SIZES] };
+}
+
+/**
+ * `tree` without its empty editor leaves, except the waiting ones and those
+ * `keepIds` names — what closing or moving a file does to the leaves it
+ * empties (FB5). Terminal leaves are left to `settle`.
+ */
+function pruneEditorLeaves(tree, keepIds = []) {
+  const keep = new Set(keepIds);
+  return pruneTree(tree, (leaf) => !isEditorLeaf(leaf) || waitingEditorLeaves.has(leaf.id) || keep.has(leaf.id));
+}
+
+/** `pruneEditorLeaves` on the groups `groupIds` names, a fresh array. */
+function pruneEditorLeavesIn(groups, groupIds, keepIds = []) {
+  const touched = new Set(groupIds.filter(Boolean));
+  return groups.map((g) => {
+    if (!touched.has(g.id)) return g;
+    const tree = pruneEditorLeaves(g.tree, keepIds);
+    return tree === g.tree ? g : { ...g, tree };
+  });
+}
+
+/**
+ * The editor leaf that becomes a group's editor pane when `paneId` closes:
+ * the next editor leaf in DOM order, else the one before — the neighbour the
+ * editor area always handed focus to. Undefined when it was the only one.
+ */
+function neighbourEditorLeaf(tree, paneId) {
+  const editors = collectLeaves(tree).filter(isEditorLeaf);
+  const i = editors.findIndex((l) => l.id === paneId);
+  if (i === -1) return undefined;
+  return (editors[i + 1] ?? editors[i - 1])?.id;
+}
+
+/**
+ * The editor leaf of `after` that takes over from editor leaf `paneId` of
+ * `before` once it is gone: the nearest one after it in DOM order that is
+ * still there, else the nearest before it — `neighbourEditorLeaf` when
+ * several leaves went at once. Undefined when none is left.
+ */
+function survivingNeighbourEditorLeaf(before, after, paneId) {
+  const order = collectLeaves(before).filter(isEditorLeaf).map((l) => l.id);
+  const left = new Set(collectLeaves(after).filter(isEditorLeaf).map((l) => l.id));
+  const i = order.indexOf(paneId);
+  if (i === -1) return undefined;
+  return order.slice(i + 1).find((id) => left.has(id)) ?? order.slice(0, i).reverse().find((id) => left.has(id));
+}
+
+/**
+ * `groups` with every file tab of `state`'s groups moved into group
+ * `targetGroupId` as ONE editor leaf, wrapped above its tree (FB4, FB6) —
+ * what replacing the groups that held them does. Nothing is closed and
+ * nothing asked. The file shown is the one the group on screen showed.
+ */
+function editorsMovedInto(state, groups, targetGroupId) {
+  const ids = [...editorIdsHeld(state.groups)];
+  if (ids.length === 0) return groups;
+  const activeOld = state.groups.find((g) => g.id === state.activeGroupId);
+  const shownLeaf = activeOld && collectLeaves(activeOld.tree).find((l) => l.id === activeOld.editorPaneId);
+  const shown = shownLeaf && ids.includes(shownLeaf.activeTabId) ? shownLeaf.activeTabId : ids[0];
+  const leaf = { ...emptyEditorLeaf(), tabIds: ids, activeTabId: shown };
+  return groups.map((g) => (g.id === targetGroupId ? { ...g, tree: wrapWithEditorLeaf(g.tree, leaf), editorPaneId: leaf.id } : g));
+}
+
+/** Every editor tab id the groups hold. */
+function editorIdsHeld(groups) {
+  return new Set(groups.flatMap((g) => collectLeaves(g.tree).filter(isEditorLeaf).flatMap((l) => l.tabIds)));
+}
+
 function makeGroup({ name, tabIds = [], createdAt = Date.now() } = {}) {
   const paneId = makePaneId();
   return {
@@ -582,20 +872,27 @@ function settle(state, patch = {}) {
   const tabs = patch.tabs ?? state.tabs;
   const inputGroups = patch.groups ?? state.groups;
   const validTabIds = new Set(tabs.map((t) => t.id));
+  // Each leaf is checked against the ids of ITS kind (sibling B, FB1): a
+  // terminal id in an editor leaf, or a file tab in a terminal leaf, is
+  // dropped like an id with no tab at all.
+  const validEditorIds = editorTabIds();
   const claimed = new Set();
 
   let groups = inputGroups.map((group) => {
     let tree = mapTree(group.tree, (n) => {
       if (n.type !== 'leaf') return n;
+      const valid = isEditorLeaf(n) ? validEditorIds : validTabIds;
       const tabIds = (Array.isArray(n.tabIds) ? n.tabIds : []).filter((id) => {
-        if (!validTabIds.has(id) || claimed.has(id)) return false;
+        if (!valid.has(id) || claimed.has(id)) return false;
         claimed.add(id);
         return true;
       });
       if (tabIds.length === n.tabIds?.length) return n;
       return { ...n, tabIds, activeTabId: tabIds.includes(n.activeTabId) ? n.activeTabId : tabIds[0] ?? null };
     });
-    tree = normalizeTree(pruneTree(tree));
+    // Empty editor leaves are never pruned here: they exist on purpose (a
+    // split made to receive a file, a leaf waiting for the editor restore).
+    tree = normalizeTree(pruneTerminalLeaves(tree, group.activePaneId));
     return tree === group.tree ? group : { ...group, tree };
   });
 
@@ -610,8 +907,8 @@ function settle(state, patch = {}) {
     const base = groups[idx];
     // Reuse the pane that is already sitting there (it pruned away precisely
     // because it is empty) rather than minting a fresh pane id on every settle.
-    const existing = inputGroups[idx] ? collectLeaves(inputGroups[idx].tree)[0] : null;
-    const pane = existing && existing.tabIds.length === 0 ? { ...existing, activeTabId: null } : emptyPane();
+    const existing = inputGroups[idx] ? collectLeaves(inputGroups[idx].tree).find((l) => !isEditorLeaf(l)) : null;
+    const pane = existing && existing.tabIds?.length === 0 ? { ...existing, activeTabId: null } : emptyPane();
     groups = [base ? { ...base, tree: pane, activePaneId: pane.id } : makeGroup({ name: 'Group 1' })];
   } else {
     groups = surviving;
@@ -619,17 +916,37 @@ function settle(state, patch = {}) {
 
   groups = groups.map((group) => {
     const leaves = collectLeaves(group.tree);
-    const activePaneId = leaves.some((l) => l.id === group.activePaneId)
+    // `activePaneId` names a TERMINAL leaf (FB2): every terminal command and
+    // reader acts on it. `editorPaneId` names the group's last active editor
+    // leaf, and goes when the group has none.
+    const terminalLeaves = leaves.filter((l) => !isEditorLeaf(l));
+    const editorLeaves = leaves.filter(isEditorLeaf);
+    const activePaneId = terminalLeaves.some((l) => l.id === group.activePaneId)
       ? group.activePaneId
-      : firstLeafId(group.tree);
+      : terminalLeaves[0]?.id ?? firstLeafId(group.tree);
+    const editorPaneId = editorLeaves.some((l) => l.id === group.editorPaneId)
+      ? group.editorPaneId
+      : editorLeaves[0]?.id;
+    const editorSettled = editorPaneId === undefined ? !('editorPaneId' in group) : editorPaneId === group.editorPaneId;
+    // The editor pane is THE active pane only while there is one (FC1):
+    // 'editor' or nothing — any other value, a restored or hand-made one
+    // included, means the terminal pane is.
+    const activeKind = group.activeKind === EDITOR_KIND && editorPaneId !== undefined ? EDITOR_KIND : undefined;
+    const kindSettled = activeKind === undefined ? !('activeKind' in group) : group.activeKind === activeKind;
     const name = typeof group.name === 'string' && group.name ? group.name : 'Group';
     // Checked against the REPAIRED active pane: a zoomed pane that was pruned
-    // has just handed `activePaneId` to a survivor, which it is not.
-    const zoomHolds =
-      Boolean(group.zoomedPaneId) && group.zoomedPaneId === activePaneId && leaves.length > 1;
+    // has just handed the active pane to a survivor, which it is not. One
+    // tree draws both kinds (sibling C, FC8), so a zoom hides every other
+    // pane of either kind, and holds while there is any other pane to hide.
+    const shownActive = activeKind === EDITOR_KIND ? editorPaneId : activePaneId;
+    const zoomHolds = Boolean(group.zoomedPaneId) && group.zoomedPaneId === shownActive && leaves.length > 1;
     const zoomSettled = zoomHolds || !('zoomedPaneId' in group);
-    if (activePaneId === group.activePaneId && name === group.name && zoomSettled) return group;
+    if (activePaneId === group.activePaneId && name === group.name && zoomSettled && editorSettled && kindSettled) return group;
     const next = { ...group, name, activePaneId };
+    if (editorPaneId === undefined) delete next.editorPaneId;
+    else next.editorPaneId = editorPaneId;
+    if (activeKind === undefined) delete next.activeKind;
+    else next.activeKind = activeKind;
     return zoomHolds ? next : withoutZoom(next);
   });
 
@@ -638,7 +955,7 @@ function settle(state, patch = {}) {
 
   // The active tab must be one the active group actually shows — switching
   // group therefore moves it.
-  const activeLeaves = collectLeaves(activeGroup.tree);
+  const activeLeaves = collectLeaves(activeGroup.tree).filter((l) => !isEditorLeaf(l));
   const inActiveGroup = new Set(activeLeaves.flatMap((l) => l.tabIds));
   let activeTabId = patch.activeTabId !== undefined ? patch.activeTabId : state.activeTabId;
   if (!activeTabId || !inActiveGroup.has(activeTabId)) {
@@ -650,6 +967,9 @@ function settle(state, patch = {}) {
   if (patch.cwd !== undefined) next.cwd = patch.cwd;
   return next;
 }
+
+/** `settle`, for tests that check its repairs on a hand-made state. */
+export const __settleLayout = (state, patch = {}) => settle(state, patch);
 
 // --- Persistence ---------------------------------------------------------
 //
@@ -675,9 +995,27 @@ let persistTimer = null;
 let persistDeadline = null;
 let pendingPersistState = null;
 
-/** Strip a tree node down to the fields worth persisting. */
+/**
+ * Whether editor placement is saved and restored at all: Settings ▸ Editor ▸
+ * Restore Open Files. Off, no editor leaf is written or restored (FB8).
+ */
+const editorsPersisted = () => useSettingsStore.getState().editorRestoreTabs !== false;
+
+/**
+ * Strip a tree node down to the fields worth persisting.
+ *
+ * An editor leaf is written with `kind` and NO tab ids (sibling B, FB8):
+ * which files it shows is the editor session's to save (`pane` there names
+ * this leaf), so a file opened, closed or typed into never changes this
+ * payload — it is also the persist subscription's key — and a v0.31.0 build
+ * reading it prunes the leaf as an empty pane, losing nothing else. A
+ * terminal leaf is written exactly as before, without `kind`.
+ */
 function serializeTreeForPersist(node) {
   if (!node) return null;
+  if (node.type === 'leaf' && isEditorLeaf(node)) {
+    return { type: 'leaf', kind: EDITOR_KIND, id: node.id, tabIds: [], activeTabId: null };
+  }
   if (node.type === 'leaf') {
     return {
       type: 'leaf',
@@ -701,20 +1039,29 @@ function serializeTreeForPersist(node) {
  * since this payload is also the persist subscription's key, zooming and
  * unzooming never schedule a write.
  */
-function serializeGroupForPersist(group) {
-  return {
+function serializeGroupForPersist(group, withEditors = editorsPersisted()) {
+  // Without editor restore the terminal projection is written: the layout a
+  // v0.31.0 build would have saved for these terminals.
+  const tree = withEditors ? group.tree : projectTree(group.tree, TERMINAL_KIND) ?? group.tree;
+  const out = {
     id: group.id,
     name: group.name,
     createdAt: group.createdAt,
     activePaneId: group.activePaneId,
-    tree: serializeTreeForPersist(group.tree),
+    tree: serializeTreeForPersist(tree),
   };
+  if (withEditors && group.editorPaneId) out.editorPaneId = group.editorPaneId;
+  // Additive (FC1): which of the two is THE active pane. Older readers
+  // build each group field by field and never look at it.
+  if (withEditors && group.editorPaneId && group.activeKind === EDITOR_KIND) out.activeKind = EDITOR_KIND;
+  return out;
 }
 
 function buildPersistedPayload(state) {
+  const withEditors = editorsPersisted();
   return {
     workspaceName: state.workspaceName,
-    groups: state.groups.map(serializeGroupForPersist),
+    groups: state.groups.map((group) => serializeGroupForPersist(group, withEditors)),
     activeGroupId: state.activeGroupId,
     // `agent` rides along so a restored terminal can offer to pick the
     // conversation back up. `serializeAgent` drops anything unrecognised — an
@@ -964,8 +1311,14 @@ function loadSavedGroups() {
  * one pane of exactly one group). `pruneTree` then removes any pane that ends
  * up empty and collapses single-child splits.
  */
-function sanitizeRestoredTree(node, validTabIds, claimed) {
+function sanitizeRestoredTree(node, validTabIds, claimed, withEditors = editorsPersisted()) {
   if (!node || typeof node !== 'object') return null;
+  if (node.type === 'leaf' && node.kind === EDITOR_KIND) {
+    // An editor leaf comes back EMPTY, whatever a hand-edited payload put in
+    // it: its files are the editor session's to restore (FB8, FB9).
+    if (!withEditors) return null;
+    return { type: 'leaf', kind: EDITOR_KIND, id: typeof node.id === 'string' && node.id ? node.id : makePaneId(), tabIds: [], activeTabId: null };
+  }
   if (node.type === 'leaf') {
     const tabIds = (Array.isArray(node.tabIds) ? node.tabIds : []).filter((id) => {
       if (!validTabIds.has(id) || claimed.has(id)) return false;
@@ -982,7 +1335,7 @@ function sanitizeRestoredTree(node, validTabIds, claimed) {
   }
   if (node.type === 'split' && Array.isArray(node.children)) {
     const children = node.children
-      .map((c) => sanitizeRestoredTree(c, validTabIds, claimed))
+      .map((c) => sanitizeRestoredTree(c, validTabIds, claimed, withEditors))
       .filter(Boolean);
     return {
       type: 'split',
@@ -1032,11 +1385,14 @@ function remapTreeTabIds(node, map) {
  * (the registry keys on it), so the restored terminal takes a new id instead.
  *
  * `layout` is `{ tabs, groups, activeGroupId, activeTabId }`; so is what
- * comes back, ready for `set()`.
+ * comes back, ready for `set()`. `heldAtStart`: the file tabs some leaf
+ * already held when this start began (see `carryEditorLeaves`).
  */
-function keepTabsMadeMeanwhile(state, layout) {
+function keepTabsMadeMeanwhile(state, layout, heldAtStart = NO_EDITOR_IDS) {
   const kept = state.tabs;
-  if (kept.length === 0) return layout;
+  const carried = carryEditorLeaves(state, layout, heldAtStart);
+  if (kept.length === 0) return carried === layout ? layout : settle(state, carried);
+  layout = carried;
 
   const taken = new Set(kept.map((t) => t.id));
   const ids = new Map(layout.tabs.map((t) => [t.id, taken.has(t.id) ? makeTabId() : t.id]));
@@ -1050,6 +1406,80 @@ function keepTabsMadeMeanwhile(state, layout) {
     activeGroupId: active.id,
     activeTabId: kept[kept.length - 1].id,
   });
+}
+
+/**
+ * `layout` with the files placed before it landed kept in it (sibling B,
+ * FB8): an editor leaf of the layout being replaced (`state.groups`) that
+ * holds files fills the layout's editor leaf of the same id — how a session
+ * restored before the terminal restore finds its groups — and the rest are
+ * wrapped, splits and all, above the active group of `layout` at [60, 40].
+ * Nothing is closed. The same `layout` comes back when there is nothing to
+ * carry.
+ *
+ * Only files placed while this start ran: those that exist (the bridge), and
+ * not among `heldAtStart`, what some leaf held when the start began. In the
+ * app that is nothing — the start runs once a page, from App's mount effect,
+ * before the editor's init and before anything can open a file — but a
+ * start run again on a store that still holds an earlier run's leaves (the
+ * suites' relaunches) must not take that run's files for new ones.
+ */
+function carryEditorLeaves(state, layout, heldAtStart = NO_EDITOR_IDS) {
+  const exists = editorTabIds();
+  const live = (id) => exists.has(id) && !heldAtStart.has(id);
+  const placed = (tree) =>
+    mapTree(tree, (n) => {
+      if (n.type !== 'leaf' || !isEditorLeaf(n)) return n;
+      const tabIds = n.tabIds.filter(live);
+      return tabIds.length === n.tabIds.length ? n : { ...n, tabIds, activeTabId: tabIds.includes(n.activeTabId) ? n.activeTabId : tabIds[0] ?? null };
+    });
+  const sources = state.groups.map((g) => ({ ...g, tree: placed(g.tree) }));
+  const before = sources
+    .flatMap((g) => collectLeaves(g.tree).filter(isEditorLeaf))
+    .filter((l) => l.tabIds.length > 0);
+  if (before.length === 0) return layout;
+  const into = new Map();
+  for (const g of layout.groups) for (const l of collectLeaves(g.tree)) if (isEditorLeaf(l)) into.set(l.id, g.id);
+  const matched = new Map(before.filter((l) => into.has(l.id)).map((l) => [l.id, l]));
+  let groups = layout.groups.map((g) => {
+    let tree = g.tree;
+    let changed = false;
+    for (const [id, leaf] of matched) {
+      if (into.get(id) !== g.id) continue;
+      tree = replaceNode(tree, id, (n) => ({ ...n, tabIds: [...leaf.tabIds], activeTabId: leaf.activeTabId ?? leaf.tabIds[0] }));
+      waitingEditorLeaves.delete(id);
+      changed = true;
+    }
+    return changed ? { ...g, tree } : g;
+  });
+  // What did not match keeps its own arrangement: each old group's editor
+  // projection without the matched leaves, one block per group.
+  // Fresh ids for them: one minted before the restore could be an id the
+  // restored layout gives a pane of its own.
+  const renamed = new Map();
+  const blocks = sources
+    .map((g) => projectTree(removeLeaves(g.tree, matched), EDITOR_KIND))
+    .map((tree) => (tree ? regeneratePaneIds(pruneTree(tree), renamed) : null))
+    .filter(Boolean);
+  if (blocks.length > 0) {
+    const block = blocks.length === 1
+      ? blocks[0]
+      : { type: 'split', id: makeSplitId(), direction: 'horizontal', children: blocks, sizes: evenSizes(blocks.length) };
+    const activeId = layout.groups.some((g) => g.id === layout.activeGroupId) ? layout.activeGroupId : layout.groups[0]?.id;
+    // The editor pane the group on screen had stays the editor pane, under
+    // its new id: an editor restore that landed first set it (`activePane`).
+    const shownBefore = state.groups.find((g) => g.id === state.activeGroupId)?.editorPaneId;
+    const editorPaneId = renamed.get(shownBefore) ?? collectLeaves(block).find(isEditorLeaf)?.id;
+    groups = groups.map((g) => (g.id === activeId ? { ...g, tree: wrapWithEditorLeaf(g.tree, block), editorPaneId } : g));
+  }
+  return { ...layout, groups };
+}
+
+/** `tree` without the leaves whose ids are keys of `ids`. */
+function removeLeaves(tree, ids) {
+  let out = tree;
+  for (const id of ids.keys()) out = out ? removePane(out, id) : null;
+  return out;
 }
 
 /** Give every pane in a tree a brand-new id, so the same layout can be loaded twice. */
@@ -1196,6 +1626,39 @@ export function onAgentConversationReplaced(listener) {
   };
 }
 
+/**
+ * Who wants to hear the conversation title a Claude Code terminal shows
+ * (`onAgentTitleShown`) — the agent session history, which keeps it as the
+ * entry's title while the agent runs (F23).
+ */
+const agentTitleShownListeners = new Set();
+
+/**
+ * Call `listener({ tabId, kind, sessionId, title })` each time a Claude Code
+ * terminal shows a conversation title other than the last one it showed
+ * (`noteAgentTitle`, `claudeTitleOf`): only for a record with a valid id,
+ * started or taken up here, not one only offered back. `title` is as Claude
+ * Code set it, trimmed — not cleaned or masked. The terminal's record is not
+ * changed by it. Returns what stops it.
+ */
+export function onAgentTitleShown(listener) {
+  if (typeof listener !== 'function') return () => {};
+  agentTitleShownListeners.add(listener);
+  return () => {
+    agentTitleShownListeners.delete(listener);
+  };
+}
+
+function agentTitleShown(event) {
+  for (const listener of [...agentTitleShownListeners]) {
+    try {
+      listener(event);
+    } catch (err) {
+      console.warn('[TerminalStore] a title-shown listener failed:', err);
+    }
+  }
+}
+
 function conversationReplaced(event) {
   for (const listener of [...conversationReplacedListeners]) {
     try {
@@ -1311,6 +1774,13 @@ function holdsTypedText(keys) {
  * up; kept out of the store because only the lookup reads it.
  */
 const shownTitles = new Map();
+
+/**
+ * tab id -> the conversation title its Claude Code shows now (`claudeTitleOf`):
+ * what `onAgentTitleShown` was last told for it, so its spinner's frames
+ * (◐, ◑ with the same text) are not told again.
+ */
+const claudeShownTitles = new Map();
 
 /** tab id -> the pending lookup of its opencode conversation. */
 const resolveTimers = new Map();
@@ -1638,6 +2108,21 @@ async function clearTerminalView(tabId) {
 }
 
 /**
+ * Scroll a tab's xterm to its previous or next prompt (`jumpToPrompt` in the
+ * registry, src/lib/promptMarks.js). False where there is none — no
+ * document, as in the Node-run tests, or no view yet.
+ */
+async function jumpToPromptView(tabId, direction) {
+  if (typeof document === 'undefined') return false;
+  try {
+    const { jumpToPrompt } = await import('../components/terminal/terminalRegistry.js');
+    return jumpToPrompt(tabId, direction);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * The kind of a tab's shell (`shellKindFor`): the shell it reported, else the
  * one it would have been given (`shellPathOf`), named as the platform names
  * it. Also the path, for naming it (`shellLabel`).
@@ -1725,6 +2210,87 @@ export function __setAttentionSource(source) {
 }
 
 const monotonicNow = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+// ---- Whether Claude Code is working or idle (src/lib/agentActivity.js) -----
+
+/**
+ * The clocks of Claude Code's working and idle state: `now` monotonic, for a
+ * turn's length and the shared rate limit; `wall` the `Date.now()` clock of
+ * `since`, of an entry's `at` and of an idle period's start, which a kept
+ * note's `keptAt` (terminalRegistry.js) is compared with; `schedule(fn, ms)`
+ * the settle timer, returning what cancels it. The suites put their own in
+ * (`__setAgentActivityClocks`).
+ */
+const realAgentSchedule = (fn, ms) => {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
+};
+let agentNow = () => monotonicNow();
+let agentWall = () => Date.now();
+let agentSchedule = realAgentSchedule;
+
+/** For the suites: the clocks and timer of the agent's state. Returns the previous ones. */
+export function __setAgentActivityClocks({ now, wall, schedule } = {}) {
+  const previous = { now: agentNow, wall: agentWall, schedule: agentSchedule };
+  agentNow = typeof now === 'function' ? now : () => monotonicNow();
+  agentWall = typeof wall === 'function' ? wall : () => Date.now();
+  agentSchedule = typeof schedule === 'function' ? schedule : realAgentSchedule;
+  return previous;
+}
+
+/** tab id -> its Claude Code's record (`nextAgentActivity`): kept out of the store, as a spinner frame changes it. */
+const agentTurns = new Map();
+/** tab id -> what cancels its settle timer: one per terminal at most. */
+const agentSettles = new Map();
+/** tab id -> the last title its Claude Code set, for the conversation's name in a finished turn's entry. */
+const agentLastTitles = new Map();
+/**
+ * tab id -> the idle period of a finished turn that listed an entry,
+ * `{ from, entryId }`: until the next working title or the agent's or the
+ * terminal's end, what Claude Code sends itself is that same moment, and is
+ * folded into the entry rather than listed again (F11).
+ */
+const agentDonePeriods = new Map();
+/**
+ * tab id -> the idle periods of its earlier turns that listed an entry, each
+ * ended by the next working title: `{ from, to, entryId }`, frozen, oldest
+ * first, AGENT_PAST_PERIODS at most. A note kept from output nobody had shown
+ * yet, read only now with its `keptAt` in one of them, is still that turn's
+ * moment: folded into its entry, never listed again (F11).
+ */
+const agentPastPeriods = new Map();
+/** How many ended idle periods a terminal keeps (`agentPastPeriods`). */
+const AGENT_PAST_PERIODS = 4;
+
+/** Forget `tabId`'s turn, its settle timer and its idle periods: no completion comes of them. */
+function dropAgentTurn(tabId) {
+  agentSettles.get(tabId)?.();
+  agentSettles.delete(tabId);
+  agentTurns.delete(tabId);
+  agentLastTitles.delete(tabId);
+  agentDonePeriods.delete(tabId);
+  agentPastPeriods.delete(tabId);
+}
+
+/**
+ * `tabId`'s open idle period, when its turn listed an entry, ends at wall
+ * time `to` (the next working title): kept among its past ones, the oldest
+ * let go beyond AGENT_PAST_PERIODS.
+ */
+function endAgentDonePeriod(tabId, to) {
+  const current = agentDonePeriods.get(tabId);
+  if (!current) return;
+  agentDonePeriods.delete(tabId);
+  const ended = Object.freeze({ from: current.from, to, entryId: current.entryId });
+  agentPastPeriods.set(tabId, [...(agentPastPeriods.get(tabId) ?? []), ended].slice(-AGENT_PAST_PERIODS));
+}
+
+/** The ended idle period of `tabId` that wall time `at` (a kept note's `keptAt`) lies in, from its start up to its end, or null. */
+function pastAgentPeriodAt(tabId, at) {
+  const past = agentPastPeriods.get(tabId);
+  if (!past || typeof at !== 'number' || !Number.isFinite(at)) return null;
+  return past.find((period) => at >= period.from && at < period.to) ?? null;
+}
 
 /**
  * How long a pane's ring flashes when a notification or a bell is aimed at
@@ -2021,10 +2587,42 @@ export function holdSpawnsUntil(ready, maxMs = SPAWN_GATE_MAX_MS) {
   return previous;
 }
 
-/** `pty_spawn`, once the gate is open (`holdSpawnsUntil`): the one way a shell is started. */
+/**
+ * `pty_spawn`, once the gate is open (`holdSpawnsUntil`): the one way a shell
+ * is started. Every shell is told whether to ask Claude Code for the normal
+ * screen (`claude_normal_screen`, Settings ▸ Terminal ▸ Claude Code on the
+ * Normal Screen; src-tauri/src/pty/manager.rs), as the setting is when it
+ * starts.
+ */
 async function spawnPty(args) {
   if (spawnGate) await spawnGate;
-  return invoke('pty_spawn', args);
+  return invoke('pty_spawn', withClaudeNormalScreen(args));
+}
+
+/** `args` with `claude_normal_screen` as the setting is now (`spawnPty`). */
+function withClaudeNormalScreen(args) {
+  return { ...args, claude_normal_screen: useSettingsStore.getState().terminalClaudeNormalScreen !== false };
+}
+
+/**
+ * Told `tabId` right before NexTerm types an agent's start or resume line
+ * into its terminal (`startAgent`, `resumeAgent`): the registry's message
+ * marks set their floor there (src/lib/agentMessageMarks.js), as they do on
+ * an Enter typed at a shell. Returns the previous one, for the suites.
+ */
+let agentLaunchObserver = null;
+export function setAgentLaunchObserver(observer) {
+  const previous = agentLaunchObserver;
+  agentLaunchObserver = typeof observer === 'function' ? observer : null;
+  return previous;
+}
+
+function noteAgentLaunch(tabId) {
+  try {
+    agentLaunchObserver?.(tabId);
+  } catch (err) {
+    console.warn('[TerminalStore] could not note an agent launch:', err);
+  }
 }
 
 /**
@@ -2384,8 +2982,11 @@ export const useTerminalStore = create((set, get, api) => {
   const recordAgent = (tabId, agent, atPrompt) => {
     // A new record has seen no title yet (`noteAgentTitle`).
     shownTitles.delete(tabId);
+    claudeShownTitles.delete(tabId);
     resolveMisses.delete(tabId);
     idHints.delete(tabId);
+    // Nor a state: the last agent's turn is not this one's.
+    dropAgentTurn(tabId);
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === tabId
@@ -2398,6 +2999,7 @@ export const useTerminalStore = create((set, get, api) => {
             }
           : t
       ),
+      agentActivity: withoutTabs(state.agentActivity, [tabId]),
     }));
   };
 
@@ -2826,10 +3428,143 @@ export const useTerminalStore = create((set, get, api) => {
   /** Forget a terminal's conversation bookkeeping: it closed, or its agent ended. */
   const forgetAgentTitle = (tabId) => {
     shownTitles.delete(tabId);
+    claudeShownTitles.delete(tabId);
     resolveMisses.delete(tabId);
     idHints.delete(tabId);
     clearTimeout(resolveTimers.get(tabId));
     resolveTimers.delete(tabId);
+    forgetAgentActivity(tabId);
+  };
+
+  /** Forget whether `tabId`'s Claude Code works or waits, with its turn and timer: it ended, or its terminal did. */
+  const forgetAgentActivity = (tabId) => {
+    dropAgentTurn(tabId);
+    if (get().agentActivity?.[tabId] === undefined) return;
+    set((state) => ({ agentActivity: withoutTabs(state.agentActivity, [tabId]) }));
+  };
+
+  /**
+   * The settle time of `tabId`'s idle title is up, with no working title
+   * since: Idle, and the turn's end (`agentDone`).
+   */
+  const settleAgentIdle = (tabId) => {
+    agentSettles.delete(tabId);
+    const prev = agentTurns.get(tabId);
+    if (!prev) return;
+    const { record, changed, done } = settleAgentActivity(prev);
+    if (record === NO_AGENT_ACTIVITY) agentTurns.delete(tabId);
+    else agentTurns.set(tabId, record);
+    if (changed) set((state) => ({ agentActivity: { ...state.agentActivity, [tabId]: Object.freeze({ state: record.shown, since: record.since }) } }));
+    if (done) agentDone(tabId, done);
+  };
+
+  /**
+   * Claude Code in `tabId` finished a turn (`done`: its length, the start of
+   * its idle period and what it sent itself in it), and now waits for you.
+   *
+   * Told only for a turn of at least `terminalAgentDoneAfterSeconds` (0 is
+   * off), read now, and only while the terminal still holds a Claude Code
+   * believed to run — the record the turn began under: a new one drops the
+   * turn (`recordAgent`). Routed as a program note with kitty's 'always'
+   * occasion (`programRoute`): an entry unless this is the terminal being
+   * typed into, which flashes instead with the setting on; a desktop
+   * notification while the window is not focused and the desktop gate
+   * allows. Nothing, or no entry, when Claude Code said it itself in the
+   * idle period (`agentDoneDecision`). Counted against the terminal's one
+   * allowance (`allowProgramNote`), after all of that. Returns what was
+   * shown, or null.
+   */
+  const agentDone = (tabId, done) => {
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.agent?.kind !== 'claude' || !agentRuns(tab)) return null;
+    const settings = useSettingsStore.getState();
+    const seconds = settings.terminalAgentDoneAfterSeconds;
+    const thresholdMs = typeof seconds === 'number' && Number.isFinite(seconds) ? seconds * 1000 : 0;
+    const attention = currentAttention();
+    const decision = agentDoneDecision({
+      durationMs: done.durationMs,
+      thresholdMs,
+      signals: done.signals,
+      route: programRoute(state, tabId, 'always', attention),
+      flashFocused: settings.terminalAttentionFlashFocused === true,
+    });
+    if (!decision.list && !decision.desktop && !decision.flash) return null;
+    if (!get().allowProgramNote(tabId, agentNow())) return null;
+    const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
+    const body = agentDoneBody(done.durationMs, claudeTitleOf(agentLastTitles.get(tabId)));
+    const at = agentWall();
+    let entryId = null;
+    const shown = deliverProgramNote(tabId, { inApp: decision.list, desktop: decision.desktop }, {
+      makeEntry: () => {
+        programNoteCounter += 1;
+        entryId = `agent-${tabId}-${at}-${programNoteCounter}`;
+        return {
+          id: entryId,
+          kind: 'program',
+          origin: 'agent-done',
+          agent: 'claude',
+          tabId,
+          tabTitle,
+          title: 'Claude Code',
+          body,
+          durationMs: done.durationMs,
+          at,
+          read: false,
+        };
+      },
+      flash: decision.flash,
+      desktop: { title: `Claude Code in ${tabTitle}`, body },
+    });
+    if (entryId) agentDonePeriods.set(tabId, { from: done.from, entryId });
+    return shown;
+  };
+
+  /**
+   * Where a program's note for `tabId` goes (`routeProgramNotification`), by
+   * kitty's `occasion` and the window's `attention`; a note read from kept
+   * output (`fromHistory`) is listed unless this is the terminal being typed
+   * into, and never shown on the desktop. The desktop gate is not asked here
+   * (`deliverProgramNote`).
+   */
+  const programRoute = (state, tabId, occasion, attention, fromHistory = false) => {
+    if (fromHistory) return { inApp: !(state.activeTabId === tabId && Boolean(attention?.focused)), desktop: false };
+    return routeProgramNotification({
+      occasion,
+      activeTab: state.activeTabId === tabId,
+      onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
+      focused: Boolean(attention?.focused),
+    });
+  };
+
+  /**
+   * Show a program's note for `tabId` where `route` says: the desktop gate
+   * asked first (`allowDesktop`, else `programDesktopGate`), only for a
+   * route with desktop; the entry `makeEntry()` builds listed for one in the
+   * app, else the pane flashed when `flash`; the desktop notification
+   * (`desktop`'s title and body); and, with `signal`, the program heard from
+   * (`programSignalled`). Returns the route as shown.
+   */
+  const deliverProgramNote = (tabId, route, { makeEntry, flash = false, desktop, allowDesktop, signal = true }) => {
+    let shown = route;
+    const desktopAllowed =
+      typeof allowDesktop === 'function' ? allowDesktop : programDesktopGate ? () => programDesktopGate(tabId) !== false : null;
+    if (shown.desktop && desktopAllowed && !desktopAllowed()) shown = { ...shown, desktop: false };
+    if (shown.inApp) {
+      const entry = makeEntry();
+      set((s) => ({ notifications: capNotifications(insertNewestFirst(s.notifications, entry), NOTIFICATION_LIMIT) }));
+    } else if (flash) {
+      flashTerminal(tabId);
+    }
+    if (shown.desktop) {
+      const { title, body } = desktop;
+      // Denied by the OS is an answer, not an error: the backend says false.
+      invoke('show_desktop_notification', { title, body }).catch((err) => {
+        console.warn('[TerminalStore] could not show a desktop notification:', err);
+      });
+    }
+    if (signal) programSignalled(tabId);
+    return shown;
   };
 
   /**
@@ -2847,7 +3582,10 @@ export const useTerminalStore = create((set, get, api) => {
   const snapshotGroup = (state, group) => {
     const slotByTabId = new Map();
     const tabs = [];
-    for (const leaf of collectLeaves(group.tree)) {
+    // Templates are terminal-only (the human's Q4): editor leaves are left
+    // out on purpose, not left behind empty for `materializeGroup` to prune.
+    const terminalTree = projectTree(group.tree, TERMINAL_KIND);
+    for (const leaf of collectLeaves(terminalTree)) {
       for (const tabId of leaf.tabIds) {
         const tab = state.tabs.find((t) => t.id === tabId);
         if (!tab) continue;
@@ -2863,7 +3601,7 @@ export const useTerminalStore = create((set, get, api) => {
       name: group.name,
       tabs,
       activePaneId: group.activePaneId,
-      tree: remapTreeTabIds(group.tree, slotByTabId),
+      tree: remapTreeTabIds(terminalTree, slotByTabId),
     };
   };
 
@@ -2892,7 +3630,8 @@ export const useTerminalStore = create((set, get, api) => {
     }
     if (spawned.length === 0) return null;
 
-    let tree = entry.tree ? remapTreeTabIds(entry.tree, bySlot) : null;
+    // Terminal leaves only, whatever a hand-edited template holds.
+    let tree = entry.tree ? remapTreeTabIds(projectTree(entry.tree, TERMINAL_KIND), bySlot) : null;
     const paneIdMap = new Map();
     tree = tree ? regeneratePaneIds(tree, paneIdMap) : null;
     tree = normalizeTree(pruneTree(tree));
@@ -2986,13 +3725,16 @@ export const useTerminalStore = create((set, get, api) => {
    * shape first (see `migrateV1Workspace`).
    */
   const restoreSavedLayout = async (saved, rootPath) => {
-    if (
-      !saved ||
-      !Array.isArray(saved.tabs) ||
-      saved.tabs.length === 0 ||
-      !Array.isArray(saved.groups) ||
-      saved.groups.length === 0
-    ) {
+    if (!saved || !Array.isArray(saved.tabs) || !Array.isArray(saved.groups) || saved.groups.length === 0) {
+      throw new Error('No saved terminal layout to restore');
+    }
+    // A group that holds files keeps an empty terminal leaf once its last
+    // terminal closes (FB2), and is saved so: with Restore Open Files on, it
+    // comes back with its editor leaves, though no terminal was saved at all
+    // (review K-02). Without one, a payload with no terminal is nothing to restore.
+    const holdsFiles = (group) => collectRawLeaves(group?.tree).some((leaf) => leaf?.kind === EDITOR_KIND);
+    const filesToRestore = editorsPersisted() && saved.groups.some(holdsFiles);
+    if (saved.tabs.length === 0 && !filesToRestore) {
       throw new Error('No saved terminal layout to restore');
     }
 
@@ -3000,9 +3742,11 @@ export const useTerminalStore = create((set, get, api) => {
 
     // Only spawn PTYs for tabs some group actually shows — an orphaned tab id
     // in the payload must not cost a shell process.
+    // Terminal leaves only: an editor leaf's ids are never terminals (FB8).
     const referenced = new Set();
     for (const group of saved.groups) {
       for (const leaf of collectRawLeaves(group?.tree)) {
+        if (leaf?.kind === EDITOR_KIND) continue;
         for (const id of Array.isArray(leaf.tabIds) ? leaf.tabIds : []) referenced.add(id);
       }
     }
@@ -3059,7 +3803,9 @@ export const useTerminalStore = create((set, get, api) => {
       });
     }
 
-    if (newTabs.length === 0) throw new Error('No terminal tabs could be restored');
+    // Terminals were saved and none could be started: the single-terminal
+    // fallback, as before. A layout that saved none has none to start.
+    if (newTabs.length === 0 && referenced.size > 0) throw new Error('No terminal tabs could be restored');
 
     const validIds = new Set(newTabs.map((t) => t.id));
     const claimed = new Set();
@@ -3067,21 +3813,34 @@ export const useTerminalStore = create((set, get, api) => {
     const groups = [];
     saved.groups.forEach((group, i) => {
       if (!group || typeof group !== 'object') return;
-      const tree = normalizeTree(pruneTree(sanitizeRestoredTree(group.tree, validIds, claimed)));
+      // Editor leaves come back empty and are kept (they wait for the editor
+      // restore); empty terminal panes are pruned as before. A group with a
+      // terminal, or with an editor leaf, comes back: one holding only files
+      // keeps its empty terminal leaf (`pruneTerminalLeaves`), as it did while
+      // the app ran, rather than being dropped with its files wrapped into
+      // the active group (review K-02). `sanitizeRestoredTree` keeps no
+      // editor leaf with Restore Open Files off.
+      const sanitized = sanitizeRestoredTree(group.tree, validIds, claimed);
+      if (!sanitized || !collectLeaves(sanitized).some((l) => isEditorLeaf(l) || l.tabIds.length > 0)) return;
+      const tree = normalizeTree(pruneTerminalLeaves(sanitized, group.activePaneId));
       if (!tree) return;
       let id = typeof group.id === 'string' && group.id ? group.id : makeGroupId();
       while (seenGroupIds.has(id)) id = makeGroupId();
       seenGroupIds.add(id);
       const leaves = collectLeaves(tree);
-      groups.push({
+      const restoredGroup = {
         id,
         name: (typeof group.name === 'string' && group.name.trim()) || `Group ${i + 1}`,
         createdAt: typeof group.createdAt === 'number' ? group.createdAt : Date.now(),
         tree,
-        activePaneId: leaves.some((l) => l.id === group.activePaneId)
+        activePaneId: leaves.some((l) => l.id === group.activePaneId && !isEditorLeaf(l))
           ? group.activePaneId
-          : firstLeafId(tree),
-      });
+          : leaves.find((l) => !isEditorLeaf(l))?.id ?? firstLeafId(tree),
+      };
+      if (leaves.some((l) => l.id === group.editorPaneId && isEditorLeaf(l))) restoredGroup.editorPaneId = group.editorPaneId;
+      // Only the one value this build writes; anything else is a terminal-active group.
+      if (restoredGroup.editorPaneId && group.activeKind === EDITOR_KIND) restoredGroup.activeKind = EDITOR_KIND;
+      groups.push(restoredGroup);
     });
 
     if (groups.length === 0) throw new Error('Saved layout had no valid panes once sanitized');
@@ -3098,10 +3857,10 @@ export const useTerminalStore = create((set, get, api) => {
       ? saved.activeGroupId
       : groups[0].id;
     const activeGroup = groups.find((g) => g.id === activeGroupId);
-    const activePane =
-      collectLeaves(activeGroup.tree).find((l) => l.id === activeGroup.activePaneId) ||
-      collectLeaves(activeGroup.tree)[0];
-    const activeTabId = activePane?.activeTabId || activePane?.tabIds?.[0] || newTabs[0].id;
+    const activeTerminals = collectLeaves(activeGroup.tree).filter((l) => !isEditorLeaf(l));
+    const activePane = activeTerminals.find((l) => l.id === activeGroup.activePaneId) || activeTerminals[0];
+    // No terminal at all when every group holds only files (K-02).
+    const activeTabId = activePane?.activeTabId || activePane?.tabIds?.[0] || newTabs[0]?.id || null;
     const activeTab = newTabs.find((t) => t.id === activeTabId) || newTabs[0];
 
     return {
@@ -3109,12 +3868,47 @@ export const useTerminalStore = create((set, get, api) => {
       groups,
       activeGroupId,
       activeTabId,
-      cwd: activeTab.cwd || rootPath,
+      cwd: activeTab?.cwd || rootPath,
       workspaceName:
         typeof saved.workspaceName === 'string' && saved.workspaceName.trim()
           ? saved.workspaceName.trim()
           : 'Default',
     };
+  };
+
+  /**
+   * The terminal layout has landed (sibling B, FB8): the restored layout's
+   * editor leaves that are still empty wait for the editor restore, which
+   * the bridge is told about (`layoutRestored`) so it can fill them by
+   * `pane`. Whatever is still waiting when the deadline passes is released
+   * (`releaseWaitingEditorLeaves`), and pruned if still empty. A fresh start
+   * lands with nothing waiting.
+   */
+  const editorLeavesLanded = (restoredGroups) => {
+    const restoredIds = new Set(
+      (restoredGroups || []).flatMap((g) => collectLeaves(g.tree).filter(isEditorLeaf).map((l) => l.id))
+    );
+    const waiting = [];
+    for (const g of get().groups) {
+      for (const l of collectLeaves(g.tree)) {
+        if (isEditorLeaf(l) && l.tabIds.length === 0 && restoredIds.has(l.id)) waiting.push(l.id);
+      }
+    }
+    for (const id of waiting) waitingEditorLeaves.add(id);
+    clearTimeout(editorWaitTimer);
+    editorWaitTimer = null;
+    if (waitingEditorLeaves.size > 0) {
+      const ms = Number.isFinite(editorBridge.restoreDeadlineMs) ? editorBridge.restoreDeadlineMs : DEFAULT_EDITOR_WAIT_MS;
+      editorWaitTimer = setTimeout(() => {
+        editorWaitTimer = null;
+        get().releaseWaitingEditorLeaves();
+      }, ms);
+    }
+    try {
+      editorBridge.layoutRestored?.(waiting);
+    } catch (err) {
+      console.warn('[TerminalStore] the editor bridge failed on a restored layout:', err);
+    }
   };
 
   /**
@@ -3432,6 +4226,15 @@ export const useTerminalStore = create((set, get, api) => {
         onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
         focused: Boolean(attention?.focused),
       });
+      if (route.inApp) {
+        // Claude Code's own ring as it finishes a turn (F11): inside the idle
+        // period of a turn that listed its entry, that entry says it already;
+        // before the turn's end is decided, it is the news, and the turn's
+        // end lists no second entry (`agentDone`).
+        if (agentDonePeriods.has(tabId)) return { inApp: false, flash: false };
+        const turn = agentTurns.get(tabId);
+        if (turn?.turn) agentTurns.set(tabId, withAgentSignal(turn, 'bell'));
+      }
       const flash = !route.inApp && settings.terminalAttentionFlashFocused === true;
       if (!route.inApp && !flash) return { inApp: false, flash: false };
       // Counted only for a ring that would show, and a flash against an
@@ -3531,6 +4334,50 @@ export const useTerminalStore = create((set, get, api) => {
     // every pane, chip and the side bar redraw for. Gone with `null`, with
     // the shell (its exit, a restart) and with the terminal (`pruneAttention`).
     reportedStatus: {},
+
+    // ---- Whether Claude Code is working or idle ---------------------------
+    //
+    // tab id -> `{ state: 'working'|'idle', since }`, frozen, from the title
+    // Claude Code sets (`noteAgentActivity`); no key is unknown. Its own map,
+    // as `progress` is: a change redraws the rows and ranks that read it,
+    // never `tabs`. Never kept across launches. Gone with the agent, the
+    // shell and the terminal (`forgetAgentActivity`, `pruneAttention`).
+    agentActivity: {},
+
+    /**
+     * A window title `windowTitle` arrived for `tabId`: what it says its
+     * Claude Code is doing (`claudeActivityOf`, `nextAgentActivity`). Read
+     * for a Claude Code record that is not only offered back, with or without
+     * an id. A store write only when the shown state changes — a spinner's
+     * next frame costs the parse — and one settle timer per terminal at most.
+     */
+    noteAgentActivity: (tabId, windowTitle) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab?.agent || tab.agent.kind !== 'claude' || tab.agentResumeOffered) return;
+      const kind = claudeActivityOf(windowTitle);
+      const prev = agentTurns.get(tabId) ?? NO_AGENT_ACTIVITY;
+      const now = agentNow();
+      const wall = agentWall();
+      const { record, changed, settle, periodEnds } = nextAgentActivity(prev, kind, now, wall);
+      if (kind) agentLastTitles.set(tabId, windowTitle);
+      if (periodEnds) endAgentDonePeriod(tabId, wall);
+      if (settle) {
+        agentSettles.get(tabId)?.();
+        agentSettles.delete(tabId);
+      }
+      if (settle === 'start') {
+        agentSettles.set(tabId, agentSchedule(() => settleAgentIdle(tabId), AGENT_IDLE_SETTLE_MS));
+      }
+      if (record === NO_AGENT_ACTIVITY) agentTurns.delete(tabId);
+      else agentTurns.set(tabId, record);
+      if (!changed) return;
+      set((state) => ({
+        agentActivity:
+          record.shown === null
+            ? withoutTabs(state.agentActivity, [tabId])
+            : { ...state.agentActivity, [tabId]: Object.freeze({ state: record.shown, since: record.since }) },
+      }));
+    },
 
     /**
      * Set `tabId`'s reported status (`{ text, tone }`), or clear it (`null`).
@@ -3720,43 +4567,57 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = state.tabs.find((t) => t.id === tabId);
       if (!tab || !note) return null;
       const fromHistory = typeof keptAt === 'number' && Number.isFinite(keptAt);
-      const typingInto = state.activeTabId === tabId && Boolean(attention?.focused);
-      let route = fromHistory
-        ? { inApp: !typingInto, desktop: false }
-        : routeProgramNotification({
-            occasion: note.occasion,
-            activeTab: state.activeTabId === tabId,
-            onScreen: Boolean(attention?.visible) && tabOnScreen(state, tabId),
-            focused: Boolean(attention?.focused),
-          });
-      const desktopAllowed =
-        typeof allowDesktop === 'function' ? allowDesktop : programDesktopGate ? () => programDesktopGate(tabId) !== false : null;
-      if (route.desktop && desktopAllowed && !desktopAllowed()) route = { ...route, desktop: false };
       const tabTitle = tab.title || tab.defaultTitle || 'Terminal';
       const title = note.title || tabTitle;
       const body = note.body || '';
-      if (route.inApp) {
-        const at = fromHistory ? keptAt : Date.now();
-        programNoteCounter += 1;
-        const entry = { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at, read: false };
-        set((s) => ({ notifications: capNotifications(insertNewestFirst(s.notifications, entry), NOTIFICATION_LIMIT) }));
-      } else if (
+      // Claude Code's own note in the idle period of a turn whose end listed
+      // its entry (F11): the same moment, said better — it takes the entry's
+      // words, keeping its place and whether it was read; nothing new. The
+      // same for a kept note printed in such a period that has ended since,
+      // read only now: folded into its entry if that is still listed, else
+      // nothing — never a second entry.
+      const period = agentDonePeriods.get(tabId);
+      const inCurrent = Boolean(period) && (!fromHistory || keptAt >= period.from);
+      const past = inCurrent || !fromHistory ? null : pastAgentPeriodAt(tabId, keptAt);
+      if (inCurrent || past) {
+        const entryId = (inCurrent ? period : past).entryId;
+        set((s) => {
+          const at = s.notifications.findIndex((n) => n?.id === entryId);
+          if (at === -1) return s;
+          const notifications = s.notifications.slice();
+          notifications[at] = { ...notifications[at], title, body };
+          return { notifications };
+        });
+        if (!fromHistory) programSignalled(tabId);
+        return { inApp: false, desktop: false };
+      }
+      const route = programRoute(state, tabId, note.occasion, attention, fromHistory);
+      const flash =
         !fromHistory &&
         (note.occasion ?? 'always') === 'always' &&
         state.activeTabId === tabId &&
         Boolean(attention?.focused) &&
-        useSettingsStore.getState().terminalAttentionFlashFocused === true
-      ) {
-        flashTerminal(tabId);
+        useSettingsStore.getState().terminalAttentionFlashFocused === true;
+      const shown = deliverProgramNote(tabId, route, {
+        makeEntry: () => {
+          const at = fromHistory ? keptAt : Date.now();
+          programNoteCounter += 1;
+          return { id: `program-${tabId}-${at}-${programNoteCounter}`, kind: 'program', tabId, tabTitle, title, body, at, read: false };
+        },
+        flash,
+        desktop: { title, body },
+        allowDesktop,
+        signal: !fromHistory,
+      });
+      // Before the turn's end is decided, it is the news (`agentDone`) — if
+      // it was heard: listed, or shown on the desktop (F11(a)). A note that
+      // went nowhere (kitty's 'unfocused' about the terminal being typed
+      // into, 'invisible' about one on screen) leaves the turn's end to say it.
+      const turn = agentTurns.get(tabId);
+      if ((shown.inApp || shown.desktop) && turn?.turn && (!fromHistory || inAgentPeriod(turn, keptAt))) {
+        agentTurns.set(tabId, withAgentSignal(turn, 'note'));
       }
-      if (route.desktop) {
-        // Denied by the OS is an answer, not an error: the backend says false.
-        invoke('show_desktop_notification', { title, body }).catch((err) => {
-          console.warn('[TerminalStore] could not show a desktop notification:', err);
-        });
-      }
-      if (!fromHistory) programSignalled(tabId);
-      return route;
+      return shown;
     },
 
     // ---- Find in the terminal ------------------------------------------
@@ -3851,8 +4712,17 @@ export const useTerminalStore = create((set, get, api) => {
         if (!group) return {};
         const pane = collectLeaves(group.tree).find((l) => l.id === paneId);
         if (!pane) return {};
+        // An editor leaf is the group's editor pane, never its terminal one
+        // (FB2), and becomes THE active pane (FC1).
+        if (isEditorLeaf(pane)) {
+          if (activePaneOf(group) === paneId && state.activeGroupId === group.id) return state;
+          return settle(state, {
+            groups: updateGroup(state, group.id, (g) => ({ ...g, ...editorFocus(paneId) })),
+            activeGroupId: group.id,
+          });
+        }
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: paneId })),
+          groups: updateGroup(state, group.id, (g) => ({ ...g, ...terminalFocus(paneId) })),
           activeGroupId: group.id,
           activeTabId: pane.activeTabId ?? state.activeTabId,
         });
@@ -3873,7 +4743,7 @@ export const useTerminalStore = create((set, get, api) => {
       set((state) => {
         const group = state.groups.find((g) => g.id === groupId);
         if (!group) return {};
-        const leaves = collectLeaves(group.tree);
+        const leaves = collectLeaves(group.tree).filter((l) => !isEditorLeaf(l));
         const pane = leaves.find((l) => l.id === group.activePaneId) || leaves[0];
         const nextTabId = pane?.activeTabId ?? pane?.tabIds?.[0] ?? null;
         const tab = state.tabs.find((t) => t.id === nextTabId);
@@ -3898,13 +4768,18 @@ export const useTerminalStore = create((set, get, api) => {
       set((state) => {
         const group = state.groups.find((g) => g.id === state.activeGroupId);
         if (!group) return {};
+        // Panes of both kinds, as one tree draws them (FC1), from the one
+        // active pane; landing on an editor leaf makes it THE active pane.
         const leaves = collectLeaves(group.tree);
         if (leaves.length === 0) return {};
-        const currentIdx = leaves.findIndex((l) => l.id === group.activePaneId);
+        const currentIdx = leaves.findIndex((l) => l.id === activePaneOf(group));
         const fromIdx = currentIdx === -1 ? 0 : currentIdx;
         const next = leaves[(fromIdx + delta + leaves.length) % leaves.length];
+        if (isEditorLeaf(next)) {
+          return settle(state, { groups: updateGroup(state, group.id, (g) => ({ ...g, ...editorFocus(next.id) })) });
+        }
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: next.id })),
+          groups: updateGroup(state, group.id, (g) => ({ ...g, ...terminalFocus(next.id) })),
           activeTabId: next.activeTabId ?? state.activeTabId,
         });
       }),
@@ -3914,11 +4789,11 @@ export const useTerminalStore = create((set, get, api) => {
      * or, when the group is already zoomed, unzoom it. tmux's `Prefix z`,
      * iTerm2's "Maximize Active Pane".
      *
-     * `paneId` defaults to the active pane of the active group, which is what
+     * `paneId` defaults to THE active pane of the active group (`activePaneOf`), which is what
      * the keyboard, the menu and the palette act on; a pane's own button
-     * passes its id. Zooming makes that pane the active one and brings its
-     * group on screen. A group with one pane has nothing to hide, and is left
-     * as it is.
+     * passes its id. Zooming makes that pane the active one, of whichever
+     * kind (FC1), and brings its group on screen. A group of one pane has
+     * nothing to hide, and is left as it is.
      *
      * The hidden panes are not closed or moved: the tree does not change at
      * all, so unzooming gives back the very layout that was zoomed, sizes
@@ -3941,13 +4816,19 @@ export const useTerminalStore = create((set, get, api) => {
           return { groups: updateGroup(state, group.id, withoutZoom) };
         }
         const leaves = collectLeaves(group.tree);
-        if (leaves.length < 2) return {};
-        const pane = leaves.find((l) => l.id === (paneId ?? group.activePaneId));
+        const pane = leaves.find((l) => l.id === (paneId ?? activePaneOf(group)));
         if (!pane) return {};
+        // Every pane counts, of either kind, as `settle` counts them (FC8):
+        // one tree draws both, so zooming one hides all the others. B
+        // counted the pane's own kind only (review K-04), when each kind had
+        // a view of its own.
+        if (leaves.length < 2) return {};
+        // The zoomed pane is THE active pane, of whichever kind it is.
+        const focus = isEditorLeaf(pane) ? editorFocus(pane.id) : terminalFocus(pane.id);
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({ ...g, activePaneId: pane.id, zoomedPaneId: pane.id })),
+          groups: updateGroup(state, group.id, (g) => ({ ...g, ...focus, zoomedPaneId: pane.id })),
           activeGroupId: group.id,
-          activeTabId: pane.activeTabId ?? state.activeTabId,
+          activeTabId: isEditorLeaf(pane) ? state.activeTabId : pane.activeTabId ?? state.activeTabId,
         });
       });
       return Boolean(zoomedPaneOf(get().groups.find((g) => g.id === target.id)));
@@ -3986,9 +4867,22 @@ export const useTerminalStore = create((set, get, api) => {
      * is killed. The last group is emptied rather than removed.
      */
     closeGroup: async (groupId) => {
+      const asked = get().groups.find((g) => g.id === groupId);
+      if (!asked) return false;
+      // Files shown in the group are closed with it — through editorStore, so
+      // its unsaved prompt (kind 'group', every dirty file of the group) can
+      // stop the whole close: Cancel changes nothing, no PTY is killed (FB7).
+      const filesAsked = collectLeaves(asked.tree).filter(isEditorLeaf).flatMap((l) => l.tabIds);
+      if (filesAsked.length > 0 && typeof editorBridge.confirmClose === 'function') {
+        const go = await editorBridge.confirmClose('group', filesAsked, { groupId, name: asked.name });
+        if (!go) return false;
+      }
       const group = get().groups.find((g) => g.id === groupId);
-      if (!group) return;
-      const owned = collectLeaves(group.tree).flatMap((l) => l.tabIds);
+      if (!group) return false;
+      const leaves = collectLeaves(group.tree);
+      const owned = leaves.filter((l) => !isEditorLeaf(l)).flatMap((l) => l.tabIds);
+      const files = leaves.filter(isEditorLeaf).flatMap((l) => l.tabIds);
+      for (const leaf of leaves) waitingEditorLeaves.delete(leaf.id);
 
       set((state) => {
         const idx = state.groups.findIndex((g) => g.id === groupId);
@@ -4006,7 +4900,11 @@ export const useTerminalStore = create((set, get, api) => {
         return settle(state, { groups, activeGroupId });
       });
 
+      const held = editorIdsHeld(get().groups);
+      const closedFiles = files.filter((id) => !held.has(id));
+      if (closedFiles.length > 0) editorBridge.closeTabs(closedFiles);
       for (const tabId of owned) await killTabIfOrphaned(tabId);
+      return true;
     },
 
     /**
@@ -4144,14 +5042,18 @@ export const useTerminalStore = create((set, get, api) => {
         const a = leaves.find((l) => l.id === paneId);
         const b = leaves.find((l) => l.id === otherPaneId);
         if (!a || !b) return {};
-        const contentsOf = (leaf) => ({ tabIds: [...leaf.tabIds], activeTabId: leaf.activeTabId });
-        let tree = replaceNode(group.tree, a.id, (n) => ({ ...n, ...contentsOf(b) }));
-        tree = replaceNode(tree, b.id, (n) => ({ ...n, ...contentsOf(a) }));
+        // The contents carry their kind (sibling B): a pane that takes a file
+        // becomes an editor leaf, one that takes terminals a terminal leaf.
+        const contentsOf = (leaf) => ({ tabIds: [...leaf.tabIds], activeTabId: leaf.activeTabId, kind: leafKind(leaf) });
+        const filled = (n, { kind, ...contents }) => withLeafKind({ ...n, ...contents }, kind);
+        let tree = replaceNode(group.tree, a.id, (n) => filled(n, contentsOf(b)));
+        tree = replaceNode(tree, b.id, (n) => filled(n, contentsOf(a)));
         const followed = { [a.id]: b.id, [b.id]: a.id };
         const activePaneId = followed[group.activePaneId] ?? group.activePaneId;
+        const editorPaneId = followed[group.editorPaneId] ?? group.editorPaneId;
         swapped = true;
         return settle(state, {
-          groups: updateGroup(state, group.id, (g) => ({ ...g, tree, activePaneId })),
+          groups: updateGroup(state, group.id, (g) => ({ ...g, tree, activePaneId, ...(editorPaneId ? { editorPaneId } : {}) })),
         });
       });
       return swapped;
@@ -4161,21 +5063,39 @@ export const useTerminalStore = create((set, get, api) => {
      * What "Swap Pane With…" offers from the active pane of a group (the one
      * on screen by default): `panes`, the other panes by the terminal each
      * shows and where it is (`swapChoices`), and `note`, why there are none
-     * to offer (`swapBlockedReason`) — a zoomed group offers none.
+     * to offer (`swapBlockedReason`) — a zoomed group offers none. `files`:
+     * the editor's tabs, which name the editor panes (this store does not
+     * hold them).
      */
-    swapTargets: (groupId = null) => {
+    swapTargets: (groupId = null, files = []) => {
       const state = get();
       const group = resolveGroup(state, groupId, null);
+      // From THE active pane, of either kind, to every other pane of the
+      // group, placed and counted as the one tree draws them (FC11). An
+      // editor pane is named by the file it shows, so the files are looked
+      // up beside the terminals.
+      const from = activePaneOf(group);
       const note = swapBlockedReason(group);
-      if (note) return { panes: [], note, fromPaneId: group?.activePaneId ?? null };
-      return { panes: swapChoices(group.tree, state.tabs, group.activePaneId), note: null, fromPaneId: group.activePaneId };
+      if (note) return { panes: [], note, fromPaneId: from };
+      return {
+        // A file tab is named by its file name, as its chip is.
+        panes: swapChoices(
+          group.tree,
+          [...state.tabs, ...(Array.isArray(files) ? files : []).map((f) => ({ id: f.id, title: f.fileName ?? f.title }))],
+          from
+        ),
+        note: null,
+        fromPaneId: from,
+      };
     },
 
     /** `swapPanes` from the active pane of the group on screen — what the palette's pick does. */
     swapActivePane: (otherPaneId) => {
       const group = get().getActiveGroup();
       if (!group) return false;
-      return get().swapPanes(group.activePaneId, otherPaneId, group.id);
+      // From THE active pane, of either kind (FC11): its contents keep the
+      // keyboard's place, as `swapPanes` has the active pane follow them.
+      return get().swapPanes(activePaneOf(group), otherPaneId, group.id);
     },
 
     /**
@@ -4271,7 +5191,12 @@ export const useTerminalStore = create((set, get, api) => {
       // A pane's only tab already "is" its own pane.
       if (!source || source.tabIds.length <= 1) return null;
       get().dropTabOnPane(tabId, source.id, direction === 'vertical' ? 'bottom' : 'right', group.id);
-      return get().groups.find((g) => g.id === group.id)?.activePaneId ?? null;
+      // The pane the tab is in now, of whichever kind (FC11): reading
+      // `activePaneId` gave the terminal pane for a file moved out of its
+      // editor pane.
+      const after = get().groups.find((g) => g.id === group.id);
+      const moved = after ? leafHoldingTab(after.tree, tabId) : null;
+      return moved && moved.id !== source.id ? moved.id : null;
     },
 
     /**
@@ -4306,7 +5231,20 @@ export const useTerminalStore = create((set, get, api) => {
      * removed from its old group in the same update, so it is never listed in
      * two panes at once.
      */
-    moveTabToGroup: (tabId, targetGroupId, targetPaneId = null) =>
+    moveTabToGroup: (tabId, targetGroupId, targetPaneId = null) => {
+      // A file goes to the group's editor leaf `targetPaneId`, else its
+      // editor pane, else a new editor leaf above its terminals (FB6).
+      if (kindOfTab(get(), tabId) === EDITOR_KIND) {
+        if (get().groups.some((g) => g.id === targetGroupId)) {
+          get().placeEditorTab(tabId, { groupId: targetGroupId, paneId: targetPaneId });
+        }
+        return;
+      }
+      get().moveTerminalToGroup(tabId, targetGroupId, targetPaneId);
+    },
+
+    /** `moveTabToGroup` for a terminal. */
+    moveTerminalToGroup: (tabId, targetGroupId, targetPaneId = null) =>
       set((state) => {
         if (!state.tabs.some((t) => t.id === tabId)) return {};
         const target = state.groups.find((g) => g.id === targetGroupId);
@@ -4314,7 +5252,7 @@ export const useTerminalStore = create((set, get, api) => {
         const source = groupOfTab(state, tabId);
 
         const paneId =
-          targetPaneId && collectLeaves(target.tree).some((l) => l.id === targetPaneId)
+          targetPaneId && collectLeaves(target.tree).some((l) => l.id === targetPaneId && !isEditorLeaf(l))
             ? targetPaneId
             : target.activePaneId;
 
@@ -4328,7 +5266,7 @@ export const useTerminalStore = create((set, get, api) => {
         groups = updateGroup(groups, target.id, (g) => ({
           ...g,
           tree: addTabToPane(g.tree, paneId, tabId),
-          activePaneId: paneId,
+          ...terminalFocus(paneId),
         }));
 
         return settle(state, { groups, activeGroupId: target.id, activeTabId: tabId });
@@ -4490,9 +5428,12 @@ export const useTerminalStore = create((set, get, api) => {
       }
       if (made.length === 0) return null;
 
+      // Terminals of the replaced groups are killed; their files move into
+      // the new active group (FB6), so nothing unsaved is lost and no prompt
+      // is needed.
       const doomed =
         mode === 'replace'
-          ? get().groups.flatMap((g) => collectLeaves(g.tree).flatMap((l) => l.tabIds))
+          ? get().groups.flatMap((g) => collectLeaves(g.tree).filter((l) => !isEditorLeaf(l)).flatMap((l) => l.tabIds))
           : [];
 
       const newGroups = made.map((m) => m.group);
@@ -4500,7 +5441,7 @@ export const useTerminalStore = create((set, get, api) => {
 
       set((state) => ({
         ...settle(state, {
-          groups: mode === 'replace' ? newGroups : [...state.groups, ...newGroups],
+          groups: mode === 'replace' ? editorsMovedInto(state, newGroups, active.id) : [...state.groups, ...newGroups],
           activeGroupId: active.id,
           activeTabId: collectLeaves(active.tree)[0]?.activeTabId ?? null,
         }),
@@ -4556,7 +5497,7 @@ export const useTerminalStore = create((set, get, api) => {
           let tree = group.tree;
           for (const t of spawned) tree = addTabToPane(tree, paneId, t.id);
           return settle(state, {
-            groups: updateGroup(state, groupId, (g) => ({ ...g, tree, activePaneId: paneId })),
+            groups: updateGroup(state, groupId, (g) => ({ ...g, tree, ...terminalFocus(paneId) })),
             activeGroupId: groupId,
             activeTabId: spawned[0].id,
           });
@@ -4666,11 +5607,34 @@ export const useTerminalStore = create((set, get, api) => {
       const closing = collectLeaves(group.tree).find((l) => l.id === paneId);
       if (!closing) return;
       const closingTabIds = [...closing.tabIds];
+      const editorPane = isEditorLeaf(closing);
+      if (editorPane) waitingEditorLeaves.delete(paneId);
 
       set((state) => {
         const idx = state.groups.findIndex((g) => g.id === group.id);
         if (idx === -1) return {};
+        const others = collectLeaves(state.groups[idx].tree).filter((l) => l.id !== paneId);
+        if (!editorPane && others.some(isEditorLeaf) && !others.some((l) => !isEditorLeaf(l))) {
+          // The last terminal pane of a group showing files: emptied in place,
+          // the group keeps a terminal pane (FB2).
+          return settle(state, {
+            groups: updateGroup(state, group.id, (g) => ({
+              ...g,
+              tree: replaceNode(g.tree, paneId, (n) => ({ ...n, tabIds: [], activeTabId: null })),
+            })),
+          });
+        }
+        const nextEditorPane = editorPane ? neighbourEditorLeaf(state.groups[idx].tree, paneId) : null;
         const tree = removePane(state.groups[idx].tree, paneId);
+        if (tree && editorPane) {
+          return settle(state, {
+            groups: updateGroup(state, group.id, (g) => ({
+              ...g,
+              tree,
+              editorPaneId: g.editorPaneId === paneId ? nextEditorPane : g.editorPaneId,
+            })),
+          });
+        }
         if (tree) {
           return settle(state, { groups: updateGroup(state, group.id, (g) => ({ ...g, tree })) });
         }
@@ -4689,6 +5653,14 @@ export const useTerminalStore = create((set, get, api) => {
         return settle(state, { groups, activeGroupId });
       });
 
+      if (editorPane) {
+        // Files are closed through editorStore (its models are disposed
+        // there), and only those no other leaf still shows.
+        const held = editorIdsHeld(get().groups);
+        const orphans = closingTabIds.filter((id) => !held.has(id));
+        if (orphans.length > 0) editorBridge.closeTabs(orphans);
+        return;
+      }
       for (const tabId of closingTabIds) await killTabIfOrphaned(tabId);
     },
 
@@ -4709,7 +5681,12 @@ export const useTerminalStore = create((set, get, api) => {
     bindPaneToTab: (paneId, tabId, groupId = null) =>
       set((state) => {
         const group = resolveGroup(state, groupId, paneId);
-        if (!group || !collectLeaves(group.tree).some((l) => l.id === paneId)) return {};
+        const target = group && collectLeaves(group.tree).find((l) => l.id === paneId);
+        if (!target) return {};
+        // One kind per pane (sibling B): a tab is never bound into a pane of the other kind.
+        const kind = kindOfTab(state, tabId) ?? TERMINAL_KIND;
+        if (kind !== leafKind(target)) return {};
+        const focus = kind === EDITOR_KIND ? editorFocus(paneId) : terminalFocus(paneId);
         const source = groupOfTab(state, tabId);
         const holder = source ? leafHoldingTab(source.tree, tabId) : null;
 
@@ -4723,18 +5700,20 @@ export const useTerminalStore = create((set, get, api) => {
           }
           groups = updateGroup(groups, group.id, (g) => ({
             ...g,
-            tree: addTabToPane(g.tree, paneId, tabId),
-            activePaneId: paneId,
+            tree: addTabToPane(g.tree, paneId, tabId, kind),
+            ...focus,
           }));
+          // As a file chip's click always did: the editor leaves it empties go.
+          if (kind === EDITOR_KIND) groups = pruneEditorLeavesIn(groups, [source?.id, group.id], [paneId]);
         } else {
           groups = updateGroup(groups, group.id, (g) => ({
             ...g,
             tree: replaceNode(g.tree, paneId, (n) => ({ ...n, activeTabId: tabId })),
-            activePaneId: paneId,
+            ...focus,
           }));
         }
 
-        return settle(state, { groups, activeGroupId: group.id, activeTabId: tabId });
+        return settle(state, { groups, activeGroupId: group.id, activeTabId: kind === EDITOR_KIND ? state.activeTabId : tabId });
       }),
 
     /**
@@ -4753,10 +5732,18 @@ export const useTerminalStore = create((set, get, api) => {
      */
     dropTabOnPane: (tabId, targetPaneId, zone = 'center', targetGroupId = null) => {
       const state0 = get();
-      if (!state0.tabs.some((t) => t.id === tabId)) return;
+      const kind = kindOfTab(state0, tabId);
+      if (!kind) return;
       const targetGroup = resolveGroup(state0, targetGroupId, targetPaneId);
       if (!targetGroup) return;
-      if (!collectLeaves(targetGroup.tree).some((l) => l.id === targetPaneId)) return;
+      const targetLeaf = collectLeaves(targetGroup.tree).find((l) => l.id === targetPaneId);
+      if (!targetLeaf) return;
+      // One kind per pane (sibling B, FB3): across kinds only an edge does
+      // anything — it splits the pane with a new leaf of the dragged kind. The
+      // centre would mix kinds in one pane, so it changes nothing.
+      if (leafKind(targetLeaf) !== kind && zone === 'center') return;
+      const focusOn = (paneId) => (kind === EDITOR_KIND ? editorFocus(paneId) : terminalFocus(paneId));
+      const activeTabId = (state) => (kind === EDITOR_KIND ? state.activeTabId : tabId);
 
       const sourceGroup = groupOfTab(state0, tabId);
       const sourcePane = sourceGroup ? leafHoldingTab(sourceGroup.tree, tabId) : null;
@@ -4779,17 +5766,22 @@ export const useTerminalStore = create((set, get, api) => {
           }));
         }
 
+        // A file's move prunes the editor leaves it empties, as the editor
+        // area's drop always did; `settle` does the same for terminal panes.
+        const pruned = (list, keep) =>
+          kind === EDITOR_KIND ? pruneEditorLeavesIn(list, [sourceGroup?.id, targetGroup.id], [keep]) : list;
+
         if (zone === 'center') {
           groups = updateGroup(groups, targetGroup.id, (g) => ({
             ...g,
-            tree: addTabToPane(g.tree, targetPaneId, tabId),
-            activePaneId: targetPaneId,
+            tree: addTabToPane(g.tree, targetPaneId, tabId, kind),
+            ...focusOn(targetPaneId),
           }));
-          return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
+          return settle(state, { groups: pruned(groups, targetPaneId), activeGroupId: targetGroup.id, activeTabId: activeTabId(state) });
         }
 
         const newPaneId = makePaneId();
-        const newLeaf = { type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId };
+        const newLeaf = withLeafKind({ type: 'leaf', id: newPaneId, tabIds: [tabId], activeTabId: tabId }, kind);
         const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
         const insertFirst = zone === 'left' || zone === 'top';
 
@@ -4797,10 +5789,10 @@ export const useTerminalStore = create((set, get, api) => {
           withoutZoom({
             ...g,
             tree: equalizedAfterSplit(splitAt(g.tree, targetPaneId, newLeaf, direction, insertFirst), newPaneId),
-            activePaneId: newPaneId,
+            ...focusOn(newPaneId),
           })
         );
-        return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
+        return settle(state, { groups: pruned(groups, newPaneId), activeGroupId: targetGroup.id, activeTabId: activeTabId(state) });
       });
     },
 
@@ -4831,10 +5823,14 @@ export const useTerminalStore = create((set, get, api) => {
      */
     moveTabInStrip: (tabId, targetPaneId, index, targetGroupId = null) =>
       set((state) => {
-        if (!state.tabs.some((t) => t.id === tabId)) return state;
+        const kind = kindOfTab(state, tabId);
+        if (!kind) return state;
         const targetGroup = resolveGroup(state, targetGroupId, targetPaneId);
         const targetPane = targetGroup && collectLeaves(targetGroup.tree).find((l) => l.id === targetPaneId);
         if (!targetPane) return state;
+        // A strip holds one kind (sibling B): the other kind's tab changes nothing.
+        if (leafKind(targetPane) !== kind) return state;
+        const editor = kind === EDITOR_KIND;
         const tabIds = moveToSlot(targetPane.tabIds, tabId, index);
         if (!tabIds) return state;
 
@@ -4843,9 +5839,9 @@ export const useTerminalStore = create((set, get, api) => {
           fromThisStrip &&
           sameOrder(tabIds, targetPane.tabIds) &&
           targetPane.activeTabId === tabId &&
-          targetGroup.activePaneId === targetPaneId &&
+          activePaneOf(targetGroup) === targetPaneId &&
           state.activeGroupId === targetGroup.id &&
-          state.activeTabId === tabId
+          (editor || state.activeTabId === tabId)
         ) {
           return state;
         }
@@ -4861,12 +5857,303 @@ export const useTerminalStore = create((set, get, api) => {
         groups = updateGroup(groups, targetGroup.id, (g) => ({
           ...g,
           tree: replaceNode(g.tree, targetPaneId, (n) => ({ ...n, tabIds, activeTabId: tabId })),
-          activePaneId: targetPaneId,
+          ...(editor ? editorFocus(targetPaneId) : terminalFocus(targetPaneId)),
         }));
+        if (editor && sourceGroup) {
+          // A file's strip move prunes only the leaf it left, if that emptied
+          // it — as the editor area's strip always did.
+          const vacated = leafHoldingTab(sourceGroup.tree, tabId)?.id;
+          groups = groups.map((g) => {
+            if (g.id !== sourceGroup.id) return g;
+            const left = collectLeaves(g.tree).find((l) => l.id === vacated);
+            if (!left || left.tabIds.length > 0 || waitingEditorLeaves.has(left.id)) return g;
+            return { ...g, tree: removePane(g.tree, vacated) };
+          });
+        }
         // `settle` prunes the pane the tab left if that emptied it, exactly as
         // a drop on a pane's body does.
-        return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: tabId });
+        return settle(state, { groups, activeGroupId: targetGroup.id, activeTabId: editor ? state.activeTabId : tabId });
       }),
+
+    // ---- Editor leaves (sibling B) ---------------------------------------
+    //
+    // editorStore owns the file tabs; these place them on the workbench. The
+    // UI of B reaches them only through editorStore's actions, which keep
+    // their names and signatures for the editor area.
+
+    /**
+     * Put file tab `tabId` (already among editorStore's tabs) into a group —
+     * the active one unless `groupId` or `paneId` says otherwise: into
+     * `paneId` when that is one of the group's editor leaves, else the
+     * group's `editorPaneId` leaf, else a new editor leaf wrapped above the
+     * group's whole tree at [60, 40] (FB4). The tab becomes that leaf's shown
+     * tab, the leaf the group's editor pane, and the group the one on screen
+     * (unless `activate` is false). A tab already in a leaf is moved, so it is
+     * never in two. Returns `{ groupId, paneId }`, or null for an unknown tab.
+     */
+    placeEditorTab: (tabId, { groupId = null, paneId = null, activate = true } = {}) => {
+      let placed = null;
+      set((state) => {
+        if (!editorTabIds().has(tabId)) return state;
+        const group = resolveGroup(state, groupId, paneId);
+        if (!group) return state;
+        let groups = state.groups;
+        const source = groupOfTab(state, tabId);
+        if (source) groups = updateGroup(groups, source.id, (g) => ({ ...g, tree: removeTabFromTree(g.tree, tabId) }));
+        const current = groups.find((g) => g.id === group.id);
+        const leaves = collectLeaves(current.tree).filter(isEditorLeaf);
+        const target = leaves.find((l) => l.id === paneId) ?? leaves.find((l) => l.id === current.editorPaneId) ?? null;
+        let tree;
+        let at;
+        if (target) {
+          at = target.id;
+          tree = replaceNode(current.tree, at, (n) => ({ ...n, tabIds: [...n.tabIds, tabId], activeTabId: tabId }));
+        } else {
+          const leaf = { ...emptyEditorLeaf(), tabIds: [tabId], activeTabId: tabId };
+          at = leaf.id;
+          tree = wrapWithEditorLeaf(current.tree, leaf);
+        }
+        placed = { groupId: group.id, paneId: at };
+        // The file's pane becomes THE active pane (FC1, FC5) — unless the
+        // caller asked for no activation, when it only becomes the group's
+        // editor pane, where the next file lands.
+        groups = updateGroup(groups, group.id, (g) => ({ ...g, tree, ...(activate ? editorFocus(at) : { editorPaneId: at }) }));
+        if (source && source.id !== group.id) groups = pruneEditorLeavesIn(groups, [source.id]);
+        return settle(state, { groups, ...(activate ? { activeGroupId: group.id } : {}) });
+      });
+      return placed;
+    },
+
+    /**
+     * Show file tab `tabId` where it already is, in ANY group (FB4): its
+     * group comes on screen, its leaf becomes that group's editor pane and
+     * shows it. Returns `{ groupId, paneId }`, or null when no leaf holds it.
+     */
+    revealEditorTab: (tabId) => {
+      let shown = null;
+      set((state) => {
+        for (const group of state.groups) {
+          const leaf = collectLeaves(group.tree).find((l) => isEditorLeaf(l) && l.tabIds.includes(tabId));
+          if (!leaf) continue;
+          shown = { groupId: group.id, paneId: leaf.id };
+          if (leaf.activeTabId === tabId && activePaneOf(group) === leaf.id && state.activeGroupId === group.id) return state;
+          const switching = state.activeGroupId !== group.id;
+          const terminalPane = collectLeaves(group.tree).find((l) => l.id === group.activePaneId);
+          const nextTab = switching ? state.tabs.find((t) => t.id === terminalPane?.activeTabId) : null;
+          return settle(state, {
+            groups: updateGroup(state, group.id, (g) => ({
+              ...g,
+              tree: replaceNode(g.tree, leaf.id, (n) => ({ ...n, activeTabId: tabId })),
+              ...editorFocus(leaf.id),
+            })),
+            activeGroupId: group.id,
+            ...(switching ? { activeTabId: nextTab?.id ?? null, cwd: nextTab?.cwd ?? state.cwd } : {}),
+          });
+        }
+        return state;
+      });
+      return shown;
+    },
+
+    /** Make editor leaf `paneId` its group's editor pane (a click in it). Any other pane: nothing. */
+    setEditorPane: (paneId) => {
+      const group = groupOfPane(get(), paneId);
+      const leaf = group && collectLeaves(group.tree).find((l) => l.id === paneId);
+      if (leaf && isEditorLeaf(leaf)) get().setActivePane(paneId, group.id);
+    },
+
+    /**
+     * Split editor leaf `paneId` with a new EMPTY editor leaf after it — a
+     * file tab cannot be conjured up as a terminal can — and make the new
+     * one its group's editor pane, so the next file opened lands there. The
+     * split is halved, as the editor area's always was. Returns the new
+     * leaf's id, or null when `paneId` is not an editor leaf.
+     */
+    splitEditorLeaf: (paneId, direction = 'horizontal') => {
+      let made = null;
+      set((state) => {
+        const group = groupOfPane(state, paneId);
+        const leaf = group && collectLeaves(group.tree).find((l) => l.id === paneId);
+        if (!leaf || !isEditorLeaf(leaf)) return state;
+        const fresh = emptyEditorLeaf();
+        made = fresh.id;
+        return settle(state, {
+          groups: updateGroup(state, group.id, (g) =>
+            withoutZoom({ ...g, tree: splitAt(g.tree, paneId, fresh, direction === 'vertical' ? 'vertical' : 'horizontal', false), ...editorFocus(fresh.id) })
+          ),
+        });
+      });
+      return made;
+    },
+
+    /**
+     * Take editor leaf `paneId` out of its group (its sibling takes the
+     * parent split's place) and hand the editor pane to its neighbour.
+     * Closes nothing: returns the ids of the files it held that no other
+     * leaf shows, for editorStore to close. Not an editor leaf: [].
+     */
+    removeEditorLeaf: (paneId) => {
+      let orphans = [];
+      set((state) => {
+        const group = groupOfPane(state, paneId);
+        const leaf = group && collectLeaves(group.tree).find((l) => l.id === paneId);
+        if (!leaf || !isEditorLeaf(leaf)) return state;
+        waitingEditorLeaves.delete(paneId);
+        const nextEditorPane = neighbourEditorLeaf(group.tree, paneId);
+        const tree = removePane(group.tree, paneId);
+        const next = settle(state, {
+          groups: updateGroup(state, group.id, (g) => ({
+            ...g,
+            tree,
+            editorPaneId: g.editorPaneId === paneId ? nextEditorPane : g.editorPaneId,
+          })),
+        });
+        const held = editorIdsHeld(next.groups);
+        orphans = leaf.tabIds.filter((id) => !held.has(id));
+        return next;
+      });
+      return orphans;
+    },
+
+    /**
+     * Take file tabs out of every leaf — editorStore closed them, or is
+     * about to — and prune the empty editor leaves of the groups they were
+     * in, except the waiting ones (FB5): what closing a file always did to
+     * the editor area.
+     */
+    removeEditorTabs: (tabIds) =>
+      set((state) => {
+        const gone = new Set(tabIds || []);
+        if (gone.size === 0) return state;
+        const touched = state.groups.filter((g) => collectLeaves(g.tree).some((l) => isEditorLeaf(l) && l.tabIds.some((id) => gone.has(id))));
+        if (touched.length === 0) return state;
+        let groups = state.groups.map((g) => {
+          if (!touched.includes(g)) return g;
+          let tree = g.tree;
+          for (const id of gone) tree = removeTabFromTree(tree, id);
+          return { ...g, tree };
+        });
+        groups = pruneEditorLeavesIn(groups, touched.map((g) => g.id));
+        // A leaf pruned with its last file hands the editor pane — and, when
+        // it was THE active pane, the focus — to its neighbouring editor leaf
+        // (FC9); with none left, `settle` gives the focus to the terminal pane.
+        groups = groups.map((g) => {
+          const before = touched.find((t) => t.id === g.id);
+          if (!before || collectLeaves(g.tree).some((l) => l.id === g.editorPaneId)) return g;
+          const editorPaneId = survivingNeighbourEditorLeaf(before.tree, g.tree, g.editorPaneId);
+          return editorPaneId ? { ...g, editorPaneId } : g;
+        });
+        return settle(state, { groups });
+      }),
+
+    /**
+     * Put a restored editor layout in (FB9): `tree` is an editor tree whose
+     * leaves hold file tab ids. A leaf whose id names an editor leaf already
+     * in a group — a leaf of the saved layout waiting for its files, or the
+     * editor pane a live restore adds to — gets its files there; the rest,
+     * splits and all, are wrapped above the group on screen at [60, 40].
+     * Each file ends in one leaf. `activePane` becomes its group's editor
+     * pane, showing `activeTabId`.
+     */
+    applyEditorLayout: (plan) => {
+      if (!plan?.tree) return;
+      set((state) => {
+        const planLeaves = collectLeaves(plan.tree);
+        const placing = new Set(planLeaves.flatMap((l) => l.tabIds));
+        const existing = new Set(
+          state.groups.flatMap((g) => collectLeaves(g.tree).filter(isEditorLeaf).map((l) => l.id))
+        );
+        const matched = new Map(planLeaves.filter((l) => existing.has(l.id)).map((l) => [l.id, l]));
+        let groups = state.groups.map((g) => {
+          let tree = g.tree;
+          for (const leaf of collectLeaves(g.tree)) {
+            if (!isEditorLeaf(leaf)) continue;
+            const planned = matched.get(leaf.id);
+            const tabIds = planned ? [...planned.tabIds] : leaf.tabIds.filter((id) => !placing.has(id));
+            const activeTabId = planned
+              ? planned.activeTabId
+              : tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : tabIds[0] ?? null;
+            if (sameOrder(tabIds, leaf.tabIds) && activeTabId === leaf.activeTabId) continue;
+            tree = replaceNode(tree, leaf.id, (n) => ({ ...n, tabIds, activeTabId }));
+            if (planned && tabIds.length > 0) waitingEditorLeaves.delete(leaf.id);
+          }
+          return tree === g.tree ? g : { ...g, tree };
+        });
+        if (plan.replace) {
+          // The saved layout replaces the empty editor leaves of the group on
+          // screen (not the ones waiting for it): the editor as it starts.
+          const empty = collectLeaves(groups.find((g) => g.id === state.activeGroupId)?.tree).filter(
+            (l) => isEditorLeaf(l) && l.tabIds.length === 0 && !matched.has(l.id) && !waitingEditorLeaves.has(l.id)
+          );
+          for (const leaf of empty) {
+            groups = updateGroup(groups, state.activeGroupId, (g) => ({ ...g, tree: removePane(g.tree, leaf.id) ?? g.tree }));
+          }
+        }
+        const rest = pruneTree(removeLeaves(plan.tree, matched));
+        if (rest) {
+          const block = mapTree(rest, (n) => (n.type === 'leaf' ? withLeafKind(n, EDITOR_KIND) : n));
+          groups = updateGroup(groups, state.activeGroupId, (g) => ({ ...g, tree: wrapWithEditorLeaf(g.tree, block) }));
+        }
+        const paneGroup = groups.find((g) => collectLeaves(g.tree).some((l) => l.id === plan.activePane && isEditorLeaf(l)));
+        if (paneGroup) {
+          groups = updateGroup(groups, paneGroup.id, (g) => ({
+            ...g,
+            editorPaneId: plan.activePane,
+            tree: replaceNode(g.tree, plan.activePane, (n) =>
+              n.tabIds.includes(plan.activeTabId) ? { ...n, activeTabId: plan.activeTabId } : n
+            ),
+          }));
+        }
+        return settle(state, { groups });
+      });
+    },
+
+    /**
+     * Take every editor leaf out of every group — a folder switch, whose
+     * files close (FB9) — and stop waiting for any. Terminals are untouched.
+     */
+    clearEditorLeaves: () => {
+      waitingEditorLeaves.clear();
+      clearTimeout(editorWaitTimer);
+      editorWaitTimer = null;
+      set((state) => {
+        if (!state.groups.some((g) => collectLeaves(g.tree).some(isEditorLeaf))) return state;
+        const groups = state.groups.map((g) => {
+          const tree = projectTree(g.tree, TERMINAL_KIND) ?? emptyPane();
+          return tree === g.tree ? g : { ...g, tree };
+        });
+        return settle(state, { groups });
+      });
+    },
+
+    /**
+     * The editor restore has dealt with waiting editor leaves `ids` (all of
+     * them when null): they stop waiting, and those still empty are pruned —
+     * a saved file that is gone, a restore that is off or found no session.
+     */
+    releaseWaitingEditorLeaves: (ids = null) => {
+      const which = (ids ? [...ids] : [...waitingEditorLeaves]).filter((id) => waitingEditorLeaves.has(id));
+      if (which.length === 0) return;
+      for (const id of which) waitingEditorLeaves.delete(id);
+      if (waitingEditorLeaves.size === 0) {
+        clearTimeout(editorWaitTimer);
+        editorWaitTimer = null;
+      }
+      const released = new Set(which);
+      set((state) => {
+        let changed = false;
+        const groups = state.groups.map((g) => {
+          let tree = g.tree;
+          for (const leaf of collectLeaves(g.tree)) {
+            if (!released.has(leaf.id) || !isEditorLeaf(leaf) || leaf.tabIds.length > 0) continue;
+            tree = tree ? removePane(tree, leaf.id) : tree;
+            changed = true;
+          }
+          return tree === g.tree ? g : { ...g, tree };
+        });
+        return changed ? settle(state, { groups }) : state;
+      });
+    },
 
     /**
      * Rename a tab (double-click its chip, or "Rename" from its right-click
@@ -5045,12 +6332,15 @@ export const useTerminalStore = create((set, get, api) => {
         // down behind the shell's last output, as at a command's end.
         const gone = get().tabs.filter((t) => t.sessionId === session_id).map((t) => t.id);
         dropProgressAfterOutput(gone);
+        for (const id of gone) dropAgentTurn(id);
         set((state) => ({
           // Nothing is asking for a password in a shell that has ended.
           secretInput: secretInputFor(state.tabs, withoutSecret(state.secretInput, gone)),
           // Nor doing what a program in it said it was (`set-status`): the
           // program is gone, and its line would describe a dead shell.
           reportedStatus: withoutTabs(state.reportedStatus, gone),
+          // Nor working or waiting: its Claude Code went with it.
+          agentActivity: withoutTabs(state.agentActivity, gone),
           tabs: state.tabs.map((tab) => {
             if (tab.sessionId !== session_id) return tab;
             // Remember that this shell is gone. Without it the tab looked
@@ -5093,17 +6383,26 @@ export const useTerminalStore = create((set, get, api) => {
         });
       }));
       // A window title a program set (OSC 0 / 2), read by the backend whether
-      // or not the terminal has been shown. Only an opencode terminal's means
-      // anything here: the conversation it shows (`noteAgentTitle`).
+      // or not the terminal has been shown. Read only for a terminal that runs
+      // an agent: for Claude Code's working and idle state
+      // (`noteAgentActivity`), and for the conversation the agent shows
+      // (`noteAgentTitle`).
       unlisteners.push(await listen('pty-title', (payload) => {
         const { session_id, title } = payload || {};
         if (!session_id || typeof title !== 'string') return;
         const tab = get().tabs.find((t) => t.sessionId === session_id);
-        if (tab?.agent) get().noteAgentTitle(tab.id, title);
+        if (!tab?.agent) return;
+        // Whether Claude Code works or waits (`noteAgentActivity`), then the
+        // conversation it shows.
+        get().noteAgentActivity(tab.id, title);
+        get().noteAgentTitle(tab.id, title);
       }));
     },
 
     dispose: () => {
+      waitingEditorLeaves.clear();
+      clearTimeout(editorWaitTimer);
+      editorWaitTimer = null;
       for (const off of unlisteners) {
         try {
           if (typeof off === 'function') off();
@@ -5148,6 +6447,9 @@ export const useTerminalStore = create((set, get, api) => {
       // last one says nothing about the terminals coming back now.
       opencodeResumers.clear();
       continuedLatest.clear();
+      // What leaves already held as this start begins is not "placed while
+      // it ran" (`carryEditorLeaves`): taken before the first await.
+      const heldAtStart = editorIdsHeld(get().groups);
 
       try {
         // Listening before anything is spawned. A shell draws its first
@@ -5241,7 +6543,7 @@ export const useTerminalStore = create((set, get, api) => {
               groups: restored.groups,
               activeGroupId: restored.activeGroupId,
               activeTabId: restored.activeTabId,
-            }),
+            }, heldAtStart),
             cwd: restored.cwd,
             isInitialized: true,
             // The session's name is saved with its layout and comes back with
@@ -5250,6 +6552,7 @@ export const useTerminalStore = create((set, get, api) => {
             // user had given.
             workspaceName: restored.workspaceName,
           }));
+          editorLeavesLanded(restored.groups);
           return;
         }
 
@@ -5297,11 +6600,12 @@ export const useTerminalStore = create((set, get, api) => {
             groups: [group],
             activeGroupId: group.id,
             activeTabId: initialTab.id,
-          }),
+          }, heldAtStart),
           cwd: initialTab.cwd,
           isInitialized: true,
           ...(savedName ? { workspaceName: savedName } : {}),
         }));
+        editorLeavesLanded([]);
       } catch (err) {
         console.error('[TerminalStore] Failed to initialize terminal session:', err);
       }
@@ -5361,7 +6665,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, group.id, (g) => ({
             ...g,
             tree: addTabToPane(g.tree, targetPaneId, newTab.id),
-            activePaneId: targetPaneId,
+            ...terminalFocus(targetPaneId),
           })),
           activeGroupId: group.id,
           activeTabId: newTab.id,
@@ -5403,7 +6707,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, group.id, (g) => ({
             ...g,
             tree: addTabToPane(g.tree, targetPaneId, newTab.id),
-            activePaneId: targetPaneId,
+            ...terminalFocus(targetPaneId),
           })),
           activeGroupId: group.id,
           activeTabId: newTab.id,
@@ -5434,7 +6738,7 @@ export const useTerminalStore = create((set, get, api) => {
           groups: updateGroup(state, owner.id, (g) => ({
             ...g,
             tree: replaceNode(g.tree, pane.id, (n) => ({ ...n, activeTabId: tabId })),
-            activePaneId: pane.id,
+            ...terminalFocus(pane.id),
           })),
           activeGroupId: owner.id,
           activeTabId: tabId,
@@ -5494,6 +6798,16 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     /**
+     * Terminal: Go to Previous / Next Prompt from the palette: the active
+     * terminal's prompt above the top of the view (`'previous'`) or below it
+     * (`'next'`), scrolled to the top. The keys go to the registry directly.
+     */
+    jumpToPrompt: async (direction, tabId = null) => {
+      const targetId = tabId || get().activeTabId;
+      return targetId ? jumpToPromptView(targetId, direction) : false;
+    },
+
+    /**
      * Run an agent in a terminal, and remember which conversation it is.
      *
      * The command is TYPED into the shell rather than spawned in place of
@@ -5521,7 +6835,29 @@ export const useTerminalStore = create((set, get, api) => {
         return null;
       }
 
-      const readiness = await untilTypingSafe(targetId);
+      // OpenCode V1 in mini mode when the setting and its version say so
+      // (opencodeLaunch.js): asked now and awaited once the prompt is there,
+      // so the wait for the prompt hides the probe (at most its timeout).
+      // Claude Code's line is not awaited.
+      const launching = kind === 'opencode' ? opencodeLaunchLine(kind, started.command) : null;
+      let answered = false;
+      launching?.then(() => {
+        answered = true;
+      });
+      const shell = get().tabs.find((t) => t.id === targetId)?.sessionId;
+      let readiness = await untilTypingSafe(targetId);
+      let command = started.command;
+      if (launching && readiness !== 'gone' && readiness !== 'hidden') {
+        const checkedAfter = answered;
+        command = await launching;
+        // A probe that answered after the check: the terminal is checked
+        // again, as the first time, before anything is typed — a password
+        // prompt may have come up meanwhile, or the shell gone.
+        if (!checkedAfter) {
+          const now = get().tabs.find((t) => t.id === targetId);
+          readiness = !now || now.sessionId !== shell || now.exited ? 'gone' : await untilTypingSafe(targetId);
+        }
+      }
       if (readiness === 'gone') return null;
       if (readiness === 'hidden') {
         // Not typed into a password prompt, and said where it would have been.
@@ -5531,7 +6867,8 @@ export const useTerminalStore = create((set, get, api) => {
         return null;
       }
       recordAgent(targetId, started.agent, readiness === 'ready');
-      await get().writeRaw(targetId, `${started.command}\r`);
+      noteAgentLaunch(targetId);
+      await get().writeRaw(targetId, `${command}\r`);
       return started.agent;
     },
 
@@ -5620,8 +6957,30 @@ export const useTerminalStore = create((set, get, api) => {
         return false;
       }
       takeOffer(targetId, agent, { continued });
+      // The opencode line in mini mode when the setting and its version say
+      // so (opencodeLaunch.js): asked now, awaited once the prompt is there.
+      const launching = agent?.kind === 'opencode' ? opencodeLaunchLine('opencode', command) : null;
+      let answered = false;
+      launching?.then(() => {
+        answered = true;
+      });
+      const shell = get().tabs.find((t) => t.id === targetId)?.sessionId;
 
-      const readiness = await untilTypingSafe(targetId);
+      let readiness = await untilTypingSafe(targetId);
+      let launched = command;
+      if (launching && readiness !== 'gone' && readiness !== 'hidden') {
+        const checkedAfter = answered;
+        launched = await launching;
+        // A probe that answered after the check: the terminal is checked
+        // again, as the first time, before anything is typed — a password
+        // prompt may have come up meanwhile, or the shell gone — and nothing
+        // is typed once it holds another agent (typed by hand, say).
+        if (!checkedAfter) {
+          const now = get().tabs.find((t) => t.id === targetId);
+          readiness = !now || now.sessionId !== shell || now.exited ? 'gone' : await untilTypingSafe(targetId);
+          if (get().tabs.find((t) => t.id === targetId)?.agent !== agent) return false;
+        }
+      }
       if (readiness === 'gone') return false;
       if (readiness === 'hidden') {
         // Not typed into a password prompt: the offer comes back, as it was
@@ -5637,7 +6996,8 @@ export const useTerminalStore = create((set, get, api) => {
       if (fresh && !notifyTerminal(targetId, NEVER_SAVED_NOTE)) console.warn(`[TerminalStore] ${NEVER_SAVED_NOTE}`);
       if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
       recordAgent(targetId, typed.agent, readiness === 'ready');
-      await get().writeRaw(targetId, `${typed.command}\r`);
+      noteAgentLaunch(targetId);
+      await get().writeRaw(targetId, `${typed.command === command ? launched : typed.command}\r`);
       if (fresh) {
         conversationReplaced({
           tabId: targetId,
@@ -5661,7 +7021,11 @@ export const useTerminalStore = create((set, get, api) => {
 
     /**
      * Put up a notice about the agent session history that no pick made —
-     * a clear that failed (agentHistoryStore.js, kind 'clearFailed').
+     * a clear that failed or that this build cannot do (agentHistoryStore.js
+     * and agentHistoryPromptStore.js, kind 'clearFailed'), or a pin, rename,
+     * archive, group change or delete the backend refused or that failed
+     * (kind 'curationFailed', `text` the backend's own words) or whose entry
+     * was no longer listed (`text` the store's).
      */
     showAgentHistoryNotice: (kind, text) =>
       set({ agentHistoryNotice: { kind, text: String(text ?? ''), key: null, tabId: null, seq: (noticeSeq += 1) } }),
@@ -5840,11 +7204,29 @@ export const useTerminalStore = create((set, get, api) => {
      * title is looked up (`resolveAgentSession`) once it has held still for
      * AGENT_RESOLVE_DELAY_MS. Its home screen's `OpenCode` and the '' it
      * sets as it quits say nothing and change nothing.
+     *
+     * Claude Code shows its conversation's title too (`✳ <title>`, a
+     * spinner glyph while it works; `claudeTitleOf`). For a record with a
+     * valid id that is not only offered back, a title whose text is not the
+     * last one this terminal showed is told to `onAgentTitleShown`'s
+     * listeners. The record does not change: a Claude Code record names no
+     * conversation (`title: null`), so the session saved is what it was.
      */
     noteAgentTitle: (tabId, windowTitle) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       const agent = tab?.agent;
-      if (!agent || agent.kind !== 'opencode' || tab.agentResumeOffered) return;
+      if (!agent || tab.agentResumeOffered) return;
+      if (agent.kind === 'claude') {
+        // A `claude` typed by hand with no id would change its entry's key
+        // with every title: only the conversation NexTerm knows by its id.
+        if (!isSessionIdFor('claude', agent.sessionId)) return;
+        const title = claudeTitleOf(windowTitle);
+        if (!title || claudeShownTitles.get(tabId) === title) return;
+        claudeShownTitles.set(tabId, title);
+        agentTitleShown({ tabId, kind: 'claude', sessionId: agent.sessionId, title });
+        return;
+      }
+      if (agent.kind !== 'opencode') return;
       const shown = opencodeTitleOf(windowTitle);
       // opencode sends the same title again as it redraws; this record has
       // already made of it whatever there was to make.
@@ -6138,7 +7520,9 @@ export const useTerminalStore = create((set, get, api) => {
             // An exit as `pty-exit` would have said it: no program's status
             // outlives its shell.
             reportedStatus: first ? withoutTabs(state.reportedStatus, [targetId]) : state.reportedStatus,
+            agentActivity: first ? withoutTabs(state.agentActivity, [targetId]) : state.agentActivity,
           }));
+          if (first) dropAgentTurn(targetId);
           if (first && !notifyTerminal(targetId, 'The shell in this terminal has stopped. Press Enter to start a new one.')) {
             console.error('[TerminalStore] Raw write failed:', err);
           }
@@ -6404,6 +7788,20 @@ useTerminalStore.subscribe((state, prevState) => {
   schedulePersist(state);
 });
 
+// Restore Open Files decides whether editor leaves are in the payload at all
+// (`editorsPersisted`, sibling B), and no change of this store follows its
+// toggle: turned off, the leaves already on disk stayed there until the next
+// layout change, and came back on the next launch. Written now, either way.
+useSettingsStore.subscribe((settings, prev) => {
+  if ((settings.editorRestoreTabs !== false) === (prev.editorRestoreTabs !== false)) return;
+  const state = useTerminalStore.getState();
+  if (!state.isInitialized) return;
+  const key = persistKeyOf(state);
+  if (key === lastPersistKey) return;
+  lastPersistKey = key;
+  schedulePersist(state);
+});
+
 /** `map` keeping only the keys in `live` — the same object when it had no others. */
 function keepLive(map, live) {
   if (!map) return map;
@@ -6451,6 +7849,9 @@ function pruneAttention(state) {
     clearTimeout(timer);
     controlledTimers.delete(id);
   }
+  for (const id of new Set([...agentTurns.keys(), ...agentSettles.keys(), ...agentDonePeriods.keys(), ...agentPastPeriods.keys(), ...agentLastTitles.keys()])) {
+    if (!live.has(id)) dropAgentTurn(id);
+  }
   const notifications = state.notifications.some((n) => !live.has(n?.tabId))
     ? state.notifications.filter((n) => live.has(n?.tabId))
     : state.notifications;
@@ -6464,17 +7865,20 @@ function pruneAttention(state) {
   // program controlled it (stage 7): gone with the terminal.
   const reportedStatus = keepLive(state.reportedStatus, live);
   const controlled = keepLive(state.controlled, live);
+  // Whether its Claude Code works or waits: gone with the terminal.
+  const agentActivity = keepLive(state.agentActivity, live);
   if (
     notifications === state.notifications &&
     progress === state.progress &&
     attentionFlash === state.attentionFlash &&
     secretInput === state.secretInput &&
     reportedStatus === state.reportedStatus &&
-    controlled === state.controlled
+    controlled === state.controlled &&
+    agentActivity === state.agentActivity
   ) {
     return;
   }
-  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled });
+  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled, agentActivity });
 }
 
 // Attention upkeep, on every change to the store:

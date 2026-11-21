@@ -244,7 +244,8 @@ describe('Output pacing: wired into the registry', () => {
       'flushed, then after the parse'
     );
     const clear = src.slice(src.indexOf('export function clearTerminal(tabId) {'));
-    assert.match(clear, /^[^}]*?return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*entry\.term\.clear\(\);/, 'a clear');
+    // Its prompt marks are read just before it (prompt_marks.test.js, PRM-08).
+    assert.match(clear, /^[^}]*?return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*(?:\/\/[^\n]*\n\s*)*(?:const promptMarked = [^\n]*\n\s*)?entry\.term\.clear\(\);/, 'a clear');
     assert.match(src, /flushPacedOutput\(tabId\);\s*dirs\.note\(cwd\);/, "the folder's mark after what was printed in the old one");
     const bind = src.slice(src.indexOf('function bindSession(entry, sessionId) {'));
     assert.match(bind, /^function bindSession\(entry, sessionId\) \{[\s\S]*?flushPaced\(entry\);\s*entry\.stopPtyListener\?\.\(\);/, 'another shell bound');

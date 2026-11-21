@@ -62,7 +62,7 @@ const BY_EXTENSION = {
 
   md: { icon: FileText, color: '#519aba' },
   mdx: { icon: FileText, color: '#519aba' },
-  txt: { icon: FileText, color: '#9d9d9d' },
+  txt: { icon: FileText, color: '#9BA3AF' },
   pdf: { icon: FileText, color: '#cc3e44' },
 
   sh: { icon: FileTerminal, color: '#8dc149' },

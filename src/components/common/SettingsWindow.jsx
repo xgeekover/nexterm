@@ -264,6 +264,36 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       control: 'checkbox',
     },
     {
+      id: 'terminalPromptMarks',
+      section: 'terminal',
+      key: 'terminalPromptMarks',
+      settingKey: 'terminal.integrated.promptMarksOnScrollbar',
+      title: 'Prompt Marks on Scrollbar',
+      description:
+        'Mark every shell prompt, and every message you sent to Claude Code, on the terminal\'s scrollbar; click a mark to scroll that row to the top. Shell prompts need a shell that reports them (cmd, PowerShell, zsh, bash); messages need Claude Code on the normal screen. Ctrl+Shift+Up and Down (Cmd on macOS) go to the previous and next mark of either kind either way.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalClaudeNormalScreen',
+      section: 'terminal',
+      key: 'terminalClaudeNormalScreen',
+      settingKey: 'terminal.integrated.claudeCodeNormalScreen',
+      title: 'Claude Code on the Normal Screen',
+      description:
+        'Start terminals with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1, unless it is set already, so Claude Code draws on the normal screen: its conversation scrolls with the scrollbar and every message you send gets a mark. Off, Claude Code uses its fullscreen renderer (less flicker, its own mouse scrolling), with no scrollback and no marks. Applies to terminals started or restarted afterwards.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalOpencodeMini',
+      section: 'terminal',
+      key: 'terminalOpencodeMini',
+      settingKey: 'terminal.integrated.opencodeMiniMode',
+      title: 'OpenCode in Mini Mode',
+      description:
+        'Start and resume OpenCode as `opencode --mini --no-replay`, so its conversation goes into the scrollback: it scrolls with the scrollbar and every message you send gets a mark. The trade is the full TUI\'s own layout and mouse. Needs OpenCode V1 1.17.10 or newer; any other version gets the full TUI as before. Typing `opencode` yourself always gives the full TUI. Applies to the next start or resume.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalScrollback',
       section: 'terminal',
       key: 'terminalScrollback',
@@ -416,6 +446,19 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       title: 'Notify After',
       description:
         'Tell me when a command finishes in a terminal I am not looking at, once it has run at least this many seconds. 0 turns it off.',
+      control: 'number',
+      min: 0,
+      max: 600,
+      step: 5,
+    },
+    {
+      id: 'terminalAgentDoneAfterSeconds',
+      section: 'terminal',
+      key: 'terminalAgentDoneAfterSeconds',
+      settingKey: 'terminal.integrated.agentDoneAfterSeconds',
+      title: 'Notify When an Agent Is Done',
+      description:
+        'Tell me when Claude Code in a terminal I am not looking at stops working and waits for me, once it has worked at least this many seconds. 0 turns it off. Needs no Claude Code setting.',
       control: 'number',
       min: 0,
       max: 600,
@@ -644,7 +687,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
 }
 
 const inputClass =
-  'h-[26px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui px-2';
+  'ui-field h-[26px] text-vsc-fg placeholder:text-vsc-placeholder text-ui px-2';
 
 /**
  * What a number field commits when focus leaves it: the number typed, held
@@ -707,7 +750,7 @@ function TextLikeControl({ item, value, onCommit }) {
 }
 
 const textareaClass =
-  'w-full h-[180px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui font-mono px-2 py-1 resize-y';
+  'ui-field w-full h-[180px] text-vsc-fg placeholder:text-vsc-placeholder text-ui font-mono px-2 py-1 resize-y';
 
 /**
  * A multi-line field (User Commands): kept as typed, committed when focus
@@ -792,7 +835,7 @@ function SettingRow({ item, value, isDefault, onChange, onReset, onAction, note 
               type="checkbox"
               checked={!!value}
               onChange={(e) => onChange(e.target.checked)}
-              className="h-[16px] w-[16px] accent-current"
+              className="h-[16px] w-[16px] accent-vsc-accent"
             />
             <span>{value ? 'Enabled' : 'Disabled'}</span>
           </label>
@@ -827,7 +870,7 @@ function SettingRow({ item, value, isDefault, onChange, onReset, onAction, note 
             type="button"
             data-setting-action={item.action}
             onClick={() => onAction?.(item)}
-            className="h-[26px] px-3 rounded-[3px] text-ui bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover transition-colors"
+            className="h-[26px] px-3 rounded-control text-ui bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover transition-colors"
           >
             {item.actionLabel}
           </button>
@@ -859,6 +902,9 @@ export function SettingsWindow() {
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
+  const terminalPromptMarks = useSettingsStore((s) => s.terminalPromptMarks);
+  const terminalClaudeNormalScreen = useSettingsStore((s) => s.terminalClaudeNormalScreen);
+  const terminalOpencodeMini = useSettingsStore((s) => s.terminalOpencodeMini);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
@@ -867,6 +913,7 @@ export function SettingsWindow() {
   const terminalUserCommands = useSettingsStore((s) => s.terminalUserCommands);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
+  const terminalAgentDoneAfterSeconds = useSettingsStore((s) => s.terminalAgentDoneAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
   const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
   const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
@@ -903,6 +950,9 @@ export function SettingsWindow() {
     terminalTheme,
     terminalSuggestions,
     terminalStickyHeader,
+    terminalPromptMarks,
+    terminalClaudeNormalScreen,
+    terminalOpencodeMini,
     terminalCopyOnSelect,
     terminalMouseReporting,
     terminalRightClick,
@@ -911,6 +961,7 @@ export function SettingsWindow() {
     terminalUserCommands,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
+    terminalAgentDoneAfterSeconds,
     terminalProgramNotifications,
     terminalBellAttention,
     terminalAttentionFlashFocused,
@@ -1127,7 +1178,7 @@ export function SettingsWindow() {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="flex flex-col w-[900px] min-w-[720px] max-w-[90vw] h-[640px] min-h-[520px] max-h-[85vh] bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[6px] overflow-hidden"
+        className="flex flex-col w-[900px] min-w-[720px] max-w-[90vw] h-[640px] min-h-[520px] max-h-[85vh] bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
       >
         {/* Header */}
         <div className="flex-shrink-0 flex items-center gap-3 h-panel-header px-4 border-b border-vsc-border">
@@ -1135,7 +1186,7 @@ export function SettingsWindow() {
             Settings
           </h2>
 
-          <div className="flex-1 flex items-center gap-2 h-[26px] px-2 rounded-[3px] bg-vsc-input border border-vsc-input-border focus-within:border-vsc-focus transition-colors max-w-[360px]">
+          <div className="ui-field flex-1 flex items-center gap-2 h-[26px] px-2 max-w-[360px]">
             <Search size={14} className="text-vsc-muted flex-shrink-0" />
             <input
               ref={searchRef}
@@ -1152,7 +1203,7 @@ export function SettingsWindow() {
           <button
             type="button"
             onClick={() => resetAll(setResetQuestion)}
-            className="flex-shrink-0 h-[26px] px-2.5 rounded-[3px] text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover transition-colors"
+            className="flex-shrink-0 h-[26px] px-2.5 rounded-control text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover transition-colors"
           >
             Reset All
           </button>

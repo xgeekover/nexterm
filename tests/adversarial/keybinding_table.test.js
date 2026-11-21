@@ -240,9 +240,19 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
   });
 
   test('KB-06: Monaco keeps the chords it owns, without them being swallowed', () => {
-    // ⌘D and ⌘W belong to the editor while the cursor is in a file: the table
-    // must step aside AND leave the key unprevented.
-    for (const key of ['mod+d', 'mod+w']) {
+    // ⌘D and ⌘F belong to the editor while the cursor is in a file: the table
+    // must step aside AND leave the key unprevented. ⌘W left this list in
+    // editor placement C2: by the human's Q5 it closes the file tab there
+    // (Monaco binds nothing to it), so it is claimed — and prevented — as
+    // anywhere else.
+    {
+      let prevented = false;
+      const e = { ...eventFor('mod+w', 'macos'), preventDefault: () => { prevented = true; } };
+      const fired = dispatchKeydown(e, ctxFor(e, 'macos', { isInMonacoEditor: true }));
+      assert.equal(fired, 'close-pane', 'mod+w is Close Pane inside Monaco (Q5)');
+      assert.equal(prevented, true, 'and the browser does not get it');
+    }
+    for (const key of ['mod+d', 'mod+f']) {
       let prevented = false;
       const e = { ...eventFor(key, 'macos'), preventDefault: () => { prevented = true; } };
       const fired = dispatchKeydown(e, ctxFor(e, 'macos', { isInMonacoEditor: true }));
@@ -329,6 +339,10 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'run-project-command',
       'stop-trusting-project-commands',
       'swap-pane',
+      // The prompt commands (prompt marks on the scrollbar): palette
+      // commands, as the split polish pair are; menu.rs has no entry for them.
+      'terminal-next-prompt',
+      'terminal-previous-prompt',
     ]);
   });
 
@@ -378,6 +392,13 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       'split-right',
       // Equalize Splits' twin (above): the pick of panes to swap with.
       'swap-pane',
+      // Ctrl+Shift+Up/Down, ⌘⇧↑/↓ on macOS: the prompt above or below the top
+      // of the view. A terminal is the only place they mean anything. Neither
+      // is a control byte, and no shell's line editor binds them by default;
+      // on the alternate screen (vim, less, OpenCode) the program keeps them
+      // (`passThrough`, PRM-20).
+      'terminal-next-prompt',
+      'terminal-previous-prompt',
       // ⌘⇧Enter, and Ctrl+Shift+Enter off macOS. Zooming the pane a terminal
       // is in is what the command is for, like Split Right. Neither spelling
       // is a control byte: xterm sends Ctrl+Shift+Enter as a plain Enter. Off

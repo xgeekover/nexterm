@@ -415,7 +415,9 @@ describe('Agent session history: resuming an entry in a new terminal', () => {
         assert.equal(c.cwd, '/workspace', 'none asked: where a new terminal starts');
       });
       assert.deepEqual(calls.spawns.map((s) => s.cwd), ['/workspace/tests', '/workspace/src', null]);
-      assert.deepEqual(calls.spawns.map((s) => Object.keys(s).sort()), Array(3).fill(['cols', 'cwd', 'rows', 'shell']), 'never strict unless asked');
+      // `claude_normal_screen` goes with every spawn (Settings ▸ Terminal ▸
+      // Claude Code on the Normal Screen); `strict_cwd` only when asked.
+      assert.deepEqual(calls.spawns.map((s) => Object.keys(s).sort()), Array(3).fill(['claude_normal_screen', 'cols', 'cwd', 'rows', 'shell']), 'never strict unless asked');
 
       // Not strict: a folder that refuses the shell falls back, as ever.
       const warn = console.warn;
