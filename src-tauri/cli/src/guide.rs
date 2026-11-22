@@ -318,11 +318,23 @@ mod tests {
         assert_eq!(words(r#"send --to x "npm test" --keys Enter"#), ["send", "--to", "x", "npm test", "--keys", "Enter"]);
     }
 
+    /// The README from its Control section on, CRLF made LF: the repo has no
+    /// .gitattributes, so a Windows checkout (CI) has CRLF line endings.
+    fn control_section(readme: &str) -> String {
+        let readme = readme.replace("\r\n", "\n");
+        let at = readme.find("\n### Control NexTerm from a terminal\n").expect("the Control section");
+        readme[at..].to_string()
+    }
+
     #[test]
     fn read_screen_names_the_three_switches_as_the_readme_does_and_the_masking() {
         let body = text(Some("read-screen")).unwrap();
         let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
-        let control = &readme[readme.find("\n### Control NexTerm from a terminal\n").expect("the Control section")..];
+        let control = control_section(&readme);
+        // The same section from either checkout, whichever this one is.
+        let lf = readme.replace("\r\n", "\n");
+        assert_eq!(control_section(&lf.replace('\n', "\r\n")), control, "a CRLF checkout");
+        assert_eq!(control_section(&lf), control, "an LF checkout");
         for (switch, default) in [
             ("Let programs in terminals control NexTerm", "on"),
             ("Let programs type into and read terminals", "off"),

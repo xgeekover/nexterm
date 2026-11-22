@@ -590,7 +590,8 @@ describe('Ctrl+Tab: the terminals most recently used, across groups (A5-3)', () 
       __resetTabMru();
     }
     // App's effect is the arrow that returns it, so React runs it as the cleanup.
-    const app = readFileSync(new URL('../../src/App.jsx', import.meta.url), 'utf8');
+    // CRLF made LF: a Windows checkout (CI) has CRLF line endings.
+    const app = readFileSync(new URL('../../src/App.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.match(app, /\n\s*useEffect\(\(\) => ensureTabMruStarted\(\), \[\]\);\n/, 'the effect returns the stop');
   });
 

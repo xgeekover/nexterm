@@ -1165,6 +1165,12 @@ scenario(
 );
 
 const { COMMANDS, configurableCommands, keysFor } = await import('../../src/lib/keybindings.js');
+// The platform the Settings note is drawn for: KeybindingSettings takes it
+// from `navigator`, which Node 20 (CI, on every OS) does not have and Node 24
+// does. Off macOS a macOS-only chord (Go to Tab 1's ⌘1) takes nothing, and
+// the note leaves the command out, so the keys counted here are that
+// platform's too.
+const { isMac: noteIsMac } = await import('../../src/lib/platform.js');
 
 scenario(
   'RN-61',
@@ -1184,7 +1190,7 @@ scenario(
     let unbound = 0;
     for (const { id, title } of configurableCommands()) {
       const named = note.includes(title);
-      const bound = keysFor(id).length > 0;
+      const bound = keysFor(id, undefined, { isMac: noteIsMac }).length > 0;
       if (COMMANDS[id].overTerminal && bound) expectThat(named, `${title} is taken ahead of the terminal, and the note does not say so`);
       else if (COMMANDS[id].overTerminal) {
         unbound += 1;
