@@ -188,6 +188,28 @@ export function startCommand(kind) {
 }
 
 /**
+ * The command that FORKS the Claude Code conversation `sourceSessionId`: a
+ * new conversation that starts with a copy of that one's, under an id NexTerm
+ * chooses — `claude --resume <source> --fork-session --session-id <new>`
+ * (Claude Code 2.0.73 and newer) — and the agent record to remember, whose
+ * `forkOf` is the source. The source is left as it was.
+ *
+ * Null for a source that is not a Claude Code id (`CLAUDE_SESSION_ID`): it is
+ * typed into a shell, and nothing else may reach one.
+ *
+ * @returns {{ command: string, agent: { kind: 'claude', sessionId: string, startedAt: number, title: null, forkOf: string } } | null}
+ */
+export function forkCommand(sourceSessionId) {
+  if (!isSessionIdFor('claude', sourceSessionId)) return null;
+  let sessionId = newSessionId();
+  while (sessionId === sourceSessionId) sessionId = newSessionId();
+  return {
+    command: `${AGENTS.claude.command} ${AGENTS.claude.resumeFlag} ${sourceSessionId} --fork-session --session-id ${sessionId}`,
+    agent: { kind: 'claude', sessionId, startedAt: Date.now(), title: null, forkOf: sourceSessionId },
+  };
+}
+
+/**
  * The command that CONTINUES the conversation an `agent` record describes, or
  * null when there is nothing to continue.
  *
@@ -209,6 +231,25 @@ export function resumeCommand(agent) {
   return isSessionIdFor(agent.kind, agent.sessionId)
     ? `${command} ${resumeFlag} ${agent.sessionId}`
     : `${command} --continue`;
+}
+
+/**
+ * What NexTerm adds to an opencode line for OpenCode V1's mini mode (1.17.10
+ * and newer): the conversation on the normal screen, in the scrollback, and
+ * nothing printed again on a resize. Fixed literals only.
+ */
+export const OPENCODE_MINI_FLAGS = '--mini --no-replay';
+
+/**
+ * `command` with OPENCODE_MINI_FLAGS right after a leading `opencode` word
+ * (`opencode`, `opencode -s <id>`, `opencode --continue`), and any other line
+ * — a claude line, one that names `--mini` already — unchanged. Pure: when to
+ * use it is opencodeLaunch.js's to say, right before the line is typed.
+ */
+export function withOpencodeMini(command) {
+  if (typeof command !== 'string' || !/^opencode(?=$|\s)/.test(command)) return command;
+  if (/(?:^|\s)--mini(?=$|\s)/.test(command)) return command;
+  return `opencode ${OPENCODE_MINI_FLAGS}${command.slice('opencode'.length)}`;
 }
 
 /**
@@ -348,23 +389,40 @@ function opencodeFromArgs(args) {
 
 function claudeFromArgs(args) {
   if (args.length > 0 && CLAUDE_SUBCOMMANDS.has(args[0])) return null;
+  // The last of either flag, as it always was: what a line without
+  // `--fork-session` names.
   let sessionId = null;
+  // Each flag's own value, for a fork: the new id and the conversation it
+  // continues from are never the same flag.
+  let newId = null;
+  let resumed = null;
   let fork = false;
   for (let i = 0; i < args.length; i += 1) {
     const [flag, inline] = flagParts(args[i]);
     if (['-p', '--print', '-h', '--help', '-v', '--version', '--bg', '--background'].includes(flag)) return null;
     if (flag === '--fork-session') fork = true;
-    if (flag === '--session-id') sessionId = inline !== undefined ? inline : args[(i += 1)] ?? null;
+    if (flag === '--session-id') {
+      sessionId = inline !== undefined ? inline : args[(i += 1)] ?? null;
+      newId = sessionId;
+    }
     if (flag === '-r' || flag === '--resume') {
       // The value is optional: without one claude shows its own picker.
       const value = inline !== undefined ? inline : args[i + 1];
       if (isSessionIdFor('claude', value)) {
         sessionId = value;
+        resumed = value;
         if (inline === undefined) i += 1;
       }
     }
   }
-  return { kind: 'claude', sessionId: !fork && isSessionIdFor('claude', sessionId) ? sessionId : null };
+  if (!fork) return { kind: 'claude', sessionId: isSessionIdFor('claude', sessionId) ? sessionId : null };
+  // `--fork-session` continues into a NEW conversation: its id is the one
+  // `--session-id` chose, when the line chose one, and nobody's otherwise.
+  // The one it was forked from is kept beside it only when both are known
+  // — a link from a conversation nobody can name leads nowhere.
+  const id = isSessionIdFor('claude', newId) ? newId : null;
+  const from = id !== null && isSessionIdFor('claude', resumed) && resumed !== id ? resumed : null;
+  return from !== null ? { kind: 'claude', sessionId: id, forkOf: from } : { kind: 'claude', sessionId: id };
 }
 
 /**
@@ -380,7 +438,15 @@ function claudeFromArgs(args) {
  *
  * `sessionId` is the conversation when the line names one — `opencode -s
  * ses_…`, `claude --resume <uuid>` or `--session-id <uuid>` — and null
- * otherwise, including a `--fork`, which continues into a new one.
+ * otherwise, including an opencode `--fork`, which continues into a new one.
+ *
+ * A Claude Code fork — `--fork-session`, in any order with the other flags —
+ * continues into a new conversation too, and its `sessionId` is that one's:
+ * the `--session-id <uuid>` the line chose, or null when it chose none
+ * (Claude Code then makes one nobody here can know). With both a valid
+ * `--session-id` and a valid `--resume <uuid>`, the record also has
+ * `forkOf`, the conversation it was forked from (`forkCommand` types such a
+ * line). A record without a fork has no `forkOf` at all.
  */
 export function agentFromCommandLine(line) {
   if (typeof line !== 'string' || line.length > 4096) return null;
@@ -414,6 +480,49 @@ export function opencodeTitleOf(windowTitle) {
   if (typeof windowTitle !== 'string') return null;
   const match = /^OC \| (.+)$/s.exec(windowTitle);
   return match ? match[1] : null;
+}
+
+// ---- Which Claude Code conversation a terminal shows --------------------------
+
+/**
+ * A terminal title Claude Code set: one status glyph — ✳ (U+2733) waiting,
+ * ◐ ◑ ◒ ◓ (U+25D0-U+25D3) working, either maybe followed by U+FE0F — one
+ * space, then the conversation's title (as Claude Code 2.1.323 sets it).
+ */
+const CLAUDE_WINDOW_TITLE = /^[\u2733\u25d0-\u25d3]\ufe0f? (.+)$/s;
+/** What Claude Code shows before its conversation has a title of its own. */
+const CLAUDE_DEFAULT_TITLE = 'Claude Code';
+
+/**
+ * The conversation title in a terminal title Claude Code set (`✳ <title>`,
+ * `◐ <title>`), trimmed, or null: for its default `Claude Code`, and for
+ * any other title — no glyph, empty, a glyph only, opencode's `OC | …`, or
+ * another program's. Not cleaned or masked: the history does that
+ * (`historyTitle`).
+ */
+export function claudeTitleOf(windowTitle) {
+  if (typeof windowTitle !== 'string') return null;
+  const match = CLAUDE_WINDOW_TITLE.exec(windowTitle);
+  const title = match ? match[1].trim() : '';
+  return title && title !== CLAUDE_DEFAULT_TITLE ? title : null;
+}
+
+/** Claude Code's working glyphs, ◐ ◑ ◒ ◓ (U+25D0-U+25D3), and its idle one, ✳ (U+2733). */
+const CLAUDE_IDLE_GLYPH = '\u2733';
+
+/**
+ * What a terminal title Claude Code set says the agent is doing: 'working'
+ * for a spinner glyph (◐ ◑ ◒ ◓), 'idle' for ✳ — its default `✳ Claude Code`
+ * too — in the shape `claudeTitleOf` reads (one glyph, maybe U+FE0F, one
+ * space, then text that is not blank). Null for anything else: not a
+ * string, empty, a glyph alone or not followed by a space, a glyph and
+ * blanks, opencode's `OC | …`, a shell's title, another program's spinner.
+ */
+export function claudeActivityOf(windowTitle) {
+  if (typeof windowTitle !== 'string') return null;
+  const match = CLAUDE_WINDOW_TITLE.exec(windowTitle);
+  if (!match || !match[1].trim()) return null;
+  return windowTitle.startsWith(CLAUDE_IDLE_GLYPH) ? 'idle' : 'working';
 }
 
 /**

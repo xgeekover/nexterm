@@ -24,6 +24,7 @@ import { expandHome } from '../../lib/paths.js';
 import { isNetworkPath } from '../../lib/terminalLinks.js';
 import { NETWORK_START_DIR } from '../../lib/terminalCwd.js';
 import { invoke } from '../../lib/ipc.js';
+import { keepAwakeDescription, keepAwakeSupport } from '../../lib/keepAwake.js';
 import { userCommandsCheck } from '../../stores/projectCommandsStore.js';
 import { COMMANDS_FILE } from '../../lib/projectCommands.js';
 
@@ -127,8 +128,14 @@ const SECTIONS = [
   { id: 'workbench', label: 'Workbench' },
 ];
 
-/** Every row the Settings window can render, grouped by section. */
-function buildItems(monoPlaceholder, detectedShells, homeDir) {
+/**
+ * Every row the Settings window can render, grouped by section. Exported for
+ * its tests. `keepAwake` is the backend's keep-awake support answer
+ * (`{ supported, method }`), or null while it is not known. `mac` adds the
+ * rows that exist on macOS only (⌘ editing keys, Option as Meta); it is the
+ * platform the window runs on unless a test says otherwise.
+ */
+export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake = null, { mac = isMac } = {}) {
   return [
     // ---- Text Editor ----
     {
@@ -194,6 +201,18 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         ? 'Delete in the Explorer moves files and folders to the Recycle Bin, where they can be restored. On a drive that has none — a network drive, a USB stick — you are asked again before anything is deleted permanently. Disabled: Delete removes them permanently, after one question.'
         : 'Delete in the Explorer moves files and folders to the Trash, where they can be restored. Where there is none — some network and USB drives — you are asked again before anything is deleted permanently. Disabled: Delete removes them permanently, after one question.',
       control: 'checkbox',
+    },
+    {
+      id: 'externalEditorCommand',
+      section: 'files',
+      key: 'externalEditorCommand',
+      settingKey: 'files.externalEditorCommand',
+      title: 'External Editor',
+      description:
+        'A program and its arguments, for example code or subl -w; run without a shell, with the path added as the last argument. Adds Open in External Editor to the Explorer menu for files, folders and the open folder. A shell, an app that opens files in their default app (open, xdg-open, start, explorer) or a wrapper that runs its arguments (env, xargs, wsl) is refused. That guards against a mistake and is not a sandbox: whatever else you set runs with the path, and interpreters such as python or node are not refused. Empty: no such item, and nothing is opened with the default app.',
+      control: 'text',
+      // Blank means none, not a default editor: the placeholder says so.
+      placeholder: 'Not set',
     },
     // ---- Terminal ----
     {
@@ -264,6 +283,36 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       control: 'checkbox',
     },
     {
+      id: 'terminalPromptMarks',
+      section: 'terminal',
+      key: 'terminalPromptMarks',
+      settingKey: 'terminal.integrated.promptMarksOnScrollbar',
+      title: 'Prompt Marks on Scrollbar',
+      description:
+        'Mark every shell prompt, and every message you sent to Claude Code, on the terminal\'s scrollbar; click a mark to scroll that row to the top. Shell prompts need a shell that reports them (cmd, PowerShell, zsh, bash); messages need Claude Code on the normal screen. Ctrl+Shift+Up and Down (Cmd on macOS) go to the previous and next mark of either kind either way.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalClaudeNormalScreen',
+      section: 'terminal',
+      key: 'terminalClaudeNormalScreen',
+      settingKey: 'terminal.integrated.claudeCodeNormalScreen',
+      title: 'Claude Code on the Normal Screen',
+      description:
+        'Start terminals with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1, unless it is set already, so Claude Code draws on the normal screen: its conversation scrolls with the scrollbar and every message you send gets a mark. Off, Claude Code uses its fullscreen renderer (less flicker, its own mouse scrolling), with no scrollback and no marks. Applies to terminals started or restarted afterwards.',
+      control: 'checkbox',
+    },
+    {
+      id: 'terminalOpencodeMini',
+      section: 'terminal',
+      key: 'terminalOpencodeMini',
+      settingKey: 'terminal.integrated.opencodeMiniMode',
+      title: 'OpenCode in Mini Mode',
+      description:
+        'Start and resume OpenCode as `opencode --mini --no-replay`, so its conversation goes into the scrollback: it scrolls with the scrollbar and every message you send gets a mark. The trade is the full TUI\'s own layout and mouse. Needs OpenCode V1 1.17.10 or newer; any other version gets the full TUI as before. Typing `opencode` yourself always gives the full TUI. Applies to the next start or resume.',
+      control: 'checkbox',
+    },
+    {
       id: 'terminalScrollback',
       section: 'terminal',
       key: 'terminalScrollback',
@@ -295,6 +344,20 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       control: 'action',
       actionLabel: 'Clear Saved Scrollback…',
       action: 'clearSavedScrollback',
+    },
+    // ---- Copy Context (bundle 1, A3) ----
+    {
+      id: 'terminalCopyContextLines',
+      section: 'terminal',
+      key: 'terminalCopyContextLines',
+      settingKey: 'terminal.integrated.copyContextLines',
+      title: 'Copy Context Lines',
+      description:
+        "How many of a terminal's last lines Copy Last N Lines (Secrets Masked) puts on the clipboard, from the tab's menu, the TERMINALS list or the Command Palette. Plain text, wrapped lines joined; strings that look like secrets (API keys, tokens, passwords after NAME=) are replaced with [hidden], as read-screen does. Nothing is written to a file.",
+      control: 'number',
+      min: 1,
+      max: 10000,
+      step: 1,
     },
     {
       id: 'terminalTheme',
@@ -422,6 +485,19 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       step: 5,
     },
     {
+      id: 'terminalAgentDoneAfterSeconds',
+      section: 'terminal',
+      key: 'terminalAgentDoneAfterSeconds',
+      settingKey: 'terminal.integrated.agentDoneAfterSeconds',
+      title: 'Notify When an Agent Is Done',
+      description:
+        'Tell me when Claude Code in a terminal I am not looking at stops working and waits for me, once it has worked at least this many seconds. 0 turns it off. Needs no Claude Code setting.',
+      control: 'number',
+      min: 0,
+      max: 600,
+      step: 5,
+    },
+    {
       id: 'terminalProgramNotifications',
       section: 'terminal',
       key: 'terminalProgramNotifications',
@@ -459,6 +535,16 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       title: 'Progress Bars',
       description:
         'Shows the progress a program reports with OSC 9;4, the sequence Windows Terminal understands, as a thin bar under its tab and its group, and on Windows on the taskbar button too. Off, every bar is taken down at once.',
+      control: 'checkbox',
+    },
+    // ---- Keep-awake (bundle 1, A4): src/lib/keepAwake.js ----
+    {
+      id: 'terminalKeepAwakeWhileAgentsWork',
+      section: 'terminal',
+      key: 'terminalKeepAwakeWhileAgentsWork',
+      settingKey: 'terminal.integrated.keepAwakeWhileAgentsWork',
+      title: 'Keep the Computer Awake While an Agent Works',
+      description: keepAwakeDescription(keepAwake),
       control: 'checkbox',
     },
     // ---- The TERMINALS side bar's rows (stage 2) ----
@@ -582,6 +668,42 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
         'Lets a full-screen program such as vim, htop or tmux use the mouse. A program in the scrollback, like Claude Code, never gets it, so a drag there always selects text. Inside a full-screen program, hold Shift while dragging to select (on macOS ⌥ works too).',
       control: 'checkbox',
     },
+    // ---- macOS keyboard (bundle 2, A6 and A7): rows that exist on macOS only ----
+    ...(mac
+      ? [
+          {
+            id: 'terminalMacEditingKeys',
+            section: 'terminal',
+            key: 'terminalMacEditingKeys',
+            settingKey: 'terminal.integrated.macEditingKeys',
+            title: 'macOS Text-Editing Keys',
+            description:
+              '⌘← and ⌘→ go to the start and the end of the line, ⌘Backspace deletes to its start and ⌘Delete (Fn+Backspace) to its end — sent as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K, which shells and most line editors read that way. Only on the normal screen: in a full-screen program such as vim, htop or less the keys are its own, as before, and so they are once a program turns modifyOtherKeys on. While a password prompt is up only ⌘Backspace works, clearing what was typed; the other three would type a character into the password. Disabled: the keys are the terminal\'s, as before.',
+            control: 'checkbox',
+          },
+          {
+            id: 'terminalOptionAsMeta',
+            section: 'terminal',
+            key: 'terminalOptionAsMeta',
+            settingKey: 'terminal.integrated.macOptionIsMeta',
+            title: 'Use Option as Meta',
+            description:
+              '⌥ and a key send Esc and that key, as Meta does: ⌥B and ⌥F move a word in zsh and bash, and Emacs gets its Meta key. The trade: while this is on, ⌥ no longer types ⌥-characters — ™, €, and on many non-US keyboard layouts @ [ ] { } | ~ — and no longer starts dead keys such as ⌥E for é. Both ⌥ keys act alike. ⌥-drag still selects text, ⌥Enter still sends Esc Enter, and ⌥← / ⌥→ still move a word, either way. Applies to every open terminal at once.',
+            control: 'checkbox',
+          },
+        ]
+      : []),
+    // ---- OSC 52 (bundle 2, A8): a program putting text on the clipboard ----
+    {
+      id: 'terminalOsc52Write',
+      section: 'terminal',
+      key: 'terminalOsc52Write',
+      settingKey: 'terminal.integrated.osc52Write',
+      title: 'Let Programs Set the Clipboard (OSC 52)',
+      description:
+        'Lets a program in a terminal — tmux, vim, Neovim, a shell over ssh — copy text to your clipboard with OSC 52. Off by default, because anything that can print to a terminal could then set the clipboard, a file shown with cat or a server over ssh included, and your next paste would run what it put there. Writes only: a program never reads the clipboard and never clears it, more than 128 KiB is refused whole, and output kept from before a terminal was shown is ignored. While this is off, the first copy a terminal tries prints one notice saying so. Nothing a program copies is logged.',
+      control: 'checkbox',
+    },
     {
       id: 'terminalUserCommands',
       section: 'terminal',
@@ -605,7 +727,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
       settingKey: 'terminal.control.enabled',
       title: 'Let Programs in Terminals Control NexTerm',
       description:
-        'Lets a program running in a terminal — an agent\'s hook, a script — use nexterm-cli to show a notification, set a status line for its terminal in the TERMINALS side bar, show a progress bar, list the terminals of this window, open a split beside its own terminal and point you to a terminal — its pane flashes and its tab is marked, and while NexTerm is in the background the Dock or taskbar asks for you too; it never switches terminals for you or raises the window. Only programs in terminals NexTerm started can reach it, as you: each shell gets a token of its own, the address is a socket or pipe only your user account can open, and nothing listens on the network. Every call is in the palette\'s Show Control Log. Off, nothing answers, and every terminal\'s token stops working.',
+        'Lets a program running in a terminal — an agent\'s hook, a script — use nexterm-cli to show a notification, set a status line for its terminal in the TERMINALS side bar, show a progress bar, give its terminal a title (nexterm-cli set-title — shown on its tab until the shell exits, unless you renamed the tab: a name you gave it always stays), list the terminals of this window, open a split beside its own terminal and point you to a terminal — its pane flashes and its tab is marked, and while NexTerm is in the background the Dock or taskbar asks for you too; it never switches terminals for you or raises the window. Only programs in terminals NexTerm started can reach it, as you: each shell gets a token of its own, the address is a socket or pipe only your user account can open, and nothing listens on the network. Every call is in the palette\'s Show Control Log. Off, nothing answers, and every terminal\'s token stops working.',
       control: 'checkbox',
     },
     {
@@ -644,7 +766,7 @@ function buildItems(monoPlaceholder, detectedShells, homeDir) {
 }
 
 const inputClass =
-  'h-[26px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui px-2';
+  'ui-field h-[26px] text-vsc-fg placeholder:text-vsc-placeholder text-ui px-2';
 
 /**
  * What a number field commits when focus leaves it: the number typed, held
@@ -707,7 +829,7 @@ function TextLikeControl({ item, value, onCommit }) {
 }
 
 const textareaClass =
-  'w-full h-[180px] rounded-[3px] bg-vsc-input border border-vsc-input-border text-vsc-fg placeholder:text-vsc-placeholder focus:border-vsc-focus outline-none text-ui font-mono px-2 py-1 resize-y';
+  'ui-field w-full h-[180px] text-vsc-fg placeholder:text-vsc-placeholder text-ui font-mono px-2 py-1 resize-y';
 
 /**
  * A multi-line field (User Commands): kept as typed, committed when focus
@@ -792,7 +914,7 @@ function SettingRow({ item, value, isDefault, onChange, onReset, onAction, note 
               type="checkbox"
               checked={!!value}
               onChange={(e) => onChange(e.target.checked)}
-              className="h-[16px] w-[16px] accent-current"
+              className="h-[16px] w-[16px] accent-vsc-accent"
             />
             <span>{value ? 'Enabled' : 'Disabled'}</span>
           </label>
@@ -827,7 +949,7 @@ function SettingRow({ item, value, isDefault, onChange, onReset, onAction, note 
             type="button"
             data-setting-action={item.action}
             onClick={() => onAction?.(item)}
-            className="h-[26px] px-3 rounded-[3px] text-ui bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover transition-colors"
+            className="h-[26px] px-3 rounded-control text-ui bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover transition-colors"
           >
             {item.actionLabel}
           </button>
@@ -856,21 +978,30 @@ export function SettingsWindow() {
   const terminalCursorBlink = useSettingsStore((s) => s.terminalCursorBlink);
   const terminalScrollback = useSettingsStore((s) => s.terminalScrollback);
   const terminalRestoreScrollback = useSettingsStore((s) => s.terminalRestoreScrollback);
+  const terminalCopyContextLines = useSettingsStore((s) => s.terminalCopyContextLines);
   const terminalTheme = useSettingsStore((s) => s.terminalTheme);
   const terminalSuggestions = useSettingsStore((s) => s.terminalSuggestions);
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
+  const terminalPromptMarks = useSettingsStore((s) => s.terminalPromptMarks);
+  const terminalClaudeNormalScreen = useSettingsStore((s) => s.terminalClaudeNormalScreen);
+  const terminalOpencodeMini = useSettingsStore((s) => s.terminalOpencodeMini);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
+  const terminalMacEditingKeys = useSettingsStore((s) => s.terminalMacEditingKeys);
+  const terminalOptionAsMeta = useSettingsStore((s) => s.terminalOptionAsMeta);
+  const terminalOsc52Write = useSettingsStore((s) => s.terminalOsc52Write);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
   const terminalMultiLinePasteWarning = useSettingsStore((s) => s.terminalMultiLinePasteWarning);
   const terminalAutoReplyBatchJob = useSettingsStore((s) => s.terminalAutoReplyBatchJob);
   const terminalUserCommands = useSettingsStore((s) => s.terminalUserCommands);
   const terminalDefaultShell = useSettingsStore((s) => s.terminalDefaultShell);
   const terminalNotifyAfterSeconds = useSettingsStore((s) => s.terminalNotifyAfterSeconds);
+  const terminalAgentDoneAfterSeconds = useSettingsStore((s) => s.terminalAgentDoneAfterSeconds);
   const terminalProgramNotifications = useSettingsStore((s) => s.terminalProgramNotifications);
   const terminalBellAttention = useSettingsStore((s) => s.terminalBellAttention);
   const terminalAttentionFlashFocused = useSettingsStore((s) => s.terminalAttentionFlashFocused);
   const terminalProgress = useSettingsStore((s) => s.terminalProgress);
+  const terminalKeepAwakeWhileAgentsWork = useSettingsStore((s) => s.terminalKeepAwakeWhileAgentsWork);
   const terminalControl = useSettingsStore((s) => s.terminalControl);
   const terminalControlTypeAndRead = useSettingsStore((s) => s.terminalControlTypeAndRead);
   const terminalControlOtherTerminals = useSettingsStore((s) => s.terminalControlOtherTerminals);
@@ -890,6 +1021,7 @@ export function SettingsWindow() {
   const editorMinimap = useSettingsStore((s) => s.editorMinimap);
   const editorRestoreTabs = useSettingsStore((s) => s.editorRestoreTabs);
   const filesEnableTrash = useSettingsStore((s) => s.filesEnableTrash);
+  const externalEditorCommand = useSettingsStore((s) => s.externalEditorCommand);
   const reducedMotion = useSettingsStore((s) => s.reducedMotion);
 
   const values = {
@@ -900,21 +1032,30 @@ export function SettingsWindow() {
     terminalCursorBlink,
     terminalScrollback,
     terminalRestoreScrollback,
+    terminalCopyContextLines,
     terminalTheme,
     terminalSuggestions,
     terminalStickyHeader,
+    terminalPromptMarks,
+    terminalClaudeNormalScreen,
+    terminalOpencodeMini,
     terminalCopyOnSelect,
     terminalMouseReporting,
+    terminalMacEditingKeys,
+    terminalOptionAsMeta,
+    terminalOsc52Write,
     terminalRightClick,
     terminalMultiLinePasteWarning,
     terminalAutoReplyBatchJob,
     terminalUserCommands,
     terminalDefaultShell,
     terminalNotifyAfterSeconds,
+    terminalAgentDoneAfterSeconds,
     terminalProgramNotifications,
     terminalBellAttention,
     terminalAttentionFlashFocused,
     terminalProgress,
+    terminalKeepAwakeWhileAgentsWork,
     terminalControl,
     terminalControlTypeAndRead,
     terminalControlOtherTerminals,
@@ -934,6 +1075,7 @@ export function SettingsWindow() {
     editorMinimap,
     editorRestoreTabs,
     filesEnableTrash,
+    externalEditorCommand,
     reducedMotion,
   };
 
@@ -959,9 +1101,22 @@ export function SettingsWindow() {
   const monoPlaceholder = useMemo(() => readInheritedMonoStack(), [isOpen]);
   const detectedShells = useSystemStore((s) => s.shells);
   const homeDir = useSystemStore((s) => s.homeDir);
+  // Whether keep-awake works here, for its row: the app's one question
+  // (`keepAwakeSupport`), read when the window first opens.
+  const [keepAwake, setKeepAwake] = useState(null);
+  useEffect(() => {
+    if (!isOpen || keepAwake) return undefined;
+    let cancelled = false;
+    keepAwakeSupport().then((answer) => {
+      if (!cancelled) setKeepAwake(answer);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, keepAwake]);
   const ITEMS = useMemo(
-    () => buildItems(monoPlaceholder, detectedShells, homeDir),
-    [monoPlaceholder, detectedShells, homeDir]
+    () => buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake),
+    [monoPlaceholder, detectedShells, homeDir, keepAwake]
   );
 
   const validatedSignature = ITEMS.filter((i) => i.validate)
@@ -1127,7 +1282,7 @@ export function SettingsWindow() {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="flex flex-col w-[900px] min-w-[720px] max-w-[90vw] h-[640px] min-h-[520px] max-h-[85vh] bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[6px] overflow-hidden"
+        className="flex flex-col w-[900px] min-w-[720px] max-w-[90vw] h-[640px] min-h-[520px] max-h-[85vh] bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
       >
         {/* Header */}
         <div className="flex-shrink-0 flex items-center gap-3 h-panel-header px-4 border-b border-vsc-border">
@@ -1135,7 +1290,7 @@ export function SettingsWindow() {
             Settings
           </h2>
 
-          <div className="flex-1 flex items-center gap-2 h-[26px] px-2 rounded-[3px] bg-vsc-input border border-vsc-input-border focus-within:border-vsc-focus transition-colors max-w-[360px]">
+          <div className="ui-field flex-1 flex items-center gap-2 h-[26px] px-2 max-w-[360px]">
             <Search size={14} className="text-vsc-muted flex-shrink-0" />
             <input
               ref={searchRef}
@@ -1152,7 +1307,7 @@ export function SettingsWindow() {
           <button
             type="button"
             onClick={() => resetAll(setResetQuestion)}
-            className="flex-shrink-0 h-[26px] px-2.5 rounded-[3px] text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover transition-colors"
+            className="flex-shrink-0 h-[26px] px-2.5 rounded-control text-ui-sm text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover transition-colors"
           >
             Reset All
           </button>

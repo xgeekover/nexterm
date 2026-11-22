@@ -223,7 +223,7 @@ describe('Theme gallery: deleting an imported theme', () => {
     const active = deleteTheme(state(list, 'custom:b'), 'custom:b');
     assert.deepEqual(active.themes.map((t) => t.id), ['custom:a', 'custom:c']);
     assert.equal(active.chosen, DEFAULT_TERMINAL_THEME_ID);
-    assert.match(active.notice.text, /Deleted "B"\. The terminals are back to Dark Modern\./);
+    assert.match(active.notice.text, /Deleted "B"\. The terminals are back to NexTerm Dark\./);
     const other = deleteTheme(state(list, 'nord'), 'custom:b');
     assert.equal(other.chosen, 'nord');
     assert.equal(other.notice.text, 'Deleted "B".');

@@ -22,7 +22,7 @@ function ActivityBarButton({ icon: Icon, label, isActive, onClick }) {
       )}
     >
       {isActive && (
-        <span className="absolute left-0 top-0 bottom-0 w-[2px] bg-vsc-focus" aria-hidden="true" />
+        <span className="absolute left-0 top-0 bottom-0 w-[2px] bg-vsc-accent" aria-hidden="true" />
       )}
       <Icon size={24} strokeWidth={1.75} />
     </button>

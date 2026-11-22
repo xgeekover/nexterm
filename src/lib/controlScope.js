@@ -77,6 +77,7 @@ const SCHEMAS = {
     text: (v) => (v === null ? null : str(500, { required: true, nonEmpty: true })(v)),
     tone: oneOf(['info', 'warn', 'error']),
   },
+  'set-title': { text: (v) => (v === null ? null : str(200, { required: true, nonEmpty: true })(v)) },
   'set-progress': { state: oneOf(['normal', 'indeterminate', 'error', 'warning', 'remove'], { required: true }), value: int(0, 100) },
   list: {},
   'new-split': { direction: oneOf(['right', 'down']), cwd: str(4096, { nonEmpty: true }), command: str(2000, { nonEmpty: true }) },

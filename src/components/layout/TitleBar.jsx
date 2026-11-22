@@ -40,14 +40,27 @@ export function TitleBar() {
         isMac ? "pl-[78px] pr-3" : "pl-2"
       )}
     >
-      {/* Left: menu (own-drawn off macOS) + app name + workspace folder */}
-      <div className="relative z-10 flex items-center gap-2 min-w-0">
+      {/* Left: menu (own-drawn off macOS) + app name + workspace folder.
+          Capped so it ends 8px before the pill, which is centred on the whole
+          bar and clamp(180px, 38%, 600px) of it wide: the cap is that, worked
+          out in this row's own percentages (its content box, the bar less
+          its padding) — 50% + (left pad + right pad) / 2 - half the pill
+          - 8px - left pad. A long folder name truncates there, its whole path
+          in the tooltip, instead of running under the pill. */}
+      <div
+        className={cn(
+          'relative z-10 flex items-center gap-2 min-w-0',
+          isMac
+            ? 'max-w-[calc(50%_-_clamp(90px,_19%_+_17.1px,_300px)_-_41px)]'
+            : 'max-w-[calc(50%_-_clamp(90px,_19%_+_1.52px,_300px)_-_12px)]'
+        )}
+      >
         {!isMac && <MenuBar />}
-        <span className="font-medium text-vsc-fg whitespace-nowrap">{APP_NAME}</span>
+        <span className="shrink-0 font-medium text-vsc-fg whitespace-nowrap">{APP_NAME}</span>
         {workspaceName && (
           <>
-            <span className="text-vsc-muted">—</span>
-            <span className="text-vsc-muted truncate" title={rootPath}>{workspaceName}</span>
+            <span className="shrink-0 text-vsc-muted">—</span>
+            <span className="min-w-0 text-vsc-muted truncate" title={rootPath}>{workspaceName}</span>
           </>
         )}
       </div>
@@ -59,10 +72,10 @@ export function TitleBar() {
         <button
           type="button"
           onClick={() => setCommandPaletteOpen(true)}
-          className="pointer-events-auto flex items-center justify-center gap-2 h-[22px] w-[38%] max-w-[600px] rounded-md bg-vsc-input border border-vsc-input-border text-vsc-muted text-ui-sm hover:text-vsc-fg transition-colors"
+          className="ui-field pointer-events-auto flex items-center justify-center gap-2 h-[22px] w-[38%] min-w-[180px] max-w-[600px] px-2 text-vsc-muted text-ui-sm hover:text-vsc-fg transition-colors"
         >
-          <Search size={14} />
-          <span>Search NexTerm ({shortcut('command-palette')})</span>
+          <Search size={14} className="shrink-0" />
+          <span className="min-w-0 truncate">Search NexTerm ({shortcut('command-palette')})</span>
         </button>
       </div>
 

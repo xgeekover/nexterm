@@ -120,6 +120,7 @@ impl Failure {
 pub enum Command {
     Notify,
     SetStatus,
+    SetTitle,
     SetProgress,
     List,
     NewSplit,
@@ -129,9 +130,10 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 8] = [
+    pub const ALL: [Command; 9] = [
         Command::Notify,
         Command::SetStatus,
+        Command::SetTitle,
         Command::SetProgress,
         Command::List,
         Command::NewSplit,
@@ -144,6 +146,7 @@ impl Command {
         match self {
             Command::Notify => "notify",
             Command::SetStatus => "set-status",
+            Command::SetTitle => "set-title",
             Command::SetProgress => "set-progress",
             Command::List => "list",
             Command::NewSplit => "new-split",
@@ -546,6 +549,9 @@ mod tests {
         for cmd in Command::ALL {
             assert_eq!(Command::parse(cmd.name()), Some(cmd));
         }
+        assert_eq!(Command::ALL.len(), 9);
+        assert_eq!(Command::parse("set-title"), Some(Command::SetTitle));
+        assert_eq!(Command::parse("set_title"), None);
         assert_eq!(Command::parse("Notify"), None);
         assert_eq!(Command::parse("notify "), None);
         let none = Map::new();
@@ -556,6 +562,10 @@ mod tests {
         assert_eq!(typing, ["new-split", "send", "read-screen"], "a split that types a command is typing");
         let cwd = json!({"cwd":"/tmp","direction":"down"}).as_object().unwrap().clone();
         assert!(!Command::NewSplit.needs_type_and_read(&cwd));
+        // set-title only relabels the caller's tab, whatever it carries.
+        let titled = json!({"text":"npm test","command":"rm -rf build"}).as_object().unwrap().clone();
+        assert!(!Command::SetTitle.needs_type_and_read(&titled));
+        assert!(!Command::SetTitle.needs_type_and_read(&none));
     }
 
     /// The page answers with the codes of `CONTROL_ERROR` and dispatches the

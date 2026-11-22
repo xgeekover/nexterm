@@ -34,6 +34,27 @@
  * (`onAgentConversationReplaced`, terminalStore's `resumeAgent`), the old
  * one's entry is removed then and there: it can never be resumed.
  *
+ * **What the user curated** (F18-F30): a name, a pin, the archive, groups.
+ * The store holds the groups as `agent_history_groups` answers them, read
+ * after every list, with `readOnly` (a newer NexTerm wrote the file) and
+ * the file's `version`. Each curation action (`pin`, `rename`, `archive`,
+ * `moveToGroup`, `createGroup`, `renameGroup`, `setGroupCollapsed`,
+ * `deleteGroup`, `deleteEntry`, …) runs after what is queued, so a write
+ * queued before it cannot undo it, and reads the list again; one refused or
+ * failed is said in the AGENT SESSIONS notice ('curationFailed'), and so is
+ * a change to an entry that is no longer listed. A started
+ * or resumed write unarchives its entry (`unarchive`); a title, an id
+ * learned or an end never does, and no recorded event changes a name, a pin
+ * or a group. A Claude Code entry the user pinned, named or grouped is not
+ * dropped for never having been saved; when a Resume starts a new
+ * conversation in its place, the new entry takes its name, pin and group
+ * first, and the old one goes only once it has (F22).
+ *
+ * **Live Claude Code titles** (F23): the title a running Claude Code shows
+ * in its terminal (`onAgentTitleShown`) is written as its entry's title,
+ * once per text, through the same queue — the transcript's (F16) replaces
+ * it at the agent's end and at the next load.
+ *
  * **For the next phase** (monitoring several agents, a notification when one
  * finishes; nothing of it here): `holders` maps a history key to the
  * terminal of this window holding it, and `subscribeAgentLifecycle` hears
@@ -42,17 +63,23 @@
  */
 import { create } from 'zustand';
 import { invoke } from '../lib/ipc.js';
-import { isKnownAgent, isSessionIdFor } from '../lib/agents.js';
+import { isKnownAgent, isSessionIdFor, newSessionId } from '../lib/agents.js';
 import {
+  carriedCuration,
   claudeHistoryChanges,
   claudeIdsHeld,
+  entryGroupId,
+  historyGroupName,
   historyHolders,
   historyKey,
+  historyTitle,
+  nextGroupName,
   observeAgents,
   queueUpsert,
+  renameChange,
 } from '../lib/agentHistory.js';
 import { lookUpClaudeConversations } from '../lib/claudeConversations.js';
-import { onAgentConversationReplaced, useTerminalStore } from './terminalStore.js';
+import { onAgentConversationReplaced, onAgentTitleShown, useTerminalStore } from './terminalStore.js';
 import { useSystemStore } from './systemStore.js';
 
 /** How long the queue waits for more before it writes. */
@@ -69,6 +96,10 @@ let writeDelay = HISTORY_WRITE_DELAY_MS;
 let unsubscribe = null;
 /** Stops hearing of Resumes that started a new conversation (`onAgentConversationReplaced`). */
 let stopReplaced = null;
+/** Stops hearing the titles Claude Code terminals show (`onAgentTitleShown`). */
+let stopTitles = null;
+/** tab id -> `{ key, title }`: the live Claude Code title last queued for that terminal's entry. */
+const liveTitles = new Map();
 const lifecycle = new Set();
 /** Refusals already said in the console, so a refused write every second is said once. */
 const said = new Set();
@@ -117,10 +148,10 @@ async function sendQueued() {
   while (queue.length > 0) {
     const op = queue.shift();
     try {
-      const kept = await invoke(
-        'agent_history_upsert',
-        op.replaces ? { entry: op.entry, replaces: op.replaces } : { entry: op.entry }
-      );
+      const args = { entry: op.entry };
+      if (op.replaces) args.replaces = op.replaces;
+      if (op.unarchive === true) args.unarchive = true;
+      const kept = await invoke('agent_history_upsert', args);
       keepKey(op, kept);
     } catch (err) {
       // Refused (a newer file, another NexTerm holding it too long) or not
@@ -131,17 +162,45 @@ async function sendQueued() {
   await readList();
 }
 
-/** Read the list into the store. Resolves with its entries, or null when it could not be read. */
+const isGroup = (g) => g !== null && typeof g === 'object' && typeof g.id === 'string' && typeof g.name === 'string';
+
+/**
+ * The groups, as `agent_history_groups` answers: `{ groups, readOnly,
+ * version }`, or null when they could not be read — the list read goes on
+ * without them (the groups the store had stay).
+ */
+async function readGroups() {
+  try {
+    const answer = await invoke('agent_history_groups');
+    if (!answer || typeof answer !== 'object' || !Array.isArray(answer.groups)) return null;
+    return {
+      groups: answer.groups.filter(isGroup).map((g) => ({ id: g.id, name: g.name, collapsed: g.collapsed === true })),
+      readOnly: answer.readOnly === true,
+      version: Number.isInteger(answer.version) ? answer.version : null,
+    };
+  } catch (err) {
+    report('its groups could not be read', err);
+    return null;
+  }
+}
+
+/**
+ * Read the list into the store, then its groups (F20), and set both at
+ * once: no entry is ever drawn against groups of another read. Resolves
+ * with the entries, or null when the list could not be read.
+ */
 async function readList() {
+  let entries;
   try {
     const all = await invoke('agent_history_list');
-    const entries = (Array.isArray(all) ? all : []).filter((e) => e && isKnownAgent(e.kind));
-    useAgentHistoryStore.setState({ entries, loaded: true });
-    return entries;
+    entries = (Array.isArray(all) ? all : []).filter((e) => e && isKnownAgent(e.kind));
   } catch (err) {
     report('could not be read', err);
     return null;
   }
+  const grouped = await readGroups();
+  useAgentHistoryStore.setState({ entries, loaded: true, ...(grouped ?? {}) });
+  return entries;
 }
 
 /**
@@ -198,13 +257,36 @@ async function claudeEnded(ids) {
 /**
  * A Resume started a new Claude Code conversation in place of one never
  * saved (terminalStore `onAgentConversationReplaced`): the old one's entry
- * goes, after what was queued — the resume of it among that.
+ * goes, after what was queued — the resume of it among that, and the new
+ * conversation's start (`resumeAgent` makes the new record the terminal's
+ * before it tells, so the recorder has queued it by then).
+ *
+ * One the user pinned, named or grouped (F22) first gives its name, pin and
+ * group to the new conversation's entry (`agent_history_update`), and goes
+ * only once that entry answered: when it is not there (not recorded — its
+ * folder is not one the history keeps — or the update was refused) the old
+ * one stays, with everything the user gave it.
  */
 function onConversationReplaced(event) {
   if (event?.kind !== 'claude' || !isSessionIdFor('claude', event.from)) return;
   const key = historyKey({ kind: 'claude', sessionId: event.from });
+  const to = isSessionIdFor('claude', event.to) ? historyKey({ kind: 'claude', sessionId: event.to }) : null;
   serially(async () => {
     await sendQueued();
+    const entries = (await readList()) ?? useAgentHistoryStore.getState().entries;
+    const changes = carriedCuration(entries.find((e) => e.key === key));
+    if (changes) {
+      let carried = null;
+      try {
+        carried = to ? await invoke('agent_history_update', { key: to, changes }) : null;
+      } catch (err) {
+        report('could not give a name, pin or group to the new conversation', err);
+      }
+      if (!carried || carried.key !== to) {
+        await readList();
+        return;
+      }
+    }
     try {
       await invoke('agent_history_remove', { key });
     } catch (err) {
@@ -224,6 +306,49 @@ function emit(event) {
   }
 }
 
+/**
+ * A Claude Code terminal showed a conversation title (terminalStore
+ * `onAgentTitleShown`, F23): for the entry the recorder tracks for that
+ * terminal — running, with that id — the title as the history keeps it
+ * (`historyTitle`) is queued, once per text, with `lastUsedAt` now and no
+ * end, and heard as `titled`. Never `unarchive`. A title before the
+ * recorder tracks the agent, or of another conversation, is let go.
+ */
+function onTitleShown(event) {
+  if (event?.kind !== 'claude' || !isSessionIdFor('claude', event.sessionId)) return;
+  const t = tracked.get(event.tabId);
+  if (!t?.live || !t.entry || t.entry.kind !== 'claude' || t.entry.sessionId !== event.sessionId) return;
+  const title = historyTitle(event.title);
+  const last = liveTitles.get(event.tabId);
+  if (!title || (last && last.key === t.key && last.title === title)) return;
+  liveTitles.set(event.tabId, { key: t.key, title });
+  const entry = { ...t.entry, title, lastUsedAt: Date.now(), endedAt: null, endReason: null };
+  enqueue({ entry, key: t.key, replaces: null, tabId: event.tabId });
+  emit({ type: 'titled', tabId: event.tabId, key: t.key, entry: { ...entry, key: t.key } });
+}
+
+/**
+ * A notice the terminal store put up: a pick of an entry a terminal of this
+ * window already holds switched to it ('focused', `resumeFromHistory`).
+ * Picking it was resuming it, so an archived one is unarchived (F29) —
+ * explicitly, as no write of the recorder's comes of it.
+ */
+function onNotice(notice) {
+  if (notice?.kind !== 'focused' || typeof notice.key !== 'string') return;
+  const { key } = notice;
+  serially(async () => {
+    await sendQueued();
+    const entries = (await readList()) ?? useAgentHistoryStore.getState().entries;
+    if (entries.find((e) => e.key === key)?.archived !== true) return;
+    try {
+      await invoke('agent_history_update', { key, changes: { archived: false } });
+    } catch (err) {
+      report('could not unarchive the entry', err);
+    }
+    await readList();
+  });
+}
+
 const osNow = () => useSystemStore.getState().os ?? null;
 
 function setHolders(tabs) {
@@ -239,7 +364,9 @@ function observe(tabs) {
   const claudeEnds = [];
   for (const event of seen.events) {
     if (event.type === 'ended' && event.entry.kind === 'claude' && event.entry.sessionId) claudeEnds.push(event.entry.sessionId);
-    enqueue({ entry: event.entry, key: event.key, replaces: event.replaces, tabId: event.tabId });
+    // A start, or a resume, of an archived entry brings it back (F29).
+    const unarchive = event.type === 'started' || event.type === 'resumed';
+    enqueue({ entry: event.entry, key: event.key, replaces: event.replaces, tabId: event.tabId, ...(unarchive ? { unarchive } : {}) });
     emit({
       type: event.type,
       ...(event.reason ? { reason: event.reason } : {}),
@@ -248,9 +375,62 @@ function observe(tabs) {
       entry: { ...event.entry, key: event.key },
     });
   }
+  for (const tabId of [...liveTitles.keys()]) if (!tracked.get(tabId)?.live) liveTitles.delete(tabId);
   setHolders(tabs);
   if (claudeEnds.length > 0) serially(() => claudeEnded(claudeEnds));
 }
+
+/**
+ * The 'curationFailed' notice's words for a change to an entry the backend
+ * no longer has (`agent_history_update` answered null): re-keyed while the
+ * write waited (an OpenCode entry that learned its id), or removed by
+ * another NexTerm.
+ */
+export const ENTRY_GONE_TEXT = 'The list changed before this could be done. If the session is still listed, try again.';
+
+/** Its words for New Group… whose session is not in the group it made. */
+export const NOT_MOVED_TEXT =
+  'The group was made, but the list changed first and the session is not in it. If the session is still listed, move it to the group.';
+
+/**
+ * One curation write (F30), after what is queued — so a write queued before
+ * it cannot undo it — then the list read again. `call` makes it and
+ * resolves with the backend's answer, which this resolves with (null for
+ * none). Refused or failed (too many curated or groups, a newer file, busy,
+ * not saved): said in the AGENT SESSIONS notice, kind 'curationFailed', in
+ * the backend's own words; the list is read again, and it resolves null.
+ * `untold`, when given, is asked after that read with the answer, and the
+ * words it gives (an answer that did not do what was asked) go in the same
+ * notice; it resolves with the answer all the same.
+ */
+function curate(what, call, untold = null) {
+  return serially(async () => {
+    await sendQueued();
+    let answer;
+    try {
+      answer = await call();
+    } catch (err) {
+      report(what, err);
+      await readList();
+      useTerminalStore.getState().showAgentHistoryNotice?.('curationFailed', messageOf(err));
+      return null;
+    }
+    await readList();
+    const text = untold ? untold(answer ?? null) : null;
+    if (text) useTerminalStore.getState().showAgentHistoryNotice?.('curationFailed', text);
+    return answer ?? null;
+  });
+}
+
+/** `changes` (`agent_history_update`) to the entry under `key`: the entry as kept, or null — said when it is no longer listed. */
+const updateEntry = (what, key, changes) =>
+  curate(what, () => invoke('agent_history_update', { key: String(key ?? ''), changes }), (kept) => (kept ? null : ENTRY_GONE_TEXT));
+
+/** An id for a new group: what the backend takes (`^[0-9A-Za-z_-]{1,64}$`). */
+const newGroupId = () =>
+  typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : newSessionId();
+
+const groupById = (id) => useAgentHistoryStore.getState().groups.find((g) => g.id === id) ?? null;
 
 function onPageHide() {
   useAgentHistoryStore.getState().flush();
@@ -269,6 +449,12 @@ export const useAgentHistoryStore = create((set, get) => ({
    * restored terminal. What the side bar's badge reads.
    */
   holders: {},
+  /** The groups, in display order, each `{ id, name, collapsed }` (`agent_history_groups`). */
+  groups: [],
+  /** Whether a newer NexTerm wrote the file: it is read, and every curation is refused. */
+  readOnly: false,
+  /** The file's format version as read (1, 2, or a newer one), or null before the first read. */
+  version: null,
 
   /**
    * Start recording, and read the list. Once: a second call changes nothing.
@@ -284,8 +470,10 @@ export const useAgentHistoryStore = create((set, get) => ({
     setHolders(tabs);
     unsubscribe = useTerminalStore.subscribe((state, prev) => {
       if (state.tabs !== prev.tabs) observe(state.tabs);
+      if (state.agentHistoryNotice !== prev.agentHistoryNotice) onNotice(state.agentHistoryNotice);
     });
     stopReplaced = onAgentConversationReplaced(onConversationReplaced);
+    stopTitles = onAgentTitleShown(onTitleShown);
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       window.addEventListener('pagehide', onPageHide);
     }
@@ -300,12 +488,18 @@ export const useAgentHistoryStore = create((set, get) => ({
       unsubscribe = null;
       stopReplaced?.();
       stopReplaced = null;
+      stopTitles?.();
+      stopTitles = null;
       if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
         window.removeEventListener('pagehide', onPageHide);
       }
     }
     const sent = get().flush();
     tracked = new Map();
+    liveTitles.clear();
+    // A recorder started again says a refusal once more, and a test file's
+    // refusals are not kept from the next one's.
+    said.clear();
     set({ holders: {} });
     return sent;
   },
@@ -370,6 +564,116 @@ export const useAgentHistoryStore = create((set, get) => ({
         return null;
       }
     });
+  },
+
+  // ---- Curation (F26-F30). Each: after what is queued, then the list read
+  // again; refused or failed, the 'curationFailed' notice and null. ----------
+
+  /** Pin the entry under `key`. Resolves with the entry as kept, or null (none, or refused). */
+  pin: (key) => updateEntry('could not pin the entry', key, { pinned: true }),
+
+  /** Unpin it. Resolves as `pin`. */
+  unpin: (key) => updateEntry('could not unpin the entry', key, { pinned: false }),
+
+  /** Archive it: it leaves the other lists and keeps its name, pin and group. Resolves as `pin`. */
+  archive: (key) => updateEntry('could not archive the entry', key, { archived: true }),
+
+  /** Unarchive it, exactly as it was. Resolves as `pin`. */
+  unarchive: (key) => updateEntry('could not unarchive the entry', key, { archived: false }),
+
+  /**
+   * Rename it (Rename…, F26): `text` trimmed, cleaned and masked
+   * (`renameChange`) — empty clears the name, the automatic title while no
+   * name is set changes nothing. Resolves with the entry as kept, the entry
+   * as the store has it when nothing was to change (nothing is sent, and
+   * nothing said), or null — said when it is no longer listed.
+   */
+  rename: (key, text) => {
+    let sent = false;
+    return curate(
+      'could not rename the entry',
+      async () => {
+        const entry = useAgentHistoryStore.getState().entries.find((e) => e.key === key) ?? null;
+        const changes = renameChange(entry, text);
+        if (!changes) return entry;
+        sent = true;
+        return invoke('agent_history_update', { key: String(key ?? ''), changes });
+      },
+      (kept) => (sent && !kept ? ENTRY_GONE_TEXT : null)
+    );
+  },
+
+  /** Move it into the group `groupId`. Resolves as `pin`. */
+  moveToGroup: (key, groupId) => updateEntry('could not move the entry', key, { groupId: String(groupId ?? '') }),
+
+  /** Take it out of its group. Resolves as `pin`. */
+  removeFromGroup: (key) => updateEntry('could not take the entry out of its group', key, { groupId: null }),
+
+  /**
+   * Make a group at the end (New Group…): named `name` cleaned and masked
+   * (`historyGroupName`), or, with none, the first free 'New Group',
+   * 'New Group 2', … (`nextGroupName`); with `moveKey`, that entry goes into
+   * it in the same write. Resolves with the group as kept
+   * (`{ id, name, collapsed: false }`), or null when refused. A `moveKey`
+   * entry that is not in the group once the list is read again (it was no
+   * longer listed) is said in the notice; the group stays, and is resolved.
+   */
+  createGroup: ({ name = null, moveKey = null } = {}) =>
+    curate(
+      'could not make the group',
+      () => {
+        const group = { id: newGroupId(), name: historyGroupName(name) ?? nextGroupName(useAgentHistoryStore.getState().groups) };
+        return invoke('agent_history_group_create', moveKey ? { group, move_key: String(moveKey) } : { group });
+      },
+      (group) => {
+        if (!moveKey || !group) return null;
+        const moved = useAgentHistoryStore.getState().entries.find((e) => e.key === String(moveKey));
+        return moved && entryGroupId(moved) === group.id ? null : NOT_MOVED_TEXT;
+      }
+    ),
+
+  /**
+   * Rename the group `id` (Rename Group…): `text` cleaned and masked
+   * (`historyGroupName`). Empty, or its name already, sends nothing.
+   * Resolves with the group as kept (or as the store has it, when nothing
+   * was sent), or null.
+   */
+  renameGroup: (id, text) =>
+    curate('could not rename the group', async () => {
+      const name = historyGroupName(text);
+      const current = groupById(id);
+      if (name === null || name === current?.name) return current;
+      return invoke('agent_history_group_update', { id: String(id ?? ''), changes: { name } });
+    }),
+
+  /** Fold (`collapsed` true) or unfold the group `id`, kept in the file. Resolves with the group, or null. */
+  setGroupCollapsed: (id, collapsed) =>
+    curate('could not fold the group', () =>
+      invoke('agent_history_group_update', { id: String(id ?? ''), changes: { collapsed: collapsed === true } })
+    ),
+
+  /**
+   * Delete the group `id`; its members go back to the list, ungrouped, and
+   * none is deleted. Asks first when given `confirm` (as `clear`): no, and
+   * nothing changes. Resolves with how many entries were ungrouped, or null
+   * (declined, no such group, or refused).
+   */
+  deleteGroup: async (id, { confirm = null } = {}) => {
+    if (typeof confirm === 'function' && !(await confirm())) return null;
+    const ungrouped = await curate('could not delete the group', () => invoke('agent_history_group_delete', { id: String(id ?? '') }));
+    return Number.isInteger(ungrouped) ? ungrouped : null;
+  },
+
+  /**
+   * Delete the entry under `key` from the list (Delete…): NexTerm's list
+   * only — the conversation and its files stay with its agent. Asks first
+   * when given `confirm`. Resolves true when it went, false when there was
+   * none or it failed (said in the notice), null when declined. Unlike
+   * `remove`, a failure is shown.
+   */
+  deleteEntry: async (key, { confirm = null } = {}) => {
+    if (typeof confirm === 'function' && !(await confirm())) return null;
+    return (await curate('could not delete the entry', () => invoke('agent_history_remove', { key: String(key ?? '') }))) === true;
   },
 }));
 

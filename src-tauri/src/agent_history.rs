@@ -16,33 +16,78 @@
 //! `$XDG_DATA_HOME/com.nexterm.ide`, Windows `%LOCALAPPDATA%\com.nexterm.ide`.
 //! The webview never names a path.
 //!
-//! **The format, version 1.** `{"version":1,"entries":[…]}`, each entry
-//! `{key, kind, sessionId, cwd, title, startedAt, lastUsedAt, endedAt,
-//! endReason}` (`Entry`), times in milliseconds since the epoch, newest
-//! first. A field this build does not know is ignored. A kind it does not
-//! know but that is well formed (`is_kind`) is kept and handed back like any
-//! other: the page shows and resumes only the agents it knows, and a later
-//! build can add one without a new format.
+//! **The format.** `{"version":1,"entries":[…]}` while nothing is curated,
+//! and `{"version":2,"entries":[…],"groups":[…]}` once anything is
+//! (`document_text`). Each entry is `{key, kind, sessionId, cwd, title,
+//! startedAt, lastUsedAt, endedAt, endReason}` (`Entry`), times in
+//! milliseconds since the epoch, newest first; then `forkOf`, only for a
+//! conversation forked from another (Fork Conversation): that one's session
+//! id, of the entry's kind's shape. It is recorded, not curated — an upsert
+//! writes it, a later one without it keeps it (`merge`) — and an entry
+//! without it is written exactly as before, so it alone never makes the file
+//! version 2; a build before it reads the file and ignores the field. Then,
+//! each only when it is not at its default, what the user curated: `name`, their own name for it,
+//! one line as a title is; `pinned` and `archived`, true; and `groupId`, the
+//! `id` of one of `groups`. A group is `{id, name, collapsed}`, in the order
+//! the side bar shows them: an id the page made (`^[0-9A-Za-z_-]{1,64}$`), a
+//! name of one line, and whether its list is folded. VERSION, the newest
+//! format this build reads and writes, is 2; it reads version 1 as well. A
+//! field this build does not know is ignored — which is how a build before
+//! `forkOf` reads one that has it. A kind it does not know but
+//! that is well formed (`is_kind`) is kept and handed back like any other:
+//! the page shows and resumes only the agents it knows, and a later build can
+//! add one without a new format.
+//!
+//! **Why version 2 only once something is curated.** NexTerm 0.26.0 ignores a
+//! field it does not know when it reads, but writes only its own nine, so it
+//! would drop a name or a pin at its next recorded event; and it reads any
+//! version above 1 as a newer file, which it lists and never writes. So a
+//! history with nothing curated is written byte for byte as 0.26.0 writes it
+//! and stays one that 0.26.0 records into, and a curated one is one it only
+//! reads. Nothing curated is lost either way.
 //!
 //! **What is refused.** The file is anyone's to edit, and a session id is
 //! typed into a shell when a conversation is resumed. So an entry is only
-//! kept when every field is what this build could have written (`entry_from`):
-//! a session id of its kind's one shape — the same patterns as
-//! src/lib/agents.js — a folder that is an absolute path without control
-//! characters, a title of one line. An entry that is not is dropped on read
-//! and refused on write; the rest of the file is kept.
+//! kept when every field is what this build could have written (`entry_from`,
+//! and `stored_entry_from` for what the user curated): a session id of its
+//! kind's one shape — the same patterns as src/lib/agents.js, and the same
+//! for the `forkOf` it was forked from — a folder that
+//! is an absolute path without control characters, a title and a name of one
+//! line, a `groupId` of a group id's shape. An entry that is not is dropped
+//! on read and refused on write; the rest of the file is kept. A group that
+//! is not valid, one with an id seen before and any past MAX_GROUPS are
+//! dropped by themselves (`valid_groups`), and a `groupId` that names no group
+//! kept is read as none: the entry stays, in no group. None of these moves the
+//! file aside.
 //!
 //! **One entry per conversation.** Its `key` is made here from its fields
 //! (`key_of`), never taken from the page or the file: `<kind>:<sessionId>`,
 //! or for a conversation whose id is not known yet `<kind>:~<cwd>\0<title>`.
 //! A write of a key that is there merges into it (`merge`). A write may name
 //! the provisional key it `replaces` — the entry that has since learned its
-//! id, or its title — which then goes, merged into the new one.
+//! id, or its title — which then goes, merged into the new one. A recorded
+//! event never changes what the user curated: an upsert reads no `name`,
+//! `pinned`, `archived` or `groupId` of the page's, and the merged entry has
+//! them from the entry under its key, else from the one it replaces; asked
+//! to `unarchive`, it clears `archived` and nothing else. Only the curation
+//! operations change them: `update`, `group_create`, `group_update`,
+//! `group_delete`, and `clear`, which deletes the groups too.
 //!
-//! **Caps.** CAP entries: after every write the least recently used go,
-//! never the one just written. A file over MAX_READ_BYTES is not read, so
-//! none is written: when CAP entries with folders and titles near their own
-//! caps would come to more, the least recently used go until it fits
+//! **Caps.** An entry that is pinned, renamed or in a group is protected
+//! (`Entry::is_protected`); archived alone is not. After every recorded event
+//! (`upsert`) the least recently used unprotected entries go until CAP are
+//! left, never the one just written, and never a protected one. At most
+//! MAX_CURATED are protected: a curation that would protect one more is
+//! refused with TOO_MANY_CURATED and changes nothing, so nothing curated is
+//! dropped for the cap. A curation adds no entry and drops none for CAP: one
+//! it leaves unprotected — unpinned, its name cleared, out of a group — stays
+//! until the next recorded event, which keeps the CAP most recent. A read
+//! keeps what every write leaves: the newest MAX_CURATED protected entries,
+//! and CAP + MAX_CURATED entries in all (`within_bounds`). A file over
+//! MAX_READ_BYTES is not read, so none is written: when entries with folders
+//! and titles near their own caps would come to more, the least recently used
+//! go until it fits — never the one just written, the unprotected first, and
+//! a protected one only once no other is left, which is logged
 //! (`fitted_text`).
 //!
 //! **A file that cannot be read** — not UTF-8, not JSON, cut short, not the
@@ -60,14 +105,17 @@
 //! envelope `{"version": n, "entries": [...]}`. A later format that grew
 //! past that size, or wrapped its entries otherwise, would be moved aside
 //! by this build as unreadable rather than left alone. So MAX_READ_BYTES
-//! and that envelope stay as they are in every version after this one.
-//! A file that is not there is the same as an empty history, and is written
-//! by the first operation that finds it missing: the file is what the history
-//! is, so one the user deleted stays deleted.
+//! and that envelope stay as they are in every version after this one:
+//! version 2 keeps to them, its `groups` a member beside `entries`, and its
+//! text within MAX_READ_BYTES. Both versions this build reads must have their
+//! `entries`. A file that is not there is the same as an empty history, and
+//! is written by the first operation that finds it missing: the file is what
+//! the history is, so one the user deleted stays deleted.
 //!
-//! **A newer format** (`version` above VERSION) is never overwritten or moved
-//! aside: a list hands back the entries this build can read, and every write
-//! is refused with NEWER_VERSION, logged once.
+//! **A newer format** (`version` above VERSION, so 3 and up) is never
+//! overwritten or moved aside: a list hands back the entries this build can
+//! read, `groups` the groups it can read and that it is read only, and every
+//! write is refused with NEWER_VERSION, logged once.
 //!
 //! **Links.** The app data folder, the file and the lock file are each looked
 //! at themselves before use, and one that is a link (on Windows any reparse
@@ -116,11 +164,31 @@ const TEMP_PREFIX: &str = ".agent-sessions.json.";
 /// What follows FILE in the name of a file moved aside, before its time.
 const BAD_SUFFIX: &str = ".bad-";
 
-/// The format this build writes.
-pub const VERSION: u64 = 1;
+/// The newest format this build reads and writes: a curated history's.
+pub const VERSION: u64 = 2;
 
-/// The most entries kept. Mirrored by the browser mock.
+/// The format a history with nothing curated is written in: NexTerm 0.26.0's,
+/// byte for byte. See the module's doc.
+pub const UNCURATED_VERSION: u64 = 1;
+
+/// The most entries kept that are not pinned, renamed or in a group. Mirrored by the browser mock.
 pub const CAP: usize = 200;
+
+/// The most entries kept that are pinned, renamed or in a group, besides CAP
+/// others. Mirrored by the browser mock.
+pub const MAX_CURATED: usize = 200;
+
+/// The most groups. Mirrored by the browser mock.
+pub const MAX_GROUPS: usize = 50;
+
+/// The longest name a user gives an entry, in characters: as long as a title.
+pub const MAX_NAME_CHARS: usize = 200;
+
+/// The longest group name, in characters.
+pub const MAX_GROUP_NAME_CHARS: usize = 100;
+
+/// The longest group id, in characters: `^[0-9A-Za-z_-]{1,64}$`.
+pub const MAX_GROUP_ID_CHARS: usize = 64;
 
 /// The most of the file that is read: 1 MiB, some twenty times what CAP
 /// entries take. Mirrored by the browser mock.
@@ -155,8 +223,19 @@ pub const NEWER_VERSION: &str = "The agent session history was written by a newe
 /// Why an operation is refused when another NexTerm held LOCK_FILE for all of LOCK_WAIT.
 pub const BUSY: &str = "Another NexTerm is updating the agent session history; try again in a moment";
 
-/// How the refusal of an entry that is not valid begins, before `: <why>`.
+/// How the refusal of an entry that is not valid begins, before `: <why>` —
+/// and of changes to one (`update`).
 pub const INVALID: &str = "Not a valid agent session";
+
+/// How the refusal of a group, or changes to one, that is not valid begins,
+/// before `: <why>`.
+pub const INVALID_GROUP: &str = "Not a valid agent session group";
+
+/// Why a group past MAX_GROUPS is refused.
+pub const TOO_MANY_GROUPS: &str = "There can be at most 50 agent session groups";
+
+/// Why a curation is refused that would protect an entry past MAX_CURATED.
+pub const TOO_MANY_CURATED: &str = "At most 200 agent sessions can be pinned, renamed or in a group; unpin one, clear its name or take it out of its group first";
 
 /// How many times a rename over the file is tried. Windows refuses one while
 /// another program holds the old file open without FILE_SHARE_DELETE (a
@@ -205,6 +284,65 @@ pub struct Entry {
     pub ended_at: Option<u64>,
     /// Set exactly when `ended_at` is.
     pub end_reason: Option<EndReason>,
+    /// The conversation this one was forked from (Fork Conversation): a
+    /// session id of its kind's shape, as `session_id` is. Written and handed
+    /// to the page only when there is one, so an entry with none is the nine
+    /// fields; not curated, so it never makes the file version 2. Recorded
+    /// like the rest — an upsert reads it — and kept by `merge` when a later
+    /// event has none. NexTerm 0.26.0 to 0.33 ignore it when they read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_of: Option<String>,
+    // What the user curated, written and handed to the page only when not at
+    // its default: an entry with none is the nine fields NexTerm 0.26.0
+    // writes. Never read from an upsert (`merge`).
+    /// The user's own name for it: one line, at most MAX_NAME_CHARS characters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// Hidden from the lists until it is unarchived, or resumed.
+    #[serde(skip_serializing_if = "is_false")]
+    pub archived: bool,
+    /// The `id` of the group it is in, one that is there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+}
+
+impl Entry {
+    /// Kept beyond CAP: pinned, renamed or in a group. Archived alone is not.
+    pub fn is_protected(&self) -> bool {
+        self.pinned || self.name.is_some() || self.group_id.is_some()
+    }
+
+    /// Anything curated, archived included: what makes the file version 2.
+    fn is_curated(&self) -> bool {
+        self.is_protected() || self.archived
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A group of entries, as kept and as handed to the page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Group {
+    /// Made by the page (`crypto.randomUUID()`), `^[0-9A-Za-z_-]{1,64}$`.
+    pub id: String,
+    /// One line, at most MAX_GROUP_NAME_CHARS characters.
+    pub name: String,
+    /// Whether the side bar folds its list.
+    pub collapsed: bool,
+}
+
+/// What `groups` hands the page: the file's own version, whether this build
+/// only reads it (a newer file), and its groups in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupList {
+    pub version: u64,
+    pub read_only: bool,
+    pub groups: Vec<Group>,
 }
 
 /// How a conversation's terminal stopped running it.
@@ -217,19 +355,35 @@ pub enum EndReason {
     Closed,
 }
 
-/// The file as written.
+/// The file as written: `groups` only in version 2.
 #[derive(Serialize)]
 struct Document<'a> {
     version: u64,
     entries: &'a [Entry],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups: Option<&'a [Group]>,
+}
+
+/// A history as read: the file's own version, its valid entries — newest
+/// first, within the bounds (`within_bounds`) — and its valid groups, in order.
+struct History {
+    version: u64,
+    entries: Vec<Entry>,
+    groups: Vec<Group>,
+}
+
+impl History {
+    fn empty() -> History {
+        History { version: UNCURATED_VERSION, entries: Vec::new(), groups: Vec::new() }
+    }
 }
 
 /// What a read found, once anything unreadable has been moved aside.
 enum Stored {
-    /// This version: its valid entries, newest first, at most CAP.
-    Current(Vec<Entry>),
-    /// A newer version, read only: the entries this build can read.
-    Newer { version: u64, entries: Vec<Entry> },
+    /// Version 1 or 2: to change and write back.
+    Current(History),
+    /// A newer version, read only: what this build can read of it.
+    Newer(History),
 }
 
 // ---- Entries ------------------------------------------------------------------
@@ -303,6 +457,37 @@ fn is_title(title: &str) -> bool {
     (1..=MAX_TITLE_CHARS).contains(&title.chars().count()) && !title.chars().any(refused_char)
 }
 
+/// A user's name for an entry: one line, as a title is.
+fn is_name(name: &str) -> bool {
+    (1..=MAX_NAME_CHARS).contains(&name.chars().count()) && !name.chars().any(refused_char)
+}
+
+fn is_group_name(name: &str) -> bool {
+    (1..=MAX_GROUP_NAME_CHARS).contains(&name.chars().count()) && !name.chars().any(refused_char)
+}
+
+/// Whether `id` names a group: `^[0-9A-Za-z_-]{1,64}$`, ASCII only — what
+/// the page's `crypto.randomUUID()` makes, and more.
+fn is_group_id(id: &str) -> bool {
+    (1..=MAX_GROUP_ID_CHARS).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+// Why a curated field, or a change to one, is refused. The browser mock says
+// the same.
+fn bad_name() -> String {
+    format!("its name is not one line of at most {MAX_NAME_CHARS} characters")
+}
+const BAD_PINNED: &str = "its pinned is neither true nor false";
+const BAD_ARCHIVED: &str = "its archived is neither true nor false";
+const BAD_GROUP_ID: &str = "its groupId is not a group's id";
+// And a group, or a change to one.
+const BAD_ID: &str = "its id is not 1 to 64 ASCII letters, digits, - and _";
+fn bad_group_name() -> String {
+    format!("its name is not one line of at most {MAX_GROUP_NAME_CHARS} characters")
+}
+const BAD_COLLAPSED: &str = "its collapsed is neither true nor false";
+
 /// The key an entry is kept under. See the module's doc.
 fn key_of(kind: &str, session_id: Option<&str>, cwd: &str, title: Option<&str>) -> String {
     match session_id {
@@ -321,6 +506,16 @@ fn text_field<'a>(entry: &'a Map<String, Value>, name: &str) -> Result<Option<&'
     }
 }
 
+/// A field that is true or false: missing and null are false; anything else
+/// but a boolean is `Err`.
+fn flag_field(object: &Map<String, Value>, name: &str) -> Result<bool, ()> {
+    match object.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(_) => Err(()),
+    }
+}
+
 /// A field that is a time: missing and null are none; anything else but a
 /// whole number from 0 to MAX_INTEGER — written without a fraction or an
 /// exponent — is `Err`.
@@ -332,9 +527,11 @@ fn time_field(entry: &Map<String, Value>, name: &str) -> Result<Option<u64>, ()>
 }
 
 /// `value` as an entry, its key made from its fields, or why it is not one.
-/// The same test for an entry read from the file and one the page writes.
-/// The browser mock asks the same questions in the same order, with the
-/// same answers.
+/// The same test for an entry read from the file and one the page writes;
+/// what the user curated is not read here, and is at its default (an
+/// upsert never sets it; the file's is read by `stored_entry_from`). The
+/// browser mock asks the same questions in the same order, with the same
+/// answers.
 fn entry_from(value: &Value) -> Result<Entry, String> {
     let Some(entry) = value.as_object() else {
         return Err("it is not an object".to_string());
@@ -375,6 +572,13 @@ fn entry_from(value: &Value) -> Result<Entry, String> {
     if ended_at.is_some() != end_reason.is_some() {
         return Err("it has an endedAt without an endReason, or an endReason without an endedAt".to_string());
     }
+    // Asked last, so that an entry of the nine fields is refused for exactly
+    // what it always was.
+    let fork_of = match text_field(entry, "forkOf") {
+        Ok(None) => None,
+        Ok(Some(id)) if is_session_id_for(kind, id) => Some(id),
+        _ => return Err(format!("its forkOf is not one that {kind} gives a conversation")),
+    };
     Ok(Entry {
         key: key_of(kind, session_id, cwd, title),
         kind: kind.to_string(),
@@ -385,7 +589,139 @@ fn entry_from(value: &Value) -> Result<Entry, String> {
         last_used_at,
         ended_at,
         end_reason,
+        fork_of: fork_of.map(str::to_string),
+        name: None,
+        pinned: false,
+        archived: false,
+        group_id: None,
     })
+}
+
+/// `value` as an entry of the file: `entry_from`'s, and what the user
+/// curated of it, each field of its shape — missing and null are its
+/// default — or why it is not one. Whether its group is there is asked
+/// after (`valid_entries`).
+fn stored_entry_from(value: &Value) -> Result<Entry, String> {
+    let mut entry = entry_from(value)?;
+    let Some(object) = value.as_object() else {
+        return Err("it is not an object".to_string());
+    };
+    entry.name = match text_field(object, "name") {
+        Ok(None) => None,
+        Ok(Some(name)) if is_name(name) => Some(name.to_string()),
+        _ => return Err(bad_name()),
+    };
+    entry.pinned = flag_field(object, "pinned").map_err(|()| BAD_PINNED.to_string())?;
+    entry.archived = flag_field(object, "archived").map_err(|()| BAD_ARCHIVED.to_string())?;
+    entry.group_id = match text_field(object, "groupId") {
+        Ok(None) => None,
+        Ok(Some(id)) if is_group_id(id) => Some(id.to_string()),
+        _ => return Err(BAD_GROUP_ID.to_string()),
+    };
+    Ok(entry)
+}
+
+/// What `update` is asked to change: each field it names, with its new value.
+#[derive(Debug, Default)]
+struct Changes {
+    name: Option<Option<String>>,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+    group_id: Option<Option<String>>,
+}
+
+/// `value` as changes to an entry, or why not: an object naming only `name`
+/// (a name, or null or "" for none), `pinned` and `archived` (true or false)
+/// and `groupId` (a group id, or null for none). Whether that group is there
+/// is asked once the file is read. The browser mock asks the same questions
+/// in the same order, with the same answers.
+fn changes_from(value: &Value) -> Result<Changes, String> {
+    let Some(object) = value.as_object() else {
+        return Err("the changes are not an object".to_string());
+    };
+    if object.keys().any(|field| !matches!(field.as_str(), "name" | "pinned" | "archived" | "groupId")) {
+        return Err("a change names something other than name, pinned, archived and groupId".to_string());
+    }
+    let mut changes = Changes::default();
+    if let Some(name) = object.get("name") {
+        changes.name = Some(match name {
+            Value::Null => None,
+            Value::String(name) if name.is_empty() => None,
+            Value::String(name) if is_name(name) => Some(name.clone()),
+            _ => return Err(bad_name()),
+        });
+    }
+    if let Some(pinned) = object.get("pinned") {
+        let Value::Bool(pinned) = pinned else { return Err(BAD_PINNED.to_string()) };
+        changes.pinned = Some(*pinned);
+    }
+    if let Some(archived) = object.get("archived") {
+        let Value::Bool(archived) = archived else { return Err(BAD_ARCHIVED.to_string()) };
+        changes.archived = Some(*archived);
+    }
+    if let Some(group_id) = object.get("groupId") {
+        changes.group_id = Some(match group_id {
+            Value::Null => None,
+            Value::String(id) if is_group_id(id) => Some(id.clone()),
+            _ => return Err(BAD_GROUP_ID.to_string()),
+        });
+    }
+    Ok(changes)
+}
+
+/// `value`, the page's new group `{id, name}`, as kept — its list not folded
+/// — or why it is not one. Any other field is not read.
+fn new_group_from(value: &Value) -> Result<Group, String> {
+    let Some(object) = value.as_object() else {
+        return Err("it is not an object".to_string());
+    };
+    let id = match text_field(object, "id") {
+        Ok(Some(id)) if is_group_id(id) => id,
+        _ => return Err(BAD_ID.to_string()),
+    };
+    let name = match text_field(object, "name") {
+        Ok(Some(name)) if is_group_name(name) => name,
+        _ => return Err(bad_group_name()),
+    };
+    Ok(Group { id: id.to_string(), name: name.to_string(), collapsed: false })
+}
+
+/// A group of the file, or none when it is not one: `new_group_from`'s, and
+/// `collapsed` true or false — missing and null are false.
+fn stored_group_from(value: &Value) -> Option<Group> {
+    let mut group = new_group_from(value).ok()?;
+    group.collapsed = flag_field(value.as_object()?, "collapsed").ok()?;
+    Some(group)
+}
+
+/// What `group_update` is asked to change.
+#[derive(Debug, Default)]
+struct GroupChanges {
+    name: Option<String>,
+    collapsed: Option<bool>,
+}
+
+/// `value` as changes to a group, or why not: an object naming only `name`
+/// (a group name) and `collapsed` (true or false).
+fn group_changes_from(value: &Value) -> Result<GroupChanges, String> {
+    let Some(object) = value.as_object() else {
+        return Err("the changes are not an object".to_string());
+    };
+    if object.keys().any(|field| !matches!(field.as_str(), "name" | "collapsed")) {
+        return Err("a change names something other than name and collapsed".to_string());
+    }
+    let mut changes = GroupChanges::default();
+    if let Some(name) = object.get("name") {
+        let Some(name) = name.as_str().filter(|name| is_group_name(name)) else {
+            return Err(bad_group_name());
+        };
+        changes.name = Some(name.to_string());
+    }
+    if let Some(collapsed) = object.get("collapsed") {
+        let Value::Bool(collapsed) = collapsed else { return Err(BAD_COLLAPSED.to_string()) };
+        changes.collapsed = Some(*collapsed);
+    }
+    Ok(changes)
 }
 
 /// `incoming`, written by the page, merged with `others`: the entry already
@@ -397,7 +733,21 @@ fn entry_from(value: &Value) -> Result<Entry, String> {
 /// were used at the same time. Its title is the newest there is, again by
 /// last use; but for an entry with no id the title is part of its key, so it
 /// stays the incoming one.
-fn merge(incoming: Entry, others: Vec<Entry>) -> Entry {
+///
+/// The conversation it was forked from is the incoming one's when it names
+/// one, else the first there is of `others`: an event after the fork — a
+/// title, an end — sends none, and must not undo the link.
+///
+/// What the user curated is never the incoming one's (`entry_from` reads
+/// none): its name and group are the first there are of `others`, it is
+/// pinned when either is, and archived as the first of them is — the entry
+/// under its key when there is one — unless it is to `unarchive`.
+fn merge(incoming: Entry, others: Vec<Entry>, unarchive: bool) -> Entry {
+    let fork_of = incoming.fork_of.clone().or_else(|| others.iter().find_map(|e| e.fork_of.clone()));
+    let name = others.iter().find_map(|e| e.name.clone());
+    let group_id = others.iter().find_map(|e| e.group_id.clone());
+    let pinned = others.iter().any(|e| e.pinned);
+    let archived = !unarchive && others.first().is_some_and(|e| e.archived);
     let mut all = Vec::with_capacity(1 + others.len());
     all.push(incoming);
     all.extend(others);
@@ -418,6 +768,11 @@ fn merge(incoming: Entry, others: Vec<Entry>) -> Entry {
     merged.ended_at = ended_at;
     merged.end_reason = end_reason;
     merged.title = title;
+    merged.fork_of = fork_of;
+    merged.name = name;
+    merged.pinned = pinned;
+    merged.archived = archived;
+    merged.group_id = group_id;
     merged
 }
 
@@ -427,36 +782,80 @@ fn sort_newest_first(entries: &mut [Entry]) {
     entries.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
 }
 
-/// Drop the least recently used until CAP are left — never `written`.
+/// Drop the least recently used unprotected entries until CAP are left —
+/// never `written`, and never a protected one. After every upsert.
 fn keep_cap(entries: &mut Vec<Entry>, written: &str) {
-    while entries.len() > CAP {
-        let Some(at) = entries.iter().rposition(|e| e.key != written) else {
+    let mut unprotected = entries.iter().filter(|e| !e.is_protected()).count();
+    while unprotected > CAP {
+        let Some(at) = entries.iter().rposition(|e| !e.is_protected() && e.key != written) else {
             break;
         };
         entries.remove(at);
+        unprotected -= 1;
     }
 }
 
-/// The valid entries of a file's `entries`, newest first, at most CAP. Of
-/// two with the same key, the one earlier in the file is kept.
-fn valid_entries(values: &[Value]) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = Vec::new();
-    for value in values {
-        let Ok(entry) = entry_from(value) else { continue };
-        if entries.iter().all(|e| e.key != entry.key) {
-            entries.push(entry);
+/// `entries`, newest first, within what every write leaves (see the module's
+/// doc): the newest MAX_CURATED protected ones, and CAP + MAX_CURATED in all.
+fn within_bounds(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut kept = Vec::with_capacity(entries.len().min(CAP + MAX_CURATED));
+    let mut protected = 0;
+    for entry in entries {
+        if kept.len() == CAP + MAX_CURATED {
+            break;
+        }
+        if entry.is_protected() {
+            if protected == MAX_CURATED {
+                continue;
+            }
+            protected += 1;
+        }
+        kept.push(entry);
+    }
+    kept
+}
+
+/// The valid groups of a file's `groups`, in order: none when it is not a
+/// list; one that is not valid, one with an id seen before, and any past the
+/// MAX_GROUPS kept, dropped by themselves.
+fn valid_groups(value: Option<&Value>) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for value in value.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
+        if groups.len() == MAX_GROUPS {
+            break;
+        }
+        let Some(group) = stored_group_from(value) else { continue };
+        if groups.iter().all(|g| g.id != group.id) {
+            groups.push(group);
         }
     }
+    groups
+}
+
+/// The valid entries of a file's `entries`, newest first, within the bounds
+/// (`within_bounds`). Of two with the same key, the one earlier in the file
+/// is kept. One in a group that is not among `groups` is in none.
+fn valid_entries(values: &[Value], groups: &[Group]) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for value in values {
+        let Ok(mut entry) = stored_entry_from(value) else { continue };
+        if entries.iter().any(|e| e.key == entry.key) {
+            continue;
+        }
+        if entry.group_id.as_ref().is_some_and(|id| groups.iter().all(|g| g.id != *id)) {
+            entry.group_id = None;
+        }
+        entries.push(entry);
+    }
     sort_newest_first(&mut entries);
-    entries.truncate(CAP);
-    entries
+    within_bounds(entries)
 }
 
 /// What a file's bytes hold.
 enum Parsed {
     /// Not a history this or any build wrote: why.
     Unreadable(&'static str),
-    Read { version: u64, entries: Vec<Entry> },
+    Read(History),
 }
 
 fn parse(bytes: &[u8]) -> Parsed {
@@ -477,13 +876,15 @@ fn parse(bytes: &[u8]) -> Parsed {
         return Parsed::Unreadable("it has no format version");
     };
     let entries = document.get("entries").and_then(Value::as_array);
-    if version == VERSION && entries.is_none() {
+    if version <= VERSION && entries.is_none() {
         return Parsed::Unreadable("it has no list of entries");
     }
-    Parsed::Read {
+    let groups = valid_groups(document.get("groups"));
+    Parsed::Read(History {
         version,
-        entries: valid_entries(entries.map(Vec::as_slice).unwrap_or(&[])),
-    }
+        entries: valid_entries(entries.map(Vec::as_slice).unwrap_or(&[]), &groups),
+        groups,
+    })
 }
 
 // ---- The folder and the file ----------------------------------------------------
@@ -727,26 +1128,43 @@ fn not_saved(e: impl std::fmt::Display) -> String {
     format!("The agent session history could not be saved: {e}")
 }
 
-/// The file's text for `entries`: pretty-printed, two spaces, ending in a
-/// line end — byte for byte what the browser mock's `JSON.stringify(…, null,
-/// 2)` makes of the same entries, which the contract test checks.
-fn document_text(entries: &[Entry]) -> Result<String, String> {
-    let mut text = serde_json::to_string_pretty(&Document { version: VERSION, entries }).map_err(not_saved)?;
+/// The file's text for `entries` and `groups`: pretty-printed, two spaces,
+/// ending in a line end — byte for byte what the browser mock's
+/// `JSON.stringify(…, null, 2)` makes of the same, which the contract test
+/// checks. While nothing is curated — no group, and no entry with a name, a
+/// pin, a group or archived — that is version 1 with no `groups`: the text
+/// NexTerm 0.26.0 writes for the same entries. Else version 2, with them.
+fn document_text(entries: &[Entry], groups: &[Group]) -> Result<String, String> {
+    let document = if groups.is_empty() && !entries.iter().any(Entry::is_curated) {
+        Document { version: UNCURATED_VERSION, entries, groups: None }
+    } else {
+        Document { version: VERSION, entries, groups: Some(groups) }
+    };
+    let mut text = serde_json::to_string_pretty(&document).map_err(not_saved)?;
     text.push('\n');
     Ok(text)
 }
 
-/// The file's text for `entries`, after dropping the least recently used —
-/// never `written` — until it is within MAX_READ_BYTES: a file this module
-/// would refuse to read is never written. Only entries whose folders and
-/// titles are near their caps come near it; for those the fewest to drop is
-/// found by halving, as the text only shrinks with each one dropped.
-fn fitted_text(entries: &mut Vec<Entry>, written: Option<&str>) -> Result<String, String> {
-    let text = document_text(entries)?;
+/// The file's text for `entries` and `groups`, after dropping the least
+/// recently used — never `written`, the unprotected first and a protected one
+/// only once no other is left — until it is within MAX_READ_BYTES: a file
+/// this module would refuse to read is never written. Only entries whose
+/// folders and titles are near their caps come near it; for those the fewest
+/// to drop is found by halving, as the text only shrinks with each one
+/// dropped (and with the version 1 a history with no more curated is).
+fn fitted_text(entries: &mut Vec<Entry>, groups: &[Group], written: Option<&str>) -> Result<String, String> {
+    let text = document_text(entries, groups)?;
     let fits = |text: &str| text.len() as u64 <= MAX_READ_BYTES;
-    // The positions that may go, the least recently used first.
-    let droppable: Vec<usize> =
-        (0..entries.len()).rev().filter(|&at| Some(entries[at].key.as_str()) != written).collect();
+    // The positions that may go, in the order they go: the least recently
+    // used unprotected first, then the least recently used protected.
+    let may_go: Vec<usize> = (0..entries.len()).rev().filter(|&at| Some(entries[at].key.as_str()) != written).collect();
+    let unprotected = may_go.iter().filter(|&&at| !entries[at].is_protected()).count();
+    let droppable: Vec<usize> = may_go
+        .iter()
+        .filter(|&&at| !entries[at].is_protected())
+        .chain(may_go.iter().filter(|&&at| entries[at].is_protected()))
+        .copied()
+        .collect();
     if fits(&text) || droppable.is_empty() {
         return Ok(text);
     }
@@ -758,19 +1176,25 @@ fn fitted_text(entries: &mut Vec<Entry>, written: Option<&str>) -> Result<String
     // the first that reached the cap: tried first. All of them dropped
     // leaves `written` alone, or nothing, and that fits.
     let (mut low, mut high) = (1, droppable.len());
-    if fits(&document_text(&without(1))?) {
+    if fits(&document_text(&without(1), groups)?) {
         high = 1;
     }
     while low < high {
         let middle = (low + high) / 2;
-        if fits(&document_text(&without(middle))?) {
+        if fits(&document_text(&without(middle), groups)?) {
             high = middle;
         } else {
             low = middle + 1;
         }
     }
+    if low > unprotected {
+        log(&format!(
+            "The agent session history would not fit in {MAX_READ_BYTES} bytes: {} pinned, renamed or grouped entries, the least recently used, were dropped from it",
+            low - unprotected
+        ));
+    }
     *entries = without(low);
-    document_text(entries)
+    document_text(entries, groups)
 }
 
 /// Replace the file in `base` with `text`, or leave it as it was.
@@ -795,8 +1219,8 @@ fn write(base: &Path, text: &str) -> Result<(), String> {
 
 /// A new, empty history in `base`.
 fn start_empty(base: &Path) -> Result<Stored, String> {
-    write(base, &document_text(&[])?)?;
-    Ok(Stored::Current(Vec::new()))
+    write(base, &document_text(&[], &[])?)?;
+    Ok(Stored::Current(History::empty()))
 }
 
 /// Move the unreadable file in `base` aside, keep the newest KEEP_BAD such,
@@ -869,17 +1293,17 @@ fn load(base: &Path) -> Result<Stored, String> {
     };
     match parse(&bytes) {
         Parsed::Unreadable(why) => set_aside(base, why),
-        Parsed::Read { version: VERSION, entries } => Ok(Stored::Current(entries)),
-        Parsed::Read { version, entries } => Ok(Stored::Newer { version, entries }),
+        Parsed::Read(history) if history.version <= VERSION => Ok(Stored::Current(history)),
+        Parsed::Read(history) => Ok(Stored::Newer(history)),
     }
 }
 
-/// The entries of `stored` to change and write back, or the refusal of a
+/// The history of `stored` to change and write back, or the refusal of a
 /// newer file — said in the log once per folder for the life of the process.
-fn writable(base: &Path, stored: Stored) -> Result<Vec<Entry>, String> {
+fn writable(base: &Path, stored: Stored) -> Result<History, String> {
     match stored {
-        Stored::Current(entries) => Ok(entries),
-        Stored::Newer { version, .. } => {
+        Stored::Current(history) => Ok(history),
+        Stored::Newer(History { version, .. }) => {
             let why = format!("{NEWER_VERSION} (format version {version}); this one reads it and changes nothing in it");
             let mut said = NEWER_SAID.lock();
             if !said.iter().any(|folder| folder == base) {
@@ -903,28 +1327,49 @@ fn with_history<T>(base: &Path, work: impl FnOnce(Stored) -> Result<T, String>) 
 // ---- The operations -----------------------------------------------------------------
 
 /// Every entry kept in `base`, the app's local data folder, newest first —
-/// the kinds this build does not know included. Makes the file when it is not
-/// there. A newer file's entries are read and the file is left as it is.
+/// the kinds this build does not know included, and what the user curated of
+/// each. Makes the file when it is not there. A newer file's entries are read
+/// and the file is left as it is.
 pub fn list(base: &Path) -> Result<Vec<Entry>, String> {
     with_history(base, |stored| {
         Ok(match stored {
-            Stored::Current(entries) | Stored::Newer { entries, .. } => entries,
+            Stored::Current(history) | Stored::Newer(history) => history.entries,
         })
     })
 }
 
+/// The groups kept in `base`, in order, with the file's own version and
+/// whether this build only reads it (a newer file, whose groups are the ones
+/// this build can read). Makes the file when it is not there, as `list` does.
+pub fn groups(base: &Path) -> Result<GroupList, String> {
+    with_history(base, |stored| {
+        let (history, read_only) = match stored {
+            Stored::Current(history) => (history, false),
+            Stored::Newer(history) => (history, true),
+        };
+        Ok(GroupList { version: history.version, read_only, groups: history.groups })
+    })
+}
+
+/// `upsert_with` that unarchives nothing.
+pub fn upsert(base: &Path, entry: &Value, replaces: Option<&str>) -> Result<Entry, String> {
+    upsert_with(base, entry, replaces, false)
+}
+
 /// Record `entry` (the page's, in the file's shape; any `key` it has is not
-/// read) merged into the one with its key, and into it the provisional entry
-/// `replaces` names — only one with no session id, of the same kind, and not
-/// the new key itself; any other name is passed over. Then keep CAP, and
-/// MAX_READ_BYTES (`fitted_text`). The entry as kept.
+/// read, nor anything curated) merged into the one with its key, and into it
+/// the provisional entry `replaces` names — only one with no session id, of
+/// the same kind, and not the new key itself; any other name is passed over.
+/// What the user curated is kept (`merge`), but `archived` is cleared when it
+/// is to `unarchive` — a conversation started or resumed again. Then keep
+/// CAP (`keep_cap`), and MAX_READ_BYTES (`fitted_text`). The entry as kept.
 ///
 /// Refused with INVALID, before the disk is touched, for an entry that is not
 /// valid; with NEWER_VERSION for a newer file.
-pub fn upsert(base: &Path, entry: &Value, replaces: Option<&str>) -> Result<Entry, String> {
+pub fn upsert_with(base: &Path, entry: &Value, replaces: Option<&str>, unarchive: bool) -> Result<Entry, String> {
     let incoming = entry_from(entry).map_err(|why| format!("{INVALID}: {why}"))?;
     with_history(base, |stored| {
-        let mut entries = writable(base, stored)?;
+        let History { mut entries, groups, .. } = writable(base, stored)?;
         let mut others = Vec::new();
         if let Some(at) = entries.iter().position(|e| e.key == incoming.key) {
             others.push(entries.remove(at));
@@ -937,41 +1382,182 @@ pub fn upsert(base: &Path, entry: &Value, replaces: Option<&str>) -> Result<Entr
                 others.push(entries.remove(at));
             }
         }
-        let merged = merge(incoming, others);
+        let merged = merge(incoming, others, unarchive);
         entries.insert(0, merged.clone());
         sort_newest_first(&mut entries);
         keep_cap(&mut entries, &merged.key);
-        write(base, &fitted_text(&mut entries, Some(&merged.key))?)?;
+        write(base, &fitted_text(&mut entries, &groups, Some(&merged.key))?)?;
         Ok(merged)
+    })
+}
+
+/// Refused with TOO_MANY_CURATED when `after`, in place of `before` in
+/// `entries`, would be one protected entry more than MAX_CURATED.
+fn room_to_protect(entries: &[Entry], before: &Entry, after: &Entry) -> Result<(), String> {
+    if after.is_protected()
+        && !before.is_protected()
+        && entries.iter().filter(|e| e.is_protected()).count() >= MAX_CURATED
+    {
+        return Err(TOO_MANY_CURATED.to_string());
+    }
+    Ok(())
+}
+
+/// Change what the user curated of the entry under `key`: the fields of
+/// `changes` (`changes_from`), and nothing else — not its last use, nor where
+/// it is in the list. The entry as kept, or none when there is no such
+/// entry.
+///
+/// Refused with INVALID, before the disk is touched, for changes that are
+/// not valid, and once the file is read for a `groupId` that names no group
+/// there; with TOO_MANY_CURATED when it would protect one entry more than
+/// MAX_CURATED; with NEWER_VERSION for a newer file. A refusal changes nothing.
+pub fn update(base: &Path, key: &str, changes: &Value) -> Result<Option<Entry>, String> {
+    let changes = changes_from(changes).map_err(|why| format!("{INVALID}: {why}"))?;
+    with_history(base, |stored| {
+        let History { mut entries, groups, .. } = writable(base, stored)?;
+        let Some(at) = entries.iter().position(|e| e.key == key) else {
+            return Ok(None);
+        };
+        if let Some(Some(id)) = &changes.group_id {
+            if groups.iter().all(|g| g.id != *id) {
+                return Err(format!("{INVALID}: its groupId names no group"));
+            }
+        }
+        let mut entry = entries[at].clone();
+        if let Some(name) = changes.name {
+            entry.name = name;
+        }
+        if let Some(pinned) = changes.pinned {
+            entry.pinned = pinned;
+        }
+        if let Some(archived) = changes.archived {
+            entry.archived = archived;
+        }
+        if let Some(group_id) = changes.group_id {
+            entry.group_id = group_id;
+        }
+        room_to_protect(&entries, &entries[at], &entry)?;
+        entries[at] = entry.clone();
+        write(base, &fitted_text(&mut entries, &groups, Some(key))?)?;
+        Ok(Some(entry))
+    })
+}
+
+/// Add `group` (the page's `{id, name}`, `new_group_from`) after the others,
+/// its list not folded, and when `move_key` names an entry, put that entry
+/// in it in the same write; a `move_key` that names none moves nothing. The
+/// group as kept.
+///
+/// Refused with INVALID_GROUP, before the disk is touched, for a group that
+/// is not valid, and once the file is read for an id another group has; with
+/// TOO_MANY_GROUPS for one past MAX_GROUPS; with TOO_MANY_CURATED when the
+/// entry moved would be one protected entry more than MAX_CURATED; with
+/// NEWER_VERSION for a newer file. A refusal changes nothing.
+pub fn group_create(base: &Path, group: &Value, move_key: Option<&str>) -> Result<Group, String> {
+    let group = new_group_from(group).map_err(|why| format!("{INVALID_GROUP}: {why}"))?;
+    with_history(base, |stored| {
+        let History { mut entries, mut groups, .. } = writable(base, stored)?;
+        if groups.iter().any(|g| g.id == group.id) {
+            return Err(format!("{INVALID_GROUP}: another group has its id"));
+        }
+        if groups.len() >= MAX_GROUPS {
+            return Err(TOO_MANY_GROUPS.to_string());
+        }
+        let moved = move_key.and_then(|key| entries.iter().position(|e| e.key == key));
+        if let Some(at) = moved {
+            let mut entry = entries[at].clone();
+            entry.group_id = Some(group.id.clone());
+            room_to_protect(&entries, &entries[at], &entry)?;
+            entries[at] = entry;
+        }
+        groups.push(group.clone());
+        let written = moved.map(|at| entries[at].key.clone());
+        write(base, &fitted_text(&mut entries, &groups, written.as_deref())?)?;
+        Ok(group)
+    })
+}
+
+/// Rename the group `id`, or fold or unfold its list: the fields of
+/// `changes` (`group_changes_from`). The group as kept, or none when there
+/// is no such group.
+///
+/// Refused with INVALID_GROUP, before the disk is touched, for an id or
+/// changes that are not valid; with NEWER_VERSION for a newer file.
+pub fn group_update(base: &Path, id: &str, changes: &Value) -> Result<Option<Group>, String> {
+    if !is_group_id(id) {
+        return Err(format!("{INVALID_GROUP}: {BAD_ID}"));
+    }
+    let changes = group_changes_from(changes).map_err(|why| format!("{INVALID_GROUP}: {why}"))?;
+    with_history(base, |stored| {
+        let History { mut entries, mut groups, .. } = writable(base, stored)?;
+        let Some(group) = groups.iter_mut().find(|g| g.id == id) else {
+            return Ok(None);
+        };
+        if let Some(name) = changes.name {
+            group.name = name;
+        }
+        if let Some(collapsed) = changes.collapsed {
+            group.collapsed = collapsed;
+        }
+        let group = group.clone();
+        write(base, &fitted_text(&mut entries, &groups, None)?)?;
+        Ok(Some(group))
+    })
+}
+
+/// Delete the group `id`. Its entries are kept, in no group, and otherwise
+/// as they were. How many there were, or none when there is no such group.
+///
+/// Refused with INVALID_GROUP, before the disk is touched, for an id that is
+/// not valid; with NEWER_VERSION for a newer file.
+pub fn group_delete(base: &Path, id: &str) -> Result<Option<u32>, String> {
+    if !is_group_id(id) {
+        return Err(format!("{INVALID_GROUP}: {BAD_ID}"));
+    }
+    with_history(base, |stored| {
+        let History { mut entries, mut groups, .. } = writable(base, stored)?;
+        let Some(at) = groups.iter().position(|g| g.id == id) else {
+            return Ok(None);
+        };
+        groups.remove(at);
+        let mut ungrouped: usize = 0;
+        for entry in entries.iter_mut().filter(|e| e.group_id.as_deref() == Some(id)) {
+            entry.group_id = None;
+            ungrouped += 1;
+        }
+        write(base, &fitted_text(&mut entries, &groups, None)?)?;
+        Ok(Some(u32::try_from(ungrouped).unwrap_or(u32::MAX)))
     })
 }
 
 /// Delete the entry under `key`. Whether there was one.
 pub fn remove(base: &Path, key: &str) -> Result<bool, String> {
     with_history(base, |stored| {
-        let mut entries = writable(base, stored)?;
+        let History { mut entries, groups, .. } = writable(base, stored)?;
         let Some(at) = entries.iter().position(|e| e.key == key) else {
             return Ok(false);
         };
         entries.remove(at);
-        write(base, &fitted_text(&mut entries, None)?)?;
+        write(base, &fitted_text(&mut entries, &groups, None)?)?;
         Ok(true)
     })
 }
 
-/// Empty the history, every kind's entries included, and delete the files
-/// moved aside: they are copies of what it held, titles and folders and all,
-/// and a history the user cleared keeps no copies. How many entries went —
-/// the entries of the file that was read, not of those copies. A refused
-/// clear (a newer file) touches neither.
+/// Empty the history, every kind's entries and every group included — what
+/// is left is the version 1 empty history — and delete the files moved
+/// aside: they are copies of what it held, titles and folders and all, and a
+/// history the user cleared keeps no copies. How many entries went — the
+/// entries of the file that was read, not of those copies. A refused clear
+/// (a newer file) touches neither.
 ///
 /// A copy that cannot be deleted, after DELETE_TRIES, fails the clear with
 /// COPIES_LEFT (`copies_left`) once every other one has gone: the history is
 /// empty, but it is not cleared as the user asked, and the page says so.
 pub fn clear(base: &Path) -> Result<u32, String> {
     with_history(base, |stored| {
-        let entries = writable(base, stored)?;
-        write(base, &document_text(&[])?)?;
+        let History { entries, .. } = writable(base, stored)?;
+        write(base, &document_text(&[], &[])?)?;
         let mut left = 0;
         for (_, path) in names_in(base, |name| bad_ms(name).is_some()) {
             if let Err(e) = delete_copy(&path) {
@@ -1190,26 +1776,49 @@ mod tests {
 
     // ---- AC4: a newer format -------------------------------------------------------
 
+    /// AC27: version 3 is the first newer one, now that this build writes 2.
     #[test]
     fn a_newer_file_is_read_and_never_written() {
         let scratch = Scratch::new("newer");
         let base = scratch.base();
         fs::create_dir_all(&base).unwrap();
-        let bytes = serde_json::to_vec(&json!({"version": 2, "entries": [
-            entry("claude", Some(CLAUDE_A), "/w", None, 1, 5),
-            {"kind": "claude", "shape": "of version 2"},
-        ], "more": true}))
+        let mut pinned = entry("claude", Some(CLAUDE_A), "/w", None, 1, 5);
+        pinned["pinned"] = json!(true);
+        pinned["groupId"] = json!("g1");
+        let bytes = serde_json::to_vec(&json!({"version": 3, "entries": [
+            pinned,
+            {"kind": "claude", "shape": "of version 3"},
+        ], "groups": [{"id": "g1", "name": "Kept", "collapsed": true}, {"id": "g2", "shape": "of version 3"}], "more": true}))
         .unwrap();
         fs::write(scratch.file(), &bytes).unwrap();
 
-        assert_eq!(keys(&list(&base).unwrap()), vec![format!("claude:{CLAUDE_A}")], "what it can read");
-        assert_eq!(fs::read(scratch.file()).unwrap(), bytes, "untouched by a list");
+        let listed = list(&base).unwrap();
+        assert_eq!(keys(&listed), vec![format!("claude:{CLAUDE_A}")], "what it can read");
+        assert!(listed[0].pinned && listed[0].group_id.as_deref() == Some("g1"), "with what was curated of it");
+        assert_eq!(
+            groups(&base).unwrap(),
+            GroupList { version: 3, read_only: true, groups: vec![Group { id: "g1".into(), name: "Kept".into(), collapsed: true }] },
+            "the groups it can read, and that it is read only"
+        );
+        assert_eq!(fs::read(scratch.file()).unwrap(), bytes, "untouched by a list and by groups");
 
         let refused = upsert(&base, &entry("claude", Some(CLAUDE_B), "/w", None, 1, 1), None).unwrap_err();
         assert!(refused.starts_with(NEWER_VERSION), "{refused}");
-        assert!(refused.contains("format version 2"), "{refused}");
-        assert!(remove(&base, &format!("claude:{CLAUDE_A}")).unwrap_err().starts_with(NEWER_VERSION));
-        assert!(clear(&base).unwrap_err().starts_with(NEWER_VERSION));
+        assert!(refused.contains("format version 3"), "{refused}");
+        let key = format!("claude:{CLAUDE_A}");
+        for refused in [
+            upsert_with(&base, &entry("claude", Some(CLAUDE_A), "/w", None, 1, 9), None, true).map(drop),
+            update(&base, &key, &json!({"name": "Mine"})).map(drop),
+            update(&base, "claude:nothing-here", &json!({"pinned": true})).map(drop),
+            group_create(&base, &json!({"id": "g3", "name": "New"}), Some(&key)).map(drop),
+            group_update(&base, "g1", &json!({"collapsed": false})).map(drop),
+            group_delete(&base, "g1").map(drop),
+            remove(&base, &key).map(drop),
+            clear(&base).map(drop),
+        ] {
+            let why = refused.unwrap_err();
+            assert!(why.starts_with(NEWER_VERSION), "{why}");
+        }
         assert_eq!(fs::read(scratch.file()).unwrap(), bytes, "byte for byte after refused writes");
         assert!(scratch.bad().is_empty(), "and never moved aside");
         assert_eq!(
@@ -1267,7 +1876,7 @@ mod tests {
         let mut one_more: Vec<Entry> = kept.clone();
         let next = entry_from(&entry("opencode", None, &folder(written - last), Some(&title), written - last, 1000 + written - last)).unwrap();
         one_more.push(next);
-        assert!(document_text(&one_more).unwrap().len() as u64 > MAX_READ_BYTES);
+        assert!(document_text(&one_more, &[]).unwrap().len() as u64 > MAX_READ_BYTES);
         // Older than all, written all the same.
         let old = upsert(&base, &entry("opencode", None, &folder(0), Some(&title), 0, 1), None).unwrap();
         assert_eq!(list(&base).unwrap().last(), Some(&old));
@@ -1391,6 +2000,7 @@ mod tests {
         let other_id = "its session id is not one that agy gives a conversation";
         let folder = "its folder is not an absolute path";
         let title = "its title is not one line of at most 200 characters";
+        let claude_fork = "its forkOf is not one that claude gives a conversation";
         let mut cases: Vec<(Value, &str)> = vec![
             (json!(["not", "an", "object"]), "it is not an object"),
             (json!("an entry"), "it is not an object"),
@@ -1443,6 +2053,21 @@ mod tests {
             (with(&good, "endReason", json!(1)), "its endReason is neither exited nor closed"),
             (with(&good, "endedAt", json!(5)), "it has an endedAt without an endReason, or an endReason without an endedAt"),
             (with(&good, "endReason", json!("closed")), "it has an endedAt without an endReason, or an endReason without an endedAt"),
+            // The conversation it was forked from: its kind's shape, as its own id.
+            (with(&good, "forkOf", json!("x; curl a | sh")), claude_fork),
+            (with(&good, "forkOf", json!(CLAUDE_B.to_uppercase())), claude_fork),
+            (with(&good, "forkOf", json!(OPENCODE_A)), claude_fork),
+            (with(&good, "forkOf", json!("")), claude_fork),
+            (with(&good, "forkOf", json!(7)), claude_fork),
+            (with(&good, "forkOf", json!([CLAUDE_B])), claude_fork),
+            (with(&good, "forkOf", json!({"sessionId": CLAUDE_B})), claude_fork),
+            (with(&good, "forkOf", json!(format!("{CLAUDE_B}\n"))), claude_fork),
+            (with(&opencode, "forkOf", json!(CLAUDE_B)), "its forkOf is not one that opencode gives a conversation"),
+            (with(&opencode, "forkOf", json!("ses_1234567")), "its forkOf is not one that opencode gives a conversation"),
+            (with(&other, "forkOf", json!("a".repeat(MAX_OTHER_ID_CHARS + 1))), "its forkOf is not one that agy gives a conversation"),
+            // Every other field first: a fork refused for its forkOf is one
+            // whose nine fields are what this build would have written.
+            (with(&with(&good, "forkOf", json!("bad")), "endReason", json!("killed")), "its endReason is neither exited nor closed"),
         ];
         // Every class of character refused in a folder, a title and the id
         // of a kind this build does not know: C0 (NUL, BEL, ESC, a line
@@ -1608,7 +2233,7 @@ mod tests {
         // A refused clear touches neither the newer file nor what was moved aside.
         fs::write(scratch.file(), "garbage").unwrap();
         assert!(list(&base).unwrap().is_empty());
-        let newer = br#"{"version":2,"entries":[]}"#;
+        let newer = br#"{"version":3,"entries":[]}"#;
         fs::write(scratch.file(), newer).unwrap();
         assert!(clear(&base).unwrap_err().starts_with(NEWER_VERSION));
         assert_eq!(fs::read(scratch.file()).unwrap(), newer.to_vec());
@@ -1752,6 +2377,1015 @@ mod tests {
             }]})
         );
     }
+
+    // ---- Fork Conversation: the conversation a fork was forked from -----------------------------------
+
+    /// A fork of CLAUDE_A recorded as CLAUDE_B, as the page writes it when
+    /// the fork is typed (src/lib/agentHistory.js `entryOfAgent`).
+    fn fork(started: u64, used: u64) -> Value {
+        let mut e = entry("claude", Some(CLAUDE_B), "/w", None, started, used);
+        e["forkOf"] = json!(CLAUDE_A);
+        e
+    }
+
+    /// The source (`write_two`'s Claude Code entry, used at 4) and its fork,
+    /// used at 6: the fork's `forkOf` after its nine fields, the source as
+    /// it always was, and still version 1.
+    const FORK_TEXT: &str = r#"{
+  "version": 1,
+  "entries": [
+    {
+      "key": "claude:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "kind": "claude",
+      "sessionId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "cwd": "/w",
+      "title": null,
+      "startedAt": 5,
+      "lastUsedAt": 6,
+      "endedAt": null,
+      "endReason": null,
+      "forkOf": "0f8fad5b-d9cb-469f-a165-70867728950e"
+    },
+    {
+      "key": "claude:0f8fad5b-d9cb-469f-a165-70867728950e",
+      "kind": "claude",
+      "sessionId": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "cwd": "/w",
+      "title": null,
+      "startedAt": 3,
+      "lastUsedAt": 4,
+      "endedAt": null,
+      "endReason": null
+    }
+  ]
+}
+"#;
+
+    #[test]
+    fn a_fork_keeps_the_conversation_it_was_forked_from_and_stays_version_1() {
+        let scratch = Scratch::new("fork-of");
+        let base = scratch.base();
+        upsert(&base, &entry("claude", Some(CLAUDE_A), "/w", None, 3, 4), None).unwrap();
+        let kept = upsert(&base, &fork(5, 6), None).unwrap();
+        assert_eq!(kept.fork_of.as_deref(), Some(CLAUDE_A));
+        assert_eq!(kept.key, format!("claude:{CLAUDE_B}"), "keyed by its own id, not the source's");
+        assert!(!kept.is_curated(), "a link is not curation");
+        assert_eq!(text(&scratch), FORK_TEXT);
+        let listed = list(&base).unwrap();
+        assert_eq!(listed[0].fork_of.as_deref(), Some(CLAUDE_A));
+        assert_eq!(listed[1].fork_of, None, "the source is left as it was");
+        assert_eq!(serde_json::to_value(&listed[0]).unwrap().as_object().unwrap().len(), 10);
+        assert_eq!(serde_json::to_value(&listed[1]).unwrap().as_object().unwrap().len(), 9, "handed to the page as before");
+        assert_eq!(groups(&base).unwrap().version, 1);
+
+        // Later events of the fork send none: the link stays — an end, a
+        // title from the transcript, a resume that names it null.
+        let mut ended = entry("claude", Some(CLAUDE_B), "/w", None, 5, 7);
+        ended["endedAt"] = json!(7);
+        ended["endReason"] = json!("exited");
+        assert_eq!(upsert(&base, &ended, None).unwrap().fork_of.as_deref(), Some(CLAUDE_A));
+        let titled = upsert(&base, &entry("claude", Some(CLAUDE_B), "/w", Some("From the transcript"), 5, 8), None).unwrap();
+        assert_eq!(titled.fork_of.as_deref(), Some(CLAUDE_A));
+        let mut resumed = entry("claude", Some(CLAUDE_B), "/w", None, 9, 9);
+        resumed["forkOf"] = Value::Null;
+        let resumed = upsert(&base, &resumed, None).unwrap();
+        assert_eq!((resumed.fork_of.as_deref(), resumed.title.as_deref()), (Some(CLAUDE_A), Some("From the transcript")));
+        assert_eq!(document(&scratch)["version"], json!(1), "never version 2 by itself");
+
+        // Curated, it is version 2, with the link between the nine and the
+        // curated fields; uncurated again, version 1 with the link.
+        let key = format!("claude:{CLAUDE_B}");
+        update(&base, &key, &json!({"pinned": true})).unwrap();
+        let pinned = text(&scratch);
+        assert!(pinned.starts_with("{\n  \"version\": 2,"), "{pinned}");
+        assert!(pinned.contains(&format!("\"endReason\": null,\n      \"forkOf\": \"{CLAUDE_A}\",\n      \"pinned\": true\n")), "{pinned}");
+        update(&base, &key, &json!({"pinned": false})).unwrap();
+        assert_eq!(document(&scratch)["version"], json!(1));
+        assert_eq!(document(&scratch)["entries"][0]["forkOf"], json!(CLAUDE_A));
+        assert_eq!(list(&base).unwrap()[0].fork_of.as_deref(), Some(CLAUDE_A), "a curation keeps it too");
+
+        // The newest that names one wins.
+        let mut again = entry("claude", Some(CLAUDE_B), "/w", None, 9, 10);
+        again["forkOf"] = json!("d4bef4d0-c043-40ef-b157-640fb31ac0ea");
+        assert_eq!(upsert(&base, &again, None).unwrap().fork_of.as_deref(), Some("d4bef4d0-c043-40ef-b157-640fb31ac0ea"));
+    }
+
+    #[test]
+    fn no_fork_of_is_written_as_nothing_and_each_kind_has_its_own_shape() {
+        let scratch = Scratch::new("fork-of-none");
+        let base = scratch.base();
+        // A page that sends `forkOf: null` for every entry writes 0.26.0's text.
+        let mut ended = entry("opencode", Some(OPENCODE_A), "/w", Some("Title"), 1, 2);
+        ended["endedAt"] = json!(2);
+        ended["endReason"] = json!("closed");
+        ended["forkOf"] = Value::Null;
+        upsert(&base, &ended, None).unwrap();
+        let mut claude = entry("claude", Some(CLAUDE_A), "/w", None, 3, 4);
+        claude["forkOf"] = Value::Null;
+        upsert(&base, &claude, None).unwrap();
+        assert_eq!(text(&scratch), V1_TEXT, "byte for byte the nine-field version 1");
+
+        // Each kind's own shape: an OpenCode fork names an OpenCode
+        // conversation; a kind this build does not know, a line of text.
+        let mut opencode = entry("opencode", Some("ses_0123456789abcdefGHIJKLMNop"), "/w", None, 5, 5);
+        opencode["forkOf"] = json!(OPENCODE_A);
+        assert_eq!(upsert(&base, &opencode, None).unwrap().fork_of.as_deref(), Some(OPENCODE_A));
+        let mut other = entry("agy", Some("agy-2"), "/w", None, 6, 6);
+        other["forkOf"] = json!("agy 1 of a line");
+        assert_eq!(upsert(&base, &other, None).unwrap().fork_of.as_deref(), Some("agy 1 of a line"));
+        // A fork whose own id is not known yet may still name its source.
+        let mut provisional = entry("claude", None, "/x", None, 7, 7);
+        provisional["forkOf"] = json!(CLAUDE_A);
+        assert_eq!(upsert(&base, &provisional, None).unwrap().fork_of.as_deref(), Some(CLAUDE_A));
+    }
+
+    #[test]
+    fn a_malformed_fork_of_is_refused_on_write_and_its_entry_dropped_on_read() {
+        let scratch = Scratch::new("fork-of-bad");
+        let base = scratch.base();
+        for bad in [json!("x; curl a | sh"), json!(CLAUDE_A.to_uppercase()), json!(OPENCODE_A), json!(""), json!(1), json!([CLAUDE_A])] {
+            let mut e = fork(1, 1);
+            e["forkOf"] = bad.clone();
+            assert_eq!(
+                upsert(&base, &e, None).unwrap_err(),
+                format!("{INVALID}: its forkOf is not one that claude gives a conversation"),
+                "{bad}"
+            );
+        }
+        assert!(!base.exists(), "nothing was made for a refused write");
+        fs::create_dir_all(&base).unwrap();
+        let mut malformed = entry("claude", Some(CLAUDE_A), "/w", None, 1, 9);
+        malformed["forkOf"] = json!("x; curl a | sh");
+        let file = json!({"version": 1, "entries": [malformed, fork(1, 5), entry("opencode", Some(OPENCODE_A), "/w", None, 1, 3)]});
+        fs::write(scratch.file(), serde_json::to_vec(&file).unwrap()).unwrap();
+        let listed = list(&base).unwrap();
+        assert_eq!(keys(&listed), vec![format!("claude:{CLAUDE_B}"), format!("opencode:{OPENCODE_A}")], "dropped, the rest kept");
+        assert_eq!(listed[0].fork_of.as_deref(), Some(CLAUDE_A));
+        assert!(scratch.bad().is_empty(), "the file is not moved aside for one entry");
+        assert_eq!(document(&scratch), file, "nor rewritten by a list");
+    }
+
+    // ---- AC25: version 2, and only once something is curated -----------------------------------------
+
+    /// What NexTerm 0.26.0 (fe24af1) writes for the two entries `write_two`
+    /// records, byte for byte: its nine fields in its order, pretty-printed
+    /// with two spaces, and a line end at the end.
+    const V1_TEXT: &str = r#"{
+  "version": 1,
+  "entries": [
+    {
+      "key": "claude:0f8fad5b-d9cb-469f-a165-70867728950e",
+      "kind": "claude",
+      "sessionId": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "cwd": "/w",
+      "title": null,
+      "startedAt": 3,
+      "lastUsedAt": 4,
+      "endedAt": null,
+      "endReason": null
+    },
+    {
+      "key": "opencode:ses_ef45006f5ffeAMtumN5ySj4VmT",
+      "kind": "opencode",
+      "sessionId": "ses_ef45006f5ffeAMtumN5ySj4VmT",
+      "cwd": "/w",
+      "title": "Title",
+      "startedAt": 1,
+      "lastUsedAt": 2,
+      "endedAt": 2,
+      "endReason": "closed"
+    }
+  ]
+}
+"#;
+
+    /// The same two entries with every field there is curated (`curate_two`):
+    /// the curated fields after the nine, each only when it is not at its
+    /// default, and the groups after the entries.
+    const V2_TEXT: &str = r#"{
+  "version": 2,
+  "entries": [
+    {
+      "key": "claude:0f8fad5b-d9cb-469f-a165-70867728950e",
+      "kind": "claude",
+      "sessionId": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "cwd": "/w",
+      "title": null,
+      "startedAt": 3,
+      "lastUsedAt": 4,
+      "endedAt": null,
+      "endReason": null,
+      "name": "Mine",
+      "pinned": true,
+      "archived": true,
+      "groupId": "g1"
+    },
+    {
+      "key": "opencode:ses_ef45006f5ffeAMtumN5ySj4VmT",
+      "kind": "opencode",
+      "sessionId": "ses_ef45006f5ffeAMtumN5ySj4VmT",
+      "cwd": "/w",
+      "title": "Title",
+      "startedAt": 1,
+      "lastUsedAt": 2,
+      "endedAt": 2,
+      "endReason": "closed",
+      "name": "Theirs",
+      "groupId": "g2"
+    }
+  ],
+  "groups": [
+    {
+      "id": "g1",
+      "name": "Work",
+      "collapsed": true
+    },
+    {
+      "id": "g2",
+      "name": "Play",
+      "collapsed": false
+    }
+  ]
+}
+"#;
+
+    /// An OpenCode conversation that ended, then a Claude Code one still running.
+    fn write_two(base: &Path) {
+        let mut ended = entry("opencode", Some(OPENCODE_A), "/w", Some("Title"), 1, 2);
+        ended["endedAt"] = json!(2);
+        ended["endReason"] = json!("closed");
+        upsert(base, &ended, None).unwrap();
+        upsert(base, &entry("claude", Some(CLAUDE_A), "/w", None, 3, 4), None).unwrap();
+    }
+
+    /// `write_two`'s entries curated with every field, through the operations.
+    fn curate_two(base: &Path) {
+        let (claude, opencode) = (format!("claude:{CLAUDE_A}"), format!("opencode:{OPENCODE_A}"));
+        group_create(base, &json!({"id": "g1", "name": "Work"}), Some(&claude)).unwrap();
+        group_create(base, &json!({"id": "g2", "name": "Play"}), Some(&opencode)).unwrap();
+        group_update(base, "g1", &json!({"collapsed": true})).unwrap();
+        update(base, &claude, &json!({"name": "Mine", "pinned": true, "archived": true})).unwrap();
+        update(base, &opencode, &json!({"name": "Theirs"})).unwrap();
+    }
+
+    fn text(scratch: &Scratch) -> String {
+        fs::read_to_string(scratch.file()).unwrap()
+    }
+
+    /// `document` as the file, written by hand.
+    fn put(scratch: &Scratch, document: &Value) {
+        fs::create_dir_all(scratch.base()).unwrap();
+        fs::write(scratch.file(), serde_json::to_vec(document).unwrap()).unwrap();
+    }
+
+    fn curation(e: &Entry) -> (Option<&str>, bool, bool, Option<&str>) {
+        (e.name.as_deref(), e.pinned, e.archived, e.group_id.as_deref())
+    }
+
+    #[test]
+    fn an_uncurated_history_is_written_byte_for_byte_as_0_26_0_writes_it() {
+        let scratch = Scratch::new("golden-v1");
+        let base = scratch.base();
+        write_two(&base);
+        assert_eq!(text(&scratch), V1_TEXT);
+        // A file 0.26.0 wrote is written back as it was.
+        fs::write(scratch.file(), V1_TEXT).unwrap();
+        upsert(&base, &entry("claude", Some(CLAUDE_A), "/w", None, 3, 4), None).unwrap();
+        assert_eq!(text(&scratch), V1_TEXT, "the same event again changes no byte");
+    }
+
+    #[test]
+    fn a_version_1_file_is_read_with_nothing_curated_and_no_groups() {
+        let scratch = Scratch::new("read-v1");
+        let base = scratch.base();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(scratch.file(), V1_TEXT).unwrap();
+        let listed = list(&base).unwrap();
+        assert_eq!(listed.len(), 2);
+        for e in &listed {
+            assert_eq!(curation(e), (None, false, false, None), "{}", e.key);
+            let answered = serde_json::to_value(e).unwrap();
+            assert_eq!(answered.as_object().unwrap().len(), 9, "handed to the page as 0.26.0 hands it: {answered}");
+        }
+        assert_eq!(groups(&base).unwrap(), GroupList { version: 1, read_only: false, groups: Vec::new() });
+        assert_eq!(text(&scratch), V1_TEXT, "neither read writes it");
+    }
+
+    #[test]
+    fn pinning_writes_version_2_and_unpinning_version_1_again() {
+        let scratch = Scratch::new("pin-v2");
+        let base = scratch.base();
+        write_two(&base);
+        let claude = format!("claude:{CLAUDE_A}");
+        assert!(update(&base, &claude, &json!({"pinned": true})).unwrap().unwrap().pinned);
+        let written = document(&scratch);
+        assert_eq!(written["version"], json!(2));
+        assert_eq!(written["groups"], json!([]), "with its list of groups, empty");
+        assert_eq!(written["entries"][0]["pinned"], json!(true));
+        assert!(written["entries"][1].get("pinned").is_none(), "on that entry only");
+        assert_eq!(groups(&base).unwrap().version, 2);
+        update(&base, &claude, &json!({"pinned": false})).unwrap();
+        assert_eq!(text(&scratch), V1_TEXT, "nothing curated: version 1 again, byte for byte");
+        assert_eq!(groups(&base).unwrap().version, 1);
+
+        // Each curated field alone makes it version 2, archived too.
+        for change in [json!({"name": "Mine"}), json!({"archived": true})] {
+            update(&base, &claude, &change).unwrap();
+            assert_eq!(document(&scratch)["version"], json!(2), "{change}");
+        }
+        update(&base, &claude, &json!({"name": null, "archived": false})).unwrap();
+        assert_eq!(text(&scratch), V1_TEXT);
+        group_create(&base, &json!({"id": "g1", "name": "Work"}), Some(&claude)).unwrap();
+        assert_eq!(document(&scratch)["entries"][0]["groupId"], json!("g1"));
+        update(&base, &claude, &json!({"groupId": null})).unwrap();
+        assert_eq!(document(&scratch)["version"], json!(2), "a group with no one in it keeps it version 2");
+        assert_eq!(document(&scratch)["groups"], json!([{"id": "g1", "name": "Work", "collapsed": false}]));
+        group_delete(&base, "g1").unwrap();
+        assert_eq!(text(&scratch), V1_TEXT);
+    }
+
+    /// AC25 (5): what NexTerm 0.26.0's `parse` (fe24af1, :462-487) and
+    /// `entry_from` ask of a file to read it as a newer one, which it lists
+    /// and never writes.
+    #[test]
+    fn a_version_2_file_is_one_that_0_26_0_reads_as_newer() {
+        let scratch = Scratch::new("v2-for-0.26.0");
+        let base = scratch.base();
+        write_two(&base);
+        curate_two(&base);
+        let written = text(&scratch);
+        assert_eq!(written, V2_TEXT);
+        assert!(written.len() as u64 <= MAX_READ_BYTES);
+        assert!(
+            written.starts_with("{\n  \"version\": 2,\n  \"entries\": [\n") && written.contains("\n  ],\n  \"groups\": [\n"),
+            "version, entries, groups: in that order"
+        );
+        let read: Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(read.as_object().unwrap().len(), 3, "and nothing else");
+        let version = read["version"].as_u64().unwrap();
+        assert!(version > 1 && version <= MAX_INTEGER, "above 0.26.0's own: a newer file to it");
+        let entries = read["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        for e in entries {
+            let mut nine = e.clone();
+            for field in ["name", "pinned", "archived", "groupId"] {
+                nine.as_object_mut().unwrap().remove(field);
+            }
+            assert_eq!(nine.as_object().unwrap().len(), 9);
+            // `entry_from` asks what 0.26.0's asked, unchanged.
+            assert!(entry_from(&nine).is_ok(), "{nine}");
+        }
+    }
+
+    /// AC27: and this build reads and writes one.
+    #[test]
+    fn this_build_reads_and_writes_a_version_2_file() {
+        let scratch = Scratch::new("v2-read-write");
+        let base = scratch.base();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(scratch.file(), V2_TEXT).unwrap();
+        let listed = list(&base).unwrap();
+        assert_eq!(curation(&listed[0]), (Some("Mine"), true, true, Some("g1")));
+        assert_eq!(curation(&listed[1]), (Some("Theirs"), false, false, Some("g2")));
+        let read = groups(&base).unwrap();
+        assert_eq!((read.version, read.read_only, read.groups.len()), (2, false, 2));
+        assert_eq!(text(&scratch), V2_TEXT, "not written by a read");
+        let kept = upsert(&base, &entry("claude", Some(CLAUDE_A), "/w", None, 3, 4), None).unwrap();
+        assert_eq!(curation(&kept), (Some("Mine"), true, true, Some("g1")));
+        assert_eq!(text(&scratch), V2_TEXT, "written back as it was");
+    }
+
+    // ---- AC26: what is refused of what the user curated ----------------------------------------------
+
+    /// Every curated field `stored_entry_from` refuses in the file, and why;
+    /// `update` refuses each with the same words. Replayed against the
+    /// browser mock by the contract (`contract_tests`).
+    pub(super) fn curated_refused_cases() -> Vec<(&'static str, Value, String)> {
+        let name = bad_name();
+        let mut cases: Vec<(&'static str, Value, String)> = vec![
+            ("name", json!("n".repeat(MAX_NAME_CHARS + 1)), name.clone()),
+            ("name", json!("é".repeat(MAX_NAME_CHARS + 1)), name.clone()),
+            ("name", json!(5), name.clone()),
+            ("name", json!(true), name.clone()),
+            ("name", json!(["Mine"]), name.clone()),
+            ("name", json!({"text": "Mine"}), name.clone()),
+            ("pinned", json!("yes"), BAD_PINNED.to_string()),
+            ("pinned", json!(1), BAD_PINNED.to_string()),
+            ("pinned", json!(0), BAD_PINNED.to_string()),
+            ("pinned", json!([true]), BAD_PINNED.to_string()),
+            ("archived", json!("no"), BAD_ARCHIVED.to_string()),
+            ("archived", json!(1), BAD_ARCHIVED.to_string()),
+            ("archived", json!({}), BAD_ARCHIVED.to_string()),
+            ("groupId", json!(""), BAD_GROUP_ID.to_string()),
+            ("groupId", json!("has space"), BAD_GROUP_ID.to_string()),
+            ("groupId", json!("g".repeat(MAX_GROUP_ID_CHARS + 1)), BAD_GROUP_ID.to_string()),
+            ("groupId", json!("grüppe"), BAD_GROUP_ID.to_string()),
+            ("groupId", json!("g/1"), BAD_GROUP_ID.to_string()),
+            ("groupId", json!("g1\n"), BAD_GROUP_ID.to_string()),
+            ("groupId", json!(7), BAD_GROUP_ID.to_string()),
+            ("groupId", json!(["g1"]), BAD_GROUP_ID.to_string()),
+        ];
+        // Every class of character a title is refused with: C0, DEL, C1, the
+        // line and paragraph separators, and the bidi controls.
+        for c in ['\u{0}', '\u{9}', '\u{a}', '\u{1b}', '\u{7f}', '\u{85}', '\u{9f}', '\u{2028}', '\u{2029}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}'] {
+            cases.push(("name", json!(format!("a{c}b")), name.clone()));
+        }
+        cases
+    }
+
+    #[test]
+    fn a_curated_field_of_the_wrong_shape_drops_its_entry_and_is_refused() {
+        let scratch = Scratch::new("curated-refused");
+        let base = scratch.base();
+        let key = format!("claude:{CLAUDE_A}");
+        for (field, value, why) in curated_refused_cases() {
+            let mut changes = json!({});
+            changes[field] = value.clone();
+            assert_eq!(update(&base, &key, &changes).unwrap_err(), format!("{INVALID}: {why}"), "{field}: {value}");
+        }
+        for (changes, why) in [
+            (json!(null), "the changes are not an object"),
+            (json!([]), "the changes are not an object"),
+            (json!("pin"), "the changes are not an object"),
+            (json!({"title": "Mine"}), "a change names something other than name, pinned, archived and groupId"),
+            (json!({"pinned": true, "key": "claude:x"}), "a change names something other than name, pinned, archived and groupId"),
+            (json!({"pinned": null}), BAD_PINNED),
+            (json!({"archived": null}), BAD_ARCHIVED),
+        ] {
+            assert_eq!(update(&base, &key, &changes).unwrap_err(), format!("{INVALID}: {why}"), "{changes}");
+        }
+        assert!(!base.exists(), "nothing was made for a refused update");
+
+        // In the file: that entry is dropped, the rest kept, nothing moved aside.
+        let good = entry("claude", Some(CLAUDE_A), "/w", None, 1, 5);
+        let mut cases: Vec<(&str, Value)> = curated_refused_cases().into_iter().map(|(field, value, _)| (field, value)).collect();
+        cases.push(("name", json!("")));
+        for (field, value) in cases {
+            let mut bad = entry("opencode", Some(OPENCODE_A), "/w", None, 1, 9);
+            bad[field] = value.clone();
+            put(&scratch, &json!({"version": 2, "entries": [good, bad], "groups": [{"id": "g1", "name": "G"}]}));
+            assert_eq!(keys(&list(&base).unwrap()), vec![key.clone()], "{field}: {value}");
+        }
+        assert!(scratch.bad().is_empty(), "none of them moved the file aside");
+
+        // Null is each one's default in the file, as a missing field is; and
+        // the bounds themselves are kept.
+        let mut nulls = good.clone();
+        for field in ["name", "pinned", "archived", "groupId"] {
+            nulls[field] = json!(null);
+        }
+        let mut longest = entry("opencode", Some(OPENCODE_A), "/w", None, 1, 9);
+        longest["name"] = json!("é".repeat(MAX_NAME_CHARS));
+        longest["groupId"] = json!(format!("{}{}", "Az09_-".repeat(10), "abcd"));
+        longest["pinned"] = json!(false);
+        put(&scratch, &json!({"version": 2, "entries": [nulls, longest], "groups": [{"id": format!("{}{}", "Az09_-".repeat(10), "abcd"), "name": "n".repeat(MAX_GROUP_NAME_CHARS)}]}));
+        let kept = list(&base).unwrap();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(curation(&kept[0]).1, false);
+        assert_eq!(kept[0].name.as_ref().map(|n| n.chars().count()), Some(MAX_NAME_CHARS));
+        assert_eq!(kept[0].group_id.as_ref().map(String::len), Some(MAX_GROUP_ID_CHARS));
+        assert_eq!(curation(&kept[1]), (None, false, false, None), "all null: nothing curated");
+        assert!(scratch.bad().is_empty());
+    }
+
+    /// A file's `groups` with every way a group is dropped by itself: of the
+    /// fifty-five valid ones with ids of their own, `ok-1` to `ok-55`, the
+    /// first fifty are kept. Replayed against the browser mock by the
+    /// contract (`contract_tests`).
+    pub(super) fn group_cases() -> Vec<Value> {
+        let mut groups = vec![
+            json!({"id": "ok-1", "name": "First", "collapsed": true}),
+            json!({"id": "has space", "name": "Bad id"}),
+            json!({"id": "", "name": "Empty id"}),
+            json!({"id": 7, "name": "A number for an id"}),
+            json!({"name": "No id"}),
+            json!({"id": "bad-name-1", "name": ""}),
+            json!({"id": "bad-name-2", "name": "n".repeat(MAX_GROUP_NAME_CHARS + 1)}),
+            json!({"id": "bad-name-3", "name": "a\u{202e}b"}),
+            json!({"id": "bad-name-4", "name": 5}),
+            json!({"id": "bad-name-5"}),
+            json!({"id": "bad-collapsed", "name": "C", "collapsed": "yes"}),
+            json!({"id": "ok-1", "name": "The same id"}),
+            json!("not a group"),
+            json!({"id": "ok-2", "name": "Second", "collapsed": null, "colour": "red"}),
+        ];
+        for n in 3..=55 {
+            groups.push(json!({"id": format!("ok-{n}"), "name": format!("Group {n}")}));
+        }
+        groups
+    }
+
+    #[test]
+    fn groups_are_read_leniently_and_never_move_the_file_aside() {
+        let scratch = Scratch::new("groups-lenient");
+        let base = scratch.base();
+        let in_group = |id: &str, n: u64| {
+            let mut e = entry("opencode", Some(&format!("ses_grp{n:05}")), "/w", None, n, n);
+            e["groupId"] = json!(id);
+            e
+        };
+        // A `groups` that is not a list: no groups; the entries are kept, in none.
+        for not_a_list in [json!(null), json!({"g1": {"name": "G"}}), json!("g1"), json!(7)] {
+            put(&scratch, &json!({"version": 2, "entries": [in_group("g1", 1)], "groups": not_a_list}));
+            let kept = list(&base).unwrap();
+            assert_eq!((kept.len(), kept[0].group_id.as_deref()), (1, None), "{not_a_list}");
+            assert_eq!(groups(&base).unwrap().groups, Vec::<Group>::new());
+        }
+        put(&scratch, &json!({"version": 2, "entries": [in_group("g1", 1)]}));
+        assert_eq!(list(&base).unwrap()[0].group_id, None, "nor when there is none");
+
+        // Each group that is not one is dropped by itself, and so is one with
+        // an id seen before, and every one past the fiftieth kept.
+        let entries = vec![in_group("ok-1", 1), in_group("bad-name-1", 2), in_group("ok-51", 3), in_group("ok-50", 4)];
+        put(&scratch, &json!({"version": 2, "entries": entries, "groups": group_cases()}));
+        let kept = groups(&base).unwrap();
+        assert_eq!(kept.groups.len(), MAX_GROUPS);
+        assert_eq!(kept.groups[0], Group { id: "ok-1".into(), name: "First".into(), collapsed: true });
+        assert_eq!(kept.groups[1], Group { id: "ok-2".into(), name: "Second".into(), collapsed: false }, "null is not folded");
+        assert_eq!(kept.groups[49].id, "ok-50");
+        let by_key = |n: u64| list(&base).unwrap().into_iter().find(|e| e.key == format!("opencode:ses_grp{n:05}")).unwrap();
+        assert_eq!(by_key(1).group_id.as_deref(), Some("ok-1"));
+        assert_eq!(by_key(2).group_id, None, "its group was dropped: kept, in none");
+        assert_eq!(by_key(3).group_id, None, "and the 51st");
+        assert_eq!(by_key(4).group_id.as_deref(), Some("ok-50"));
+        assert!(scratch.bad().is_empty(), "none of them moved the file aside");
+        // The next write keeps what was read.
+        upsert(&base, &entry("claude", Some(CLAUDE_A), "/w", None, 9, 9), None).unwrap();
+        let written = document(&scratch);
+        assert_eq!(written["groups"].as_array().unwrap().len(), MAX_GROUPS);
+        assert_eq!(written["groups"][1], json!({"id": "ok-2", "name": "Second", "collapsed": false}));
+    }
+
+    // ---- AC28: a recorded event keeps what the user curated --------------------------------------------
+
+    #[test]
+    fn a_recorded_event_never_changes_what_the_user_curated() {
+        let scratch = Scratch::new("merge-curation");
+        let base = scratch.base();
+        let key = format!("claude:{CLAUDE_A}");
+        let at = |started: u64, used: u64| entry("claude", Some(CLAUDE_A), "/w", None, started, used);
+        let ended = |mut e: Value, when: u64| {
+            e["endedAt"] = json!(when);
+            e["endReason"] = json!("exited");
+            e
+        };
+        upsert(&base, &at(100, 100), None).unwrap();
+        group_create(&base, &json!({"id": "g1", "name": "Work"}), Some(&key)).unwrap();
+        update(&base, &key, &json!({"name": "Mine", "pinned": true, "archived": true})).unwrap();
+        let curated = (Some("Mine"), true, true, Some("g1"));
+
+        // (a) a new title: it changes underneath.
+        let mut titled = at(100, 200);
+        titled["title"] = json!("Fix the build");
+        let kept = upsert(&base, &titled, None).unwrap();
+        assert_eq!((kept.title.as_deref(), curation(&kept)), (Some("Fix the build"), curated), "(a)");
+        // (b) an end.
+        let kept = upsert(&base, &ended(at(100, 300), 300), None).unwrap();
+        assert_eq!((kept.ended_at, curation(&kept)), (Some(300), curated), "(b)");
+        // (c) a title from Claude Code's transcript, with the entry's own times (F16).
+        let mut from_transcript = ended(at(100, 300), 300);
+        from_transcript["title"] = json!("From the transcript");
+        let kept = upsert(&base, &from_transcript, None).unwrap();
+        assert_eq!((kept.title.as_deref(), kept.last_used_at, curation(&kept)), (Some("From the transcript"), 300, curated), "(c)");
+        // (d) an incoming entry with curated fields of its own: not read, so
+        // not refused either.
+        let mut carrying = at(100, 400);
+        carrying["name"] = json!("Other");
+        carrying["pinned"] = json!(false);
+        carrying["archived"] = json!(false);
+        carrying["groupId"] = json!("g2");
+        assert_eq!(curation(&upsert(&base, &carrying, None).unwrap()), curated, "(d)");
+        let mut odd = at(100, 400);
+        odd["pinned"] = json!("yes");
+        odd["name"] = json!(5);
+        assert_eq!(curation(&upsert(&base, &odd, None).unwrap()), curated, "(d), of no shape");
+        assert_eq!(curation(&list(&base).unwrap()[0]), curated, "and in the file");
+
+        // unarchive: archived cleared, and nothing else.
+        let before = list(&base).unwrap()[0].clone();
+        let kept = upsert_with(&base, &at(500, 500), None, true).unwrap();
+        let mut expected = before.clone();
+        expected.archived = false;
+        expected.last_used_at = 500;
+        expected.ended_at = None;
+        expected.end_reason = None;
+        assert_eq!(kept, expected);
+        let kept = upsert_with(&base, &at(500, 600), None, true).unwrap();
+        assert!(!kept.archived, "unarchiving one not archived changes nothing");
+        // An entry that was never there, unarchived, is new and plain.
+        let fresh = upsert_with(&base, &entry("opencode", Some(OPENCODE_A), "/w", None, 1, 1), None, true).unwrap();
+        assert_eq!(curation(&fresh), (None, false, false, None));
+    }
+
+    #[test]
+    fn a_provisional_entrys_curation_goes_with_it_when_it_is_replaced() {
+        let scratch = Scratch::new("merge-replaces");
+        let base = scratch.base();
+        let provisional = upsert(&base, &entry("opencode", None, "/w", None, 100, 100), None).unwrap();
+        group_create(&base, &json!({"id": "g1", "name": "Work"}), Some(&provisional.key)).unwrap();
+        update(&base, &provisional.key, &json!({"name": "Mine", "archived": true})).unwrap();
+        let learned =
+            upsert(&base, &entry("opencode", Some(OPENCODE_A), "/w", Some("Fix it"), 100, 200), Some(&provisional.key)).unwrap();
+        assert_eq!(keys(&list(&base).unwrap()), vec![learned.key.clone()], "one entry");
+        assert_eq!(curation(&learned), (Some("Mine"), false, true, Some("g1")), "named and grouped, archived as it was");
+
+        // Both curated: the entry under the key first, and pinned when either is.
+        let provisional = upsert(&base, &entry("opencode", None, "/x", None, 300, 300), None).unwrap();
+        group_create(&base, &json!({"id": "g2", "name": "Play"}), Some(&provisional.key)).unwrap();
+        update(&base, &provisional.key, &json!({"name": "Provisional", "pinned": true, "archived": true})).unwrap();
+        update(&base, &learned.key, &json!({"archived": false})).unwrap();
+        let merged =
+            upsert(&base, &entry("opencode", Some(OPENCODE_A), "/w", Some("Fix it"), 100, 400), Some(&provisional.key)).unwrap();
+        assert_eq!(curation(&merged), (Some("Mine"), true, false, Some("g1")));
+        // None under the key but the provisional's: its own.
+        update(&base, &merged.key, &json!({"name": null, "groupId": null, "pinned": false})).unwrap();
+        let provisional = upsert(&base, &entry("opencode", None, "/y", None, 500, 500), None).unwrap();
+        update(&base, &provisional.key, &json!({"groupId": "g2"})).unwrap();
+        let merged =
+            upsert(&base, &entry("opencode", Some(OPENCODE_A), "/w", None, 100, 600), Some(&provisional.key)).unwrap();
+        assert_eq!(curation(&merged), (None, false, false, Some("g2")));
+    }
+
+    // ---- AC29: the operations -------------------------------------------------------------------------
+
+    #[test]
+    fn update_changes_only_what_it_names() {
+        let scratch = Scratch::new("update");
+        let base = scratch.base();
+        write_two(&base);
+        let (claude, opencode) = (format!("claude:{CLAUDE_A}"), format!("opencode:{OPENCODE_A}"));
+        let before = list(&base).unwrap();
+        let kept = update(&base, &claude, &json!({"name": "Mine"})).unwrap().unwrap();
+        let mut expected = before[0].clone();
+        expected.name = Some("Mine".into());
+        assert_eq!(kept, expected, "its name, and nothing else");
+        // The older one changed stays where it is.
+        update(&base, &opencode, &json!({"pinned": true, "archived": true})).unwrap();
+        let after = list(&base).unwrap();
+        assert_eq!(keys(&after), keys(&before), "not moved");
+        assert_eq!(after[1].last_used_at, before[1].last_used_at, "not used");
+        assert_eq!(curation(&after[1]), (None, true, true, None));
+        // "" and null clear a name.
+        for none in [json!(""), json!(null)] {
+            update(&base, &claude, &json!({"name": "Mine"})).unwrap();
+            assert_eq!(update(&base, &claude, &json!({"name": none})).unwrap().unwrap().name, None, "{none}");
+        }
+        // No change at all is the entry as it is.
+        assert_eq!(update(&base, &claude, &json!({})).unwrap().unwrap(), list(&base).unwrap()[0]);
+        // No such entry: none, and nothing written; nor for a group that is not there.
+        let unchanged = text(&scratch);
+        assert_eq!(update(&base, "claude:nothing-here", &json!({"pinned": true})).unwrap(), None);
+        assert_eq!(update(&base, &claude, &json!({"groupId": "g1"})).unwrap_err(), format!("{INVALID}: its groupId names no group"));
+        assert_eq!(text(&scratch), unchanged);
+    }
+
+    #[test]
+    fn groups_are_made_renamed_folded_and_deleted() {
+        let scratch = Scratch::new("group-ops");
+        let base = scratch.base();
+        write_two(&base);
+        let (claude, opencode) = (format!("claude:{CLAUDE_A}"), format!("opencode:{OPENCODE_A}"));
+        let work = group_create(&base, &json!({"id": "g1", "name": "Work", "collapsed": true, "colour": "red"}), None).unwrap();
+        assert_eq!(work, Group { id: "g1".into(), name: "Work".into(), collapsed: false }, "not folded, whatever it says");
+        let play = group_create(&base, &json!({"id": "g2", "name": "Play"}), Some(&claude)).unwrap();
+        assert_eq!(groups(&base).unwrap().groups, vec![work.clone(), play.clone()], "after the others");
+        assert_eq!(list(&base).unwrap()[0].group_id.as_deref(), Some("g2"), "moved in the same write");
+        let empty = group_create(&base, &json!({"id": "g3", "name": "Empty"}), Some("claude:nothing-here")).unwrap();
+        assert_eq!(groups(&base).unwrap().groups.last(), Some(&empty), "a move_key naming no entry moves nothing");
+
+        for (group, why) in [
+            (json!("g4"), "it is not an object".to_string()),
+            (json!(null), "it is not an object".to_string()),
+            (json!({"id": "has space", "name": "Work"}), BAD_ID.to_string()),
+            (json!({"id": "g".repeat(MAX_GROUP_ID_CHARS + 1), "name": "Work"}), BAD_ID.to_string()),
+            (json!({"id": 4, "name": "Work"}), BAD_ID.to_string()),
+            (json!({"name": "Work"}), BAD_ID.to_string()),
+            (json!({"id": "g4"}), bad_group_name()),
+            (json!({"id": "g4", "name": ""}), bad_group_name()),
+            (json!({"id": "g4", "name": "n".repeat(MAX_GROUP_NAME_CHARS + 1)}), bad_group_name()),
+            (json!({"id": "g4", "name": "one\ntwo"}), bad_group_name()),
+            (json!({"id": "g4", "name": "a\u{2066}b"}), bad_group_name()),
+        ] {
+            assert_eq!(group_create(&base, &group, None).unwrap_err(), format!("{INVALID_GROUP}: {why}"), "{group}");
+        }
+        assert_eq!(group_create(&base, &json!({"id": "g1", "name": "Again"}), None).unwrap_err(), format!("{INVALID_GROUP}: another group has its id"));
+
+        let renamed = group_update(&base, "g1", &json!({"name": "Office"})).unwrap().unwrap();
+        assert_eq!(renamed, Group { id: "g1".into(), name: "Office".into(), collapsed: false });
+        let folded = group_update(&base, "g1", &json!({"collapsed": true})).unwrap().unwrap();
+        assert_eq!(folded, Group { id: "g1".into(), name: "Office".into(), collapsed: true });
+        assert_eq!(groups(&base).unwrap().groups[0], folded, "in the file");
+        assert_eq!(group_update(&base, "g9", &json!({"collapsed": true})).unwrap(), None);
+        for (id, changes, why) in [
+            ("has space", json!({"collapsed": true}), BAD_ID.to_string()),
+            ("", json!({"collapsed": true}), BAD_ID.to_string()),
+            ("g1", json!(null), "the changes are not an object".to_string()),
+            ("g1", json!({"id": "g5"}), "a change names something other than name and collapsed".to_string()),
+            ("g1", json!({"name": null}), bad_group_name()),
+            ("g1", json!({"name": ""}), bad_group_name()),
+            ("g1", json!({"collapsed": "yes"}), BAD_COLLAPSED.to_string()),
+            ("g1", json!({"collapsed": null}), BAD_COLLAPSED.to_string()),
+        ] {
+            assert_eq!(group_update(&base, id, &changes).unwrap_err(), format!("{INVALID_GROUP}: {why}"), "{id} {changes}");
+        }
+
+        // Deleted: how many were in it, and they are otherwise as they were.
+        update(&base, &opencode, &json!({"groupId": "g2", "pinned": true})).unwrap();
+        let before = list(&base).unwrap();
+        assert_eq!(group_delete(&base, "g2").unwrap(), Some(2));
+        let after = list(&base).unwrap();
+        for (was, now) in before.iter().zip(&after) {
+            let mut expected = was.clone();
+            expected.group_id = None;
+            assert_eq!(now, &expected);
+        }
+        assert!(groups(&base).unwrap().groups.iter().all(|g| g.id != "g2"));
+        assert_eq!(group_delete(&base, "g2").unwrap(), None, "gone already");
+        assert_eq!(group_delete(&base, "g3").unwrap(), Some(0), "an empty one");
+        assert_eq!(group_delete(&base, "bad id").unwrap_err(), format!("{INVALID_GROUP}: {BAD_ID}"));
+    }
+
+    #[test]
+    fn there_are_at_most_fifty_groups() {
+        let scratch = Scratch::new("fifty-groups");
+        let base = scratch.base();
+        write_two(&base);
+        for n in 0..MAX_GROUPS {
+            group_create(&base, &json!({"id": format!("g{n}"), "name": format!("Group {n}")}), None).unwrap();
+        }
+        let unchanged = text(&scratch);
+        let refused = group_create(&base, &json!({"id": "g50", "name": "One more"}), Some(&format!("claude:{CLAUDE_A}")));
+        assert_eq!(refused.unwrap_err(), TOO_MANY_GROUPS);
+        assert_eq!(text(&scratch), unchanged, "and nothing moved either");
+        assert!(TOO_MANY_GROUPS.contains(&MAX_GROUPS.to_string()));
+        group_delete(&base, "g0").unwrap();
+        assert!(group_create(&base, &json!({"id": "g50", "name": "One more"}), None).is_ok(), "one deleted, one more");
+    }
+
+    #[test]
+    fn clear_deletes_the_groups_and_leaves_the_version_1_empty_history() {
+        let scratch = Scratch::new("clear-groups");
+        let base = scratch.base();
+        write_two(&base);
+        fs::write(scratch.file(), "{not json").unwrap();
+        assert!(list(&base).unwrap().is_empty());
+        write_two(&base);
+        curate_two(&base);
+        assert_eq!(scratch.bad().len(), 1, "premise: a copy moved aside");
+        assert_eq!(clear(&base).unwrap(), 2);
+        assert_eq!(text(&scratch), "{\n  \"version\": 1,\n  \"entries\": []\n}\n");
+        assert_eq!(groups(&base).unwrap(), GroupList { version: 1, read_only: false, groups: Vec::new() });
+        assert!(scratch.bad().is_empty());
+    }
+
+    // ---- AC30: the cap and the fit protect what the user curated ---------------------------------------
+
+    /// An unprotected OpenCode entry used at `used`.
+    fn plain(n: u64, used: u64) -> Value {
+        entry("opencode", Some(&format!("ses_cap{n:05}")), "/w", None, used, used)
+    }
+
+    #[test]
+    fn the_cap_keeps_every_protected_entry_beside_the_newest_two_hundred() {
+        let scratch = Scratch::new("cap-protected");
+        let base = scratch.base();
+        // Ten protected, older than every other: pinned, renamed, grouped.
+        let mut entries = Vec::new();
+        for n in 1..=10u64 {
+            let mut e = entry("opencode", Some(&format!("ses_kept{n:05}")), "/w", None, n, n);
+            match n {
+                1..=4 => e["pinned"] = json!(true),
+                5..=7 => e["name"] = json!(format!("Mine {n}")),
+                _ => e["groupId"] = json!("g1"),
+            }
+            entries.push(e);
+        }
+        // Two hundred that are not, the two oldest archived only.
+        for n in 1..=200u64 {
+            let mut e = plain(n, 100 + n);
+            if n <= 2 {
+                e["archived"] = json!(true);
+            }
+            entries.push(e);
+        }
+        put(&scratch, &json!({"version": 2, "entries": entries, "groups": [{"id": "g1", "name": "Kept"}]}));
+        assert_eq!(list(&base).unwrap().len(), 210, "premise: all read");
+        for n in 201..=205u64 {
+            upsert(&base, &plain(n, 1000 + n), None).unwrap();
+        }
+        let kept = list(&base).unwrap();
+        assert_eq!(kept.len(), 210);
+        let protected: Vec<String> = kept.iter().filter(|e| e.is_protected()).map(|e| e.key.clone()).collect();
+        assert_eq!(protected.len(), 10, "every protected one kept, the oldest of all");
+        let unprotected: Vec<&Entry> = kept.iter().filter(|e| !e.is_protected()).collect();
+        assert_eq!(unprotected.len(), CAP);
+        assert_eq!(unprotected[0].key, "opencode:ses_cap00205");
+        assert_eq!(unprotected[CAP - 1].key, "opencode:ses_cap00006", "the five oldest went, the two archived ones first");
+        assert!(!kept.iter().any(|e| e.archived), "archived alone protects nothing");
+    }
+
+    #[test]
+    fn a_201st_protected_entry_is_refused_and_changes_nothing() {
+        let scratch = Scratch::new("max-curated");
+        let base = scratch.base();
+        let mut entries: Vec<Value> = (1..=MAX_CURATED as u64)
+            .map(|n| {
+                let mut e = plain(n, n);
+                e["pinned"] = json!(true);
+                e
+            })
+            .collect();
+        entries.push(plain(999, 999));
+        put(&scratch, &json!({"version": 2, "entries": entries, "groups": [{"id": "g1", "name": "Full"}]}));
+        let one_more = "opencode:ses_cap00999";
+        list(&base).unwrap();
+        let unchanged = text(&scratch);
+        for change in [json!({"pinned": true}), json!({"name": "One more"}), json!({"groupId": "g1"}), json!({"archived": true, "pinned": true})] {
+            assert_eq!(update(&base, one_more, &change).unwrap_err(), TOO_MANY_CURATED, "{change}");
+        }
+        assert_eq!(group_create(&base, &json!({"id": "g2", "name": "New"}), Some(one_more)).unwrap_err(), TOO_MANY_CURATED);
+        assert_eq!(text(&scratch), unchanged, "nothing changed: no entry, no group");
+        assert!(TOO_MANY_CURATED.contains(&MAX_CURATED.to_string()));
+        // Archived alone protects nothing; a protected one may change; and
+        // one that is no longer protected makes room.
+        assert!(update(&base, one_more, &json!({"archived": true})).unwrap().unwrap().archived);
+        assert!(update(&base, "opencode:ses_cap00001", &json!({"name": "Renamed", "groupId": "g1"})).is_ok());
+        update(&base, "opencode:ses_cap00002", &json!({"pinned": false})).unwrap();
+        assert!(update(&base, one_more, &json!({"pinned": true})).unwrap().unwrap().pinned);
+    }
+
+    /// A curation drops no entry for CAP (see the module's doc): one it leaves
+    /// unprotected stays until the next recorded event, which keeps the CAP
+    /// most recent.
+    #[test]
+    fn a_curation_drops_no_entry_for_the_cap() {
+        let scratch = Scratch::new("cap-curation");
+        let base = scratch.base();
+        let mut pinned = plain(900, 1);
+        pinned["pinned"] = json!(true);
+        let mut grouped = plain(901, 2);
+        grouped["groupId"] = json!("g1");
+        let mut entries: Vec<Value> = (1..=CAP as u64).map(|n| plain(n, 100 + n)).collect();
+        entries.extend([pinned, grouped]);
+        put(&scratch, &json!({"version": 2, "entries": entries, "groups": [{"id": "g1", "name": "Old"}]}));
+        update(&base, "opencode:ses_cap00900", &json!({"pinned": false})).unwrap();
+        assert_eq!(group_delete(&base, "g1").unwrap(), Some(1));
+        let kept = list(&base).unwrap();
+        assert_eq!(kept.len(), CAP + 2, "both back in the list, and nothing else gone");
+        assert!(kept.iter().all(|e| !e.is_protected()));
+        // The next recorded event keeps the CAP most recent.
+        upsert(&base, &plain(1000, 5000), None).unwrap();
+        let kept = list(&base).unwrap();
+        assert_eq!(kept.len(), CAP);
+        assert_eq!(kept[0].key, "opencode:ses_cap01000");
+        assert_eq!(kept[CAP - 1].key, "opencode:ses_cap00002", "the two once curated and the oldest other went");
+    }
+
+    #[test]
+    fn the_read_size_fit_drops_unprotected_entries_before_any_protected_one() {
+        let scratch = Scratch::new("fit-protected");
+        let base = scratch.base();
+        // Folders at their cap with no id (each in the key a second time) and
+        // titles at theirs: some 10 KB an entry, so about 100 fit.
+        let folder = |n: u64| format!("/{n:04}{}", "d".repeat(MAX_CWD_BYTES - 5));
+        let title = "\u{1f600}".repeat(MAX_TITLE_CHARS);
+        let wide = |n: u64, used: u64| entry("opencode", None, &folder(n), Some(&title), used, used);
+        for n in 1..=20 {
+            let kept = upsert(&base, &wide(n, n), None).unwrap();
+            update(&base, &kept.key, &json!({"pinned": true})).unwrap();
+        }
+        for n in 21..=120 {
+            upsert(&base, &wide(n, 1000 + n), None).unwrap();
+        }
+        assert!(fs::metadata(scratch.file()).unwrap().len() <= MAX_READ_BYTES);
+        let kept = list(&base).unwrap();
+        assert_eq!(kept.iter().filter(|e| e.pinned).count(), 20, "every pinned one, the oldest of all, kept");
+        let unprotected: Vec<&Entry> = kept.iter().filter(|e| !e.pinned).collect();
+        assert!(unprotected.len() < 100 && unprotected.len() > 50, "{} kept", unprotected.len());
+        assert_eq!(unprotected[0].cwd, folder(120), "the newest kept");
+        assert_eq!(unprotected[unprotected.len() - 1].cwd, folder(120 - unprotected.len() as u64 + 1), "the oldest went");
+        assert!(scratch.bad().is_empty());
+
+        // And a protected one only once no other is left: a file of pinned
+        // ones only, which the next write cannot keep all of.
+        let scratch = Scratch::new("fit-protected-only");
+        let base = scratch.base();
+        let pinned: Vec<Value> = (1..=110)
+            .map(|n| {
+                let mut e = wide(n, n);
+                e["pinned"] = json!(true);
+                e
+            })
+            .collect();
+        put(&scratch, &json!({"version": 2, "entries": pinned, "groups": []}));
+        assert!(fs::metadata(scratch.file()).unwrap().len() <= MAX_READ_BYTES, "premise: read, in its short form");
+        assert_eq!(list(&base).unwrap().len(), 110);
+        let written = upsert(&base, &wide(999, 5000), None).unwrap();
+        assert!(fs::metadata(scratch.file()).unwrap().len() <= MAX_READ_BYTES);
+        let kept = list(&base).unwrap();
+        assert_eq!(kept[0], written, "never the one just written");
+        assert!(kept.len() < 111 && kept.len() > 50, "{} kept", kept.len());
+        assert_eq!(kept[1].cwd, folder(110), "the newest pinned kept");
+        assert_eq!(kept[kept.len() - 1].cwd, folder(110 - (kept.len() as u64 - 1) + 1), "the least recently used went");
+    }
+
+    /// Decision 2: a read keeps the newest MAX_CURATED protected entries and
+    /// CAP + MAX_CURATED in all (`within_bounds`), of a file larger than this
+    /// build writes; the next upsert then keeps CAP unprotected (`keep_cap`).
+    #[test]
+    fn a_read_keeps_the_newest_two_hundred_protected_and_four_hundred_in_all() {
+        let scratch = Scratch::new("read-bounds");
+        let base = scratch.base();
+        // 210 pinned, used at 1 to 210; 250 plain ones, newer, used at 1001 to 1250.
+        let mut entries: Vec<Value> = (1..=210u64)
+            .map(|n| {
+                let mut e = plain(n, n);
+                e["pinned"] = json!(true);
+                e
+            })
+            .collect();
+        entries.extend((1001..=1250u64).map(|n| plain(n, n)));
+        put(&scratch, &json!({"version": 2, "entries": entries, "groups": []}));
+        let unchanged = text(&scratch);
+        let key = |n: u64| format!("opencode:ses_cap{n:05}");
+        let range = |from: u64, to: u64| -> Vec<String> { (from..=to).rev().map(key).collect() };
+
+        let listed = list(&base).unwrap();
+        assert_eq!(listed.len(), CAP + MAX_CURATED, "400 in all");
+        let mut expected = range(1001, 1250);
+        expected.extend(range(61, 210));
+        assert_eq!(keys(&listed), expected, "the 250 plain ones, then the newest 150 pinned");
+        assert_eq!(listed.iter().filter(|e| e.pinned).count(), 150);
+        assert_eq!(text(&scratch), unchanged, "a read writes nothing");
+
+        // One plain upsert: the newest CAP plain ones, the written one among
+        // them, beside those 150 pinned; the 60 older pinned ones are gone
+        // from the file (decision 2's accepted limitation).
+        let written = upsert(&base, &plain(2000, 2000), None).unwrap();
+        assert_eq!(written.key, key(2000));
+        let listed = list(&base).unwrap();
+        let mut expected = vec![key(2000)];
+        expected.extend(range(1052, 1250));
+        expected.extend(range(61, 210));
+        assert_eq!(keys(&listed), expected);
+        assert_eq!(listed.iter().filter(|e| !e.is_protected()).count(), CAP);
+        let file: Value = serde_json::from_str(&text(&scratch)).unwrap();
+        assert_eq!(file["entries"].as_array().unwrap().len(), CAP + 150, "and the file holds exactly those");
+
+        // A version 1 file of 450 entries is read as its newest 400.
+        let scratch = Scratch::new("read-bounds-v1");
+        let base = scratch.base();
+        put(&scratch, &json!({"version": 1, "entries": (1..=450u64).map(|n| plain(n, n)).collect::<Vec<Value>>()}));
+        let unchanged = text(&scratch);
+        assert_eq!(keys(&list(&base).unwrap()), range(51, 450));
+        assert_eq!(text(&scratch), unchanged, "a read writes nothing");
+    }
+
+    /// Decision 2, the protected bound alone: of 250 pinned entries newer
+    /// than 100 plain ones a read keeps the newest MAX_CURATED pinned and
+    /// every plain one, though the 350 are fewer than CAP + MAX_CURATED; the
+    /// next upsert keeps what was read and drops nothing for the cap.
+    #[test]
+    fn a_read_keeps_only_the_newest_two_hundred_protected_below_four_hundred_in_all() {
+        let scratch = Scratch::new("read-bounds-protected");
+        let base = scratch.base();
+        // 250 pinned, used at 1001 to 1250; 100 plain ones, older, used at 1 to 100.
+        let mut entries: Vec<Value> = (1001..=1250u64)
+            .map(|n| {
+                let mut e = plain(n, n);
+                e["pinned"] = json!(true);
+                e
+            })
+            .collect();
+        entries.extend((1..=100u64).map(|n| plain(n, n)));
+        assert!(entries.len() < CAP + MAX_CURATED, "premise: the bound of 400 in all cuts nothing");
+        put(&scratch, &json!({"version": 2, "entries": entries, "groups": []}));
+        let unchanged = text(&scratch);
+        let key = |n: u64| format!("opencode:ses_cap{n:05}");
+        let range = |from: u64, to: u64| -> Vec<String> { (from..=to).rev().map(key).collect() };
+
+        let listed = list(&base).unwrap();
+        let mut expected = range(1051, 1250);
+        expected.extend(range(1, 100));
+        assert_eq!(keys(&listed), expected, "the newest 200 pinned, then the 100 plain ones; not the 50 older pinned");
+        assert_eq!(listed.len(), 300);
+        assert_eq!(listed.iter().filter(|e| e.pinned).count(), MAX_CURATED);
+        assert_eq!(text(&scratch), unchanged, "a read writes nothing");
+
+        // One plain upsert, the newest: 101 unprotected are within CAP, so
+        // nothing goes for the cap; the 50 older pinned ones are gone from
+        // the file (decision 2's accepted limitation).
+        let written = upsert(&base, &plain(2000, 2000), None).unwrap();
+        assert_eq!(written.key, key(2000));
+        let listed = list(&base).unwrap();
+        let mut expected = vec![key(2000)];
+        expected.extend(range(1051, 1250));
+        expected.extend(range(1, 100));
+        assert_eq!(keys(&listed), expected, "the written one, the same 200 pinned, the same 100 plain ones");
+        assert_eq!(listed.iter().filter(|e| e.pinned).count(), MAX_CURATED);
+        let file: Value = serde_json::from_str(&text(&scratch)).unwrap();
+        assert_eq!(file["entries"].as_array().unwrap().len(), 301, "and the file holds exactly those");
+    }
 }
 
 /// The other half of the browser mock's contract with this module: a list of
@@ -1767,6 +3401,7 @@ mod contract_tests {
     use serde_json::json;
 
     const CLAUDE_A: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    const CLAUDE_B: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     const OPENCODE_A: &str = "ses_ef45006f5ffeAMtumN5ySj4VmT";
     const OPENCODE_B: &str = "ses_0123456789abcdefGHIJKLMNop";
 
@@ -1811,10 +3446,12 @@ mod contract_tests {
             {"kind": "agy", "sessionId": "agy 1", "cwd": "/w", "startedAt": 2, "lastUsedAt": 2, "extra": {"a": 1}},
             "not an entry",
         ]});
-        let newer = json!({"version": 2, "entries": [
-            entry("claude", Some(CLAUDE_A), "/w", None, 1, 5),
+        // Version 3: the first newer than this build's (AC27), with what this
+        // build can read of its groups and of what was curated.
+        let newer = json!({"version": 3, "entries": [
+            with(with(entry("claude", Some(CLAUDE_A), "/w", None, 1, 5), "pinned", json!(true)), "groupId", json!("g1")),
             {"kind": "claude", "v2": true},
-        ], "settings": {}});
+        ], "groups": [{"id": "g1", "name": "Kept", "collapsed": true}, {"id": "g2", "v3": true}], "settings": {}});
 
         // Every refusal of the unit test, written through the command: the
         // mock must refuse each with the same words.
@@ -1909,7 +3546,7 @@ mod contract_tests {
         fit.push(json!({"op": "remove", "args": {"key": format!("opencode:~{}\u{0}{quoted}", wide(90))}}));
         fit.push(json!({"op": "list"}));
 
-        vec![
+        let mut all = vec![
             ("the first list makes an empty history", vec![json!({"op": "list"})]),
             (
                 "one conversation written twice is one entry",
@@ -2052,7 +3689,7 @@ mod contract_tests {
                     json!({"op": "clear"}),
                     write_file("garbage", None),
                     json!({"op": "list"}),
-                    write_file(r#"{"version":2,"entries":[]}"#, None),
+                    write_file(r#"{"version":3,"entries":[]}"#, None),
                     json!({"op": "clear"}),
                 ],
             ),
@@ -2072,16 +3709,475 @@ mod contract_tests {
                 vec![
                     write_file(&newer.to_string(), None),
                     json!({"op": "list"}),
+                    json!({"op": "groups"}),
                     upsert_op(entry("opencode", Some(OPENCODE_A), "/w", None, 1, 1), None),
+                    unarchive_op(entry("claude", Some(CLAUDE_A), "/w", None, 1, 9), None),
+                    update_op(&format!("claude:{CLAUDE_A}"), json!({"name": "Mine"})),
+                    update_op("claude:nothing-here", json!({"pinned": true})),
+                    create_op(json!({"id": "g2", "name": "New"}), Some(&format!("claude:{CLAUDE_A}"))),
+                    group_update_op("g1", json!({"collapsed": false})),
+                    group_delete_op("g1"),
                     json!({"op": "remove", "args": {"key": format!("claude:{CLAUDE_A}")}}),
                     json!({"op": "clear"}),
                     upsert_op(json!({"kind": 1}), None),
                     json!({"op": "list"}),
+                    json!({"op": "groups"}),
                 ],
             ),
             (
                 "a newer file with no list reads as empty",
-                vec![write_file(r#"{"version":3,"sessions":[]}"#, None), json!({"op": "list"})],
+                vec![write_file(r#"{"version":3,"sessions":[]}"#, None), json!({"op": "list"}), json!({"op": "groups"})],
+            ),
+            ("a fork keeps the conversation it was forked from", fork_scenario()),
+        ];
+        all.extend(curated_scenarios());
+        all
+    }
+
+    /// Fork Conversation: a fork of CLAUDE_A recorded as CLAUDE_B. Its
+    /// `forkOf` is written after the nine fields and only when there is one,
+    /// kept when a later event sends none, curated or not, and never makes
+    /// the file version 2 by itself; one of the wrong shape is refused, and
+    /// dropped from a file.
+    fn fork_scenario() -> Vec<Value> {
+        let source = entry("claude", Some(CLAUDE_A), "/work/app", None, 1, 2);
+        let fork = |started: u64, used: u64| with(entry("claude", Some(CLAUDE_B), "/work/app", None, started, used), "forkOf", json!(CLAUDE_A));
+        let plain = |started: u64, used: u64| entry("claude", Some(CLAUDE_B), "/work/app", None, started, used);
+        let fork_key = format!("claude:{CLAUDE_B}");
+        let in_file = json!({"version": 1, "entries": [
+            fork(3, 9),
+            with(entry("claude", Some(CLAUDE_A), "/w", None, 1, 8), "forkOf", json!("x; curl a | sh")),
+            with(entry("opencode", Some(OPENCODE_A), "/w", None, 1, 7), "forkOf", json!(CLAUDE_A)),
+            with(entry("opencode", Some(OPENCODE_B), "/w", None, 1, 6), "forkOf", json!(OPENCODE_A)),
+            with(entry("claude", None, "/w", None, 1, 5), "forkOf", json!(null)),
+        ]});
+        vec![
+            upsert_op(source.clone(), None),
+            upsert_op(fork(3, 4), None),
+            upsert_op(ended(plain(3, 5), 5, "exited"), None),
+            upsert_op(with(plain(3, 6), "title", json!("From the transcript")), None),
+            upsert_op(with(plain(7, 7), "forkOf", json!(null)), None),
+            json!({"op": "list"}),
+            update_op(&fork_key, json!({"pinned": true})),
+            json!({"op": "list"}),
+            update_op(&fork_key, json!({"pinned": false})),
+            upsert_op(with(entry("opencode", Some(OPENCODE_B), "/w", None, 8, 8), "forkOf", json!(OPENCODE_A)), None),
+            upsert_op(with(entry("claude", None, "/x", None, 9, 9), "forkOf", json!(CLAUDE_A)), None),
+            upsert_op(with(plain(10, 10), "forkOf", json!(OPENCODE_A)), None),
+            upsert_op(with(plain(10, 10), "forkOf", json!(CLAUDE_A.to_uppercase())), None),
+            json!({"op": "list"}),
+            write_file(&in_file.to_string(), None),
+            json!({"op": "list"}),
+            upsert_op(source, None),
+            json!({"op": "list"}),
+        ]
+    }
+
+    fn update_op(key: &str, changes: Value) -> Value {
+        json!({"op": "update", "args": {"key": key, "changes": changes}})
+    }
+
+    fn create_op(group: Value, move_key: Option<&str>) -> Value {
+        match move_key {
+            Some(key) => json!({"op": "group_create", "args": {"group": group, "move_key": key}}),
+            None => json!({"op": "group_create", "args": {"group": group}}),
+        }
+    }
+
+    fn group_update_op(id: &str, changes: Value) -> Value {
+        json!({"op": "group_update", "args": {"id": id, "changes": changes}})
+    }
+
+    fn group_delete_op(id: &str) -> Value {
+        json!({"op": "group_delete", "args": {"id": id}})
+    }
+
+    /// An upsert that unarchives: what the page sends when a conversation is
+    /// started or resumed again.
+    fn unarchive_op(entry: Value, replaces: Option<&str>) -> Value {
+        match replaces {
+            Some(key) => json!({"op": "upsert", "args": {"entry": entry, "replaces": key, "unarchive": true}}),
+            None => json!({"op": "upsert", "args": {"entry": entry, "unarchive": true}}),
+        }
+    }
+
+    /// `e`, with `field` set to `value`: one curated field, in the file.
+    fn curated(mut e: Value, field: &str, value: Value) -> Value {
+        e[field] = value;
+        e
+    }
+
+    /// The sequences of format version 2: what the user curated (AC25-AC30).
+    fn curated_scenarios() -> Vec<(&'static str, Vec<Value>)> {
+        let claude_key = format!("claude:{CLAUDE_A}");
+        let opencode_key = format!("opencode:{OPENCODE_A}");
+        let claude = |started: u64, used: u64| entry("claude", Some(CLAUDE_A), "/w", None, started, used);
+        // `tests::write_two`: an OpenCode conversation that ended, then a
+        // Claude Code one still running.
+        let write_two = vec![
+            upsert_op(ended(entry("opencode", Some(OPENCODE_A), "/w", Some("Title"), 1, 2), 2, "closed"), None),
+            upsert_op(claude(3, 4), None),
+        ];
+        let with_two = |ops: Vec<Value>| -> Vec<Value> { write_two.iter().cloned().chain(ops).collect() };
+        let plain = |n: u64, used: u64| entry("opencode", Some(&format!("ses_cap{n:05}")), "/w", None, used, used);
+
+        // Every curated field refused, through update — before the file is
+        // made — and in a file, where the entry is dropped and the rest kept.
+        let mut refused: Vec<Value> = super::tests::curated_refused_cases()
+            .into_iter()
+            .map(|(field, value, _)| update_op(&claude_key, json!({ field: value })))
+            .collect();
+        for changes in [
+            json!(null),
+            json!([]),
+            json!("pin"),
+            json!({"title": "Mine"}),
+            json!({"pinned": true, "key": "claude:x"}),
+            json!({"pinned": null}),
+            json!({"archived": null}),
+        ] {
+            refused.push(update_op(&claude_key, changes));
+        }
+        let mut in_file = vec![
+            claude(1, 5),
+            curated(entry("opencode", Some("ses_kept00001"), "/w", None, 1, 4), "name", json!("")),
+        ];
+        for (n, (field, value, _)) in super::tests::curated_refused_cases().into_iter().enumerate() {
+            in_file.push(curated(entry("opencode", Some(&format!("ses_bad{n:05}")), "/w", None, 1, 9), field, value));
+        }
+        let mut nulls = claude(1, 3);
+        for field in ["name", "pinned", "archived", "groupId"] {
+            nulls[field] = json!(null);
+        }
+        let mut longest = entry("opencode", Some(OPENCODE_A), "/w", None, 1, 7);
+        longest["name"] = json!("é".repeat(MAX_NAME_CHARS));
+        longest["groupId"] = json!(format!("{}{}", "Az09_-".repeat(10), "abcd"));
+        longest["pinned"] = json!(false);
+        in_file.extend([nulls, longest]);
+        let in_file_groups = json!([{"id": format!("{}{}", "Az09_-".repeat(10), "abcd"), "name": "n".repeat(MAX_GROUP_NAME_CHARS)}]);
+
+        let in_group = |id: &str, n: u64| curated(entry("opencode", Some(&format!("ses_grp{n:05}")), "/w", None, n, n), "groupId", json!(id));
+
+        // The cap: ten protected entries older than two hundred others.
+        let mut capped = Vec::new();
+        for n in 1..=10u64 {
+            let e = entry("opencode", Some(&format!("ses_kept{n:05}")), "/w", None, n, n);
+            capped.push(match n {
+                1..=4 => curated(e, "pinned", json!(true)),
+                5..=7 => curated(e, "name", json!(format!("Mine {n}"))),
+                _ => curated(e, "groupId", json!("g1")),
+            });
+        }
+        for n in 1..=200u64 {
+            let e = plain(n, 100 + n);
+            capped.push(if n <= 2 { curated(e, "archived", json!(true)) } else { e });
+        }
+        let mut cap = vec![write_file(&json!({"version": 2, "entries": capped, "groups": [{"id": "g1", "name": "Kept"}]}).to_string(), None)];
+        for n in 201..=205u64 {
+            cap.push(upsert_op(plain(n, 1000 + n), None));
+        }
+        cap.push(json!({"op": "list"}));
+
+        // At most MAX_CURATED protected.
+        let mut full: Vec<Value> = (1..=MAX_CURATED as u64).map(|n| curated(plain(n, n), "pinned", json!(true))).collect();
+        full.push(plain(999, 999));
+        let one_more = "opencode:ses_cap00999";
+        let max_curated = vec![
+            write_file(&json!({"version": 2, "entries": full, "groups": [{"id": "g1", "name": "Full"}]}).to_string(), None),
+            update_op(one_more, json!({"pinned": true})),
+            update_op(one_more, json!({"name": "One more"})),
+            update_op(one_more, json!({"groupId": "g1"})),
+            update_op(one_more, json!({"archived": true, "pinned": true})),
+            create_op(json!({"id": "g2", "name": "New"}), Some(one_more)),
+            json!({"op": "groups"}),
+            update_op(one_more, json!({"archived": true})),
+            update_op("opencode:ses_cap00001", json!({"name": "Renamed", "groupId": "g1"})),
+            update_op("opencode:ses_cap00002", json!({"pinned": false})),
+            update_op(one_more, json!({"pinned": true})),
+            json!({"op": "list"}),
+        ];
+
+        // A curation drops no entry for the cap; the next recorded event does.
+        let mut returned: Vec<Value> = (1..=CAP as u64).map(|n| plain(n, 100 + n)).collect();
+        returned.push(curated(plain(900, 1), "pinned", json!(true)));
+        returned.push(curated(plain(901, 2), "groupId", json!("g1")));
+        let no_cap_for_a_curation = vec![
+            write_file(&json!({"version": 2, "entries": returned, "groups": [{"id": "g1", "name": "Old"}]}).to_string(), None),
+            update_op("opencode:ses_cap00900", json!({"pinned": false})),
+            group_delete_op("g1"),
+            json!({"op": "list"}),
+            upsert_op(plain(1000, 5000), None),
+            json!({"op": "list"}),
+        ];
+
+        // The read-size fit (`fitted_text`): the folders and titles of the
+        // older fit scenario, a fifth of them pinned and the oldest; then
+        // pinned ones only. Written short, as a hand might, so that the next
+        // write is the one that must fit.
+        let wide = |n: u64| format!("C:\\{n:03}{}", "\\x".repeat(2045));
+        let quoted = "\"".repeat(MAX_TITLE_CHARS);
+        let wide_entry = |n: u64, used: u64| entry("opencode", None, &wide(n), Some(&quoted), used, used);
+        let mixed: Vec<Value> = (1..=90u64)
+            .map(|n| if n <= 20 { curated(wide_entry(n, n), "pinned", json!(true)) } else { wide_entry(n, 100 + n) })
+            .collect();
+        let pinned_only: Vec<Value> = (1..=90u64).map(|n| curated(wide_entry(n, n), "pinned", json!(true))).collect();
+
+        // The read bound (`within_bounds`, decision 2): 210 pinned and 250
+        // newer plain ones are read as the 250 and the newest 150 pinned;
+        // a version 1 file of 450 as its newest 400.
+        let mut beyond: Vec<Value> = (1..=210u64).map(|n| curated(plain(n, n), "pinned", json!(true))).collect();
+        beyond.extend((1001..=1250u64).map(|n| plain(n, n)));
+        let beyond_v1: Vec<Value> = (1..=450u64).map(|n| plain(n, n)).collect();
+        // The protected bound alone: 250 pinned newer than 100 plain ones
+        // are read as the newest 200 pinned and the 100, 300 in all.
+        let mut beyond_protected: Vec<Value> =
+            (1001..=1250u64).map(|n| curated(plain(n, n), "pinned", json!(true))).collect();
+        beyond_protected.extend((1..=100u64).map(|n| plain(n, n)));
+
+        vec![
+            (
+                "an uncurated history is version 1, a curated one version 2",
+                with_two(vec![
+                    json!({"op": "groups"}),
+                    update_op(&claude_key, json!({"pinned": true})),
+                    json!({"op": "groups"}),
+                    update_op(&claude_key, json!({"pinned": false})),
+                    json!({"op": "groups"}),
+                    update_op(&claude_key, json!({"archived": true})),
+                    update_op(&claude_key, json!({"archived": false, "name": "Mine"})),
+                    update_op(&claude_key, json!({"name": ""})),
+                    create_op(json!({"id": "g1", "name": "Work"}), None),
+                    json!({"op": "list"}),
+                    json!({"op": "groups"}),
+                    group_delete_op("g1"),
+                    json!({"op": "list"}),
+                ]),
+            ),
+            (
+                "every curated field, written as version 2",
+                with_two(vec![
+                    create_op(json!({"id": "g1", "name": "Work"}), Some(&claude_key)),
+                    create_op(json!({"id": "g2", "name": "Play"}), Some(&opencode_key)),
+                    group_update_op("g1", json!({"collapsed": true})),
+                    update_op(&claude_key, json!({"name": "Mine", "pinned": true, "archived": true})),
+                    update_op(&opencode_key, json!({"name": "Theirs"})),
+                    json!({"op": "list"}),
+                    json!({"op": "groups"}),
+                    upsert_op(claude(3, 4), None),
+                ]),
+            ),
+            (
+                "a version 2 file is read and written",
+                vec![
+                    write_file(&json!({"version": 2, "entries": [
+                        curated(curated(curated(curated(claude(3, 4), "name", json!("Mine")), "pinned", json!(true)), "archived", json!(true)), "groupId", json!("g1")),
+                        curated(entry("opencode", Some(OPENCODE_A), "/w", Some("Title"), 1, 2), "groupId", json!("g2")),
+                    ], "groups": [{"id": "g1", "name": "Work", "collapsed": true}, {"id": "g2", "name": "Play", "collapsed": false}]}).to_string(), None),
+                    json!({"op": "list"}),
+                    json!({"op": "groups"}),
+                    upsert_op(claude(3, 10), None),
+                    json!({"op": "remove", "args": {"key": opencode_key.clone()}}),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "version 2 must have its entries too",
+                vec![
+                    write_file(r#"{"version":2}"#, None),
+                    json!({"op": "list"}),
+                    write_file(r#"{"version":2,"entries":{},"groups":[]}"#, None),
+                    json!({"op": "groups"}),
+                    write_file(r#"{"version":2,"entries":[],"groups":[]}"#, None),
+                    json!({"op": "groups"}),
+                ],
+            ),
+            (
+                "update changes only what it names",
+                with_two(vec![
+                    update_op(&claude_key, json!({"name": "Mine"})),
+                    update_op(&opencode_key, json!({"pinned": true, "archived": true})),
+                    update_op(&claude_key, json!({"name": null})),
+                    update_op(&claude_key, json!({})),
+                    update_op("claude:nothing-here", json!({"pinned": true})),
+                    update_op(&claude_key, json!({"groupId": "g1"})),
+                    create_op(json!({"id": "g1", "name": "Work"}), None),
+                    update_op(&claude_key, json!({"groupId": "g1"})),
+                    update_op(&opencode_key, json!({"groupId": "g1", "pinned": false})),
+                    update_op(&claude_key, json!({"groupId": null})),
+                    json!({"op": "list"}),
+                ]),
+            ),
+            ("update refuses what is not a change, and nothing is made", refused),
+            (
+                "curated fields of the wrong shape drop their entry from a valid file",
+                vec![
+                    write_file(&json!({"version": 2, "entries": in_file, "groups": in_file_groups}).to_string(), None),
+                    json!({"op": "list"}),
+                    upsert_op(claude(1, 6), None),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "groups are read leniently, each dropped by itself",
+                vec![
+                    write_file(&json!({"version": 2, "entries": [in_group("g1", 1)], "groups": null}).to_string(), None),
+                    json!({"op": "list"}),
+                    write_file(&json!({"version": 2, "entries": [in_group("g1", 1)], "groups": {"g1": {"name": "G"}}}).to_string(), None),
+                    json!({"op": "groups"}),
+                    write_file(&json!({"version": 2, "entries": [in_group("g1", 1)], "groups": "g1"}).to_string(), None),
+                    json!({"op": "list"}),
+                    write_file(&json!({"version": 2, "entries": [in_group("g1", 1)]}).to_string(), None),
+                    json!({"op": "list"}),
+                    write_file(&json!({"version": 2, "entries": [
+                        in_group("ok-1", 1), in_group("bad-name-1", 2), in_group("ok-51", 3), in_group("ok-50", 4),
+                    ], "groups": super::tests::group_cases()}).to_string(), None),
+                    json!({"op": "list"}),
+                    json!({"op": "groups"}),
+                    upsert_op(claude(9, 9), None),
+                    json!({"op": "groups"}),
+                ],
+            ),
+            (
+                "a recorded event never changes what the user curated",
+                vec![
+                    upsert_op(claude(100, 100), None),
+                    create_op(json!({"id": "g1", "name": "Work"}), Some(&claude_key)),
+                    update_op(&claude_key, json!({"name": "Mine", "pinned": true, "archived": true})),
+                    upsert_op(with(claude(100, 200), "title", json!("Fix the build")), None),
+                    upsert_op(ended(claude(100, 300), 300, "exited"), None),
+                    upsert_op(with(ended(claude(100, 300), 300, "exited"), "title", json!("From the transcript")), None),
+                    upsert_op(curated(curated(curated(curated(claude(100, 400), "name", json!("Other")), "pinned", json!(false)), "archived", json!(false)), "groupId", json!("g2")), None),
+                    upsert_op(curated(curated(claude(100, 400), "pinned", json!("yes")), "name", json!(5)), None),
+                    unarchive_op(claude(500, 500), None),
+                    unarchive_op(claude(500, 600), None),
+                    unarchive_op(entry("opencode", Some(OPENCODE_B), "/w", None, 1, 1), None),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "a provisional entry's curation goes with it when it is replaced",
+                vec![
+                    upsert_op(entry("opencode", None, "/w", None, 100, 100), None),
+                    create_op(json!({"id": "g1", "name": "Work"}), Some("opencode:~/w\u{0}")),
+                    update_op("opencode:~/w\u{0}", json!({"name": "Mine", "archived": true})),
+                    upsert_op(entry("opencode", Some(OPENCODE_A), "/w", Some("Fix it"), 100, 200), Some("opencode:~/w\u{0}")),
+                    upsert_op(entry("opencode", None, "/x", None, 300, 300), None),
+                    create_op(json!({"id": "g2", "name": "Play"}), Some("opencode:~/x\u{0}")),
+                    update_op("opencode:~/x\u{0}", json!({"name": "Provisional", "pinned": true, "archived": true})),
+                    update_op(&opencode_key, json!({"archived": false})),
+                    upsert_op(entry("opencode", Some(OPENCODE_A), "/w", Some("Fix it"), 100, 400), Some("opencode:~/x\u{0}")),
+                    update_op(&opencode_key, json!({"name": null, "groupId": null, "pinned": false})),
+                    upsert_op(entry("opencode", None, "/y", None, 500, 500), None),
+                    update_op("opencode:~/y\u{0}", json!({"groupId": "g2"})),
+                    unarchive_op(entry("opencode", Some(OPENCODE_A), "/w", None, 100, 600), Some("opencode:~/y\u{0}")),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "groups are made, renamed, folded and deleted",
+                with_two(vec![
+                    create_op(json!({"id": "g1", "name": "Work", "collapsed": true, "colour": "red"}), None),
+                    create_op(json!({"id": "g2", "name": "Play"}), Some(&claude_key)),
+                    create_op(json!({"id": "g3", "name": "Empty"}), Some("claude:nothing-here")),
+                    create_op(json!("g4"), None),
+                    create_op(json!(null), None),
+                    create_op(json!({"id": "has space", "name": "Work"}), None),
+                    create_op(json!({"id": "g".repeat(MAX_GROUP_ID_CHARS + 1), "name": "Work"}), None),
+                    create_op(json!({"id": 4, "name": "Work"}), None),
+                    create_op(json!({"name": "Work"}), None),
+                    create_op(json!({"id": "g4"}), None),
+                    create_op(json!({"id": "g4", "name": ""}), None),
+                    create_op(json!({"id": "g4", "name": "n".repeat(MAX_GROUP_NAME_CHARS + 1)}), None),
+                    create_op(json!({"id": "g4", "name": "one\ntwo"}), None),
+                    create_op(json!({"id": "g4", "name": "a\u{2066}b"}), None),
+                    create_op(json!({"id": "g1", "name": "Again"}), None),
+                    group_update_op("g1", json!({"name": "Office"})),
+                    group_update_op("g1", json!({"collapsed": true})),
+                    group_update_op("g9", json!({"collapsed": true})),
+                    group_update_op("has space", json!({"collapsed": true})),
+                    group_update_op("", json!({"collapsed": true})),
+                    group_update_op("g1", json!(null)),
+                    group_update_op("g1", json!({"id": "g5"})),
+                    group_update_op("g1", json!({"name": null})),
+                    group_update_op("g1", json!({"name": ""})),
+                    group_update_op("g1", json!({"collapsed": "yes"})),
+                    group_update_op("g1", json!({"collapsed": null})),
+                    update_op(&opencode_key, json!({"groupId": "g2", "pinned": true})),
+                    json!({"op": "list"}),
+                    group_delete_op("g2"),
+                    group_delete_op("g2"),
+                    group_delete_op("g3"),
+                    group_delete_op("bad id"),
+                    json!({"op": "list"}),
+                    json!({"op": "groups"}),
+                ]),
+            ),
+            (
+                "there are at most fifty groups",
+                with_two(
+                    (0..MAX_GROUPS)
+                        .map(|n| create_op(json!({"id": format!("g{n}"), "name": format!("Group {n}")}), None))
+                        .chain([
+                            create_op(json!({"id": "g50", "name": "One more"}), Some(&claude_key)),
+                            group_delete_op("g0"),
+                            create_op(json!({"id": "g50", "name": "One more"}), None),
+                            json!({"op": "groups"}),
+                        ])
+                        .collect(),
+                ),
+            ),
+            (
+                "clear deletes the groups, and leaves the version 1 empty history",
+                with_two(vec![
+                    write_file("{not json", None),
+                    json!({"op": "list"}),
+                    upsert_op(claude(3, 4), None),
+                    create_op(json!({"id": "g1", "name": "Work"}), Some(&claude_key)),
+                    update_op(&claude_key, json!({"pinned": true})),
+                    json!({"op": "clear"}),
+                    json!({"op": "groups"}),
+                    json!({"op": "list"}),
+                ]),
+            ),
+            ("the cap keeps every protected entry beside the newest two hundred", cap),
+            ("a 201st protected entry is refused and changes nothing", max_curated),
+            ("a curation drops no entry for the cap", no_cap_for_a_curation),
+            (
+                "the read-size fit drops unprotected entries before any protected one",
+                vec![
+                    write_file(&json!({"version": 2, "entries": mixed, "groups": []}).to_string(), None),
+                    upsert_op(wide_entry(91, 1000), None),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "the read-size fit drops a protected entry only once no other is left",
+                vec![
+                    write_file(&json!({"version": 2, "entries": pinned_only, "groups": []}).to_string(), None),
+                    upsert_op(wide_entry(91, 1000), None),
+                ],
+            ),
+            (
+                "a read keeps the newest two hundred protected and four hundred in all",
+                vec![
+                    write_file(&json!({"version": 2, "entries": beyond, "groups": []}).to_string(), None),
+                    json!({"op": "list"}),
+                    upsert_op(plain(2000, 2000), None),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "a read keeps only the newest two hundred protected, below four hundred in all",
+                vec![
+                    write_file(&json!({"version": 2, "entries": beyond_protected, "groups": []}).to_string(), None),
+                    json!({"op": "list"}),
+                    upsert_op(plain(2000, 2000), None),
+                    json!({"op": "list"}),
+                ],
+            ),
+            (
+                "a version 1 file of 450 entries is read as its newest 400",
+                vec![write_file(&json!({"version": 1, "entries": beyond_v1}).to_string(), None), json!({"op": "list"})],
             ),
         ]
     }
@@ -2093,11 +4189,19 @@ mod contract_tests {
         }
     }
 
+    /// One op of a sequence. The arguments are the commands' own, by the
+    /// names the page gives them (snake_case: `move_key`), so that the mock
+    /// is called with each exactly as the page calls the backend.
     fn run(base: &Path, op: &Value) -> Value {
         let args = &op["args"];
         match op["op"].as_str().unwrap() {
             "list" => answer(list(base)),
-            "upsert" => answer(upsert(base, &args["entry"], args["replaces"].as_str())),
+            "groups" => answer(groups(base)),
+            "upsert" => answer(upsert_with(base, &args["entry"], args["replaces"].as_str(), args["unarchive"] == json!(true))),
+            "update" => answer(update(base, args["key"].as_str().unwrap(), &args["changes"])),
+            "group_create" => answer(group_create(base, &args["group"], args["move_key"].as_str())),
+            "group_update" => answer(group_update(base, args["id"].as_str().unwrap(), &args["changes"])),
+            "group_delete" => answer(group_delete(base, args["id"].as_str().unwrap())),
             "remove" => answer(remove(base, args["key"].as_str().unwrap())),
             "clear" => answer(clear(base)),
             "delete_file" => {
@@ -2155,7 +4259,10 @@ mod contract_tests {
                 "file": FILE, "version": VERSION, "cap": CAP, "maxReadBytes": MAX_READ_BYTES, "keepBad": KEEP_BAD,
                 "maxCwdBytes": MAX_CWD_BYTES, "maxTitleChars": MAX_TITLE_CHARS, "maxOtherIdChars": MAX_OTHER_ID_CHARS,
                 "maxInteger": MAX_INTEGER, "newerVersion": NEWER_VERSION, "invalid": INVALID,
-                "copiesLeft": COPIES_LEFT,
+                "copiesLeft": COPIES_LEFT, "uncuratedVersion": UNCURATED_VERSION, "maxCurated": MAX_CURATED,
+                "maxGroups": MAX_GROUPS, "maxNameChars": MAX_NAME_CHARS, "maxGroupNameChars": MAX_GROUP_NAME_CHARS,
+                "maxGroupIdChars": MAX_GROUP_ID_CHARS, "invalidGroup": INVALID_GROUP, "tooManyGroups": TOO_MANY_GROUPS,
+                "tooManyCurated": TOO_MANY_CURATED,
             },
             "scenarios": out,
         });

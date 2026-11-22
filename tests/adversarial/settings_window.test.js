@@ -281,15 +281,22 @@ describe('Settings: what a focused terminal never sees', () => {
     // the wrong answer for someone looking for what took a key from their
     // shell. And a command with no key takes nothing from anyone: Mark All
     // Notifications Read is claimed over a terminal, and has no default.
+    // The keys in force on the platform: off macOS Go to Tab 1's only chord
+    // is the macOS \u{2318}1, which takes nothing from a shell there (B-R2).
     const overTerminalNote = await exported('overTerminalNote');
-    const note = overTerminalNote();
-    for (const { id, title } of configurableCommands()) {
-      const takes = COMMANDS[id].overTerminal && keysFor(id).length > 0;
-      if (takes) assert.ok(note.includes(title), `${title} takes a key over a terminal and is not named`);
-      else assert.ok(!note.includes(title), `${title} takes no key over a terminal, yet is named`);
+    for (const isMac of [true, false]) {
+      const note = overTerminalNote(undefined, undefined, { isMac });
+      for (const { id, title } of configurableCommands()) {
+        const takes = COMMANDS[id].overTerminal && keysFor(id, undefined, { isMac }).length > 0;
+        if (takes) assert.ok(note.includes(title), `isMac ${isMac}: ${title} takes a key over a terminal and is not named`);
+        else assert.ok(!note.includes(title), `isMac ${isMac}: ${title} takes no key over a terminal, yet is named`);
+      }
+      assert.ok(!note.includes('Mark All Notifications Read'), 'no key, not named');
+      assert.ok(!/only the two side-bar toggles/.test(note));
+      assert.equal(/\bGo to Tab 1\b/.test(note), isMac, `isMac ${isMac}: Go to Tab 1 named only on macOS`);
+      assert.equal(note.includes('Go to Last Tab'), isMac, `isMac ${isMac}: Go to Last Tab named only on macOS`);
+      assert.ok(note.includes('Next Tab'), `isMac ${isMac}: Next Tab keeps Ctrl+PageDown everywhere`);
     }
-    assert.ok(!note.includes('Mark All Notifications Read'), 'no key, not named');
-    assert.ok(!/only the two side-bar toggles/.test(note));
     // What the user has bound is what counts.
     const { bindings } = resolveKeybindings({ 'mark-notifications-read': 'mod+alt+u', 'find-in-terminal': null });
     const rebound = overTerminalNote(undefined, bindings);
@@ -303,6 +310,46 @@ describe('Settings: what a focused terminal never sees', () => {
     const html = renderToString(h(KeybindingSettings));
     const text = html.replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
     assert.ok(text.includes(overTerminalNote()), 'the section does not draw the generated note');
+  });
+
+  test('SW-15: off macOS the rows show no macOS-only \u{2318} chord \u{2014} Go to Tab 1 is Unassigned, Next Tab is Ctrl+PageDown alone', async () => {
+    const KeybindingSettings = await exported('KeybindingSettings');
+    const overTerminalNote = await exported('overTerminalNote');
+    const visible = (html) => html.replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
+    /** A row's title-to-chords map, as drawn: the `<kbd>`s that follow its title. */
+    const rowsOf = (html) => {
+      const rows = new Map();
+      for (const row of html.split(/(?=<div class="py-1\.5 border-b)/).slice(1)) {
+        const title = /<span class="flex-1[^"]*">([^<]*)<\/span>/.exec(row)?.[1];
+        if (!title) continue;
+        rows.set(title, {
+          keys: [...row.matchAll(/<kbd\b[^>]*>([\s\S]*?)<\/kbd>/g)].map((m) => visible(m[1])),
+          unassigned: row.includes('Unassigned'),
+        });
+      }
+      return rows;
+    };
+    for (const [name, platform] of [['Windows', { isMac: false, isWindows: true }], ['Linux', { isMac: false, isWindows: false }]]) {
+      const html = renderToString(h(KeybindingSettings, { platform }));
+      const rows = rowsOf(html);
+      for (const title of ['Go to Tab 1', 'Go to Tab 8', 'Go to Last Tab']) {
+        assert.ok(rows.has(title), `${name}: the ${title} row is drawn`);
+        assert.deepEqual(rows.get(title).keys, [], `${name}: ${title} shows no chord`);
+        assert.ok(rows.get(title).unassigned, `${name}: ${title} reads Unassigned`);
+      }
+      assert.deepEqual(rows.get('Next Tab').keys, ['Ctrl+PageDown'], `${name}: Next Tab`);
+      assert.deepEqual(rows.get('Previous Tab').keys, ['Ctrl+PageUp'], `${name}: Previous Tab`);
+      const shown = [...rows.values()].flatMap((r) => r.keys);
+      assert.ok(!shown.includes('Cmd+1') && !shown.includes('Cmd+9'), `${name}: no Cmd+1 or Cmd+9 anywhere`);
+      assert.ok(!shown.some((k) => /Cmd\+Shift\+[[\]]/.test(k)), `${name}: no Cmd+Shift+[ or ]`);
+      const text = visible(html);
+      assert.ok(text.includes(overTerminalNote(undefined, undefined, { isMac: false })), `${name}: the note is the one for off macOS`);
+    }
+    // On macOS the same rows carry the \u{2318} defaults.
+    const mac = rowsOf(renderToString(h(KeybindingSettings, { platform: { isMac: true, isWindows: false } })));
+    assert.deepEqual(mac.get('Go to Tab 1').keys, ['\u{2318}1']);
+    assert.deepEqual(mac.get('Go to Last Tab').keys, ['\u{2318}9']);
+    assert.equal(mac.get('Next Tab').keys.length, 2, 'macOS: Ctrl+PageDown and \u{2318}\u{21E7}]');
   });
 });
 
@@ -353,5 +400,148 @@ describe('Settings: Restore Scrollback says where, and Clear asks first', () => 
     assert.equal((src.match(/clearSavedScrollback\(\)/g) ?? []).length, 1, 'cleared from somewhere other than the answer');
     // Asked afresh each time the window opens.
     assert.match(src, /setResetQuestion\(null\);\s*setClearAsked\(false\);/);
+  });
+});
+
+describe('Settings: Copy Context Lines (bundle 1, A3)', () => {
+  test('SW-22: a number row in the terminal section, 1 to 10000, 200 by default, saying secrets are masked and nothing is written to a file', async () => {
+    const buildItems = await exported('buildItems');
+    const numberToCommit = await exported('numberToCommit');
+    const { SETTINGS_DEFAULTS } = await import('../../src/stores/settingsStore.js');
+    const rows = buildItems('', [], '');
+    const row = rows.find((r) => r.id === 'terminalCopyContextLines');
+    assert.ok(row, 'no Copy Context Lines row');
+    assert.equal(rows.filter((r) => r.key === 'terminalCopyContextLines').length, 1, 'one row for the setting');
+    assert.deepEqual(
+      [row.section, row.key, row.control, row.min, row.max, row.title],
+      ['terminal', 'terminalCopyContextLines', 'number', 1, 10000, 'Copy Context Lines']
+    );
+    assert.equal(SETTINGS_DEFAULTS[row.key], 200);
+    assert.match(row.description, /\[hidden\]/);
+    assert.match(row.description, /Nothing is written to a file/);
+    // Held to its range as it is committed; a blank or junk field keeps what was saved.
+    assert.equal(numberToCommit('0', row, 200), 1);
+    assert.equal(numberToCommit('-4', row, 200), 1);
+    assert.equal(numberToCommit('25000', row, 200), 10000);
+    assert.equal(numberToCommit('350', row, 200), 350);
+    assert.equal(numberToCommit('', row, 200), 200);
+    assert.equal(numberToCommit('lots', row, 200), 200);
+    // The window hands the row its value.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(src, /const terminalCopyContextLines = useSettingsStore\(\(s\) => s\.terminalCopyContextLines\);/);
+    assert.match(src, /const values = \{[^}]*\n    terminalCopyContextLines,\n/);
+  });
+});
+
+describe('Settings: Keep the Computer Awake While an Agent Works (bundle 1, A4)', () => {
+  test("SW-23: a checkbox row in the terminal section, off by default, saying the display may still sleep — and 'not available on this system' when unsupported", async () => {
+    const buildItems = await exported('buildItems');
+    const { SETTINGS_DEFAULTS } = await import('../../src/stores/settingsStore.js');
+    const rowFor = (support) => buildItems('', [], '', support).find((r) => r.id === 'terminalKeepAwakeWhileAgentsWork');
+    const row = rowFor(null);
+    assert.ok(row, 'no keep-awake row');
+    assert.equal(buildItems('', [], '').filter((r) => r.key === 'terminalKeepAwakeWhileAgentsWork').length, 1, 'one row for the setting');
+    assert.deepEqual(
+      [row.section, row.key, row.control, row.title],
+      ['terminal', 'terminalKeepAwakeWhileAgentsWork', 'checkbox', 'Keep the Computer Awake While an Agent Works']
+    );
+    assert.equal(SETTINGS_DEFAULTS[row.key], false, 'on by default');
+    // Not known yet, or supported: what it does, and that the display may still sleep.
+    for (const support of [null, { supported: true, method: 'caffeinate' }, { supported: true, method: 'SetThreadExecutionState' }]) {
+      const words = rowFor(support).description;
+      assert.match(words, /Claude Code terminal is working/);
+      assert.match(words, /The display may still turn off and lock\./);
+      assert.doesNotMatch(words, /not available/i, `unsupported while ${JSON.stringify(support)}`);
+    }
+    // Unsupported: said so, in the row itself.
+    const unsupported = rowFor({ supported: false, method: 'none' }).description;
+    assert.match(unsupported, /The display may still turn off and lock\./);
+    assert.match(unsupported, /Not available on this system\.$/);
+    // The window asks the shared support question when it opens, hands the answer to the rows, and the row its value.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(src, /keepAwakeSupport\(\)\.then\(\(answer\) => \{\s*if \(!cancelled\) setKeepAwake\(answer\);/);
+    assert.match(src, /buildItems\(monoPlaceholder, detectedShells, homeDir, keepAwake\),\s*\[monoPlaceholder, detectedShells, homeDir, keepAwake\]/);
+    assert.match(src, /const terminalKeepAwakeWhileAgentsWork = useSettingsStore\(\(s\) => s\.terminalKeepAwakeWhileAgentsWork\);/);
+    assert.match(src, /const values = \{[^}]*\n    terminalKeepAwakeWhileAgentsWork,\n/);
+  });
+});
+
+describe('Settings: bundle 2 rows', () => {
+  // The macOS-only rows (A6, A7): in the Terminal section on macOS, and not
+  // there at all elsewhere — a ⌘ or ⌥ setting does nothing on Windows or Linux.
+  const MAC_ONLY = [
+    ['terminalMacEditingKeys', 'macOS Text-Editing Keys'],
+    ['terminalOptionAsMeta', 'Use Option as Meta'],
+  ];
+
+  test('SW-B2-01: buildItems has the macOS-only rows on macOS only, one checkbox each in Terminal', async () => {
+    const buildItems = await exported('buildItems');
+    const mac = buildItems('', [], '', null, { mac: true });
+    const other = buildItems('', [], '', null, { mac: false });
+    for (const [key, title] of MAC_ONLY) {
+      const rows = mac.filter((r) => r.key === key);
+      assert.equal(rows.length, 1, `one ${key} row on macOS`);
+      assert.deepEqual([rows[0].id, rows[0].section, rows[0].control, rows[0].title], [key, 'terminal', 'checkbox', title]);
+      assert.equal(other.filter((r) => r.key === key || r.id === key).length, 0, `no ${key} row off macOS`);
+    }
+    // Nothing else depends on the platform flag.
+    const macOnly = new Set(MAC_ONLY.map(([key]) => key));
+    assert.deepEqual(mac.filter((r) => !macOnly.has(r.key)).map((r) => r.id), other.map((r) => r.id));
+    // The ⌘ keys row says what each key sends and where it does not.
+    const editing = mac.find((r) => r.key === 'terminalMacEditingKeys').description;
+    for (const words of [/⌘← and ⌘→/, /Ctrl\+A, Ctrl\+E, Ctrl\+U and Ctrl\+K/, /full-screen program/, /password prompt is up only ⌘Backspace/]) {
+      assert.match(editing, words);
+    }
+    // The Option as Meta row states the trade: ⌥-characters and dead keys go; the mouse, ⌥Enter and ⌥←/→ stay.
+    const meta = mac.find((r) => r.key === 'terminalOptionAsMeta').description;
+    for (const words of [/⌥-characters/, /™, €/, /@ \[ \] \{ \} \| ~/, /dead keys/, /⌥-drag still selects/, /⌥Enter still sends Esc Enter/, /⌥← \/ ⌥→ still move a word/]) {
+      assert.match(meta, words);
+    }
+    // OSC 52 (A8): one checkbox in Terminal on every platform, whose words
+    // say it is writes only, what is refused, and why it starts off.
+    for (const rows of [mac, other]) {
+      const osc52 = rows.filter((r) => r.key === 'terminalOsc52Write');
+      assert.equal(osc52.length, 1, 'one terminalOsc52Write row');
+      assert.deepEqual(
+        [osc52[0].id, osc52[0].section, osc52[0].control, osc52[0].title],
+        ['terminalOsc52Write', 'terminal', 'checkbox', 'Let Programs Set the Clipboard (OSC 52)']
+      );
+      for (const words of [/Off by default/, /never reads the clipboard and never clears it/, /more than 128 KiB is refused whole/, /kept from before a terminal was shown is ignored/, /one notice/, /Nothing a program copies is logged/]) {
+        assert.match(osc52[0].description, words);
+      }
+    }
+    // The external editor (A12-3): one text row in Files on every platform,
+    // whose words say what is run, how, and what is refused.
+    for (const rows of [mac, other]) {
+      const editor = rows.filter((r) => r.key === 'externalEditorCommand');
+      assert.equal(editor.length, 1, 'one externalEditorCommand row');
+      assert.deepEqual(
+        [editor[0].id, editor[0].section, editor[0].control, editor[0].title],
+        ['externalEditorCommand', 'files', 'text', 'External Editor']
+      );
+      assert.match(
+        editor[0].description,
+        /^A program and its arguments, for example code or subl -w; run without a shell, with the path added as the last argument\./
+      );
+      for (const words of [/Open in External Editor/, /files, folders and the open folder/, /A shell, an app that opens files in their default app \(open, xdg-open, start, explorer\) or a wrapper that runs its arguments \(env, xargs, wsl\) is refused\./, /guards against a mistake and is not a sandbox/, /interpreters such as python or node are not refused/, /Empty: no such item/]) {
+        assert.match(editor[0].description, words);
+      }
+      assert.equal(editor[0].placeholder, 'Not set', 'blank reads as none, not as a default editor');
+    }
+    // The window hands each row its value, and asks for the rows of the platform it runs on.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(src, /export function buildItems\(monoPlaceholder, detectedShells, homeDir, keepAwake = null, \{ mac = isMac \} = \{\}\)/);
+    for (const [key] of [...MAC_ONLY, ['terminalOsc52Write'], ['externalEditorCommand']]) {
+      assert.match(src, new RegExp(`const ${key} = useSettingsStore\\(\\(s\\) => s\\.${key}\\);`));
+      assert.match(src, new RegExp(`const values = \\{[^}]*\\n    ${key},\\n`));
+    }
+  });
+
+  test('SW-B2-02: the defaults — macOS Text-Editing Keys on, Use Option as Meta and OSC 52 writes off, no external editor', async () => {
+    const { SETTINGS_DEFAULTS } = await import('../../src/stores/settingsStore.js');
+    assert.equal(SETTINGS_DEFAULTS.terminalMacEditingKeys, true);
+    assert.equal(SETTINGS_DEFAULTS.terminalOptionAsMeta, false);
+    assert.equal(SETTINGS_DEFAULTS.terminalOsc52Write, false);
+    assert.equal(SETTINGS_DEFAULTS.externalEditorCommand, '');
   });
 });

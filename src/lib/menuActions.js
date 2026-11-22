@@ -11,6 +11,7 @@ import { DEFAULT_RESOLVED, keysFor, shortcutLabel } from './keybindings.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
+import { closeActive, findActive, keyboardPlace, saveActive, splitActive, toggleZoomActive } from './workbenchCommands.js';
 
 /** Drive the window we are drawing chrome for. No-op in a browser. */
 async function window_(method) {
@@ -46,8 +47,11 @@ export function runMenuAction(id) {
     case 'new-terminal':
       terminal.createTab?.();
       break;
+    // The pane items act on THE active pane, of either kind, as their keys
+    // do (workbenchCommands.js): the native menu leaves the keyboard where
+    // it was, so inside Monaco is the editor's — the pane's holding it.
     case 'save':
-      if (editor.activeTabId) editor.saveFile?.(editor.activeTabId);
+      saveActive(keyboardPlace());
       break;
     case 'command-palette':
       settings.setCommandPaletteOpen(true, 'all');
@@ -65,22 +69,22 @@ export function runMenuAction(id) {
       settings.toggleSecondarySidebar?.();
       break;
     case 'split-right':
-      terminal.splitActivePane?.('horizontal');
+      splitActive('horizontal', keyboardPlace());
       break;
     case 'split-down':
-      terminal.splitActivePane?.('vertical');
+      splitActive('vertical', keyboardPlace());
       break;
     case 'close-pane':
-      terminal.closeActivePane?.();
+      closeActive(keyboardPlace());
       break;
     case 'toggle-pane-zoom':
-      terminal.togglePaneZoom?.();
+      toggleZoomActive();
       break;
     case 'clear-terminal':
       terminal.clearTerminal?.();
       break;
     case 'find-in-terminal':
-      terminal.openFind?.();
+      findActive(keyboardPlace());
       break;
     case 'search-in-files':
       settings.showView?.('search');

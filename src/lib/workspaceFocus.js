@@ -10,8 +10,9 @@
  * it was chosen from, a button that went with what it closed — to the
  * terminal or the editor on screen.
  */
-import { useTerminalStore } from '../stores/terminalStore.js';
+import { activeKindOf, activePaneOf, useTerminalStore } from '../stores/terminalStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
+import { EDITOR_KIND } from '../components/terminal/splitLayout.js';
 
 /**
  * The input of the terminal on screen: the active pane of the group shown.
@@ -20,7 +21,8 @@ import { useEditorStore } from '../stores/editorStore.js';
 export function activeTerminalInput() {
   const { groups, activeGroupId } = useTerminalStore.getState();
   const paneId = groups?.find((g) => g.id === activeGroupId)?.activePaneId;
-  if (!paneId) return null;
+  // No page to look in (the menus' unit tests run without one).
+  if (!paneId || typeof document === 'undefined') return null;
   const quoted = String(paneId).replace(/["\\]/g, '\\$&');
   return document.querySelector(`[data-pane-body="${quoted}"] .xterm-helper-textarea`);
 }
@@ -89,7 +91,12 @@ export function menuOnScreen(doc = globalThis.document) {
   return anyShown(doc, '[role="menu"]', '[data-opened-by-itself], .monaco-editor, [aria-hidden="true"], [inert]');
 }
 
-/** Give the terminal on screen the keyboard. False when there is none. */
+/**
+ * Give the terminal on screen the keyboard. False when there is none. Its
+ * pane becomes THE active one as focus comes in (TerminalSplitContainer's
+ * `onFocusCapture`), and with that an editor pane's focus request still
+ * waiting for its Monaco goes (editorStore.js, C2 review N-02).
+ */
 export function focusTerminal() {
   const input = activeTerminalInput();
   // Without scrolling, as xterm's own focus() does: the textarea follows the
@@ -111,10 +118,47 @@ export function focusEditorTab() {
 }
 
 /**
- * Give the keyboard to the terminal on screen, or to the open file when
- * there is no terminal — the other way round when `first` is 'editor', for
- * what was asked about a file. False when there is neither.
+ * Give editor pane `paneId` the keyboard (C1 review M-01): out of the
+ * terminal that has it first — its program is told it lost focus when its
+ * pane stops being the active one (TerminalView) — then into the pane's
+ * editor, held by the store until that editor is mounted (a zoom remounts
+ * it, Monaco may still be loading), or onto the body of a pane with no file.
+ * False when the pane is not there.
+ */
+export function focusEditorPane(paneId, doc = globalThis.document) {
+  const had = doc?.activeElement;
+  if (had?.closest?.('.xterm')) had.blur?.();
+  if (useEditorStore.getState().focusEditorPane?.(paneId)) return true;
+  const quoted = String(paneId).replace(/["\\]/g, '\\$&');
+  const body = doc?.querySelector?.(`[data-editor-pane-body="${quoted}"]`);
+  body?.focus?.({ preventScroll: true });
+  return Boolean(body);
+}
+
+/**
+ * Give THE active pane of the group on screen the keyboard, of whichever
+ * kind it is (FC11): its editor, or its terminal's input. What a command
+ * that moved the active pane without a pointer calls (workbenchCommands.js).
+ * A terminal pane that is being remounted takes it itself as it mounts
+ * (TerminalView's focus effect). False when there is nothing to focus.
+ */
+export function focusActivePane() {
+  const { groups, activeGroupId } = useTerminalStore.getState();
+  const group = groups?.find((g) => g.id === activeGroupId);
+  if (!group) return false;
+  if (activeKindOf(group) === EDITOR_KIND) return focusEditorPane(activePaneOf(group));
+  return focusTerminal();
+}
+
+/**
+ * Give the keyboard back to the workspace: to THE active pane, of whichever
+ * kind (FC11), then to the terminal on screen, then to the open file — the
+ * open file first when `first` is 'editor', for what was asked about a file.
+ * With a terminal as the active pane, as every group without files has,
+ * 'terminal' (the default) is what it always was. False when there is
+ * nothing to focus.
  */
 export function focusWorkspace(first = 'terminal') {
-  return first === 'editor' ? focusEditorTab() || focusTerminal() : focusTerminal() || focusEditorTab();
+  if (first === 'editor') return focusEditorTab() || focusTerminal();
+  return focusActivePane() || focusTerminal() || focusEditorTab();
 }

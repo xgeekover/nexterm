@@ -9,7 +9,7 @@
  */
 
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
-import { invoke, listen, isTauri, mockBridge, pathKinds, revealInFileManager } from '../../src/lib/ipc.js';
+import { invoke, listen, isTauri, mockBridge, openInExternalEditor, pathKinds, revealInFileManager, writeClipboardText } from '../../src/lib/ipc.js';
 import { readFileSync } from 'node:fs';
 
 /** Run `fn` while the page claims to be inside Tauri, with no runtime behind it. */
@@ -212,5 +212,121 @@ describe('IPC: project_commands_read', () => {
       await reasonFor(() => mockBridge.files.set(file, 'x'.repeat(262145)), () => mockBridge.files.delete(file)),
       said.TOO_LARGE
     );
+  });
+});
+
+// A program's OSC 52 write (src/lib/osc52.js → clipboard_write_text,
+// src-tauri/src/commands/clipboard.rs). The mock holds the backend's line.
+describe('IPC: clipboard_write_text', () => {
+  const source = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+  test('registered, async, and capped at the same 131072 bytes in the backend', () => {
+    const main = source('../../src-tauri/src/main.rs');
+    const handler = main.slice(main.indexOf('generate_handler!['), main.indexOf('])', main.indexOf('generate_handler![')));
+    assert.ok(handler.includes('commands::clipboard::clipboard_write_text,'), 'in generate_handler!');
+    const rust = source('../../src-tauri/src/commands/clipboard.rs');
+    assert.match(rust, /#\[tauri::command\(async, rename_all = "snake_case"\)\]\npub fn clipboard_write_text\(text: String\) -> Result<\(\), String> \{\n\s*check_write\(&text\)\?;/);
+    assert.match(rust, /^pub const MAX_WRITE_BYTES: usize = 131_072;$/m);
+  });
+
+  test('the mock refuses empty and over-long text without quoting it, and records the rest', async () => {
+    const before = mockBridge.clipboardWrites;
+    await assert.rejects(() => writeClipboardText(''), /nothing to put on the clipboard/);
+    const secret = 'secret-payload-';
+    const over = secret.repeat(Math.ceil(131073 / secret.length));
+    await assert.rejects(() => writeClipboardText(over), (err) => /too much/.test(err.message) && !err.message.includes(secret));
+    // Bytes, not UTF-16 units: 43691 three-byte characters are 131073 bytes.
+    await assert.rejects(() => writeClipboardText('한'.repeat(43691)), /too much/);
+    assert.equal(mockBridge.clipboardWrites, before, 'nothing refused was recorded');
+    const exact = 'a'.repeat(131072);
+    await writeClipboardText(exact);
+    assert.equal(mockBridge.lastClipboardWrite, exact);
+    assert.equal(mockBridge.clipboard.text, exact, 'it is what a right-click would paste next');
+    assert.equal(mockBridge.clipboardWrites, before + 1);
+    mockBridge.lastClipboardWrite = null;
+    mockBridge.clipboard = { text: '', has_image: false };
+  });
+});
+
+// Open in External Editor in the Explorer (src/lib/ipc.js openInExternalEditor
+// → fs_open_in_external_editor, src-tauri/src/commands/fs.rs). Tauri hands a
+// command its arguments by name, so the wrapper's keys and the Rust
+// parameters must be the same two words, in the same order.
+describe('IPC: fs_open_in_external_editor', () => {
+  const source = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+  test('registered, async, and taking exactly the wrapper\'s command and path', () => {
+    const main = source('../../src-tauri/src/main.rs');
+    const handler = main.slice(main.indexOf('generate_handler!['), main.indexOf('])', main.indexOf('generate_handler![')));
+    assert.ok(handler.includes('commands::fs::fs_open_in_external_editor,'), 'in generate_handler!');
+
+    const rust = source('../../src-tauri/src/commands/fs.rs');
+    const signature = rust.match(
+      /#\[tauri::command\(rename_all = "snake_case"\)\]\npub async fn fs_open_in_external_editor\(\n((?:\s+\w+: [^\n]+,\n)+)\) -> Result<\(\), String> \{\n/
+    );
+    assert.ok(signature, 'an async snake_case command that answers Result<(), String>');
+    const params = signature[1].trim().split(/,\n\s*/).map((p) => p.replace(/,$/, ''));
+    assert.deepEqual(params, ["state: State<'_, AppState>", 'command: String', 'path: String']);
+
+    const ipc = source('../../src/lib/ipc.js');
+    const wrapper = ipc.match(/^export function openInExternalEditor\((\w+), (\w+)\) \{\n\s*return invoke\('fs_open_in_external_editor', \{ (\w+), (\w+) \}\);\n\}$/m);
+    assert.ok(wrapper, 'the wrapper passes its two arguments by name, nothing else');
+    const fromWebview = params.slice(1).map((p) => p.split(':')[0]);
+    assert.deepEqual(wrapper.slice(1, 3), fromWebview, 'its parameters');
+    assert.deepEqual(wrapper.slice(3, 5), fromWebview, 'the keys it sends');
+  });
+
+  test('inside Tauri, the backend answers or rejects — never the mock, which records nothing', async () => {
+    const before = mockBridge.externalEditorOpens.length;
+    await pretendingToBeInTauri(async () => {
+      await assert.rejects(() => openInExternalEditor('code', '/workspace/README.md'));
+    });
+    assert.equal(mockBridge.externalEditorOpens.length, before);
+    // Outside it, the mock records what it was asked, and starts nothing.
+    await openInExternalEditor('subl -w', '/workspace/README.md');
+    assert.deepEqual(mockBridge.externalEditorOpens.slice(before), [{ command: 'subl -w', path: '/workspace/README.md' }]);
+    mockBridge.externalEditorOpens.length = before;
+  });
+
+  test('the mock refuses exactly the backend\'s REFUSED_PROGRAMS, name for name', async () => {
+    // Two lists of one policy: the backend's, and the mock's the suites and
+    // the browser preview answer with. Read from the sources as written.
+    const literal = (text, pattern, what) => {
+      const body = text.match(pattern);
+      assert.ok(body, `${what} is a literal list where it is expected`);
+      assert.equal(body[1].replace(/"[^"]*"|'[^']*'|,|\s/g, ''), '', `${what} holds nothing but quoted names`);
+      return [...body[1].matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
+    };
+    const backend = literal(
+      source('../../src-tauri/src/fs/external_editor.rs'),
+      /^pub const REFUSED_PROGRAMS: &\[&str\] = &\[\n([\s\S]*?)\n\];$/m,
+      'REFUSED_PROGRAMS'
+    );
+    const mock = literal(
+      source('../../src/lib/ipc.js'),
+      /^const MOCK_REFUSED_EDITORS = new Set\(\[\n([\s\S]*?)\n\]\);$/m,
+      'MOCK_REFUSED_EDITORS'
+    );
+    assert.ok(backend.includes('sh') && backend.includes('conhost'), 'the backend list was read in full');
+    assert.equal(new Set(backend).size, backend.length, 'no name twice in the backend list');
+    assert.equal(new Set(mock).size, mock.length, 'no name twice in the mock list');
+    assert.deepEqual([...mock].sort(), [...backend].sort(), 'the mock refuses what the backend refuses, and nothing else');
+
+    // And the mock as it runs: every one refused, by bare name and as NAME.exe.
+    const before = mockBridge.externalEditorOpens.length;
+    for (const name of backend) {
+      for (const program of [name, `${name.toUpperCase()}.exe`]) {
+        await assert.rejects(
+          () => openInExternalEditor(`${program} -w`, '/workspace/README.md'),
+          /is a shell or opens files in their default app/,
+          `${program}: refused by the mock`
+        );
+      }
+    }
+    assert.equal(mockBridge.externalEditorOpens.length, before, 'nothing refused was recorded');
+    // An interpreter is no wrapper on either side: it runs.
+    await openInExternalEditor('python -m idlelib', '/workspace/README.md');
+    assert.equal(mockBridge.externalEditorOpens.length, before + 1, 'python is not refused');
+    mockBridge.externalEditorOpens.length = before;
   });
 });

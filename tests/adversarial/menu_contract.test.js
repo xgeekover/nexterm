@@ -130,6 +130,15 @@ function recordingActions(fn) {
       store.setState(stubs);
     }
     // Save writes the file being edited, so there has to be one.
+    // From a terminal pane, Save writes the editor's active tab. From an
+    // editor pane it writes the file that pane shows (editor placement C2,
+    // workbench_commands.test.js WC-01), so a group a suite before this one
+    // left with an editor pane active must not decide this one. The group
+    // first: the editor's active tab follows the group on screen.
+    useTerminalStore.setState({
+      groups: [{ id: 'group-mc', name: 'Group 1', createdAt: 0, tree: { type: 'leaf', id: 'pane-mc', tabIds: [], activeTabId: null }, activePaneId: 'pane-mc' }],
+      activeGroupId: 'group-mc',
+    });
     useEditorStore.setState({ activeTabId: 'tab-1' });
     windowControls.close = (...args) => { calls.push(`window.close(${args.join(',')})`); };
     return fn(calls);

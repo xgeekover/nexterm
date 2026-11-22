@@ -53,6 +53,140 @@ fn usage_help_and_version() {
     assert!(text(&o.stdout).contains("Exit status:"));
 }
 
+#[test]
+fn set_title_usage_and_help() {
+    // Wrong usage is exit 2 with the command's usage, even inside NexTerm:
+    // nothing is sent (NEXTERM_CONTROL names nothing that answers).
+    for wrong in [&["set-title"][..], &["set-title", "--clear", "npm test"], &["set-title", "x", "--clear"], &["set-title", ""]] {
+        let mut c = cli_with(wrong);
+        c.env("NEXTERM_CONTROL", "/nonexistent/nexterm-cli-test.sock").env("NEXTERM_CONTROL_TOKEN", TOKEN);
+        let o = run(c, b"");
+        assert_eq!(o.status.code(), Some(2), "{wrong:?}: {}", text(&o.stderr));
+        assert!(text(&o.stderr).contains("Usage: nexterm-cli set-title <text>"), "{}", text(&o.stderr));
+        assert!(o.stdout.is_empty());
+    }
+    let o = run(cli_with(&["help", "set-title"]), b"");
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).starts_with("Usage: nexterm-cli set-title <text>\n       nexterm-cli set-title --clear"));
+    let o = run(cli_with(&["help"]), b"");
+    assert!(text(&o.stdout).contains("\n  set-title <text>\n  set-title --clear\n"), "{}", text(&o.stdout));
+}
+
+/// A new, empty folder of this test's own in the system's temp folder,
+/// removed again when the test ends, passed or failed.
+struct EmptyDir(std::path::PathBuf);
+
+impl EmptyDir {
+    fn new(tag: &str) -> EmptyDir {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("ncli-guide-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        EmptyDir(dir)
+    }
+}
+
+impl std::ops::Deref for EmptyDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for EmptyDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn entries(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect()
+}
+
+const GUIDE_TOPICS: [&str; 6] = ["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen"];
+
+#[test]
+fn guide_needs_no_nexterm_and_writes_nothing() {
+    let home = EmptyDir::new("home");
+    let cwd = EmptyDir::new("cwd");
+    // Every folder a program might write to is the empty HOME, and it runs
+    // in the empty cwd: both must still be empty at the end.
+    let in_empty = |args: &[&str]| {
+        let mut c = cli_with(args);
+        c.current_dir(&*cwd);
+        for var in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP"] {
+            c.env(var, &*home);
+        }
+        for var in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"] {
+            c.env(var, home.join(var));
+        }
+        c
+    };
+    let ascii_80 = |out: &str| {
+        assert!(out.ends_with('\n'), "{out}");
+        for line in out.lines() {
+            assert!(line.is_ascii() && !line.contains('\x1b') && line.len() <= 80, "{line:?}");
+        }
+    };
+
+    // NEXTERM_CONTROL and NEXTERM_CONTROL_TOKEN unset (cli() removes them)
+    // and no server anywhere.
+    let o = run(in_empty(&["guide"]), b"");
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert!(o.stderr.is_empty(), "{}", text(&o.stderr));
+    let index = text(&o.stdout);
+    assert!(index.starts_with("nexterm-cli guide - "), "{index}");
+    assert!(index.contains("nexterm-cli help <command>"), "{index}");
+    for topic in GUIDE_TOPICS {
+        assert!(index.contains(&format!("\n  {topic}  ")), "{topic} not in the index");
+    }
+    ascii_80(&index);
+
+    for topic in GUIDE_TOPICS {
+        let o = run(in_empty(&["guide", topic]), b"");
+        assert_eq!(o.status.code(), Some(0), "{topic}: {}", text(&o.stderr));
+        assert!(o.stderr.is_empty());
+        let out = text(&o.stdout);
+        assert!(out.starts_with(&format!("nexterm-cli guide {topic} - ")), "{out}");
+        assert!(out.contains(&format!("nexterm-cli help {topic}")), "{out}");
+        ascii_80(&out);
+    }
+    let o = run(in_empty(&["guide", "read-screen"]), b"");
+    let out = text(&o.stdout);
+    for switch in ["Let programs in terminals control NexTerm", "Let programs type into and read terminals", "Let programs control other terminals"] {
+        assert!(out.contains(switch), "{switch}: {out}");
+    }
+    assert!(out.contains("masked"), "{out}");
+    let o = run(in_empty(&["guide", "set-title"]), b"");
+    assert!(text(&o.stdout).contains("(Rename) always wins"), "{}", text(&o.stdout));
+
+    // Inside a NexTerm terminal whose NexTerm is gone, it still never tries
+    // to connect: the same text, exit 0 (a connection would be exit 5).
+    let mut c = in_empty(&["guide"]);
+    c.env("NEXTERM_CONTROL", home.join("gone.sock")).env("NEXTERM_CONTROL_TOKEN", TOKEN);
+    let o = run(c, b"");
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert_eq!(text(&o.stdout), index);
+
+    // An unknown topic is exit 2 and lists the topics; so is a second word.
+    for wrong in [&["guide", "frob"][..], &["guide", "send"], &["guide", "notify", "extra"]] {
+        let o = run(in_empty(wrong), b"");
+        assert_eq!(o.status.code(), Some(2), "{wrong:?}");
+        assert!(o.stdout.is_empty(), "{wrong:?}");
+        let err = text(&o.stderr);
+        assert!(err.starts_with("nexterm-cli: "), "{err}");
+        assert!(err.contains("'nexterm-cli guide'"), "{err}");
+        if wrong.len() == 2 {
+            assert!(err.contains(&format!("Topics: {}\n", GUIDE_TOPICS.join(", "))), "{err}");
+        }
+    }
+
+    assert_eq!(entries(&home), Vec::<std::ffi::OsString>::new(), "the guide wrote into HOME");
+    assert_eq!(entries(&cwd), Vec::<std::ffi::OsString>::new(), "the guide wrote into its folder");
+}
+
 fn cli_with(args: &[&str]) -> Command {
     let mut c = cli();
     c.args(args);
@@ -252,6 +386,25 @@ mod unix {
         let req = request(&server.join().unwrap());
         assert_eq!(req["cmd"], "send");
         assert_eq!(req["args"], serde_json::json!({"target": "child:tab-term-4", "text": "echo 한글\n", "keys": ["Tab"]}));
+    }
+
+    #[test]
+    fn set_title_end_to_end() {
+        let fake = Fake::new();
+        let server = fake.serve(r#"{"v":1,"id":1,"ok":true,"result":{"title":"npm test"}}"#);
+        let o = run(fake.cli(&["set-title", "npm", "test"]), b"");
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        assert!(o.stdout.is_empty());
+        let req = request(&server.join().unwrap());
+        assert_eq!(req, serde_json::json!({"v": 1, "id": 1, "token": TOKEN, "cmd": "set-title", "args": {"text": "npm test"}}));
+
+        fs::remove_file(fake.socket()).unwrap();
+        let server = fake.serve(r#"{"v":1,"id":1,"ok":true,"result":{"title":null}}"#);
+        let o = run(fake.cli(&["set-title", "--clear"]), b"");
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        let req = request(&server.join().unwrap());
+        assert_eq!(req["cmd"], "set-title");
+        assert_eq!(req["args"], serde_json::json!({"text": null}));
     }
 
     #[test]

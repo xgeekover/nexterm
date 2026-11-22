@@ -355,6 +355,13 @@ pub fn app_close_window(window: Window) -> Result<(), String> {
 /// Quit, now that the user has answered about the unsaved tabs.
 #[tauri::command(rename_all = "snake_case")]
 pub fn app_quit(app: AppHandle) {
+    quit(&app);
+}
+
+/// Every quit decided here. Keep-awake is let go of first (src/power.rs):
+/// `exit` ends the process without dropping what holds it.
+fn quit(app: &AppHandle) {
+    crate::power::release();
     app.exit(0);
 }
 
@@ -446,7 +453,7 @@ mod macos {
     use objc2::{ffi, msg_send, sel};
     use tauri::AppHandle;
 
-    use super::{ask_webview, gate, Leaving, Question, ACK_TIMEOUT, QUIT_REQUESTED};
+    use super::{ask_webview, gate, quit, Leaving, Question, ACK_TIMEOUT, QUIT_REQUESTED};
 
     /// How the webview is asked about a quit, by the question's id. Set once,
     /// by `ask_before_quitting`.
@@ -470,7 +477,7 @@ mod macos {
                 eprintln!(
                     "[NexTerm] The page did not answer about unsaved changes within {ACK_TIMEOUT:?}; quitting anyway"
                 );
-                quitter.exit(0);
+                quit(&quitter);
             });
         });
         if ASK.set(asker).is_err() {

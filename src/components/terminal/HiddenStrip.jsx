@@ -5,6 +5,7 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { unreadLabel } from '../../lib/attention.js';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
+import { displayTitle } from '../../lib/tabTitle.js';
 import { ProgressBar, UnreadPill, progressWords } from './AttentionIndicators.jsx';
 import { cn } from '../../lib/utils.js';
 
@@ -213,7 +214,7 @@ export function StripHandle({ paneId, tabId, title, tabs = [], unread = 0, open 
   const ids = tabs.length ? tabs.map((t) => t.id) : tabId ? [tabId] : [];
   const marks = useTerminalStore(useShallow((s) => ids.map((id) => s.controlled?.[id] ?? null)));
   const controlled = ids
-    .map((id, i) => (marks[i] ? { mark: marks[i], title: tabs.find((t) => t.id === id)?.title ?? id, shown: id === tabId } : null))
+    .map((id, i) => (marks[i] ? { mark: marks[i], title: displayTitle(tabs.find((t) => t.id === id), id), shown: id === tabId } : null))
     .filter(Boolean);
   const barsOn = useSettingsStore((s) => s.terminalProgress !== false);
   const stored = useTerminalStore((s) => (tabId ? s.progress[tabId] : undefined));
@@ -244,8 +245,7 @@ export function StripHandle({ paneId, tabId, title, tabs = [], unread = 0, open 
       onContextMenu={onContextMenu}
       className={cn(
         'group/handle relative shrink-0 block w-full h-[6px] p-0 m-0 cursor-pointer',
-        'bg-vsc-panel border-0 border-b border-solid border-vsc-border hover:bg-vsc-hover outline-none',
-        'focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vsc-focus'
+        'bg-vsc-panel border-0 border-b border-solid border-vsc-border hover:bg-vsc-hover'
       )}
     >
       {/* The grip: says "something to take hold of" without a word. */}

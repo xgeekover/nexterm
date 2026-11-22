@@ -285,8 +285,10 @@ describe('Clear Terminal', () => {
     // without focus (outputPacing.js) included — so what came before the
     // clear is cleared with it; no terminal, or a closed one, clears nothing.
     // The clear's own callback also saves the cleared terminal at once, so
-    // what was cleared is not restored at the next start (stage 6).
-    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*entry\.term\.clear\(\);\s*noteCleared\(entry\);\s*\}\);/);
+    // what was cleared is not restored at the next start (stage 6). The
+    // prompt marks go with the clear, and the cursor's prompt keeps its own
+    // (prompt_marks.test.js, PRM-08).
+    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*(?:\/\/[^\n]*\n\s*)*const promptMarked = entry\.promptMarks\?\.cursorOnNewestMark\(\) \?\? false;\s*entry\.term\.clear\(\);\s*entry\.promptMarks\?\.afterClear\(promptMarked\);\s*noteCleared\(entry\);\s*\}\);/);
     assert.match(registry, /function afterOutputSoFar\(entry, fn\) \{\s*if \(!entry \|\| entry\.disposed\) return false;/);
     assert.match(read('../../src-tauri/src/menu.rs'), /terminal_safe\("clear-terminal", "Clear Terminal", "CmdOrCtrl\+L"\)/);
     assert.match(read('../../src/components/command/CommandPalette.jsx'), /case 'clear_terminal':\s*clearTerminal\(\);/);

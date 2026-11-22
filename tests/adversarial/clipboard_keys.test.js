@@ -392,10 +392,19 @@ describe('Copy Path (copyText)', () => {
     assert.equal(await copyText(''), false);
     assert.equal(await copyText(null), false);
 
+    // Copy Path goes through copyText in all three, by way of copyAndConfirm
+    // (src/lib/copyFeedback.js), which copies with copyText and then says so
+    // in a toast (U6); the Explorer's Copy Relative Path calls copyText itself.
     for (const file of ['../../src/components/terminal/TerminalsPanel.jsx', '../../src/components/terminal/TerminalSplitContainer.jsx', '../../src/components/explorer/FileExplorer.jsx']) {
       const src = readFileSync(new URL(file, import.meta.url), 'utf8');
-      assert.match(src, /import \{ copyText \} from '\.\.\/\.\.\/lib\/copyText\.js';/, file);
+      assert.match(src, /import \{ [^}]*\bcopyAndConfirm\b[^}]* \} from '\.\.\/\.\.\/lib\/copyFeedback\.js';/, file);
+      assert.match(src, /key: 'copy-path',[\s\S]{0,400}?copyAndConfirm\(/, `${file}: Copy Path does not go through copyAndConfirm`);
       assert.doesNotMatch(src, /navigator\.clipboard|execCommand/, `${file} copies on its own`);
     }
+    assert.match(readFileSync(new URL('../../src/components/explorer/FileExplorer.jsx', import.meta.url), 'utf8'), /import \{ copyText \} from '\.\.\/\.\.\/lib\/copyText\.js';/);
+    const feedback = readFileSync(new URL('../../src/lib/copyFeedback.js', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+    assert.match(feedback, /import \{ copyText \} from '\.\/copyText\.js';/);
+    assert.match(feedback, /\{ copy = copyText,/, 'copyAndConfirm does not copy with copyText by default');
+    assert.doesNotMatch(feedback, /navigator\.clipboard|execCommand/, 'copyFeedback copies on its own');
   });
 });

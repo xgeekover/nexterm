@@ -14,10 +14,12 @@
  * that they also run when the JS suite is run on its own: the cap, one entry
  * per conversation, `replaces`, remove and clear across a restart, a kind
  * this build does not know, the deleted- and corrupt-file hooks, and
- * Tauri's own refusals. AH-20 checks the numbers and patterns against the
- * Rust source and src/lib/agents.js, and that the four commands are
- * registered; AH-21 does the same on copies with a Windows checkout's CRLF
- * line ends. AH-99 puts the mock and the storage back.
+ * Tauri's own refusals; AH-22 what the user curates (format version 2);
+ * AH-23 the `forkOf` of a forked conversation.
+ * AH-20 checks the numbers and patterns against the Rust source and
+ * src/lib/agents.js, and that the nine commands are registered; AH-21 does
+ * the same on copies with a Windows checkout's CRLF line ends. AH-99 puts
+ * the mock and the storage back.
  */
 import { describe, test, assert, skip } from '../e2e/harness/testFramework.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -174,12 +176,37 @@ describe('Agent session history: the browser mock against the backend', () => {
   test('AH-02: the fixture covers what the mock is held to', () => {
     if (!available) skip('no tests/fixtures/agent-history.json — run `cd src-tauri && cargo test` first');
     const ops = fixture.scenarios.flatMap((s) => s.ops.map((o) => o.op));
-    for (const op of ['list', 'upsert', 'remove', 'clear', 'delete_file', 'write_file']) {
+    for (const op of [
+      'list', 'upsert', 'remove', 'clear', 'delete_file', 'write_file',
+      'groups', 'update', 'group_create', 'group_update', 'group_delete',
+    ]) {
       assert.ok(ops.includes(op), `some sequence runs ${op}`);
     }
     const errors = fixture.scenarios.flatMap((s) => s.results).filter((r) => r?.error).map((r) => r.error);
     assert.ok(errors.some((e) => e.startsWith(fixture.constants.newerVersion)), 'a refused write of a newer file');
     assert.ok(errors.some((e) => e.startsWith(`${fixture.constants.invalid}: `)), 'a refused entry');
+    // Format version 2: written only while something is curated.
+    assert.equal(fixture.constants.version, 2);
+    assert.equal(fixture.constants.uncuratedVersion, 1);
+    const lazy = fixture.scenarios.find((s) => s.name.startsWith('an uncurated history is version 1'));
+    assert.equal(JSON.parse(lazy.fileText).version, 1, 'curated, then not: version 1 again');
+    assert.ok(lazy.results.some((r) => r?.ok?.version === 2) && lazy.results.some((r) => r?.ok?.version === 1), 'and both on the way');
+    const curated = fixture.scenarios.find((s) => s.name === 'every curated field, written as version 2');
+    assert.deepEqual(Object.keys(JSON.parse(curated.fileText)), ['version', 'entries', 'groups'], 'in that order');
+    assert.deepEqual(
+      Object.keys(JSON.parse(curated.fileText).entries[0]),
+      ['key', 'kind', 'sessionId', 'cwd', 'title', 'startedAt', 'lastUsedAt', 'endedAt', 'endReason', 'name', 'pinned', 'archived', 'groupId']
+    );
+    assert.ok(errors.some((e) => e.startsWith(`${fixture.constants.invalidGroup}: `)), 'a refused group');
+    assert.ok(errors.includes(fixture.constants.tooManyGroups), 'a group past the fiftieth refused');
+    assert.ok(errors.includes(fixture.constants.tooManyCurated), 'a 201st protected entry refused');
+    const listsOfGroups = fixture.scenarios.flatMap((s) => s.results).filter((r) => r?.ok && typeof r.ok === 'object' && 'readOnly' in r.ok);
+    assert.ok(listsOfGroups.some((r) => r.ok.readOnly) && listsOfGroups.some((r) => !r.ok.readOnly), 'groups of a newer file, and of this one');
+    const newer = fixture.scenarios.find((s) => s.name === 'a newer file is read and never written');
+    assert.equal(JSON.parse(newer.ops[0].args.text).version, 3, 'version 3 is the newer one now');
+    assert.equal(newer.results.filter((r) => r?.error?.startsWith(fixture.constants.newerVersion)).length, 9, 'every write refused');
+    const kept = fixture.scenarios.find((s) => s.name.startsWith('the cap keeps every protected entry'));
+    assert.equal(kept.results.at(-1).ok.length, 210, 'ten protected beside the newest two hundred');
     assert.ok(fixture.scenarios.some((s) => s.bad.length === fixture.constants.keepBad), 'a sequence that fills the asides');
     // Clear deletes the files moved aside, a refused one none: a sequence
     // with asides made before a clear, and one more after it.
@@ -209,6 +236,31 @@ describe('Agent session history: the browser mock against the backend', () => {
     const listed = fitted?.results?.at(-1)?.ok;
     assert.ok(Array.isArray(listed) && listed.length > 1 && listed.length < 90, 'and one that is held under the read cap by size');
     assert.ok(utf8(fitted.fileText) <= fixture.constants.maxReadBytes && utf8(fitted.fileText) > fixture.constants.maxReadBytes * 0.9);
+    // Fork Conversation: `forkOf` after the nine fields, only on a fork,
+    // kept by later events and curation, version 1 by itself; one of the
+    // wrong shape refused through the command and dropped from a file.
+    const forked = fixture.scenarios.find((s) => s.name === 'a fork keeps the conversation it was forked from');
+    assert.ok(forked, 'a sequence that records a fork');
+    const forkKey = `claude:${CLAUDE_B}`;
+    const firstList = forked.results[forked.ops.findIndex((o) => o.op === 'list')].ok;
+    const theFork = firstList.find((e) => e.key === forkKey);
+    assert.equal(theFork.forkOf, CLAUDE_A, 'kept through an end, a title and a resume that sent none');
+    assert.equal(theFork.title, 'From the transcript');
+    assert.ok(!('forkOf' in firstList.find((e) => e.key === `claude:${CLAUDE_A}`)), 'the source is left as it was');
+    const pinnedAt = forked.ops.findIndex((o) => o.op === 'update' && o.args.changes.pinned === true);
+    assert.equal(forked.results[pinnedAt].ok.forkOf, CLAUDE_A, 'and through a curation');
+    // The answers are recorded with their keys sorted; the file is as written.
+    const written = JSON.parse(forked.fileText);
+    assert.equal(written.version, 1, 'a fork alone never makes version 2');
+    assert.deepEqual(
+      Object.keys(written.entries.find((e) => e.key === forkKey)),
+      ['key', 'kind', 'sessionId', 'cwd', 'title', 'startedAt', 'lastUsedAt', 'endedAt', 'endReason', 'forkOf'],
+      'after the nine fields'
+    );
+    assert.ok(written.entries.filter((e) => e.key !== forkKey).some((e) => Object.keys(e).length === 9), 'an entry without one is the nine');
+    assert.ok(forked.results.some((r) => r?.error === `${fixture.constants.invalid}: its forkOf is not one that claude gives a conversation`));
+    const forkWhys = [...whys].filter((w) => w.includes('its forkOf'));
+    assert.ok(forkWhys.length >= 3, `the refusal rules of forkOf too: ${forkWhys}`);
   });
 });
 
@@ -335,10 +387,11 @@ describe('Agent session history: the mock alone', () => {
 
   test('AH-16: a newer file is read, never written, and the refusal is logged once', async () => {
     await fresh(async (warned) => {
-      const text = JSON.stringify({ version: 2, entries: [entry('claude', CLAUDE_A, '/w', null, 1, 1)] });
+      // Version 3: the first newer than this build's 2 (AC27).
+      const text = JSON.stringify({ version: 3, entries: [entry('claude', CLAUDE_A, '/w', null, 1, 1)] });
       mockBridge.agentHistoryCorruptFile(text);
       assert.equal((await list()).length, 1);
-      await assert.rejects(() => upsert(entry('claude', CLAUDE_B, '/w', null, 2, 2)), /^Error: The agent session history was written by a newer NexTerm \(format version 2\)/);
+      await assert.rejects(() => upsert(entry('claude', CLAUDE_B, '/w', null, 2, 2)), /^Error: The agent session history was written by a newer NexTerm \(format version 3\)/);
       await assert.rejects(() => call('clear'), /newer NexTerm/);
       assert.equal(mockBridge.agentHistoryFile(), text, 'byte for byte');
       assert.equal(warned.filter((w) => w.includes('newer NexTerm')).length, 1);
@@ -404,6 +457,86 @@ describe('Agent session history: the mock alone', () => {
     });
   });
 
+  test('AH-22: version 2 only while something is curated, which no recorded event undoes', async () => {
+    await fresh(async (warned) => {
+      const claude = await upsert(entry('claude', CLAUDE_A, '/w', null, 1, 2));
+      const v1 = mockBridge.agentHistoryFile();
+      assert.equal(JSON.parse(v1).version, 1, 'nothing curated: version 1');
+      assert.deepEqual(await call('groups'), { version: 1, readOnly: false, groups: [] });
+      const pinned = await call('update', { key: claude.key, changes: { pinned: true } });
+      assert.deepEqual(pinned, { ...claude, pinned: true });
+      assert.deepEqual(Object.keys(JSON.parse(mockBridge.agentHistoryFile())), ['version', 'entries', 'groups']);
+      await call('update', { key: claude.key, changes: { pinned: false } });
+      assert.equal(mockBridge.agentHistoryFile(), v1, 'nothing curated again: version 1, byte for byte');
+
+      const group = await call('group_create', { group: { id: 'g1', name: 'Work' }, move_key: claude.key });
+      assert.deepEqual(group, { id: 'g1', name: 'Work', collapsed: false });
+      await call('update', { key: claude.key, changes: { name: 'Mine', archived: true } });
+      const later = await upsert({ ...entry('claude', CLAUDE_A, '/w', 'A title', 1, 9), name: 'Other', groupId: null });
+      assert.deepEqual([later.title, later.name, later.archived, later.groupId], ['A title', 'Mine', true, 'g1'], 'a recorded event keeps it');
+      const resumed = await call('upsert', { entry: entry('claude', CLAUDE_A, '/w', null, 10, 10), unarchive: true });
+      assert.deepEqual([resumed.name, resumed.archived, resumed.groupId], ['Mine', undefined, 'g1'], 'unarchive clears archived, and only it');
+      assert.deepEqual(await call('groups'), { version: 2, readOnly: false, groups: [group] });
+      assert.deepEqual(await call('group_update', { id: 'g1', changes: { collapsed: true } }), { ...group, collapsed: true });
+      assert.equal(await call('group_delete', { id: 'g1' }), 1);
+      assert.equal(await call('update', { key: 'claude:nothing-here', changes: { pinned: true } }), null);
+      assert.equal(await call('group_update', { id: 'g1', changes: { name: 'Gone' } }), null);
+      await assert.rejects(() => call('update', { key: claude.key, changes: { title: 'x' } }), /^Error: Not a valid agent session: a change names something other than name, pinned, archived and groupId$/);
+      await assert.rejects(() => call('update', { key: claude.key, changes: { groupId: 'g9' } }), /^Error: Not a valid agent session: its groupId names no group$/);
+      await assert.rejects(() => call('group_create', { group: { id: 'has space', name: 'x' } }), /^Error: Not a valid agent session group: its id is not 1 to 64 ASCII letters, digits, - and _$/);
+      // Tauri's own refusals, before the command runs.
+      await assert.rejects(() => call('update', { key: claude.key }), /invalid args `changes` for command `agent_history_update`: command agent_history_update missing required key changes/);
+      await assert.rejects(() => call('update', { changes: {} }), /invalid args `key`/);
+      await assert.rejects(() => call('upsert', { entry: entry('claude', CLAUDE_A, '/w', null, 1, 1), unarchive: 'yes' }), /invalid args `unarchive`/);
+      await assert.rejects(() => call('group_create', { group: { id: 'g2', name: 'x' }, move_key: 7 }), /invalid args `move_key`/);
+      await assert.rejects(() => call('group_create', {}), /invalid args `group`/);
+      await assert.rejects(() => call('group_update', { id: 'g1' }), /invalid args `changes`/);
+      await assert.rejects(() => call('group_delete', {}), /invalid args `id`/);
+
+      // A newer file: its groups read, and read only.
+      const newer = JSON.stringify({ version: 3, entries: [], groups: [{ id: 'g1', name: 'Kept' }, { id: 'bad id', name: 'x' }] });
+      mockBridge.agentHistoryCorruptFile(newer);
+      assert.deepEqual(await call('groups'), { version: 3, readOnly: true, groups: [{ id: 'g1', name: 'Kept', collapsed: false }] });
+      await assert.rejects(() => call('group_delete', { id: 'g1' }), /^Error: The agent session history was written by a newer NexTerm \(format version 3\)/);
+      await assert.rejects(() => call('update', { key: claude.key, changes: { pinned: true } }), /newer NexTerm/);
+      assert.equal(mockBridge.agentHistoryFile(), newer, 'byte for byte');
+      assert.equal(warned.filter((w) => w.includes('newer NexTerm')).length, 1, 'said once');
+    });
+  });
+
+  test('AH-23: a fork\u{2019}s forkOf — after the nine fields, kept by later events and curation, version 1 by itself, its shape checked', async () => {
+    await fresh(async () => {
+      const source = await upsert(entry('claude', CLAUDE_A, '/w', null, 1, 2));
+      const fork = await upsert({ ...entry('claude', CLAUDE_B, '/w', null, 3, 4), forkOf: CLAUDE_A });
+      assert.equal(fork.forkOf, CLAUDE_A);
+      assert.deepEqual(Object.keys(fork), ['key', 'kind', 'sessionId', 'cwd', 'title', 'startedAt', 'lastUsedAt', 'endedAt', 'endReason', 'forkOf']);
+      const text = mockBridge.agentHistoryFile();
+      assert.equal(JSON.parse(text).version, 1, 'not curated');
+      assert.ok(text.includes(`"endReason": null,\n      "forkOf": "${CLAUDE_A}"\n    }`), text);
+      // A later event of the fork names none: kept.
+      const later = await upsert({ ...entry('claude', CLAUDE_B, '/w', 'Its title', 3, 9), forkOf: null });
+      assert.equal(later.forkOf, CLAUDE_A);
+      const pinned = await call('update', { key: fork.key, changes: { pinned: true } });
+      assert.equal(pinned.forkOf, CLAUDE_A);
+      assert.ok(mockBridge.agentHistoryFile().includes(`"forkOf": "${CLAUDE_A}",\n      "pinned": true\n`), 'between the nine and the curated');
+      await call('update', { key: fork.key, changes: { pinned: false } });
+      assert.equal(JSON.parse(mockBridge.agentHistoryFile()).version, 1);
+      const listed = await list();
+      assert.deepEqual(listed.map((e) => [e.key, e.forkOf]), [[fork.key, CLAUDE_A], [source.key, undefined]], 'the source left as it was');
+      for (const bad of ['x; curl a | sh', CLAUDE_A.toUpperCase(), OPENCODE_A, '', 7]) {
+        await assert.rejects(
+          () => upsert({ ...entry('claude', CLAUDE_B, '/w', null, 3, 10), forkOf: bad }),
+          /^Error: Not a valid agent session: its forkOf is not one that claude gives a conversation$/,
+          JSON.stringify(bad)
+        );
+      }
+      await assert.rejects(
+        () => upsert({ ...entry('opencode', OPENCODE_A, '/w', null, 3, 10), forkOf: CLAUDE_A }),
+        /its forkOf is not one that opencode gives a conversation$/
+      );
+    });
+  });
+
   /** AH-20's checks, on the five files as `read` gives them. */
   const theBackendsOwn = (read) => {
     const rust = read('../../src-tauri/src/agent_history.rs');
@@ -415,7 +548,19 @@ describe('Agent session history: the mock alone', () => {
       ['pub const MAX_CWD_BYTES: usize = 4096;', 'const MOCK_AGENT_HISTORY_MAX_CWD_BYTES = 4096;'],
       ['pub const MAX_TITLE_CHARS: usize = 200;', 'const MOCK_AGENT_HISTORY_MAX_TITLE_CHARS = 200;'],
       ['pub const MAX_OTHER_ID_CHARS: usize = 128;', 'const MOCK_AGENT_HISTORY_MAX_OTHER_ID_CHARS = 128;'],
-      ['pub const VERSION: u64 = 1;', 'const MOCK_AGENT_HISTORY_VERSION = 1;'],
+      ['pub const VERSION: u64 = 2;', 'const MOCK_AGENT_HISTORY_VERSION = 2;'],
+      ['pub const UNCURATED_VERSION: u64 = 1;', 'const MOCK_AGENT_HISTORY_UNCURATED_VERSION = 1;'],
+      ['pub const MAX_CURATED: usize = 200;', 'const MOCK_AGENT_HISTORY_MAX_CURATED = 200;'],
+      ['pub const MAX_GROUPS: usize = 50;', 'const MOCK_AGENT_HISTORY_MAX_GROUPS = 50;'],
+      ['pub const MAX_NAME_CHARS: usize = 200;', 'const MOCK_AGENT_HISTORY_MAX_NAME_CHARS = 200;'],
+      ['pub const MAX_GROUP_NAME_CHARS: usize = 100;', 'const MOCK_AGENT_HISTORY_MAX_GROUP_NAME_CHARS = 100;'],
+      ['pub const MAX_GROUP_ID_CHARS: usize = 64;', 'const MOCK_AGENT_HISTORY_MAX_GROUP_ID_CHARS = 64;'],
+      ['pub const INVALID_GROUP: &str = "Not a valid agent session group";', "const MOCK_AGENT_HISTORY_INVALID_GROUP = 'Not a valid agent session group';"],
+      ['pub const TOO_MANY_GROUPS: &str = "There can be at most 50 agent session groups";', "const MOCK_AGENT_HISTORY_TOO_MANY_GROUPS = 'There can be at most 50 agent session groups';"],
+      [
+        'pub const TOO_MANY_CURATED: &str = "At most 200 agent sessions can be pinned, renamed or in a group; unpin one, clear its name or take it out of its group first";',
+        "const MOCK_AGENT_HISTORY_TOO_MANY_CURATED = 'At most 200 agent sessions can be pinned, renamed or in a group; unpin one, clear its name or take it out of its group first';",
+      ],
       ['pub const FILE: &str = "agent-sessions.json";', "const MOCK_AGENT_HISTORY_FILE = 'agent-sessions.json';"],
       ['pub const NEWER_VERSION: &str = "The agent session history was written by a newer NexTerm";', "const MOCK_AGENT_HISTORY_NEWER = 'The agent session history was written by a newer NexTerm';"],
       ['pub const INVALID: &str = "Not a valid agent session";', "const MOCK_AGENT_HISTORY_INVALID = 'Not a valid agent session';"],
@@ -440,7 +585,12 @@ describe('Agent session history: the mock alone', () => {
     const commands = read('../../src-tauri/src/commands/agent_history.rs');
     const signatures = {
       agent_history_list: '(app: AppHandle) -> Result<Vec<Entry>, String>',
-      agent_history_upsert: '(app: AppHandle, entry: Value, replaces: Option<String>) -> Result<Entry, String>',
+      agent_history_groups: '(app: AppHandle) -> Result<GroupList, String>',
+      agent_history_upsert: '(app: AppHandle, entry: Value, replaces: Option<String>, unarchive: Option<bool>) -> Result<Entry, String>',
+      agent_history_update: '(app: AppHandle, key: String, changes: Value) -> Result<Option<Entry>, String>',
+      agent_history_group_create: '(app: AppHandle, group: Value, move_key: Option<String>) -> Result<Group, String>',
+      agent_history_group_update: '(app: AppHandle, id: String, changes: Value) -> Result<Option<Group>, String>',
+      agent_history_group_delete: '(app: AppHandle, id: String) -> Result<Option<u32>, String>',
       agent_history_remove: '(app: AppHandle, key: String) -> Result<bool, String>',
       agent_history_clear: '(app: AppHandle) -> Result<u32, String>',
     };
@@ -451,7 +601,7 @@ describe('Agent session history: the mock alone', () => {
         `${name}: snake_case arguments, an async fn on the blocking pool, ${signature}`
       );
     }
-    assert.equal((commands.match(/#\[tauri::command/g) ?? []).length, 4, 'no other command there');
+    assert.equal((commands.match(/#\[tauri::command/g) ?? []).length, 9, 'no other command there');
     assert.ok(commands.includes('spawn_blocking'), 'the blocking pool');
   };
   const BACKEND_FILES = [

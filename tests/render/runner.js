@@ -24,7 +24,7 @@
  * right depth: effects are where the real backend would be needed, and that
  * is what driving the app is for (see TEST_INFRA.md).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { register } from 'node:module';
 
 // `import.meta.url` straight through, never via `.pathname`. On Windows that
@@ -81,6 +81,7 @@ const { renderToString } = await import('react-dom/server');
 
 const { useTerminalStore } = await import('../../src/stores/terminalStore.js');
 const { useEditorStore } = await import('../../src/stores/editorStore.js');
+const { setEditorLayout } = await import('../e2e/harness/workbench.js');
 const { useSettingsStore } = await import('../../src/stores/settingsStore.js');
 const { useGitStore } = await import('../../src/stores/gitStore.js');
 const { usePathDropStore } = await import('../../src/stores/pathDropStore.js');
@@ -90,10 +91,12 @@ const { useSystemStore } = await import('../../src/stores/systemStore.js');
 const { useControlLogStore } = await import('../../src/stores/controlLogStore.js');
 const { useAgentHistoryStore } = await import('../../src/stores/agentHistoryStore.js');
 const { useAgentHistoryPromptStore } = await import('../../src/stores/agentHistoryPromptStore.js');
+const { useTabSwitcherStore } = await import('../../src/stores/tabSwitcherStore.js');
+const { useToastStore, setToastTimers, resetToasts, TOAST_MS } = await import('../../src/stores/toastStore.js');
 const { default: App } = await import('../../src/App.jsx');
 const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore, useTabSwitcherStore, useToastStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -220,6 +223,31 @@ scenario('RN-16', 'the sticky command header turned off', () => {
   useSettingsStore.getState().setSetting('terminalStickyHeader', false);
 });
 
+scenario('RN-16b', 'a terminal pane with prompt marks on the scrollbar (the default)', () => {
+  reset();
+  useSettingsStore.getState().setSetting('terminalPromptMarks', true);
+});
+
+scenario('RN-16c', 'a terminal pane with prompt marks turned off', () => {
+  reset();
+  useSettingsStore.getState().setSetting('terminalPromptMarks', false);
+});
+
+scenario(
+  'RN-16d',
+  'the settings window offers Prompt Marks on Scrollbar, on and off',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    expectText(html, 'Prompt Marks on Scrollbar');
+    expectThat(html.includes('terminal.integrated.promptMarksOnScrollbar'), 'the row has no setting key');
+    useSettingsStore.getState().setSetting('terminalPromptMarks', false);
+    expectText(renderArranged(), 'Prompt Marks on Scrollbar');
+  }
+);
+
 scenario('RN-03', 'a pane holding no terminal', () => {
   // The state a split reaches when its last tab is closed. Renders the pane's
   // empty branch AND the group switcher's aggregate over zero tabs.
@@ -232,8 +260,8 @@ scenario('RN-04', 'an editor pane holding no file', () => {
   useEditorStore.setState({
     tabs: [],
     activeTabId: null,
-    editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: [], activeTabId: null },
   });
+  setEditorLayout();
 });
 
 scenario('RN-05', 'several groups, one of them running and one failed', () => {
@@ -304,9 +332,125 @@ scenario('RN-12', 'a file open in the editor', () => {
   useEditorStore.setState({
     tabs: [{ id: 'e1', filePath: '/workspace/a.js', fileName: 'a.js', content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' }],
     activeTabId: 'e1',
-    editorSplitTree: { type: 'leaf', id: 'editor-pane-root', tabIds: ['e1'], activeTabId: 'e1' },
   });
+  setEditorLayout({ type: 'leaf', id: 'editor-pane-root', tabIds: ['e1'], activeTabId: 'e1' });
 });
+
+// ---- The releasability bridge (editor placement, sibling B, AC-B9) ---------
+// Each view draws its own kind's projection of the group on screen.
+
+const fileTab = (id) => ({ id, filePath: `/workspace/${id}.js`, fileName: `${id}.js`, content: 'x', savedContent: 'x', isDirty: false, language: 'javascript' });
+const editorLeaf = (id, tabIds) => ({ type: 'leaf', kind: 'editor', id, tabIds, activeTabId: tabIds[0] ?? null });
+const terminalTree = () => ({
+  type: 'split', id: 'split-t', direction: 'horizontal', sizes: [50, 50],
+  children: [{ type: 'leaf', id: 'pane-t1', tabIds: ['t1'], activeTabId: 't1' }, { type: 'leaf', id: 'pane-t2', tabIds: ['t2'], activeTabId: 't2' }],
+});
+
+/** Two groups: group-1 [editors e1 | e2 above its terminals], group-2 [editor e3 above its own]; `active` on screen. */
+function arrangeWorkbench(active = 'group-1', { wrapped = true } = {}) {
+  reset();
+  useEditorStore.setState({ tabs: ['e1', 'e2', 'e3'].map(fileTab), activeTabId: 'e1' });
+  const editors = { type: 'split', id: 'split-e', direction: 'horizontal', sizes: [50, 50], children: [editorLeaf('pane-e1', ['e1']), editorLeaf('pane-e2', ['e2'])] };
+  useTerminalStore.setState({
+    tabs: [tab('t1'), tab('t2'), tab('t3')],
+    activeTabId: active === 'group-1' ? 't1' : 't3',
+    groups: [
+      {
+        id: 'group-1', name: 'Group 1', createdAt: 0, activePaneId: 'pane-t1',
+        ...(wrapped ? { editorPaneId: 'pane-e1', tree: { type: 'split', id: 'split-w', direction: 'vertical', sizes: [60, 40], children: [editors, terminalTree()] } } : { tree: terminalTree() }),
+      },
+      {
+        id: 'group-2', name: 'Group 2', createdAt: 0, activePaneId: 'pane-t3', editorPaneId: 'pane-e3',
+        tree: { type: 'split', id: 'split-w2', direction: 'vertical', sizes: [60, 40], children: [editorLeaf('pane-e3', ['e3']), { type: 'leaf', id: 'pane-t3', tabIds: ['t3'], activeTabId: 't3' }] },
+      },
+      { id: 'group-3', name: 'Group 3', createdAt: 0, activePaneId: 'pane-t4', tree: { type: 'leaf', id: 'pane-t4', tabIds: [], activeTabId: null } },
+    ],
+    activeGroupId: active,
+  });
+}
+
+// The workbench draws the whole tree (editor placement, sibling C, FC2): its
+// editor panes are drawn at once, with only their Monaco body lazy, so a
+// server render of the app shows every pane of both kinds. The same checks,
+// with TerminalSplitContainer bundled on its own, are in
+// tests/adversarial/workbench_render.test.js (AC-C2).
+const editorPanesIn = (html) => [...html.matchAll(/data-editor-pane-body="([^"]+)"/g)].map((m) => m[1]);
+const terminalPanesIn = (html) => [...html.matchAll(/data-pane-body="([^"]+)"/g)].map((m) => m[1]);
+/** Every pane body, of either kind, in the order drawn: `kind:id`. */
+const panesInOrder = (html) =>
+  [...html.matchAll(/data-(editor-pane-body|pane-body)="([^"]+)"/g)].map((m) => `${m[1] === 'pane-body' ? 'terminal' : 'editor'}:${m[2]}`);
+/** The pane whose body holds the active line, or null; throws if there are two. */
+function activeLineOf(html) {
+  const at = [...html.matchAll(/data-active-pane=""/g)].map((m) => m.index);
+  if (at.length === 0) return null;
+  expectThat(at.length === 1, `${at.length} active lines on screen`);
+  const before = [...html.slice(0, at[0]).matchAll(/data-(editor-pane-body|pane-body)="([^"]+)"/g)];
+  return before.length ? before[before.length - 1][2] : null;
+}
+
+// Rewritten for sibling C (FC4): RN-B9b asserted that PanelLayout drew an
+// `editor-group` Panel exactly while the group on screen had an editor leaf.
+// The centre editor area is retired, so it now asserts that there is no
+// editor-group and no Maximize Panel whatever the group holds, and that the
+// files of the group on screen are drawn inside the terminal view instead.
+scenario(
+  'RN-B9b',
+  'PanelLayout draws no editor-group and no Maximize Panel; the files of the group on screen are drawn in the workbench',
+  () => arrangeWorkbench('group-1'),
+  (html) => {
+    expectThat(!html.includes('id="editor-group"'), 'a group with editor leaves still draws an editor-group');
+    expectThat(!/Maximize Panel|Restore Panel Size/.test(html), 'the region header still offers Maximize Panel');
+    expectThat(JSON.stringify(editorPanesIn(html)) === JSON.stringify(['pane-e1', 'pane-e2']), `the workbench draws the editor panes ${JSON.stringify(editorPanesIn(html))}`);
+    arrangeWorkbench('group-3');
+    const none = renderArranged();
+    expectThat(!none.includes('id="editor-group"'), 'a group with no editor leaf draws an editor-group');
+    expectThat(editorPanesIn(none).length === 0, 'and no editor pane, though files are open in other groups');
+  }
+);
+
+// Rewritten for sibling C (FC2): RN-B9c asserted the bridge, that the terminal
+// view drew the terminal PROJECTION of the group and the same panes with or
+// without editor leaves wrapped in. The view now draws the full tree, so it
+// asserts that both kinds are drawn in tree order, each by its own attributes
+// (an editor pane never carries `data-pane-body`), and that a terminal-only
+// group draws exactly its terminal panes, as before.
+scenario(
+  'RN-B9c',
+  'the workbench draws both kinds in tree order, an editor pane with its own strip and body and never as a terminal pane',
+  () => arrangeWorkbench('group-1', { wrapped: false }),
+  (html) => {
+    const plain = terminalPanesIn(html);
+    expectThat(JSON.stringify(plain) === JSON.stringify(['pane-t1', 'pane-t2']), `without editors: ${JSON.stringify(plain)}`);
+    expectThat(editorPanesIn(html).length === 0, 'an editor pane without an editor leaf');
+    arrangeWorkbench('group-1', { wrapped: true });
+    const wrapped = renderArranged();
+    const order = panesInOrder(wrapped);
+    expectThat(JSON.stringify(order) === JSON.stringify(['editor:pane-e1', 'editor:pane-e2', 'terminal:pane-t1', 'terminal:pane-t2']), `tree order: ${JSON.stringify(order)}`);
+    expectThat(!terminalPanesIn(wrapped).some((id) => id.startsWith('pane-e')), 'an editor leaf is drawn as a terminal pane');
+    for (const pane of ['pane-e1', 'pane-e2']) {
+      expectThat(wrapped.includes(`data-editor-tab-strip="${pane}"`), `${pane} has no tab strip of its own`);
+      expectThat(!wrapped.includes(`data-tab-strip="${pane}"`), `${pane} carries a terminal strip`);
+    }
+  }
+);
+
+// FC6 (AC-C6): one active line across both kinds, by the terminal's rule.
+scenario(
+  'RN-C6',
+  'one active line across kinds: on the terminal pane, or on the file pane once a file is active; none while zoomed',
+  () => arrangeWorkbench('group-1'),
+  (html) => {
+    expectThat(activeLineOf(html) === 'pane-t1', `terminal-active: the line is on ${activeLineOf(html)}`);
+    const st = useTerminalStore.getState();
+    useTerminalStore.setState({ groups: st.groups.map((g) => (g.id === 'group-1' ? { ...g, activeKind: 'editor', editorPaneId: 'pane-e2' } : g)) });
+    const editorActive = renderArranged();
+    expectThat(activeLineOf(editorActive) === 'pane-e2', `editor-active: the line is on ${activeLineOf(editorActive)}`);
+    useTerminalStore.setState({ groups: useTerminalStore.getState().groups.map((g) => (g.id === 'group-1' ? { ...g, zoomedPaneId: 'pane-e2' } : g)) });
+    const zoomed = renderArranged();
+    expectThat(activeLineOf(zoomed) === null, 'a zoomed editor pane, alone on screen, is marked active');
+    expectThat(JSON.stringify(panesInOrder(zoomed)) === JSON.stringify(['editor:pane-e2']), `the zoom hides both kinds: ${JSON.stringify(panesInOrder(zoomed))}`);
+  }
+);
 
 // ---- Reading the markup back -----------------------------------------------
 
@@ -1022,6 +1166,12 @@ scenario(
 );
 
 const { COMMANDS, configurableCommands, keysFor } = await import('../../src/lib/keybindings.js');
+// The platform the Settings note is drawn for: KeybindingSettings takes it
+// from `navigator`, which Node 20 (CI, on every OS) does not have and Node 24
+// does. Off macOS a macOS-only chord (Go to Tab 1's ⌘1) takes nothing, and
+// the note leaves the command out, so the keys counted here are that
+// platform's too.
+const { isMac: noteIsMac } = await import('../../src/lib/platform.js');
 
 scenario(
   'RN-61',
@@ -1041,7 +1191,7 @@ scenario(
     let unbound = 0;
     for (const { id, title } of configurableCommands()) {
       const named = note.includes(title);
-      const bound = keysFor(id).length > 0;
+      const bound = keysFor(id, undefined, { isMac: noteIsMac }).length > 0;
       if (COMMANDS[id].overTerminal && bound) expectThat(named, `${title} is taken ahead of the terminal, and the note does not say so`);
       else if (COMMANDS[id].overTerminal) {
         unbound += 1;
@@ -2009,12 +2159,12 @@ const paneBodyTag = (html, paneId) => new RegExp(`<div\\b[^>]*\\sdata-pane-body=
     const three = renderArranged();
     expectThat(JSON.stringify(activeIn(three)) === '["pane-b"]', `the active line is on ${JSON.stringify(activeIn(three))}, not pane-b alone`);
     const line = /<div\b[^>]*\sdata-active-pane=""[^>]*>/.exec(three)[0];
-    expectThat(/\binset-0\b/.test(line) && /\bring-1\b/.test(line) && /\bring-vsc-focus\b/.test(line), `not a 1px focus line on the edge: ${line}`);
+    expectThat(/\binset-0\b/.test(line) && /\bring-1\b/.test(line) && /\bring-vsc-accent\b/.test(line), `not a 1px accent line on the edge: ${line}`);
     expectThat(/pointer-events-none/.test(line) && /aria-hidden="true"/.test(line), `the line is in the way: ${line}`);
     // Both on one pane: the ring one pixel in, so the two read as two things.
     expectThat(/data-attention-ring="unread"/.test(paneBody(three, 'pane-b') ?? ''), 'setup: pane-b does not ring');
     // Painted under the strip and the terminal, a ring on the pane's own box never showed.
-    expectThat(!/<div\b[^>]*class="[^"]*ring-vsc-focus[^"]*"[^>]*>\s*<div\b[^>]*data-tab-strip/.test(three), 'the pane box still carries the ring the strip hid');
+    expectThat(!/<div\b[^>]*class="[^"]*ring-vsc-accent[^"]*"[^>]*>\s*<div\b[^>]*data-tab-strip/.test(three), 'the pane box still carries the ring the strip hid');
     reset();
     expectThat(activeIn(renderArranged()).length === 0, 'a lone pane is marked active');
     arrangeThreePanes({ zoomedPaneId: 'pane-b' });
@@ -3408,7 +3558,8 @@ const pressedCards = (html) =>
   attrOrder(html, 'data-theme-card').filter((id) => /<button\b[^>]*\saria-checked="true"/.test(themeCard(html, id) ?? ''));
 /** The opening tag of a card's own button (the radio). */
 const cardRadio = (html, id) => /<button\b[^>]*>/.exec(themeCard(html, id) ?? '')?.[0] ?? '';
-const swatchesIn = (markup) => [...(markup ?? '').matchAll(/<span class="block h-\[10px\] rounded-\[2px\]" style="background:([^"]+)"/g)].map((m) => m[1]);
+// rounded-sm: the 2px of the old rounded-[2px], in Tailwind's own scale (RN-226).
+const swatchesIn = (markup) => [...(markup ?? '').matchAll(/<span class="block h-\[10px\] rounded-sm" style="background:([^"]+)"/g)].map((m) => m[1]);
 const mineTheme = { id: 'custom:mine', label: 'Mine', theme: { background: '#0a0b0c', red: '#ff0000' } };
 
 scenario(
@@ -4546,6 +4697,1618 @@ scenario(
     );
   }
 );
+
+// ---- AGENT SESSIONS curated: pinned, groups, the rest, Archived (F25, AC37) -------
+
+/** Its group headers, each as `{ id, collapsed, count, text, at }`, in the order drawn. */
+function agentGroupHeadersIn(html) {
+  return [...html.matchAll(/<div\b[^>]*\sdata-agent-group="([^"]*)"[^>]*>[\s\S]*?<\/div>/g)].map((m) => ({
+    id: m[1],
+    collapsed: /\sdata-agent-group-collapsed="([^"]*)"/.exec(m[0])?.[1],
+    count: Number(/\sdata-agent-group-count="([^"]*)"/.exec(m[0])?.[1]),
+    text: visibleText(m[0]).replace(/\s+/g, ' ').trim(),
+    at: m.index,
+  }));
+}
+/** A row's place in the markup, its level and whether it carries the pin marker. */
+const rowFacts = (html, key) => {
+  const at = html.indexOf(`data-agent-session="${key}"`);
+  const tag = at === -1 ? '' : html.slice(html.lastIndexOf('<div', at), html.indexOf('>', at) + 1);
+  return { at, level: /\sdata-agent-level="(\d)"/.exec(tag)?.[1] ?? null, pinned: /\sdata-agent-pinned=""/.test(tag) };
+};
+
+const CURATED_GROUPS = [
+  { id: 'g-work', name: 'Work', collapsed: false },
+  { id: 'g-folded', name: 'Folded away', collapsed: true },
+  { id: 'g-empty', name: 'Nothing yet', collapsed: false },
+];
+const CURATED = [
+  historyEntry('k-archived-new', { title: 'Archived but newest', archived: true }, 1),
+  historyEntry('k-pinned', { title: 'Pinned in Work', pinned: true, groupId: 'g-work' }, 50),
+  historyEntry('k-member', { title: 'A Work member' }, 10),
+  historyEntry('k-folded', { title: 'Under a folded group', groupId: 'g-folded' }, 12),
+  historyEntry('k-renamed', { kind: 'claude', sessionId: CLAUDE_ID, cwd: '/work/web', title: 'What Claude Code called it', name: 'My own name' }, 20),
+  historyEntry('k-plain', { title: 'Plain and ungrouped' }, 30),
+  historyEntry('k-archived-old', { title: 'Archived long ago', archived: true, groupId: 'g-work' }, 900),
+];
+CURATED[2].groupId = 'g-work';
+
+scenario(
+  'RN-211',
+  'AGENT SESSIONS curated: pinned rows first with a pin, then each group with its count and its rows a level deeper, then the rest; Archived closed with its count; a renamed row by its name (AC37)',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: CURATED, groups: CURATED_GROUPS, loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    expectThat(section, 'no AGENT SESSIONS section');
+    expectThat(/data-agent-sessions-count="5"/.test(section), `the header counts the archived entries: ${/data-agent-sessions-count="(\d+)"/.exec(section)?.[1]}`);
+    const keys = agentSessionRowsIn(section).map((r) => r.key);
+    expectThat(JSON.stringify(keys) === JSON.stringify(['k-pinned', 'k-member', 'k-renamed', 'k-plain']), `rows drawn: ${JSON.stringify(keys)}`);
+    const headers = agentGroupHeadersIn(section);
+    expectThat(JSON.stringify(headers.map((h) => [h.id, h.collapsed, h.count])) === JSON.stringify([['g-work', 'false', 1], ['g-folded', 'true', 1], ['g-empty', 'false', 0]]), JSON.stringify(headers));
+    for (const [h, name] of [[headers[0], 'Work'], [headers[1], 'Folded away'], [headers[2], 'Nothing yet']]) expectThat(h.text.startsWith(name), `the header does not name its group: ${h.text}`);
+    const pinned = rowFacts(section, 'k-pinned');
+    expectThat(pinned.pinned && pinned.level === '1', `the pinned row: ${JSON.stringify(pinned)}`);
+    expectThat(pinned.at < headers[0].at, 'a pinned row comes after a group header');
+    const pinnedRow = agentSessionRowsIn(section).find((r) => r.key === 'k-pinned');
+    expectThat(/data-agent-session-group="g-work"/.test(pinnedRow.tag) && pinnedRow.text.includes('Work'), `the pinned row does not name its group: ${pinnedRow.text}`);
+    const member = rowFacts(section, 'k-member');
+    expectThat(member.level === '2' && !member.pinned && member.at > headers[0].at && member.at < headers[1].at, `the member is not under its header: ${JSON.stringify(member)}`);
+    expectThat(rowFacts(section, 'k-folded').at === -1, 'a collapsed group draws its rows');
+    for (const key of ['k-renamed', 'k-plain']) {
+      const row = rowFacts(section, key);
+      expectThat(row.level === '1' && !row.pinned && row.at > headers[2].at, `the ungrouped row ${key} is not after the groups: ${JSON.stringify(row)}`);
+    }
+    const renamed = agentSessionRowsIn(section).find((r) => r.key === 'k-renamed');
+    expectThat(renamed.text.includes('My own name') && !renamed.text.includes('What Claude Code called it'), `the renamed row: ${renamed.text}`);
+    expectThat(renamed.title.startsWith('Claude Code: My own name') && renamed.title.includes('Its own title: What Claude Code called it'), `its tooltip: ${renamed.title}`);
+    const archived = /<div\b[^>]*\sdata-agent-archived="([^"]*)"[^>]*>[\s\S]*?<\/div>/.exec(section);
+    expectThat(archived && archived[1] === 'closed', 'no closed Archived header');
+    expectThat(/data-agent-archived-count="2"/.test(archived[0]) && visibleText(archived[0]).includes('Archived'), `the Archived header: ${archived?.[0]}`);
+    expectThat(archived.index > rowFacts(section, 'k-plain').at, 'Archived is not last');
+    expectThat(!section.includes('data-agent-session="k-archived-new"') && !section.includes('data-agent-session="k-archived-old"'), 'archived rows drawn while closed');
+    expectThat(!visibleText(section).includes('are listed here, newest first'), 'the empty-state hint beside entries');
+  }
+);
+
+scenario(
+  'RN-212',
+  'AGENT SESSIONS with only archived entries: the hint, a count of 0 and Archived (n), no rows; a group alone keeps the hint away (AC37, F25)',
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: [CURATED[0], CURATED[6]], groups: [], loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    expectThat(/data-agent-sessions-count="0"/.test(section), 'the header counts the archived entries');
+    expectText(section, 'Claude Code and OpenCode sessions run in these terminals are listed here, newest first.');
+    expectThat(/data-agent-archived="closed"/.test(section) && /data-agent-archived-count="2"/.test(section), 'no Archived (2)');
+    expectThat(agentSessionRowsIn(section).length === 0, 'rows drawn');
+    reset();
+    useAgentHistoryStore.setState({ entries: [], groups: [CURATED_GROUPS[2]], loaded: true, holders: {} });
+    const alone = agentSessionsSection(renderArranged());
+    expectThat(!visibleText(alone).includes('are listed here, newest first'), 'the hint beside a group');
+    expectThat(agentGroupHeadersIn(alone).map((h) => `${h.id}:${h.count}`).join() === 'g-empty:0', 'the empty group is not drawn with 0');
+    expectThat(!/data-agent-archived=/.test(alone), 'an Archived header with nothing archived');
+  }
+);
+
+scenario(
+  'RN-213',
+  "Resume Agent Session… curated: pinned first, then newest first, a grouped row's subtitle names its group, then 'archived agent sessions' (AC40)",
+  () => {
+    reset();
+    useAgentHistoryStore.setState({ entries: CURATED, groups: CURATED_GROUPS, loaded: true });
+    useSettingsStore.setState({ isCommandPaletteOpen: true, commandPaletteMode: 'agent-sessions' });
+  },
+  (html) => {
+    const live = paletteRows(paletteGroup(html, 'agent sessions') ?? '');
+    const archivedAt = html.indexOf('>archived agent sessions</div>');
+    expectThat(archivedAt !== -1, 'no archived agent sessions group');
+    const listed = live.filter((r) => html.indexOf(r.tag) < archivedAt).map((r) => [r.title, r.subtitle, r.hint]);
+    expectThat(
+      JSON.stringify(listed) ===
+        JSON.stringify([
+          ['Pinned in Work', '/work/app · Work', 'opencode · pinned'],
+          ['A Work member', '/work/app · Work', 'opencode'],
+          ['Under a folded group', '/work/app · Folded away', 'opencode'],
+          ['My own name', '/work/web', 'Claude Code'],
+          ['Plain and ungrouped', '/work/app', 'opencode'],
+        ]),
+      JSON.stringify(listed)
+    );
+    const archived = paletteRows(html.slice(archivedAt)).map((r) => [r.title, r.subtitle]);
+    expectThat(JSON.stringify(archived) === JSON.stringify([['Archived but newest', '/work/app'], ['Archived long ago', '/work/app · Work']]), JSON.stringify(archived));
+    expectThat(/placeholder="Resume an agent session — name, title, group/.test(html), 'the placeholder does not mention names and groups');
+  }
+);
+
+scenario(
+  'RN-214',
+  'a pin, rename, group or delete the history refused is an alert headed "Agent session not changed" (F30)',
+  () => {
+    reset();
+    useTerminalStore.getState().showAgentHistoryNotice('curationFailed', 'There can be at most 50 agent session groups');
+  },
+  (html) => {
+    const notice = /<div\b[^>]*\sdata-agent-history-notice="curationFailed"[^>]*>[\s\S]*?<\/button><\/div>/.exec(html)?.[0];
+    expectThat(notice, 'no notice drawn');
+    expectThat(/\srole="alert"/.test(notice), 'not announced as an alert');
+    expectText(notice, 'Agent session not changed');
+    expectText(notice, 'There can be at most 50 agent session groups');
+  }
+);
+
+scenario(
+  'RN-215',
+  'a newer NexTerm’s list draws the same sections; more than 15 ungrouped rows end in "Show all (N)…" with N every unarchived entry (F25, F30)',
+  () => {
+    reset();
+    const many = Array.from({ length: 17 }, (_, i) => historyEntry(`k-${i}`, { title: `Task ${i}` }, i + 1));
+    many.push(historyEntry('k-pin', { title: 'Pinned', pinned: true }, 100), historyEntry('k-arch', { title: 'Gone', archived: true }, 200));
+    useAgentHistoryStore.setState({ entries: many, groups: [], readOnly: true, version: 3, loaded: true, holders: {} });
+  },
+  (html) => {
+    const section = agentSessionsSection(html);
+    const keys = agentSessionRowsIn(section).map((r) => r.key);
+    expectThat(keys.length === 16 && keys[0] === 'k-pin' && keys[15] === 'k-14', JSON.stringify(keys));
+    expectThat(/data-agent-sessions-count="18"/.test(section), 'the count');
+    expectText(section, 'Show all (18)…');
+    expectThat(/data-agent-archived-count="1"/.test(section), 'no Archived (1)');
+  }
+);
+
+// ---- Claude Code working or idle, from its title (T-20261117-135439-4164) --------
+
+/** Three Claude Code terminals — working, idle, idle with an unread entry — and a plain one. */
+function arrangeClaudeStates() {
+  reset();
+  useTerminalStore.setState({
+    tabs: [
+      tab('cc-w', { title: 'busy', ...running('cc-w', 'claude') }),
+      tab('cc-i', { title: 'done', ...running('cc-i', 'claude'), running: true }),
+      tab('cc-u', { title: 'told', ...running('cc-u', 'claude') }),
+      tab('cc-p', { title: 'plain' }),
+    ],
+    activeTabId: 'cc-p',
+    groups: [groupOf('group-1', ['cc-w', 'cc-i', 'cc-u', 'cc-p'])],
+    // Each state just began: since U5 (RN-238) a line says how long its
+    // state has held, and these cases are about the state's words alone.
+    agentActivity: {
+      'cc-w': Object.freeze({ state: 'working', since: Date.now() }),
+      'cc-i': Object.freeze({ state: 'idle', since: Date.now() }),
+      'cc-u': Object.freeze({ state: 'idle', since: Date.now() }),
+    },
+    notifications: [
+      { id: 'agent-cc-u-1-1', kind: 'program', origin: 'agent-done', agent: 'claude', tabId: 'cc-u', tabTitle: 'told', title: 'Claude Code', body: 'Waiting for you after 12s of work', durationMs: 12000, at: Date.now(), read: false },
+    ],
+  });
+}
+
+scenario(
+  'RN-216',
+  'TERMINALS: a working Claude Code draws Working with the loader, an idle one Idle with a ring (even while its shell runs it), an unread entry Waiting (AC12)',
+  arrangeClaudeStates,
+  (html) => {
+    const working = statusIn(terminalRow(html, 'cc-w'));
+    expectThat(working?.state === 'working' && working.words === 'Working' && working.icon === 'loader-circle', `working: ${JSON.stringify(working)}`);
+    const idle = statusIn(terminalRow(html, 'cc-i'));
+    expectThat(idle?.state === 'idle' && idle.words === 'Idle' && idle.icon === 'circle', `idle: ${JSON.stringify(idle)}`);
+    expectThat(!/text-vsc-info|text-vsc-attention|text-vsc-error/.test(idle.iconTag), `the idle ring is coloured as news: ${idle.iconTag}`);
+    const told = statusIn(terminalRow(html, 'cc-u'));
+    expectThat(told?.state === 'waiting' && told.words === 'Waiting', `an unread entry: ${JSON.stringify(told)}`);
+    expectThat(statusIn(terminalRow(html, 'cc-p')) === null, 'the plain terminal says something');
+  }
+);
+
+scenario(
+  'RN-217',
+  "AGENT SESSIONS: a row held open says its terminal's state with the same word; an offered row says offered; a held row whose terminal says nothing says open (AC12, F7)",
+  () => {
+    arrangeClaudeStates();
+    useAgentHistoryStore.setState({
+      entries: HISTORY,
+      loaded: true,
+      holders: {
+        'k-open': { tabId: 'cc-i', state: 'open' },
+        'k-claude': { tabId: 'cc-w', state: 'offered' },
+        'k-free': { tabId: 'cc-p', state: 'open' },
+      },
+    });
+  },
+  (html) => {
+    const rows = agentSessionRowsIn(agentSessionsSection(html) ?? '');
+    const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
+    const held = byKey['k-open'];
+    const badge = tagWith(held?.tag, 'data-agent-state');
+    expectThat(badge && attrOf(badge, 'data-agent-holder') === 'open' && attrOf(badge, 'data-agent-state') === 'idle', `the held badge: ${badge}`);
+    const termWords = statusIn(terminalRow(html, 'cc-i'))?.words;
+    expectThat(termWords === 'Idle' && held.text.includes(termWords), `the held row does not say its terminal's ${termWords}: ${held?.text}`);
+    expectThat(/lucide-circle\b/.test(held.tag), 'the held badge has no icon');
+    // The row's tooltip says it is open, as in v0.27.0; the live state is the
+    // badge's and its own title's (F7 as amended).
+    const tipLines = (row) => row.title.split('\n').map((line) => line.trim());
+    expectThat(tipLines(held).includes('Open in a terminal of this window') && !/Open in a terminal of this window:/.test(held.title), `its tooltip: ${held.title}`);
+    expectThat(attrOf(badge, 'title') === 'Open in a terminal of this window: Idle', `the held badge's title: ${badge}`);
+    const offered = byKey['k-claude'];
+    expectThat(/data-agent-holder="offered"/.test(offered?.tag ?? '') && !/data-agent-state=/.test(offered.tag) && offered.text.includes('offered'), `the offered row: ${offered?.tag}`);
+    expectThat(offered.title.includes('Offered for resuming in a terminal of this window'), `the offered tooltip: ${offered.title}`);
+    const quiet = byKey['k-free'];
+    const quietBadge = tagWith(quiet?.tag, 'data-agent-state');
+    expectThat(attrOf(quietBadge, 'data-agent-state') === 'none' && attrOf(quietBadge, 'data-agent-holder') === 'open', `the quiet badge: ${quietBadge}`);
+    expectThat(/>open<\/span>/.test(quiet.tag), `the quiet row does not say open: ${quiet.tag}`);
+    expectThat(tipLines(quiet).includes('Open in a terminal of this window') && !/Open in a terminal of this window:/.test(quiet.title), `the quiet tooltip: ${quiet.title}`);
+    expectThat(attrOf(quietBadge, 'title') === 'Open in a terminal of this window: open', `the quiet badge's title: ${quietBadge}`);
+  }
+);
+
+scenario(
+  'RN-218',
+  "the bell list draws a finished Claude Code turn as a program's entry (AC12, F10)",
+  () => reset(),
+  () => {
+    const html = renderToString(
+      React.createElement(NotificationList, {
+        notifications: [
+          { id: 'agent-t1-1-1', kind: 'program', origin: 'agent-done', agent: 'claude', tabId: 't1', tabTitle: 't1', title: 'Claude Code', body: 'Waiting for you after 12s of work \u{2014} Fix it', durationMs: 12000, at: Date.now(), read: false },
+        ],
+        onGo() {},
+        onDismiss() {},
+      })
+    );
+    const kinds = [...html.matchAll(/\sdata-notification-entry="([^"]+)"/g)].map((m) => m[1]);
+    expectThat(JSON.stringify(kinds) === '["program"]', `drawn as ${JSON.stringify(kinds)}`);
+    expectText(html, 'Waiting for you after 12s of work');
+  }
+);
+
+scenario(
+  'RN-219',
+  'the settings window offers Notify When an Agent Is Done as a number, 10 by default, right after Notify After (AC13)',
+  () => {
+    reset();
+    useSettingsStore.setState({ isSettingsModalOpen: true });
+  },
+  (html) => {
+    const after = html.indexOf('terminal.integrated.notifyAfterSeconds');
+    const at = html.indexOf('terminal.integrated.agentDoneAfterSeconds');
+    const before = html.indexOf('terminal.integrated.programNotifications');
+    expectThat(after !== -1 && at !== -1 && before !== -1 && after < at && at < before, `not between Notify After and Notifications from Programs: ${after} ${at} ${before}`);
+    const keys = [...html.matchAll(/font-mono text-ui-sm text-vsc-muted">([^<]+)</g)].map((m) => m[1]);
+    const n = keys.indexOf('terminal.integrated.notifyAfterSeconds');
+    expectThat(
+      n !== -1 && keys[n + 1] === 'terminal.integrated.agentDoneAfterSeconds' && keys[n + 2] === 'terminal.integrated.programNotifications',
+      `not directly after Notify After: ${keys.slice(Math.max(0, n), n + 3)}`
+    );
+    expectText(html, 'Notify When an Agent Is Done');
+    expectText(html, 'Needs no Claude Code setting.');
+    const input = /<input\b[^>]*type="number"[^>]*>/.exec(html.slice(at, before))?.[0] ?? '';
+    expectThat(/\svalue="10"/.test(input), `not a number input at 10: ${input}`);
+  }
+);
+
+scenario(
+  'RN-220',
+  "the README says where Claude Code's state and its completion come from, in each section that tells of them (AC14, F13)",
+  () => reset(),
+  () => {
+    const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    /** The text of the section headed `heading`, to the next heading of its level or higher. */
+    const section = (heading) => {
+      const at = readme.indexOf(heading);
+      expectThat(at !== -1, `no section ${heading}`);
+      const level = /^#+/.exec(heading)[0].length;
+      const rest = readme.slice(at + heading.length);
+      const end = rest.search(new RegExp(`\\n#{1,${level}} `));
+      return (end === -1 ? rest : rest.slice(0, end)).replace(/\s+/g, ' ');
+    };
+    const say = (text, words, where) => {
+      for (const w of words) expectThat(text.includes(w), `${where} does not say ${JSON.stringify(w)}`);
+    };
+    say(section('### Knowing what every terminal is doing'), ['Notify When an Agent Is Done', 'needs no Claude Code setting', 'one entry for that moment, not two'], 'Knowing what every terminal is doing');
+    say(section('#### Notifications from programs'), ['no longer needed', 'one entry', 'Notify When an Agent Is Done'], 'Notifications from programs');
+    say(section('#### The TERMINALS panel as a status board'), ['Idle', 'Working', '✳', 'not running'], 'The TERMINALS panel as a status board');
+    say(section('#### Agent sessions: every conversation run here'), ['Idle', 'Working', 'open'], 'Agent sessions');
+    say(readme.replace(/\s+/g, ' '), ['`idle`', '`working`'], 'the control section');
+  }
+);
+
+check('RN-221', "a change of Claude Code's state redraws its own line, never the whole TERMINALS panel (non-functional: cost)", () => {
+  // As for the bars (RN-114): the panel reading the activity map would
+  // redraw every row on each state change; the second line reads its own
+  // terminal's entry and nothing else of the map.
+  const panel = readFileSync(new URL('../../src/components/terminal/TerminalsPanel.jsx', import.meta.url), 'utf8');
+  const board = readFileSync(new URL('../../src/components/terminal/StatusBoard.jsx', import.meta.url), 'utf8');
+  expectThat(!/\bs\.agentActivity\b/.test(panel), 'the TERMINALS panel subscribes to the activity map');
+  expectThat(!/\.agentActivity\b/.test(panel), 'the TERMINALS panel reads the activity map');
+  const start = board.search(/^export const TerminalStatusLine = memo\(function TerminalStatusLine\(/m);
+  expectThat(start !== -1, 'the second line is not a memoised module-level component');
+  const rest = board.slice(start);
+  const end = rest.search(/^\}\);/m);
+  // The component's code, its comments left out.
+  const line = (end === -1 ? rest : rest.slice(0, end)).replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
+  const own = /useTerminalStore\(\(s\) => \(showAgent \? s\.agentActivity\?\.\[tabId\] \?\? null : null\)\)/;
+  expectThat(own.test(line), 'the second line does not subscribe to its own terminal\'s entry');
+  const reads = (line.match(/\bagentActivity\b/g) || []).length;
+  expectThat(reads === 1, `the second line reads the activity map ${reads} times, not once for its own entry`);
+});
+
+// ---- The UI refresh: palette, focus, simple look, responsive panels ------------
+//
+// What the stylesheet and the class strings must say, read from the source:
+// CSS is not drawn by a server render, and focus, hover and the separators'
+// states only exist in a browser. The human checks what these cannot
+// (WebView2 and WKWebView, forced colours, scaling).
+
+// LF whatever the checkout has: a Windows one has CRLF, and checks here are
+// written against `\n` (PZ-31 failed on windows-latest for v0.33.0 on that).
+const readSource = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+/** The :root value of `--vsc-<name>` as written, or null. */
+const rootToken = (css, name) => new RegExp(`--vsc-${name}:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? null;
+/** Every .js/.jsx/.css file under a source directory, as [path, text]. */
+function sourcesUnder(rel) {
+  const out = [];
+  for (const entry of readdirSync(new URL(`../../${rel}/`, import.meta.url), { withFileTypes: true })) {
+    const child = `${rel}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...sourcesUnder(child));
+    else if (/\.(jsx?|css)$/.test(entry.name)) out.push([child, readSource(child)]);
+  }
+  return out;
+}
+
+check('RN-222', 'the palette: ActionMacro violet on bluish greys, every text and UI-part pair at WCAG contrast', () => {
+  const css = readSource('src/styles/index.css');
+  const exact = {
+    accent: '#8B5CF6', 'accent-hover': '#6D28D9', 'accent-solid': '#7C3AED', 'accent-pressed': '#5B21B6',
+    'accent-text': '#C4B5FD', focus: '#8B5CF6', 'focus-ring': '#C4B5FD', link: '#A78BFA', 'badge-accent': '#7C3AED',
+    selection: '#3B2C5B',
+    'titlebar-bg': '#0E1014', 'activitybar-bg': '#0E1014', 'sidebar-bg': '#0E1014', 'panel-bg': '#0E1014',
+    'terminal-bg': '#0E1014', 'statusbar-bg': '#0E1014', 'tab-inactive-bg': '#0E1014', 'attention-fg': '#0E1014',
+    'editor-bg': '#15171C', 'tab-active-bg': '#15171C',
+    'widget-bg': '#1B1E25', 'quickinput-bg': '#1B1E25', 'menu-bg': '#1B1E25',
+    'input-bg': '#232731', 'button-secondary': '#232731', hover: '#232731',
+    border: '#2A2F3A',
+    'widget-border': '#3A4150', 'input-border': '#3A4150', 'indent-guide': '#3A4150', 'badge-bg': '#3A4150',
+    'input-border-hover': '#4F586B',
+    fg: '#E7E9EE', 'activitybar-fg': '#E7E9EE', 'line-number-active': '#E7E9EE', 'badge-fg': '#E7E9EE',
+    muted: '#9BA3AF', 'tab-inactive-fg': '#9BA3AF', 'activitybar-muted': '#9BA3AF',
+    'input-placeholder': '#8B93A0', 'inactive-selection': '#2B303C',
+    'line-number': '#6B7280', 'indent-guide-active': '#6B7280',
+    'item-hover': 'rgba(155, 163, 175, 0.18)', 'item-active': 'rgba(155, 163, 175, 0.30)',
+    scrollbar: 'rgba(155, 163, 175, 0.28)', 'scrollbar-hover': 'rgba(155, 163, 175, 0.45)',
+  };
+  for (const [name, value] of Object.entries(exact)) {
+    expectThat((rootToken(css, name) ?? '').toLowerCase() === value.toLowerCase(), `--vsc-${name} is ${rootToken(css, name)}, not ${value}`);
+  }
+  // No colour of the old palette is left, comments included.
+  const old = /#(0078d4|026ec1|04395e|181818|1f1f1f|202020|222222|313131|3c3c3c|2b2b2b|cccccc|9d9d9d|989898|868686|d7d7d7|2a2d2e|37373d|6e7681|404040|707070|282828|aeafad|616161|f8f8f8)\b/i;
+  const left = [...sourcesUnder('src/styles'), ...sourcesUnder('src/components'), ['src/lib/monaco.js', readSource('src/lib/monaco.js')]]
+    .filter(([, text]) => old.test(text)).map(([file, text]) => `${file}: ${old.exec(text)[0]}`);
+  expectThat(left.length === 0, `colours of the old palette are left: ${left.join(', ')}`);
+
+  const hex = (name) => {
+    const value = rootToken(css, name);
+    expectThat(/^#[0-9a-fA-F]{6}$/.test(value ?? ''), `--vsc-${name} is not #RRGGBB (the contrast maths and xterm parse it): ${value}`);
+    return value;
+  };
+  const surfaces = ['sidebar-bg', 'editor-bg', 'widget-bg', 'input-bg', 'inactive-selection'];
+  const needs = (fgName, bgNames, min) => {
+    for (const bgName of bgNames) {
+      const ratio = contrast(hex(fgName), hex(bgName));
+      expectThat(ratio >= min, `--vsc-${fgName} on --vsc-${bgName} is ${ratio.toFixed(2)}:1, under ${min}`);
+    }
+  };
+  for (const text of ['fg', 'muted', 'tab-inactive-fg', 'activitybar-muted']) needs(text, [...surfaces, 'selection'], 4.5);
+  needs('input-placeholder', ['input-bg', 'widget-bg'], 4.5);
+  needs('accent', surfaces, 3);
+  needs('focus', ['input-bg', 'widget-bg', 'editor-bg', 'sidebar-bg'], 3);
+  needs('focus-ring', [...surfaces, 'selection', 'accent-solid'], 3);
+  needs('accent-text', surfaces, 4.5);
+  needs('link', [...surfaces, 'selection'], 4.5);
+  needs('accent-fg', ['accent-solid', 'accent-hover', 'accent-pressed'], 4.5);
+  needs('fg', ['selection'], 4.5);
+  needs('selection-fg', ['selection'], 4.5);
+  needs('attention-fg', ['attention'], 4.5);
+  needs('line-number', ['editor-bg'], 3);
+  // Violet reads as neither "a terminal wants you" nor a warning nor a failure.
+  const apart = (a, b) => Math.min(Math.abs(hue(a) - hue(b)), 360 - Math.abs(hue(a) - hue(b)));
+  for (const other of ['attention', 'warn', 'error']) {
+    expectThat(apart(hex('accent'), hex(other)) >= 60, `the accent is ${apart(hex('accent'), hex(other)).toFixed(0)}\u{00b0} from --vsc-${other}`);
+  }
+  // No text sits on the plain accent: white on it is under 4.5:1.
+  const plainFill = sourcesUnder('src/components').filter(([, text]) => /\bbg-vsc-accent\b(?![-/])[^'"`\n]*\btext-vsc-accent-fg\b|\btext-vsc-accent-fg\b[^'"`\n]*\bbg-vsc-accent\b(?![-/])/.test(text));
+  expectThat(plainFill.length === 0, `text on the plain accent (use bg-vsc-accent-solid): ${plainFill.map(([file]) => file).join(', ')}`);
+});
+
+check('RN-229', "Monaco's theme is a copy of the stylesheet's tokens, key by key", () => {
+  const css = readSource('src/styles/index.css');
+  const monaco = readSource('src/lib/monaco.js');
+  const key = (name) => new RegExp(`'${name.replace(/\./g, '\\.')}':\\s*'(#[0-9a-fA-F]{6,8})'`).exec(monaco)?.[1] ?? null;
+  const mirrors = {
+    'editor.background': 'editor-bg',
+    'editorGutter.background': 'editor-bg',
+    'editor.foreground': 'fg',
+    'editorCursor.foreground': 'fg',
+    'editorLineNumber.foreground': 'line-number',
+    'editorLineNumber.activeForeground': 'line-number-active',
+    'editorIndentGuide.background1': 'indent-guide',
+    'editorIndentGuide.activeBackground1': 'indent-guide-active',
+    'editorWidget.background': 'widget-bg',
+    'editorWidget.border': 'widget-border',
+    'input.background': 'input-bg',
+    'input.border': 'input-border',
+    'inputOption.activeBorder': 'accent',
+    'list.hoverBackground': 'hover',
+    'list.activeSelectionBackground': 'selection',
+    'menu.background': 'menu-bg',
+    'menu.foreground': 'fg',
+    'menu.selectionBackground': 'selection',
+    'menu.border': 'widget-border',
+    focusBorder: 'focus',
+  };
+  for (const [monacoKey, token] of Object.entries(mirrors)) {
+    const value = key(monacoKey);
+    expectThat(value && value.toLowerCase() === (rootToken(css, token) ?? '').toLowerCase(), `Monaco's ${monacoKey} is ${value}, --vsc-${token} is ${rootToken(css, token)}`);
+  }
+  for (const [monacoKey, value] of [
+    ['editor.selectionBackground', '#523F8A'],
+    ['editor.lineHighlightBorder', '#1F232B'],
+    ['scrollbarSlider.background', '#9BA3AF47'],
+    ['scrollbarSlider.hoverBackground', '#9BA3AF73'],
+  ]) {
+    expectThat((key(monacoKey) ?? '').toLowerCase() === value.toLowerCase(), `Monaco's ${monacoKey} is ${key(monacoKey)}, not ${value}`);
+  }
+  // The slider is the stylesheet's scrollbar grey.
+  expectThat(/^rgba\(155, 163, 175,/.test(rootToken(css, 'scrollbar') ?? ''), `--vsc-scrollbar is no longer #9BA3AF: ${rootToken(css, 'scrollbar')}`);
+  // The selection still reads on the editor as the old one did.
+  expectThat(Math.abs(luminance('#523F8A') - luminance('#264f78')) < 0.01, 'the editor selection is lighter or darker than before');
+  expectThat(contrast(key('editor.foreground'), key('editor.selectionBackground')) >= 4.5, 'editor text on the selection is under 4.5:1');
+});
+
+/** The body of the first `<at-rule> {` block that starts at column 0, up to its closing brace at column 0. */
+const topBlock = (css, head) => {
+  const start = css.indexOf(`\n${head} {`);
+  if (start === -1) return null;
+  const end = css.indexOf('\n}', start + 1);
+  return css.slice(start + head.length + 3, end);
+};
+/** Every `selector { declarations }` rule in a block of CSS without nested blocks. */
+const rulesIn = (block) =>
+  [...(block ?? '').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    selector: m[1].trim(),
+    props: m[2].split(';').map((d) => d.trim()).filter(Boolean).map((d) => d.split(':')[0].trim()),
+    body: m[2],
+  }));
+
+check('RN-223', 'focus is one rule: a keyboard-only ring in the base layer, a field shows focus by its own border, and forced colours keep both', () => {
+  const css = readSource('src/styles/index.css');
+  const base = topBlock(css, '@layer base');
+  expectThat(base, 'no @layer base block');
+  expectThat(/(^|\n)\s*:focus-visible \{\s*outline: 2px solid var\(--vsc-focus-ring\);\s*outline-offset: -2px;\s*\}/.test(base), `the keyboard ring is not 2px of --vsc-focus-ring, 2px in: ${base}`);
+  const fields = /:is\(input:not\(\[type=checkbox\], \[type=radio\], \[type=range\], \[type=file\], \[type=color\]\), textarea, select\):focus-visible \{\s*outline: none;\s*\}/;
+  expectThat(fields.test(base), 'text fields keep an outline of their own (F6)');
+  // Unlayered, after `@tailwind utilities`, a :focus-visible rule beats
+  // every `outline-none`: the double frame again.
+  const outside = css.replace(base, '');
+  expectThat(!/(^|\n)\s*:focus-visible\s*\{/.test(outside), 'a :focus-visible rule outside the base layer');
+  expectThat(css.indexOf('@layer base') > css.indexOf('@tailwind utilities'), 'setup: the layers come after the @tailwind lines');
+  const components = rulesIn(topBlock(css, '@layer components'));
+  const rule = (selector) => components.find((r) => r.selector === selector);
+  const field = rule('.ui-field');
+  expectThat(field, 'no .ui-field in @layer components');
+  expectThat(/border: 1px solid var\(--vsc-input-border\)/.test(field.body), `.ui-field's border is not 1px of --vsc-input-border: ${field.body}`);
+  expectThat(/background-color: var\(--vsc-input-bg\)/.test(field.body), '.ui-field is not on --vsc-input-bg');
+  expectThat(/border-radius: var\(--radius-control\)/.test(field.body), '.ui-field does not round to --radius-control');
+  expectThat(!/outline|box-shadow|padding|height|margin/.test(field.body), `.ui-field sets more than its look: ${field.body}`);
+  expectThat(/border-color: var\(--vsc-input-border-hover\)/.test(rule('.ui-field:hover')?.body ?? ''), 'a field gets no hover border');
+  expectThat(/border-color: var\(--vsc-focus\)/.test(rule('.ui-field:focus-within')?.body ?? ''), 'a focused field does not turn --vsc-focus');
+  const invalid = components.filter((r) => r.selector.includes('.ui-field-invalid'));
+  expectThat(invalid.length > 0 && invalid.every((r) => /border-color: var\(--vsc-error\)/.test(r.body)), 'an invalid field does not keep --vsc-error');
+  for (const state of ['', ':hover', ':focus-within']) {
+    expectThat(invalid.some((r) => r.selector.split(',').some((one) => one.trim() === `.ui-field.ui-field-invalid${state}`)), `an invalid field is not red${state ? ` on ${state}` : ' at rest'}`);
+  }
+  // Focus and hover change a colour, never a size: nothing moves.
+  for (const r of components.filter((one) => /:hover|:focus-within/.test(one.selector))) {
+    expectThat(r.props.every((prop) => prop === 'border-color'), `${r.selector} sets ${r.props.join(', ')}, not border-color alone`);
+  }
+  // Forced colours repaint a border colour away: an outline in Highlight.
+  const forced = /@media \(forced-colors: active\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+  expectThat(/\.ui-field:focus-within \{\s*outline: 2px solid Highlight( !important)?;\s*outline-offset: -2px;/.test(forced), 'in forced colours, a focused field shows nothing');
+  expectThat((css.match(/@media \(forced-colors: active\)/g) || []).length === 1, 'a second forced-colours block (RN-94 and RN-114 read the first alone)');
+});
+
+check('RN-224', 'every text field is a ui-field, red through ui-field-invalid, with no focus class of its own', () => {
+  const fields = [
+    ['src/components/command/CommandPalette.jsx', 1],
+    ['src/components/search/SearchPanel.jsx', 1],
+    ['src/components/explorer/FileExplorer.jsx', 1],
+    ['src/components/terminal/TerminalFindBar.jsx', 1],
+    ['src/components/common/SettingsWindow.jsx', 3],
+    ['src/components/command/ProjectCommandDialog.jsx', 2],
+    ['src/components/terminal/StartupCommandsDialog.jsx', 1],
+    ['src/components/common/KeybindingSettings.jsx', 1],
+    ['src/components/terminal/TerminalSplitContainer.jsx', 2],
+    ['src/components/terminal/TerminalsPanel.jsx', 1],
+    ['src/components/explorer/TreeRow.jsx', 1],
+    ['src/components/layout/TitleBar.jsx', 1],
+  ];
+  const forbidden = /\b(focus:border-\S+|focus-within:border-\S+|focus-visible:outline\S*|focus-visible:ring\S*)/;
+  for (const [file, count] of fields) {
+    const source = readSource(file);
+    const classes = [...source.matchAll(/(['"`])([^'"`\n]*\bui-field\b[^'"`\n]*)\1/g)].map((m) => m[2]).filter((c) => /(^|\s)ui-field(\s|$)/.test(c));
+    expectThat(classes.length === count, `${file}: ${classes.length} ui-field class strings, not ${count}`);
+    for (const cls of classes) expectThat(!/\bborder-2\b|\bborder-vsc-error\b|\bbg-vsc-input\b|\bborder-vsc-input-border\b/.test(cls), `${file}: a field draws its own border or fill: ${cls}`);
+    expectThat(!forbidden.test(source), `${file}: a focus class of its own: ${forbidden.exec(source)?.[0]}`);
+  }
+  // A refused value: the field keeps the error colour through ui-field-invalid.
+  for (const [file, flag] of [
+    ['src/components/command/ProjectCommandDialog.jsx', 'error'],
+    ['src/components/terminal/StartupCommandsDialog.jsx', 'error'],
+    ['src/components/common/KeybindingSettings.jsx', 'refusal'],
+    ['src/components/explorer/TreeRow.jsx', 'error'],
+  ]) {
+    const source = readSource(file);
+    expectThat(source.includes(`${flag} && 'ui-field-invalid'`), `${file}: an invalid value is not drawn with ui-field-invalid`);
+    expectThat(!/\? 'border-vsc-error' :/.test(source), `${file}: still picks border-vsc-error by hand`);
+  }
+  // One exception, and only it: the Explorer tree has no ring of its own, so
+  // with no row selected it marks the row the keys move from in the ring's
+  // colour (K-01, explorer_row_menu RM-06 to RM-10).
+  const FOCUS_ROW = "isFocusRow && 'outline outline-1 -outline-offset-1 outline-vsc-focus-ring'";
+  const treeRow = readSource('src/components/explorer/TreeRow.jsx');
+  expectThat(treeRow.split(FOCUS_ROW).length === 2, "TreeRow's focus row is not one 1px inset outline in --vsc-focus-ring");
+  const named = [...sourcesUnder('src/components'), ...sourcesUnder('src/lib')]
+    .map(([file, text]) => [file, file === 'src/components/explorer/TreeRow.jsx' ? text.replace(FOCUS_ROW, '') : text])
+    .filter(([, text]) => /vsc-focus/.test(text))
+    .map(([file]) => file);
+  expectThat(named.length === 0, `components still name vsc-focus (a field border is ui-field's, an active mark --vsc-accent, the ring the global rule's): ${named.join(', ')}`);
+  // The per-component rings are gone: one ring, the global one.
+  for (const file of ['src/components/common/ThemeGallery.jsx', 'src/components/common/ConfirmDialog.jsx', 'src/components/terminal/HiddenStrip.jsx', 'src/components/common/ControlLogDialog.jsx']) {
+    expectThat(!forbidden.test(readSource(file)), `${file}: a focus ring of its own: ${forbidden.exec(readSource(file))?.[0]}`);
+  }
+});
+
+check('RN-225', "'active' is violet and stays apart from focus and attention: pane line, tab marks, activity bar", () => {
+  const read = (rel) => readSource(`src/components/${rel}`);
+  expectThat(/isActive\s*\?\s*'text-vsc-fg border-vsc-accent'/.test(read('layout/PanelLayout.jsx')), 'the region tab underline is not the accent');
+  expectThat(/shadow-\[inset_0_1px_0_0_var\(--vsc-accent\)\]/.test(read('editor/EditorTabs.jsx')), "the editor's active tab line is not the accent");
+  expectThat(/absolute left-0 top-0 bottom-0 w-\[2px\] bg-vsc-accent/.test(read('layout/Sidebar.jsx')), "the activity bar's bar is not the accent");
+  // Rewritten for sibling C (FC6): the editor pane's always-on ring is gone.
+  // Its active line is the terminal's PaneFrame, by the same rule (RN-C6).
+  const editorPane = read('editor/EditorPane.jsx');
+  expectThat(/<PaneFrame active=\{showActiveLine\} \/>/.test(editorPane), "the editor pane's active line is not PaneFrame's");
+  expectThat(!/ring-vsc-accent/.test(editorPane) && !/ring-vsc-accent/.test(read('editor/EditorPanel.jsx')), 'an editor pane still draws a ring of its own');
+  expectThat(/showActiveLine=\{isActivePane && Boolean\(zoom\?\.canZoom\) && !zoomed\}/.test(read('terminal/TerminalSplitContainer.jsx')), "the editor pane's line is not on the terminal's condition");
+  // One drop indicator for both kinds: named zones, the accent border.
+  expectThat(/'border-2 border-vsc-accent rounded-sm'/.test(read('terminal/TerminalSplitContainer.jsx')), 'the drop indicator is not bordered in the accent');
+  expectThat(!/function DropIndicator/.test(editorPane + read('editor/EditorPanel.jsx') + read('editor/EditorTabs.jsx')), 'the editor still draws a drop indicator of its own');
+  const indicators = read('terminal/AttentionIndicators.jsx');
+  expectThat(/'inset-0 ring-1 ring-inset ring-vsc-accent'/.test(indicators), "the terminal's active pane line is not the accent");
+  // Attention: orange, 2px, one pixel inside the active line, as before.
+  expectThat((indicators.match(/'inset-px ring-2 ring-inset ring-vsc-attention animate-attention-(pulse|flash)'/g) || []).length === 2, 'the attention ring is no longer 2px of --vsc-attention one pixel in');
+  expectThat(/chosen \? 'border-vsc-accent'/.test(read('common/ThemeGallery.jsx')), 'the chosen theme card has no accent border');
+});
+
+/** The :root value of a custom property by its full name, or null. */
+const rootTokenOf = (css, name) => new RegExp(`${name}:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? null;
+check('RN-226', 'the simple look, and only it: two corner tokens, popovers rounded with inset rows, one shadow, edged secondary buttons', () => {
+  const css = readSource('src/styles/index.css');
+  const tailwind = readSource('tailwind.config.js');
+  expectThat(rootTokenOf(css, '--radius-control') === '4px' && rootTokenOf(css, '--radius-popover') === '8px', 'the corner tokens are not 4px and 8px');
+  expectThat(/control: 'var\(--radius-control\)'/.test(tailwind) && /popover: 'var\(--radius-popover\)'/.test(tailwind), 'tailwind has no rounded-control or rounded-popover');
+  expectThat(/widget: '0 8px 24px -6px var\(--vsc-shadow\)'/.test(tailwind), 'shadow-widget is not the one elevation');
+  expectThat(rootToken(css, 'shadow') === 'rgba(0, 0, 0, 0.5)', `--vsc-shadow is ${rootToken(css, 'shadow')}`);
+  const components = sourcesUnder('src/components');
+  /**
+   * The class string around each use of a class, as [file, string, what comes
+   * before it]: the run of text with no quote in it, so an apostrophe in a
+   * comment cannot pair the quotes wrongly.
+   */
+  const around = (pattern) =>
+    components.flatMap(([file, text]) =>
+      [...text.matchAll(new RegExp(`[^'"\`]*${pattern}[^'"\`]*`, 'g'))].map((m) => [file, m[0], text.slice(Math.max(0, m.index - 20), m.index)])
+    );
+  const arbitrary = around('\\brounded-(\\[\\d+px\\]|md\\b)');
+  expectThat(arbitrary.length === 0, `corners outside the tokens: ${arbitrary.map(([file, cls]) => `${file}: ${cls}`).join(' | ')}`);
+  const shadowed = around('\\bshadow-widget\\b');
+  expectThat(shadowed.length >= 12, `setup: only ${shadowed.length} popovers found`);
+  for (const [file, cls] of shadowed) expectThat(/\brounded-popover\b/.test(cls), `${file}: a shadow without the popover corner: ${cls}`);
+  // Menus and the palette: inset rows at the same 22px.
+  const menu = readSource('src/components/common/ContextMenu.jsx');
+  const bar = readSource('src/components/layout/MenuBar.jsx');
+  const palette = readSource('src/components/command/CommandPalette.jsx');
+  expectThat(/className="z-\[70\] min-w-\[220px\] p-1 rounded-popover /.test(menu), 'the context menu is not p-1 rounded-popover');
+  expectThat(/'flex items-center gap-2 h-\[22px\] px-3 rounded-control text-ui select-none'/.test(menu), "the context menu's rows are not inset at 22px");
+  expectThat(/const popupClass =\s*'p-1 rounded-popover /.test(bar), 'the menu-bar popups are not p-1 rounded-popover');
+  expectThat(/'flex items-center gap-2 h-\[22px\] px-3 rounded-control text-ui select-none cursor-pointer'/.test(bar), "the menu bar's rows are not inset at 22px");
+  expectThat(/<div className="max-h-\[400px\] overflow-auto p-1">/.test(palette), "the palette's list is not p-1");
+  expectThat(/'h-\[22px\] px-2 rounded-control flex items-center gap-2 text-ui cursor-pointer'/.test(palette), "the palette's rows are not inset at 22px");
+  // A secondary button is the field colour on a dialog only 1.12:1 lighter: it needs an edge.
+  for (const [file, cls, before] of around('\\bbg-vsc-button-secondary\\b')) {
+    if (/<kbd\s+className=["'`]?$/.test(before)) continue; // a key cap, not a button
+    expectThat(/\bborder-vsc-(input-border|border)\b/.test(cls), `${file}: a secondary button without an edge: ${cls}`);
+    if (/\bborder-vsc-input-border\b/.test(cls)) expectThat(/(^|\s)border(\s|$)/.test(cls), `${file}: an edge colour with no border: ${cls}`);
+  }
+  // Native checkboxes and selected text in violet.
+  expectThat(around('\\baccent-current\\b').length === 0, 'a checkbox is still drawn in the text colour');
+  for (const file of ['src/components/common/SettingsWindow.jsx', 'src/components/command/ProjectCommandDialog.jsx']) expectThat(/accent-vsc-accent/.test(readSource(file)), `${file}: the checkbox is not violet`);
+  expectThat(/::selection \{\s*background: var\(--vsc-accent-solid\);\s*color: var\(--vsc-accent-fg\);\s*\}/.test(css), 'selected text is not the solid violet');
+  // Motion: no new keyframes but the toasts' two opacity fades (U6, RN-239),
+  // and every transition is a colour, 150ms or less (the maximize one went
+  // with Maximize Panel, sibling C).
+  const frames = [...css.matchAll(/@keyframes ([\w-]+)/g)].map((m) => m[1]).sort();
+  expectThat(JSON.stringify(frames) === JSON.stringify(['attention-flash', 'attention-pulse', 'overlay-fade-in', 'panel-fade-in', 'panel-fade-out', 'progress-slide', 'toast-fade-in', 'toast-fade-out']), `the keyframes changed: ${frames}`);
+  for (const [, value] of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(?:^|[\s;{])transition:\s*([^;]+);/g)) {
+    for (const part of value.split(',')) {
+      const [prop, time] = part.trim().split(/\s+/);
+      expectThat(/^(background-color|border-color|outline-color|color)$/.test(prop) && parseInt(time, 10) <= 150 && /ms$/.test(time), `a transition that is not a colour of 150ms or less: ${part.trim()}`);
+    }
+  }
+});
+
+check('RN-227', 'at 960px and wider the title bar does not overlap and the status bar keeps the bell', () => {
+  const bar = readSource('src/components/layout/TitleBar.jsx');
+  expectThat(/isMac \? "pl-\[78px\] pr-3" : "pl-2"/.test(bar), "setup: the title bar's padding changed; the cap below is worked out from it");
+  const pill = /<button\b[^>]*onClick=\{\(\) => setCommandPaletteOpen\(true\)\}[^>]*className="([^"]*)"/.exec(bar)?.[1] ?? '';
+  const share = Number(/\bw-\[(\d+)%\]/.exec(pill)?.[1]);
+  const least = Number(/\bmin-w-\[(\d+)px\]/.exec(pill)?.[1]);
+  const most = Number(/\bmax-w-\[(\d+)px\]/.exec(pill)?.[1]);
+  expectThat(share === 38 && least === 180 && most === 600, `the pill is not clamp(180px, 38%, 600px): ${pill}`);
+  expectThat(/\bui-field\b/.test(pill) && /\bpx-2\b/.test(pill), `the pill is not a field with room for its ellipsis: ${pill}`);
+  expectThat(/<span className="min-w-0 truncate">Search NexTerm/.test(bar), "the pill's label does not truncate");
+  expectThat(/<Search size=\{14\} className="shrink-0" \/>/.test(bar), "the pill's icon gives way to the label");
+  expectThat(/<span className="min-w-0 text-vsc-muted truncate" title=\{rootPath\}>\{workspaceName\}<\/span>/.test(bar), 'the workspace name does not truncate with its path in the tooltip');
+  expectThat(/data-tauri-drag-region/.test(bar) && /absolute inset-0 flex items-center justify-center pointer-events-none/.test(bar), 'the bare title bar no longer drags the window');
+  const cluster = /'relative z-10 flex items-center gap-2 min-w-0',\s*isMac\s*\?\s*'max-w-\[([^\]]+)\]'\s*:\s*'max-w-\[([^\]]+)\]'/.exec(bar);
+  expectThat(cluster, 'the left cluster is not min-w-0 with a cap per platform');
+  /** A Tailwind calc() in px and % of `base`, worked out. */
+  const evaluate = (value, base) => {
+    const expr = value.replace(/_/g, ' ').replace(/calc\(/g, '(').replace(/(\d+(?:\.\d+)?)%/g, `($1*${base}/100)`).replace(/(\d+(?:\.\d+)?)px/g, '$1');
+    return Function('clamp', `return ${expr};`)((lo, v, hi) => Math.min(Math.max(lo, v), hi));
+  };
+  for (const [platform, cap, left, right] of [['macOS', cluster[1], 78, 12], ['Windows and Linux', cluster[2], 8, 0]]) {
+    for (const width of [960, 1024, 1280, 1440, 1600, 1920, 2560, 3840]) {
+      const content = width - left - right;
+      const pillWidth = Math.min(Math.max(least, (share / 100) * width), most);
+      const pillLeft = width / 2 - pillWidth / 2;
+      const clusterRight = left + evaluate(cap, content);
+      expectThat(pillLeft - clusterRight >= 8 - 1e-9, `${platform} at ${width}px: the left cluster can come ${(pillLeft - clusterRight).toFixed(1)}px from the pill`);
+      expectThat(pillLeft - clusterRight <= 8.5, `${platform} at ${width}px: the cap leaves ${(pillLeft - clusterRight).toFixed(1)}px unused`);
+    }
+  }
+
+  const status = readSource('src/components/layout/StatusBar.jsx');
+  expectThat(/const SHRINKS = new Set\(\['workspace', 'cwd'\]\);/.test(status), 'the folder and cwd items are not the ones that give way');
+  expectThat(/SHRINKS\.has\(item\.id\) \? 'min-w-0' : 'shrink-0'/.test(status), 'the folder and cwd items do not shrink');
+  expectThat(/<span className="truncate">\{item\.text\}<\/span>/.test(status), "an item's text does not truncate");
+  expectThat(/<div className="flex-1 min-w-0 flex items-center h-full overflow-hidden">\s*\{left\.map/.test(status), 'the left group is not flex-1 min-w-0');
+  expectThat(/<div className="shrink-0 flex items-center h-full">\s*\{right\.map\(\(it\) => \(\s*<StatusItem key=\{it\.id\} item=\{it\} \/>\s*\)\)\}\s*<NotificationCenter \/>/.test(status), 'the right group, with the bell, can shrink');
+  expectThat(/className="h-statusbar shrink-0 flex items-center justify-between [^"]*overflow-hidden"/.test(status) && !/flex-wrap/.test(status), 'the status bar can wrap or grow');
+});
+
+check('RN-228', 'every separator: a 1px line, violet on hover and drag (two rules) across a 10px hit area, a keyboard ring; pixel minimums for the editor and the bottom panel', () => {
+  const css = readSource('src/styles/index.css');
+  const rules = rulesIn(css.slice(css.indexOf('[data-separator] {'), css.indexOf('/* ------', css.indexOf('[data-separator] {'))));
+  const rule = (selector) => rules.find((r) => r.selector.replace(/\s+/g, ' ') === selector);
+  expectThat(/background: var\(--vsc-border\)/.test(rule('[data-separator]')?.body ?? ''), 'a separator is not a line in --vsc-border');
+  // Hover (the pointer on the line, or anywhere in the hit area) and a drag
+  // are two rules since U2: hover waits, a drag does not (RN-235).
+  expectThat(/background: var\(--vsc-accent\)/.test(rule('[data-separator]:hover, [data-separator="hover"]')?.body ?? ''), 'a separator does not turn violet on hover, across its hit area');
+  expectThat(/background: var\(--vsc-accent\)/.test(rule('[data-separator="active"]')?.body ?? ''), 'a separator does not turn violet while dragged');
+  const focus = rule('[data-separator]:focus-visible')?.body ?? '';
+  expectThat(/background: var\(--vsc-focus-ring\)/.test(focus) && /outline: 1px solid var\(--vsc-focus-ring\)/.test(focus) && /outline-offset: 0/.test(focus), `a focused separator shows no 3px ring line: ${focus}`);
+  expectThat(rule('[data-separator]:focus-visible')?.props.join(',') === 'background,outline,outline-offset', `the keyboard ring rule changed: ${focus}`);
+  expectThat(!/\[data-state/.test(css.replace(/\/\*[\s\S]*?\*\//g, '')), 'a v3 data-state selector, which v4 never sets');
+  // Every separator in the app is the 1px element the rule draws.
+  const separators = [...sourcesUnder('src/components')].flatMap(([file, text]) => [...text.matchAll(/<Separator\b([^>]*)\/>/g)].map((m) => [file, m[1]]));
+  // Three (sibling C): the two of the side bars and the workbench's own. The
+  // editor area's split and the editor|panel one went with the centre area.
+  expectThat(separators.length === 3, `setup: ${separators.length} separators`);
+  for (const [file, attrs] of separators) expectThat(/className=(\{direction === 'horizontal' \? 'w-px' : 'h-px'\}|"w-px"|"h-px")/.test(attrs), `${file}: a separator that is not 1px: ${attrs}`);
+  // The hit area is the library's: 10px for a mouse, centred, unless a Group says otherwise.
+  // What the package's own types say is read there; what only its build says
+  // is read from the minified build, which a patch or a new minifier can
+  // reword with nothing changed. A miss there is the library's, not NexTerm's.
+  const types = readFileSync(new URL('../../node_modules/react-resizable-panels/dist/react-resizable-panels.d.ts', import.meta.url), 'utf8');
+  const library = readFileSync(new URL('../../node_modules/react-resizable-panels/dist/react-resizable-panels.js', import.meta.url), 'utf8');
+  const H8 = 'react-resizable-panels changed (this reads its minified build, so the wording may have moved with nothing else): an update needs its hit area and separator states re-verified by hand (H8); NexTerm\u{2019}s own behaviour did not change';
+  const fine = Number(/resizeTargetMinimumSize: \w+ = \{\s*coarse: \d+,\s*fine: (\d+)\s*\}/.exec(library)?.[1]);
+  expectThat(fine >= 8, Number.isNaN(fine) ? `the default hit area for a mouse was not found: ${H8}` : `the default hit area for a mouse is ${fine}px, under 8: ${H8}`);
+  expectThat(/g\.x - L \/ 2/.test(library) && /g\.y - L \/ 2/.test(library), `the hit area was not found centred on the line: ${H8}`);
+  expectThat(/Use the `data-separator` attribute for custom _hover_ and _active_ styles/.test(types), 'the package\u{2019}s types no longer say data-separator carries the hover and active states');
+  expectThat(/Q\("inactive"\)/.test(library) && /state: "hover"/.test(library), `the separator states behind data-separator ("hover" across the hit area, "inactive" at rest) were not found: ${H8}`);
+  expectThat(/declare type BaseSeparatorAttributes = Omit<HTMLAttributes<HTMLDivElement>, "role" \| "tabIndex">/.test(types) && /Separators are not _required_ but they are _recommended_ as they improve keyboard accessibility/.test(types), 'the package\u{2019}s types no longer say a separator is reached by the keyboard, with its tabIndex its own');
+  const overrides = [...sourcesUnder('src')].filter(([file, text]) => /\.jsx?$/.test(file) && /resizeTargetMinimumSize/.test(text));
+  expectThat(overrides.length === 0, `a Group overrides the hit area: ${overrides.map(([file]) => file).join(', ')}`);
+
+  const layout = readSource('src/components/layout/PanelLayout.jsx');
+  const settings = readSource('src/stores/settingsStore.js');
+  const row = Number(/terminalFontSize: (\d+),/.exec(settings)?.[1]) * Number(/terminalLineHeight: ([\d.]+),/.exec(settings)?.[1]);
+  // Rewritten for sibling C (FC4, FC7): the editor-group Panel and its 112px
+  // minimum went with the centre area, and Maximize Panel with it. An editor
+  // pane's minimum is now the workbench's: PANE_MIN_PX, which ResizableSplit
+  // turns into each Panel's share.
+  const css2 = readSource('src/styles/index.css');
+  const layoutCode = layout.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+  expectThat(!/editor-group/.test(layoutCode) && !/aximize/.test(layoutCode), 'PanelLayout still has an editor-group or a Maximize Panel');
+  expectThat(!/panel-maximize-transition/.test(layout + css2), 'the maximize transition is still there');
+  const bottomMin = Number(/id="bottom-panel"\s*defaultSize="40"\s*minSize=\{(\d+)\}/.exec(layout)?.[1]);
+  // The bottom panel: its 35px header, the 28px pane strip and three terminal rows.
+  expectThat(bottomMin >= 35 + 28 + 3 * row, `the bottom panel's minimum is ${bottomMin}px (a row is ${row}px)`);
+  // It fits in the 640px window, under the title and status bars.
+  expectThat(bottomMin <= 640 - 35 - 22, 'the bottom panel minimum does not fit the smallest window');
+  expectThat(/id="primary-sidebar"\s*defaultSize=\{260\}\s*minSize=\{170\}/.test(layout), 'the left side bar is no longer 260px, at least 170px');
+  expectThat(/id="secondary-sidebar"\s*defaultSize=\{320\}\s*minSize=\{220\}/.test(layout), 'the right side bar is no longer 320px, at least 220px');
+  const split = readSource('src/components/terminal/TerminalSplitContainer.jsx');
+  const panes = readSource('src/components/terminal/splitLayout.js');
+  expectThat(/terminal: Object\.freeze\(\{ width: 120, height: 88 \}\)/.test(panes) && /editor: Object\.freeze\(\{ width: 160, height: 96 \}\)/.test(panes), 'the documented pane minimums changed');
+  expectThat(/const pixelShares = lengthPx \? minSharesOf\(node, lengthPx\) : null;/.test(split) && /minSize=\{minSizeOf\(i\)\}/.test(split), 'ResizableSplit does not derive its Panel minimums from PANE_MIN_PX');
+  expectThat(/Math\.min\(equalBound, pixelShares\[i\]\)/.test(split), 'a pixel minimum can exceed the equal-share bound');
+});
+
+// ---- A program's title for its terminal (set-title, A10b) ----------------------
+//
+// Who wins a terminal's label (`displayTitle`, src/lib/tabTitle.js): the
+// user's own name, then the title a program set, then the default name — on
+// the chip, the TERMINALS row and the hidden strip's handle alike.
+
+/** Three terminals: one a program titled, one the user named (a program titled it too), one plain. */
+function arrangeProgramTitles() {
+  reset();
+  useTerminalStore.setState({
+    tabs: [
+      tab('pt-1', { title: 'Terminal 1', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 }),
+      tab('pt-2', { title: 'build', defaultTitle: 'Terminal 2', programTitle: 'npm test', programTitleAt: 1 }),
+      tab('pt-3', { title: 'Terminal 3', defaultTitle: 'Terminal 3' }),
+    ],
+    activeTabId: 'pt-1',
+    groups: baseGroups(['pt-1', 'pt-2', 'pt-3']),
+    activeGroupId: 'group-1',
+  });
+}
+
+/** The text a chip or row draws as its name: its first `truncate` span. */
+const nameIn = (markup) => visibleText(/<span class="[^"]*\btruncate\b[^"]*">([^<]*)<\/span>/.exec(markup ?? '')?.[1] ?? '');
+
+scenario(
+  'RN-231',
+  "a program's title names an unnamed terminal on its chip and its TERMINALS row; a name the user gave wins over it; a plain one keeps its default",
+  arrangeProgramTitles,
+  (html) => {
+    for (const [id, want, not] of [
+      ['pt-1', 'vim notes.md', 'Terminal 1'],
+      ['pt-2', 'build', 'npm test'],
+      ['pt-3', 'Terminal 3', null],
+    ]) {
+      const chip = tabChip(html, id);
+      expectThat(chip, `no chip for ${id}`);
+      expectThat(nameIn(chip) === want, `the chip of ${id} says ${JSON.stringify(nameIn(chip))}, not ${JSON.stringify(want)}`);
+      const tip = attrOf(openingTag(chip), 'title') ?? '';
+      expectThat(tip.startsWith(`${want} — `), `the chip's tooltip of ${id} does not start with its label: ${JSON.stringify(tip)}`);
+      expectThat(attrOf(chip.match(/<button\b[^>]*aria-label="Close [^"]*"[^>]*>/)?.[0], 'aria-label') === `Close ${want}`, `the ✕ of ${id} does not name ${want}`);
+      const row = terminalRow(html, id);
+      expectThat(row, `no TERMINALS row for ${id}`);
+      expectThat(nameIn(row) === want, `the TERMINALS row of ${id} says ${JSON.stringify(nameIn(row))}, not ${JSON.stringify(want)}`);
+      if (not) expectThat(!chip.includes(`>${not}<`) && !row.includes(`>${not}<`), `${id} still draws ${JSON.stringify(not)}`);
+    }
+  }
+);
+
+scenario(
+  'RN-232',
+  "the hidden strip's handle names its terminal by the same rule: the program's title, or the user's name over it",
+  () => {
+    arrangeHidden({ extra: { tabs: [tab('t1', { title: 'Terminal 1', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 })] } });
+  },
+  (html) => {
+    const words = attrOf(openingTag(handleOf(paneMarkup(html, 'pane-1'))), 'aria-label') ?? '';
+    expectThat(words === 'vim notes.md. Show its tab strip', `the handle's words: ${JSON.stringify(words)}`);
+    // The same terminal, renamed: the user's name, whatever the program said.
+    arrangeHidden({ extra: { tabs: [tab('t1', { title: 'mine', defaultTitle: 'Terminal 1', programTitle: 'vim notes.md', programTitleAt: 1 })] } });
+    const named = attrOf(openingTag(handleOf(paneMarkup(renderArranged(), 'pane-1'))), 'aria-label') ?? '';
+    expectThat(named === 'mine. Show its tab strip', `the renamed handle's words: ${JSON.stringify(named)}`);
+  }
+);
+
+/** The Ctrl+Tab switcher's overlay, or '' when none is drawn. */
+function tabSwitcherIn(html) {
+  const at = html.indexOf('data-tab-switcher=""');
+  if (at < 0) return '';
+  const start = html.lastIndexOf('<div', at);
+  const end = html.indexOf('</div></div>', at);
+  return end < 0 ? html.slice(start) : html.slice(start, end + '</div></div>'.length);
+}
+/** Its rows, in order: the tab id, whether marked selected, and the words drawn. */
+function tabSwitcherRows(markup) {
+  return [...markup.matchAll(/<div\b[^>]*data-tab-switcher-row="([^"]+)"[^>]*>([\s\S]*?)(?=<div\b[^>]*data-tab-switcher-row=|<\/div><\/div>$)/g)].map((m) => {
+    const tag = m[0].match(/^<div\b[^>]*>/)[0];
+    const words = (sel) => m[2].match(new RegExp(`<span[^>]*${sel}[^>]*>([^<]*)</span>`))?.[1] ?? null;
+    return {
+      tabId: m[1],
+      selected: attrOf(tag, 'aria-selected'),
+      role: attrOf(tag, 'role'),
+      id: attrOf(tag, 'id'),
+      title: words('data-tab-switcher-title'),
+      group: words('data-tab-switcher-group'),
+      folder: words('data-tab-switcher-folder'),
+    };
+  });
+}
+
+scenario(
+  'RN-233',
+  'the Ctrl+Tab switcher: a listbox of every group\u{2019}s terminals, most recent first, the selected row marked, each with its name, group and folder',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        tab('t1', { title: 'Terminal 1', defaultTitle: 'Terminal 1', cwd: '/home/me/api' }),
+        tab('t2', { title: 'build', defaultTitle: 'Terminal 2', cwd: 'C:\\work\\web' }),
+        tab('t3', { title: 'Terminal 3', defaultTitle: 'Terminal 3', cwd: '/srv/logs/' }),
+      ],
+      activeTabId: 't1',
+      activeGroupId: 'group-1',
+      groups: [
+        { id: 'group-1', name: 'Group 1', createdAt: 0, activePaneId: 'pane-1', tree: { type: 'leaf', id: 'pane-1', tabIds: ['t1', 't2'], activeTabId: 't1' } },
+        { id: 'group-2', name: 'Servers', createdAt: 0, activePaneId: 'pane-2', tree: { type: 'leaf', id: 'pane-2', tabIds: ['t3'], activeTabId: 't3' } },
+      ],
+    });
+    useTabSwitcherStore.setState({ open: true, items: ['t1', 't3', 't2'], selectedIndex: 1, modifiers: { ctrl: true, alt: false, meta: false, shift: false } });
+  },
+  (html) => {
+    const overlay = tabSwitcherIn(html);
+    expectThat(overlay, 'no switcher drawn while it is open');
+    const listbox = overlay.match(/<div\b[^>]*role="listbox"[^>]*>/)?.[0];
+    expectThat(listbox, 'the switcher is no listbox');
+    expectThat(attrOf(listbox, 'aria-label') === 'Recent terminals', `the listbox is called ${JSON.stringify(attrOf(listbox, 'aria-label'))}`);
+    const rows = tabSwitcherRows(overlay);
+    expectThat(rows.map((r) => r.tabId).join() === 't1,t3,t2', `the rows, in order: ${rows.map((r) => r.tabId).join()}`);
+    expectThat(rows.every((r) => r.role === 'option'), 'a row is not an option');
+    expectThat(rows.map((r) => r.selected).join() === 'false,true,false', `the selected marks: ${rows.map((r) => r.selected).join()}`);
+    expectThat(attrOf(listbox, 'aria-activedescendant') === rows[1].id && rows[1].id, `aria-activedescendant ${JSON.stringify(attrOf(listbox, 'aria-activedescendant'))} is not the selected row ${JSON.stringify(rows[1].id)}`);
+    const drawn = rows.map((r) => [r.title, r.group, r.folder].join('|')).join(' / ');
+    expectThat(drawn === 'Terminal 1|Group 1|api / Terminal 3|Servers|logs / build|Group 1|web', `the rows say ${JSON.stringify(drawn)}`);
+    // The theme's colours only, and nothing that moves (reduce motion).
+    const classes = [...overlay.matchAll(/class="([^"]*)"/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean);
+    const colours = classes.filter((c) => /^(bg|text|border|shadow)-/.test(c) && !/^text-ui(-sm)?$/.test(c) && !/^shadow-widget$/.test(c));
+    const notTheme = colours.filter((c) => !/^(bg|text|border)-vsc-/.test(c));
+    expectThat(notTheme.length === 0, `colours that are not the theme's: ${notTheme.join(' ')}`);
+    const moving = classes.filter((c) => /^(transition|animate|duration)/.test(c));
+    expectThat(moving.length === 0, `classes that animate: ${moving.join(' ')}`);
+    // Closed: nothing drawn, whatever list it last held.
+    useTabSwitcherStore.setState({ open: false });
+    expectThat(!tabSwitcherIn(renderArranged()), 'the switcher is drawn while closed');
+  }
+);
+
+// ---- The style guide: STYLEGUIDE.md against the stylesheet ---------------------
+//
+// STYLEGUIDE.md is written by hand, so it can drift from index.css. This reads
+// both as text (raw, so the CRLF handling is this check's own) and lists what
+// no longer matches. RN-234 runs it on the checkout, on CRLF copies of all
+// three files, and on broken copies it must catch.
+
+const STYLEGUIDE_SECTIONS = [
+  'Palette and tokens', 'Accent', 'Focus', 'Radii', 'Elevation', 'Motion and reduced motion',
+  'Density and sizes', 'Copy', 'In-flight feedback', 'Recorded decisions',
+];
+/** The tokens the guide must name, each also declared in index.css's :root. */
+const STYLEGUIDE_KEY_TOKENS = [
+  'accent', 'accent-solid', 'accent-text', 'focus', 'focus-ring', 'attention', 'error', 'warn', 'ok', 'info',
+  'border', 'widget-border', 'widget-bg', 'editor-bg', 'terminal-bg', 'input-bg', 'radius-control', 'radius-popover',
+].map((name) => (name.startsWith('radius-') ? `--${name}` : `--vsc-${name}`));
+/** [what is checked, how a decision's bold title names it]. */
+const STYLEGUIDE_DECISIONS = [
+  ['Q-C1', /\bQ-C1\b/],
+  ['F8', /\bF8\b/],
+  ['git read-only', /\bgit read-only\b/i],
+  ['dark only', /\bdark only\b/i],
+  ['a closed tab keeps nothing on disk', /\ba closed tab keeps nothing on disk\b/i],
+];
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** The body of a markdown `## <title>` section (to the next `## ` or the end), or null. */
+function markdownSection(markdown, title) {
+  const start = new RegExp(`^## ${escapeRegExp(title)}[ \\t]*$`, 'im').exec(markdown);
+  if (!start) return null;
+  const rest = markdown.slice(start.index + start[0].length);
+  const next = /^## /m.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
+/** A real calendar date written YYYY-MM-DD, or null. */
+function isoDateIn(text) {
+  for (const m of text.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) {
+    const date = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+    if (date.toISOString().slice(0, 10) === m[0]) return m[0];
+  }
+  return null;
+}
+
+/** Every way STYLEGUIDE.md (`guide`) disagrees with index.css (`css`) and README.md (`readme`). */
+function styleguideDrift({ guide: rawGuide, css: rawCss, readme: rawReadme }) {
+  const guide = rawGuide.replace(/\r\n/g, '\n');
+  const css = rawCss.replace(/\r\n/g, '\n');
+  const readme = rawReadme.replace(/\r\n/g, '\n');
+  const problems = [];
+
+  // The sections, as `## ` headings.
+  const headings = [...guide.matchAll(/^## (.+?)[ \t]*$/gm)].map((m) => m[1].toLowerCase());
+  for (const title of STYLEGUIDE_SECTIONS) {
+    if (!headings.includes(title.toLowerCase())) problems.push(`no "## ${title}" heading`);
+  }
+  const feedback = markdownSection(guide, 'In-flight feedback') ?? '';
+  for (const [label, pattern] of [['100 ms', /\b100\s?ms\b/], ['1 s', /\b1\s?s\b/], ['3 s', /\b3\s?s\b/]]) {
+    if (!pattern.test(feedback)) problems.push(`In-flight feedback does not name ${label}`);
+  }
+
+  // The tokens: index.css's :root block, the one at the start of a line.
+  const root = /^:root\s*\{([\s\S]*?)^\}/m.exec(css)?.[1] ?? '';
+  if (!root) problems.push('index.css has no :root block');
+  const declared = new Set([...root.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+  for (const token of STYLEGUIDE_KEY_TOKENS) {
+    if (!declared.has(token)) problems.push(`${token} is not declared in index.css :root`);
+    if (!new RegExp(`${escapeRegExp(token)}(?![\\w-])`).test(guide)) problems.push(`STYLEGUIDE.md does not name ${token}`);
+  }
+  // Every token the guide names is real. A name followed by `*` (`--vsc-*`) is a
+  // family, and real when :root declares at least one token of it.
+  for (const m of guide.matchAll(/--(?:vsc|radius)-[\w-]*(\*?)/g)) {
+    const token = m[0].replace(/\*$/, '');
+    const real = m[1] ? [...declared].some((d) => d.startsWith(token) && d !== token) : declared.has(token);
+    if (!real) problems.push(`STYLEGUIDE.md names ${m[0]}, which index.css :root does not declare`);
+  }
+  // The corners it states are the ones the stylesheet sets.
+  for (const token of ['--radius-control', '--radius-popover']) {
+    const stated = new RegExp(`${escapeRegExp(token)}\`?\\s*\\((\\d+px)`).exec(guide)?.[1];
+    const actual = new RegExp(`${escapeRegExp(token)}\\s*:\\s*([^;]+);`).exec(root)?.[1]?.trim();
+    if (stated !== actual) problems.push(`STYLEGUIDE.md gives ${token} as ${stated}, index.css as ${actual}`);
+  }
+
+  // The decisions: one `- **title** ...` entry each, with a date and a reason.
+  const decisions = markdownSection(guide, 'Recorded decisions') ?? '';
+  const entries = decisions.split(/\n(?=- )/).map((e) => e.trim()).filter((e) => e.startsWith('- '));
+  if (entries.length === 0) problems.push('Recorded decisions lists no entry');
+  for (const entry of entries) {
+    const title = /^- \*\*([\s\S]+?)\*\*/.exec(entry)?.[1]?.replace(/\s+/g, ' ');
+    const what = title ?? entry.slice(0, 40);
+    if (!title) problems.push(`a decision without a bold title: ${JSON.stringify(what)}`);
+    if (!isoDateIn(entry)) problems.push(`the decision "${what}" has no YYYY-MM-DD date`);
+    if (!/\bReason:\s+\S+(\s+\S+){2,}/.test(entry)) problems.push(`the decision "${what}" gives no reason`);
+  }
+  for (const [label, pattern] of STYLEGUIDE_DECISIONS) {
+    const hits = entries.filter((e) => pattern.test(/^- \*\*([\s\S]+?)\*\*/.exec(e)?.[1]?.replace(/\s+/g, ' ') ?? ''));
+    if (hits.length !== 1) problems.push(`Recorded decisions has ${hits.length} entries titled "${label}", not 1`);
+  }
+
+  // README links it from Develop, and index.css's header comment points to it.
+  if (!/\]\(\.?\/?STYLEGUIDE\.md\)/.test(markdownSection(readme, 'Develop') ?? '')) {
+    problems.push("README.md's Develop section does not link STYLEGUIDE.md");
+  }
+  const header = /\/\*[\s\S]*?\*\//.exec(css)?.[0] ?? '';
+  if (!header.includes('STYLEGUIDE.md')) problems.push("index.css's header comment does not point to STYLEGUIDE.md");
+  return problems;
+}
+
+check('RN-234', 'STYLEGUIDE.md: its sections, the recorded decisions with dates and reasons, and the tokens it names all match index.css; README links it', () => {
+  // Raw, not readSource: the CRLF handling under test is styleguideDrift's own.
+  const raw = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8');
+  const texts = { guide: raw('STYLEGUIDE.md'), css: raw('src/styles/index.css'), readme: raw('README.md') };
+  const crlf = (text) => text.replace(/\r?\n/g, '\r\n');
+  const asCrlf = { guide: crlf(texts.guide), css: crlf(texts.css), readme: crlf(texts.readme) };
+  expectThat(asCrlf.guide.includes('\r\n') && !/[^\r]\n/.test(asCrlf.guide), 'the CRLF copy is not CRLF');
+  for (const [which, copy] of [['the checkout', texts], ['a CRLF copy', asCrlf]]) {
+    const problems = styleguideDrift(copy);
+    expectThat(problems.length === 0, `STYLEGUIDE.md drifted (${which}): ${problems.join('; ')}`);
+  }
+
+  // And it is not a check that passes anything: each of these breaks must show.
+  const lf = (text) => text.replace(/\r\n/g, '\n');
+  const broken = (what, change) => {
+    const copy = { guide: lf(texts.guide), css: lf(texts.css), readme: lf(texts.readme) };
+    change(copy);
+    const problems = styleguideDrift(copy);
+    expectThat(problems.length > 0, `styleguideDrift misses ${what}`);
+  };
+  broken('a key token left out of the guide', (c) => { c.guide = c.guide.replace(/--vsc-focus-ring(?![\w-])/g, 'the ring colour'); });
+  broken('a key token gone from :root', (c) => { c.css = c.css.replace(/^(\s*)--vsc-warn(\s*):/m, '$1--vsc-caution$2:'); });
+  broken('a token the guide names that does not exist', (c) => { c.guide += '\nUse `--vsc-made-up` for this.\n'; });
+  broken('a token family the guide names that does not exist', (c) => { c.guide += '\nThe `--vsc-made-up-*` tokens.\n'; });
+  broken('a decision without its date', (c) => { c.guide = c.guide.replace(/(\*\*F8\b[\s\S]*?)\(2026-11-18\)/, '$1(November)'); });
+  broken('a decision without its reason', (c) => { c.guide = c.guide.replace(/(\*\*Dark only\*\*[\s\S]*?)Reason:/i, '$1Because:'); });
+  broken('a missing decision', (c) => { c.guide = c.guide.replace(/\bQ-C1\b/g, 'K-03'); });
+  broken('a missing heading', (c) => { c.guide = c.guide.replace(/^## Elevation$/m, '## Shadows'); });
+  broken('the in-flight thresholds', (c) => { c.guide = c.guide.replace(/\b3 s\b/g, 'three seconds'); });
+  broken('a radius that changed', (c) => { c.css = c.css.replace(/--radius-popover:\s*8px/, '--radius-popover: 6px'); });
+  broken('README without the link', (c) => { c.readme = c.readme.replace(/\]\(STYLEGUIDE\.md\)/g, ''); });
+  broken('index.css without the pointer', (c) => { c.css = c.css.replace(/STYLEGUIDE\.md/g, 'the guide'); });
+});
+
+// ---- Divider hover delay and the press that left it focused (U2) -----------
+//
+// A divider highlights after a 200 ms hover, at once while dragged, and with
+// no transition at all under reduced motion; PanelLayout installs the release
+// that blurs a separator the library focused on a press (src/lib/
+// separatorFocus.js, DV-1.. in the adversarial suite).
+
+/** The milliseconds of a CSS time (`200ms`, `0.2s`, `0`), or NaN. */
+const cssMs = (time) => {
+  const m = /^(-?[\d.]+)(ms|s)?$/.exec(String(time).trim());
+  if (!m) return Number.NaN;
+  if (!m[2]) return Number(m[1]) === 0 ? 0 : Number.NaN;
+  return Number(m[1]) * (m[2] === 's' ? 1000 : 1);
+};
+/** Every time a declaration body gives, in ms, under `transition-delay` and in a `transition` shorthand's second time. */
+const delaysIn = (body) => {
+  const delays = [];
+  for (const [, name, value] of body.matchAll(/(transition(?:-delay)?)\s*:\s*([^;]+)/g)) {
+    for (const part of value.replace(/!important/, '').split(',')) {
+      const times = part.trim().split(/\s+/).filter((t) => /^-?[\d.]+(ms|s)$/.test(t));
+      if (name === 'transition-delay') delays.push(...part.trim().split(/\s+/).map(cssMs));
+      else if (times.length > 1) delays.push(cssMs(times[1]));
+    }
+  }
+  return delays;
+};
+/** The bodies of every `@media (prefers-reduced-motion: reduce)` block in index.css. */
+const reducedMotionBlocks = (css) => {
+  const blocks = [];
+  const head = '@media (prefers-reduced-motion: reduce) {';
+  for (let at = css.indexOf(head); at !== -1; at = css.indexOf(head, at + 1)) {
+    const end = css.indexOf('\n}\n', at);
+    blocks.push(css.slice(at + head.length, end === -1 ? undefined : end));
+  }
+  return blocks;
+};
+
+check('RN-235', 'a divider highlights after a 200 ms hover, at once while dragged, with no transition under either reduced-motion switch; PanelLayout installs the press release once', () => {
+  const css = readSource('src/styles/index.css');
+  const start = css.indexOf('[data-separator] {');
+  expectThat(start !== -1, 'setup: no [data-separator] rule');
+  const rules = rulesIn(css.slice(start, css.indexOf('/* ------', start)));
+  const rule = (selector) => rules.find((r) => r.selector.replace(/\s+/g, ' ') === selector);
+
+  // At rest: a colour transition and no delay, so leaving a hover goes back at once.
+  const rest = rule('[data-separator]')?.body ?? '';
+  expectThat(/transition: background-color (\d+)ms ease;/.test(rest), `a separator at rest has no colour transition: ${rest}`);
+  expectThat(delaysIn(rest).every((d) => d === 0), `leaving a hover waits: ${rest}`);
+  expectThat(Number(/transition: background-color (\d+)ms/.exec(rest)?.[1]) <= 150, `the separator's colour fade is not short: ${rest}`);
+
+  // Hover, on the line or anywhere in the hit area: violet after 200 ms.
+  const hover = rule('[data-separator]:hover, [data-separator="hover"]');
+  expectThat(hover, 'no rule for [data-separator]:hover, [data-separator="hover"] alone');
+  expectThat(/background: var\(--vsc-accent\)/.test(hover.body), `a hovered separator is not violet: ${hover.body}`);
+  expectThat(delaysIn(hover.body).length === 1 && delaysIn(hover.body)[0] === 200, `a hovered separator does not wait 200ms: ${hover.body}`);
+  // Only the delay: `:hover` outranks `[data-separator="active"]`, so a
+  // transition-property or shorthand here would bring the delay back to a
+  // drag over the 1px line.
+  expectThat(!hover.props.includes('transition') && !hover.props.includes('transition-property'), `the hover rule sets more of the transition than its delay: ${hover.body}`);
+
+  // A drag: violet at once. `transition-property: none` also cancels a hover
+  // delay still running when the press comes (the colour does not change
+  // between hover and active, so a running transition would otherwise be
+  // kept). Not the `transition: none` shorthand: RN-226 allows a shorthand
+  // only for a colour of 150ms or less.
+  const active = rule('[data-separator="active"]');
+  expectThat(active, 'no rule for [data-separator="active"] alone');
+  expectThat(/background: var\(--vsc-accent\)/.test(active.body), `a dragged separator is not violet: ${active.body}`);
+  expectThat(/transition-property: none;/.test(active.body), `a dragged separator keeps a transition: ${active.body}`);
+  expectThat(delaysIn(active.body).every((d) => d === 0), `a dragged separator waits: ${active.body}`);
+  // No other separator rule (the ring's included) adds a delay.
+  for (const r of rules) {
+    if (r === hover) continue;
+    expectThat(delaysIn(r.body).every((d) => d === 0), `${r.selector} delays: ${r.body}`);
+  }
+
+  // Reduced motion, both switches: no transition, no delay. The cut to
+  // 0.01ms on `*` leaves the 200ms delay in place, so it is not enough.
+  const none = (body) => /transition-property: none !important;/.test(body) && /transition-delay: 0s !important;/.test(body) && delaysIn(body).every((d) => d === 0);
+  const osRules = reducedMotionBlocks(css).flatMap((block) => rulesIn(block));
+  expectThat(osRules.some((r) => r.selector === '[data-separator]' && none(r.body)), 'prefers-reduced-motion leaves a separator its transition and delay');
+  const settingRules = rulesIn(css.slice(css.indexOf('/* Workbench "Reduced motion" setting')));
+  expectThat(settingRules.some((r) => r.selector === ':root.reduce-motion [data-separator]' && none(r.body)), 'the Reduced motion setting leaves a separator its transition and delay');
+
+  // The release: installed once, from one PanelLayout effect, for its life.
+  const code = (text) => text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+  const layout = code(readSource('src/components/layout/PanelLayout.jsx'));
+  expectThat(/import \{ installSeparatorFocusRelease \} from '\.\.\/\.\.\/lib\/separatorFocus\.js';/.test(layout), 'PanelLayout does not import the release');
+  expectThat((layout.match(/installSeparatorFocusRelease\(/g) ?? []).length === 1, 'PanelLayout does not call the release exactly once');
+  expectThat(/useEffect\(\(\) => \{[^{}]*?return installSeparatorFocusRelease\(document\);\s*\}, \[\]\);/.test(layout), 'the release is not installed from a mount-only effect that returns its uninstall');
+  const callers = [...sourcesUnder('src')].filter(([file, text]) => /\.jsx?$/.test(file) && !/separatorFocus\.js$/.test(file) && /installSeparatorFocusRelease\(/.test(code(text)));
+  expectThat(callers.length === 1 && /PanelLayout\.jsx$/.test(callers[0][0]), `the release is installed elsewhere too: ${callers.map(([file]) => file).join(', ')}`);
+  expectThat((code(readSource('src/App.jsx')).match(/<PanelLayout\b/g) ?? []).length === 1, 'the app draws PanelLayout more than once');
+});
+
+// ---- The activity mark by shape as well as colour (U4) ----------------------
+//
+// Running is a filled, pulsing violet dot; failed is lucide's CircleX in the
+// error red, the icon StatusBoard draws for a failed command; unread stays
+// the UnreadPill (RN-79). Forced colours keep the two apart by shape.
+
+/** The doc block right above `export function ActivityDot`, line ends made `\n` first. */
+const activityDotDoc = (source) => {
+  const text = source.replace(/\r\n/g, '\n');
+  const end = text.indexOf('\n */\nexport function ActivityDot(');
+  const start = text.lastIndexOf('/**', end);
+  return end === -1 || start === -1 ? null : text.slice(start, end + 4);
+};
+
+scenario(
+  'RN-236',
+  'a failed command is a circled cross on its tab, its group chip and its side bar row, a running one the pulsing violet dot; forced colours keep both; the doc says violet',
+  () => {
+    reset();
+    useTerminalStore.setState({
+      tabs: [
+        tab('t1', { title: 'build', running: true }),
+        tab('t2', { title: 'tests', lastExitCode: 2 }),
+        tab('t3', { title: 'shell' }),
+        tab('t4', { title: 'lint', lastExitCode: 1 }),
+        tab('t5', { title: 'serve', running: true }),
+      ],
+      activeTabId: 't1',
+      groups: [
+        // Running and failed in one group: the chip says running.
+        { ...baseGroups([])[0], tree: { type: 'leaf', id: 'pane-1', tabIds: ['t1', 't2', 't3'], activeTabId: 't1' } },
+        { id: 'group-2', name: 'Failing', createdAt: 0, tree: { type: 'leaf', id: 'pane-2', tabIds: ['t4'], activeTabId: 't4' }, activePaneId: 'pane-2' },
+        { id: 'group-3', name: 'Busy', createdAt: 0, tree: { type: 'leaf', id: 'pane-3', tabIds: ['t5'], activeTabId: 't5' }, activePaneId: 'pane-3' },
+      ],
+    });
+  },
+  (html) => {
+    const marksIn = (markup) => [...(markup ?? '').matchAll(/<[a-z]+\b[^>]*\sdata-activity="[^"]*"[^>]*>/g)].map((m) => ({ tag: m[0], at: m.index }));
+
+    // Failed: an SVG, the CircleX, red, hidden from a screen reader, and no
+    // coloured dot anywhere in the chip or row.
+    for (const [where, markup, passed] of [
+      ['the tab chip "tests"', tabChip(html, 't2'), 'mr-1.5'],
+      ['the chip of the group "Failing"', groupChip(html, 'group-2'), null],
+      ['the side bar row "tests"', sideRow(html, 'tests'), null],
+    ]) {
+      expectThat(markup, `${where} is not drawn`);
+      const marks = marksIn(markup);
+      expectThat(marks.length === 1, `${where} has ${marks.length} activity marks: ${marks.map((m) => m.tag).join(' ')}`);
+      const { tag, at } = marks[0];
+      expectThat(tag.startsWith('<svg'), `${where}'s failed mark is not an icon: ${tag}`);
+      expectThat(attrOf(tag, 'data-activity') === 'failed', `${where}'s mark is not the failed one: ${tag}`);
+      expectThat(iconOf(tag) === 'circle-x', `${where}'s failed mark is not lucide's CircleX: ${tag}`);
+      expectThat(classOf(tag).split(/\s+/).includes('text-vsc-error'), `${where}'s cross is not in the error red: ${tag}`);
+      expectThat(attrOf(tag, 'aria-hidden') === 'true', `${where}'s cross is read out: ${tag}`);
+      expectThat(attrOf(tag, 'width') === '10' && attrOf(tag, 'height') === '10', `${where}'s cross is not 10px: ${tag}`);
+      expectThat(!/\bbg-vsc-error\b/.test(markup), `${where} still draws a red dot`);
+      expectThat(!/\brounded-full\b/.test(tag), `${where}'s cross is a dot: ${tag}`);
+      // In a box of the dot's 6px, the caller's classes on it, so the title
+      // beside it does not move when a running command fails.
+      const box = /<span\b[^>]*>$/.exec(markup.slice(0, at))?.[0] ?? '';
+      const boxCls = classOf(box).split(/\s+/);
+      for (const c of ['w-[6px]', 'h-[6px]', 'shrink-0', 'flex', 'items-center', 'justify-center']) {
+        expectThat(boxCls.includes(c), `${where}'s cross is not in a 6px box (${c}): ${box || '(none)'}`);
+      }
+      expectThat(attrOf(box, 'aria-hidden') === 'true', `${where}'s box is read out: ${box}`);
+      if (passed) expectThat(boxCls.includes(passed), `${where}'s ${passed} is not passed on to the box: ${box}`);
+    }
+
+    // Running: the filled, pulsing violet dot, as before.
+    for (const [where, markup, passed] of [
+      ['the tab chip "build"', tabChip(html, 't1'), 'mr-1.5'],
+      ['the chip of the group "Busy"', groupChip(html, 'group-3'), null],
+      ['the chip of the group "Group 1" (running and failed)', groupChip(html, 'group-1'), null],
+      ['the side bar row "build"', sideRow(html, 'build'), null],
+    ]) {
+      expectThat(markup, `${where} is not drawn`);
+      const marks = marksIn(markup);
+      expectThat(marks.length === 1, `${where} has ${marks.length} activity marks: ${marks.map((m) => m.tag).join(' ')}`);
+      const { tag } = marks[0];
+      expectThat(tag.startsWith('<span'), `${where}'s running mark is not the dot: ${tag}`);
+      expectThat(attrOf(tag, 'data-activity') === 'running', `${where}'s mark is not the running one: ${tag}`);
+      const cls = classOf(tag).split(/\s+/);
+      for (const c of ['bg-vsc-accent', 'animate-pulse', 'rounded-full', 'w-[6px]', 'h-[6px]']) {
+        expectThat(cls.includes(c), `${where}'s running dot has no ${c}: ${tag}`);
+      }
+      expectThat(attrOf(tag, 'aria-hidden') === 'true', `${where}'s dot is read out: ${tag}`);
+      if (passed) expectThat(cls.includes(passed), `${where}'s ${passed} is not passed on to the dot: ${tag}`);
+    }
+    for (const [where, markup] of [['the tab chip "shell"', tabChip(html, 't3')], ['the side bar row "shell"', sideRow(html, 'shell')]]) {
+      expectThat(markup && marksIn(markup).length === 0, `${where} has a mark with nothing running or failed`);
+    }
+
+    // Forced colours: the dot is a background, which the mode paints over,
+    // and the cross keeps the red set on itself, so each has its own rule.
+    const css = readSource('src/styles/index.css');
+    const head = '@media (forced-colors: active) {';
+    const forced = [];
+    for (let at = css.indexOf(head); at !== -1; at = css.indexOf(head, at + 1)) {
+      const end = css.indexOf('\n}\n', at);
+      forced.push(...rulesIn(css.slice(at + head.length, end === -1 ? undefined : end)));
+    }
+    const forcedRule = (selector) => forced.find((r) => r.selector === selector)?.body ?? '';
+    const running = forcedRule('[data-activity="running"]');
+    expectThat(/forced-color-adjust:\s*none/.test(running) && /background:\s*Highlight\b/.test(running), `the running dot vanishes in forced colours: ${JSON.stringify(running)}`);
+    expectThat(/(^|[;\s])color:\s*CanvasText\b/.test(forcedRule('[data-activity="failed"]')), 'the failed cross keeps its red in forced colours');
+
+    // The cross is the one StatusBoard draws for a failed command.
+    expectThat(/failed: \[CircleX, 'text-vsc-error'\]/.test(readSource('src/components/terminal/StatusBoard.jsx')), "StatusBoard's failed icon is no longer CircleX in the error red");
+    const source = readFileSync(new URL('../../src/components/terminal/ActivityDot.jsx', import.meta.url), 'utf8');
+    expectThat(/import \{ CircleX \} from 'lucide-react';/.test(source), 'ActivityDot does not draw lucide-react\u{2019}s CircleX');
+
+    // The doc says violet, with the checkout's line ends and with CRLF.
+    for (const [which, text] of [['the checkout', source], ['a CRLF copy', source.replace(/\r?\n/g, '\r\n')]]) {
+      const doc = activityDotDoc(text);
+      expectThat(doc, `ActivityDot has no doc block (${which})`);
+      expectThat(!/\bblue\b/i.test(doc), `ActivityDot's doc calls the dot blue (${which})`);
+      expectThat(/\bviolet\b/i.test(doc), `ActivityDot's doc does not say violet (${which})`);
+    }
+  }
+);
+
+// ---- The fade at the edge of an overflowing tab strip (U3) ------------------
+//
+// The four strips that scroll sideways with no scroll bar (`.no-scrollbar`)
+// fade the side with more content: useEdgeFade sets `data-edge-fade` on the
+// scroller, and index.css masks it. Each strip passes its own drag state, so
+// a strip a drag is over is not faded and its marker is drawn whole. The
+// rule and the watcher are tests/adversarial/edge_fade.test.js (EDGE-*).
+
+/** What each strip passes as its suspend flag: the component, its file, the expression. */
+const EDGE_FADE_STRIPS = [
+  ['the region view tabs', 'src/components/layout/PanelLayout.jsx', 'RegionHeader', 'Boolean(draggingView)'],
+  ['the terminal chip row', 'src/components/terminal/TerminalSplitContainer.jsx', 'TerminalPane', "dropZone === 'tabs' || insertAt !== null"],
+  ['the group switcher row', 'src/components/terminal/TerminalSplitContainer.jsx', 'GroupSwitcher', 'Boolean(drag?.active)'],
+  ['the editor tab row', 'src/components/editor/EditorTabs.jsx', 'EditorTabs', 'tabsTargeted || dropIndex !== null'],
+];
+
+check('RN-237', 'the four tab strips fade the side with more content by a mask (both prefixes, start/end/both), each suspended by its own drag state, with no element added', () => {
+  const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+
+  // The stylesheet: start, end and both, each masked with and without the prefix.
+  const css = readSource('src/styles/index.css');
+  const fadeRules = rulesIn(css).filter((r) => r.selector.includes('data-edge-fade'));
+  for (const side of ['start', 'end', 'both']) {
+    const rule = fadeRules.find((r) => r.selector === `[data-edge-fade="${side}"]`);
+    expectThat(rule, `index.css has no [data-edge-fade="${side}"] rule`);
+    expectThat(rule.props.includes('mask-image') && rule.props.includes('-webkit-mask-image'), `[data-edge-fade="${side}"] lacks mask-image or -webkit-mask-image: ${rule.body}`);
+    const gradients = [...rule.body.matchAll(/mask-image:\s*([^;]+);/g)].map((m) => m[1].trim());
+    expectThat(gradients.length === 2 && gradients[0] === gradients[1], `[data-edge-fade="${side}"]'s two masks differ: ${rule.body}`);
+    expectThat(/^linear-gradient\(to right, /.test(gradients[0]) && /\btransparent\b/.test(gradients[0]) && /\bblack 20px\b|\bblack calc\(100% - 20px\)/.test(gradients[0]), `[data-edge-fade="${side}"] is not a 20px fade to transparent: ${gradients[0]}`);
+    expectThat(!/var\(|transition|animation/.test(rule.body), `[data-edge-fade="${side}"] names a token or animates: ${rule.body}`);
+  }
+  expectThat(fadeRules.length === 3, `index.css has other data-edge-fade rules: ${fadeRules.map((r) => r.selector).join(', ')}`);
+  expectThat(!fadeRules.some((r) => /::?(before|after)\b/.test(r.selector) || r.props.includes('pointer-events')), 'a fade is a pseudo-element or touches pointer events');
+
+  // The strips: every scroller that hides its bar is one of the four, and
+  // carries a ref that its own component hands to useEdgeFade with its own
+  // drag state.
+  const scrollers = sourcesUnder('src').flatMap(([file, text]) =>
+    /\.jsx?$/.test(file) ? [...stripComments(text).matchAll(/<div\b[^>]*\bno-scrollbar\b[^>]*>/g)].map((m) => file) : []
+  );
+  expectThat(scrollers.length === EDGE_FADE_STRIPS.length, `the strips that hide their scroll bar are not the four: ${scrollers.join(', ')}`);
+  const calls = sourcesUnder('src').flatMap(([file, text]) =>
+    /\.jsx?$/.test(file) && !/useEdgeFade\.js$/.test(file) ? [...stripComments(text).matchAll(/\buseEdgeFade\(/g)].map(() => file) : []
+  );
+  expectThat(calls.length === EDGE_FADE_STRIPS.length, `useEdgeFade is called ${calls.length} times: ${calls.join(', ')}`);
+  for (const [where, file, component, suspend] of EDGE_FADE_STRIPS) {
+    const source = stripComments(readSource(file));
+    expectThat(/^import \{ useEdgeFade \} from '\.\.\/\.\.\/hooks\/useEdgeFade\.js';$/m.test(source), `${file} does not import useEdgeFade`);
+    const start = source.search(new RegExp(`\\n(export )?function ${component}\\(`));
+    expectThat(start !== -1, `setup: no function ${component} in ${file}`);
+    const next = source.slice(start + 1).search(/\n(export )?function [A-Za-z]/);
+    const body = next === -1 ? source.slice(start) : source.slice(start, start + 1 + next);
+    const tags = [...body.matchAll(/<div\b[^>]*\bno-scrollbar\b[^>]*>/g)].map((m) => m[0]);
+    expectThat(tags.length === 1, `${where}: ${component} has ${tags.length} scrollers`);
+    const ref = /\bref=\{(\w+)\}/.exec(tags[0])?.[1];
+    expectThat(ref, `${where}: its scroller has no ref: ${tags[0]}`);
+    expectThat(new RegExp(`const ${ref} = useRef\\(null\\);`).test(body), `${where}: ${ref} is not ${component}'s own useRef`);
+    const hookCalls = [...body.matchAll(/\buseEdgeFade\(([^;]*)\);/g)].map((m) => m[1]);
+    expectThat(hookCalls.length === 1, `${where}: ${component} calls useEdgeFade ${hookCalls.length} times`);
+    expectThat(hookCalls[0] === `${ref}, ${suspend}`, `${where}: useEdgeFade(${hookCalls[0]}) is not useEdgeFade(${ref}, ${suspend})`);
+    // Before the markup, so it runs on every render, never behind a return.
+    expectThat(body.indexOf('useEdgeFade(') < body.indexOf('\n  return ('), `${where}: the hook comes after ${component}'s return`);
+    expectThat(!/data-edge-fade|EdgeFade[A-Z]?\w*\s*\/?>|<EdgeFade/.test(body), `${where}: the fade is drawn as markup`);
+  }
+
+  // No element, no attribute in the markup: the fade exists only once an
+  // effect runs, which a server render never does.
+  reset();
+  useTerminalStore.setState({
+    tabs: [tab('t1'), tab('t2'), tab('t3')],
+    activeTabId: 't1',
+    groups: [
+      { ...baseGroups(['t1', 't2', 't3'])[0] },
+      { id: 'group-2', name: 'Other', createdAt: 0, tree: { type: 'leaf', id: 'pane-2', tabIds: [], activeTabId: null }, activePaneId: 'pane-2' },
+    ],
+  });
+  const html = renderArranged();
+  expectThat(html.includes('data-chip-row'), 'setup: no chip row drawn');
+  expectThat(!/edge-fade/i.test(html), 'the server markup carries a fade');
+  for (const [file] of [['src/lib/edgeFade.js'], ['src/hooks/useEdgeFade.js']]) {
+    const source = stripComments(readSource(file));
+    expectThat(!/createElement|appendChild|insertBefore|innerHTML|\.style\b/.test(source), `${file} adds or styles an element`);
+  }
+});
+
+// ---- How long each agent's state has held (bundle 3, U5) -----------------------
+
+const MINUTE = 60 * 1000;
+
+/**
+ * Agent rows whose states began a while ago — Claude Code working for 3
+ * minutes, idle for 12, waiting after 12 idle minutes, working for 20 seconds;
+ * OpenCode running for 4 minutes — and a plain shell running a command for 9.
+ * Five seconds over each whole minute, so the case holds however long the
+ * render takes short of a minute.
+ */
+function arrangeElapsed() {
+  reset();
+  const now = Date.now();
+  const ago = (minutes) => now - minutes * MINUTE - 5000;
+  useTerminalStore.setState({
+    tabs: [
+      tab('el-w', { title: 'busy', ...running('el-w', 'claude') }),
+      tab('el-i', { title: 'done', ...running('el-i', 'claude') }),
+      tab('el-u', { title: 'told', ...running('el-u', 'claude') }),
+      tab('el-n', { title: 'new', ...running('el-n', 'claude') }),
+      tab('el-o', { title: 'oc', ...running('el-o', 'opencode'), running: true, runStartedAt: ago(4) }),
+      tab('el-p', { title: 'plain', running: true, runStartedAt: ago(9) }),
+    ],
+    activeTabId: 'el-p',
+    groups: [groupOf('group-1', ['el-w', 'el-i', 'el-u', 'el-n', 'el-o', 'el-p'])],
+    agentActivity: {
+      'el-w': Object.freeze({ state: 'working', since: ago(3) }),
+      'el-i': Object.freeze({ state: 'idle', since: ago(12) }),
+      'el-u': Object.freeze({ state: 'idle', since: ago(12) }),
+      'el-n': Object.freeze({ state: 'working', since: now - 20000 }),
+    },
+    notifications: [
+      { id: 'agent-el-u-1-1', kind: 'program', origin: 'agent-done', agent: 'claude', tabId: 'el-u', tabTitle: 'told', title: 'Claude Code', body: 'Session done', at: now, read: false },
+    ],
+  });
+}
+
+/** The tooltip of a row's second line. */
+const lineTitle = (row) => attrOf(tagWith(row, 'data-status-line'), 'title');
+const withoutComments = (text) => text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+
+scenario(
+  'RN-238',
+  'TERMINALS: an agent row says how long its state has held (Working 3m, Idle 12m, Waiting 12m, OpenCode Running 4m), in words in its tooltip; no time under a minute, on a plain row or with Show Agent off; only a line with a time listens to the minute clock (AC14, U5)',
+  arrangeElapsed,
+  (html) => {
+    const row = (id) => {
+      const markup = terminalRow(html, id);
+      expectThat(markup, `no row ${id}`);
+      return markup;
+    };
+    const expectStatus = (id, state, shown, words, elapsed) => {
+      const s = statusIn(row(id));
+      expectThat(s?.state === state && s.shown === shown && s.words === words, `${id}: ${JSON.stringify(s)}`);
+      expectThat(attrOf(s.tag, 'data-status-elapsed') === elapsed, `${id}'s data-status-elapsed: ${s.tag}`);
+      expectThat(!/\d+s\b|second/.test(`${s.shown} ${s.words} ${lineTitle(row(id))}`), `${id} counts seconds: ${s.shown} / ${s.words}`);
+      return s;
+    };
+    expectStatus('el-w', 'working', 'Working 3m', 'Working for 3 minutes', '3m');
+    expectThat(lineTitle(row('el-w')) === 'Claude Code \u{2014} Working for 3 minutes', `the working tooltip: ${lineTitle(row('el-w'))}`);
+    expectThat(lineTitle(row('el-w')).includes('for 3 minutes'), 'the tooltip does not say for 3 minutes');
+    expectStatus('el-i', 'idle', 'Idle 12m', 'Idle for 12 minutes', '12m');
+    expectStatus('el-u', 'waiting', 'Waiting 12m', 'Waiting for 12 minutes', '12m');
+    const oc = expectStatus('el-o', 'running', 'Running 4m', 'Running for 4 minutes', '4m');
+    expectThat(/\sdata-agent="opencode"/.test(row('el-o')) && oc, 'the OpenCode row does not name its agent');
+    // Under a minute: the state alone, never "0m".
+    expectStatus('el-n', 'working', 'Working', 'Working', null);
+    // A plain shell running a command for 9 minutes names no agent: no time.
+    expectStatus('el-p', 'running', 'Running', 'Running', null);
+    expectThat(!/data-agent=/.test(row('el-p')) && !/\b9m\b|9 minutes/.test(row('el-p')), `the plain row shows a time: ${row('el-p')}`);
+    expectThat(lineTitle(row('el-p')) === 'Running', `the plain tooltip: ${lineTitle(row('el-p'))}`);
+
+    // Only the line, and only when it shows a time, listens to the clock.
+    const board = withoutComments(readSource('src/components/terminal/StatusBoard.jsx'));
+    const start = board.search(/^export const TerminalStatusLine = memo\(function TerminalStatusLine\(/m);
+    expectThat(start !== -1, 'the second line is not a memoised module-level component');
+    const rest = board.slice(start);
+    const line = rest.slice(0, rest.search(/^\}\);/m));
+    const calls = board.match(/\buseMinuteNow\(/g) || [];
+    expectThat(calls.length === 1 && /\bconst now = useMinuteNow\(since !== null\);/.test(line), `the line does not listen only with a start to count from (${calls.length} calls)`);
+    expectThat(/\bconst agent = showAgent \? agentLabel\(tab\) : '';/.test(line), 'the agent row is no longer Show Agent and a named agent');
+    expectThat(
+      /\bconst since = status \? elapsedSince\(tab, status, \{ activity, agentRow: Boolean\(agent\) \}\) : null;/.test(line),
+      'the start is not elapsedSince of an agent row'
+    );
+    expectThat(/\bconst status = showAgent \? terminalStatus\(/.test(line), 'the state is drawn with Show Agent off');
+    expectThat(/\bconst elapsed = since !== null \? elapsedLabel\(now - since\) : '';/.test(line), 'the time is not elapsedLabel of the start');
+    expectThat(!/setInterval|requestAnimationFrame/.test(board), 'StatusBoard ticks a clock of its own');
+    const shape = /useAgentFits\(lineRef, agent, `([^`]*)`\)/.exec(line)?.[1] ?? '';
+    expectThat(shape.includes('${elapsed}'), `the agent's fit is not measured again for a new time: ${shape}`);
+    for (const [file, source] of sourcesUnder('src')) {
+      if (file === 'src/components/terminal/StatusBoard.jsx' || file === 'src/hooks/useMinuteNow.js' || file === 'src/lib/minuteClock.js') continue;
+      expectThat(!/\buseMinuteNow\b|\bminuteClock\b/.test(withoutComments(source)), `${file} listens to the minute clock`);
+    }
+    const clock = withoutComments(readSource('src/lib/minuteClock.js'));
+    expectThat(!/setInterval/.test(clock) && /const MINUTE_MS = 60 \* 1000;/.test(clock), 'the minute clock is not one timeout a minute');
+
+    // The README and the style guide say it (U5).
+    const flat = (text) => text.replace(/\s+/g, ' ');
+    const readme = flat(readSource('README.md'));
+    const boardSection = readme.slice(readme.indexOf('#### The TERMINALS panel as a status board'));
+    for (const words of ['*Working 3m*', '*Idle 12m*', '*Waiting 12m*', '*Running 4m*', 'never in seconds', 'nothing under a minute', '*Working for 3 minutes*', 'once a minute']) {
+      expectThat(readme.includes('#### The TERMINALS panel as a status board') && boardSection.slice(0, 4000).includes(words), `the status board section does not say ${words}`);
+    }
+    const guide = flat(readSource('STYLEGUIDE.md'));
+    const copy = guide.slice(guide.indexOf('## Copy'), guide.indexOf('## In-flight feedback'));
+    for (const words of ['"Working 3m"', 'never "Working 0m"', '"1h 0m", "2h 5m"', 'Never seconds', '"Working for 3 minutes"']) {
+      expectThat(copy.includes(words), `STYLEGUIDE.md's Copy does not say ${words}`);
+    }
+
+    // Show Agent off: no state and no time on any row, agent or not.
+    useSettingsStore.getState().setSetting('terminalsPanelAgent', false);
+    const off = renderArranged();
+    for (const id of ['el-w', 'el-i', 'el-u', 'el-o', 'el-p']) {
+      const markup = terminalRow(off, id);
+      expectThat(markup, `no row ${id} with Show Agent off`);
+      expectThat(statusIn(markup) === null, `${id} draws a state with Show Agent off`);
+      expectThat(!/data-status-elapsed|\b\d+m\b|minutes/.test(markup), `${id} shows a time with Show Agent off: ${markup}`);
+    }
+  }
+);
+
+// ---- Toasts (bundle 3, U6) -------------------------------------------------------
+
+check('RN-239', 'toasts: an always-mounted hidden polite status region (the one copy of a confirmation\u{2019}s words) and an alert, above the status bar beside the corner notices (right-2, right-[416px], right-[824px]; above them in a narrow window), by opacity only, never taking focus (AC16, U6)', () => {
+  // No real timer: a confirmation's TOAST_MS would keep the suite up for 3 s.
+  const quiet = { setTimeout: () => 0, clearTimeout: () => {} };
+  const OPEN_FAILURE = { path: '/workspace/a.bin', fileName: 'a.bin', reason: 'Binary file' };
+  const AGENT_NOTICE = { kind: 'gone', text: 'The entry is no longer in the list.', key: 'k', tabId: null, seq: 1 };
+  const hostOf = (html) => /<div\b[^>]*\sdata-toast-host=""[^>]*>/.exec(html)?.[0] ?? null;
+  /** The polite region: its tag and what it holds (one div per confirmation). */
+  const liveOf = (html) => {
+    const all = [...html.matchAll(/<div\b[^>]*\sdata-toast-live=""[^>]*>((?:<div>[^<]*<\/div>)*)<\/div>/g)];
+    return all.length === 1 ? { tag: /^<div\b[^>]*>/.exec(all[0][0])[0], lines: [...all[0][1].matchAll(/<div>([^<]*)<\/div>/g)].map((m) => m[1]) } : null;
+  };
+  const isLive = (tag) =>
+    attrOf(tag, 'role') === 'status' && attrOf(tag, 'aria-live') === 'polite' && attrOf(tag, 'aria-atomic') === 'false' &&
+    classesOf(tag).includes('sr-only') && classesOf(tag).includes('pointer-events-none');
+  const classesOf = (tag) => (attrOf(tag, 'class') ?? '').split(/\s+/).filter(Boolean);
+  const offsetOf = (tag) => classesOf(tag).filter((c) => c.startsWith('right-'));
+  /** The app drawn with a confirmation and an error up, and the corner notices asked for. */
+  const drawn = ({ openFailure = false, agentNotice = false } = {}) => {
+    reset();
+    setToastTimers(quiet);
+    useToastStore.getState().show({ text: 'Path copied' });
+    useToastStore.getState().show({ kind: 'error', text: 'Path not copied' });
+    if (openFailure) useEditorStore.setState({ openFailure: OPEN_FAILURE });
+    if (agentNotice) useTerminalStore.setState({ agentHistoryNotice: AGENT_NOTICE });
+    return renderArranged();
+  };
+  try {
+    reset();
+    setToastTimers(quiet);
+    const none = renderArranged();
+    expectThat(hostOf(none) === null, 'a toast host is drawn with no toast up');
+    expectThat(!/\sdata-toast="/.test(none), 'a toast is drawn with no toast up');
+    // The polite region is there before any toast, empty, hidden, taking no clicks.
+    const quietRegion = liveOf(none);
+    expectThat(quietRegion, 'no single polite toast region with no toast up');
+    expectThat(isLive(quietRegion.tag), `the toast region is not a hidden polite status taking no clicks: ${quietRegion.tag}`);
+    expectThat(quietRegion.lines.length === 0, `the toast region is not empty with no toast up: ${quietRegion.lines}`);
+
+    const html = drawn();
+    const host = hostOf(html);
+    expectThat(host, 'no toast host drawn');
+    for (const cls of ['fixed', 'bottom-statusbar', 'mb-2', 'z-40', 'w-[400px]', 'pointer-events-none']) {
+      expectThat(classesOf(host).includes(cls), `the host is not ${cls}: ${host}`);
+    }
+    expectThat(JSON.stringify(offsetOf(host)) === '["right-2"]', `with no corner notice the host is not right-2 alone: ${host}`);
+    const toasts = [...html.matchAll(/<div\b[^>]*\sdata-toast="(?:confirm|error)"[^>]*>/g)].map((m) => m[0]);
+    expectThat(toasts.length === 2, `${toasts.length} toasts drawn, not 2`);
+    const [confirm, error] = toasts;
+    expectThat(attrOf(confirm, 'data-toast') === 'confirm' && attrOf(error, 'data-toast') === 'error', 'the newest is not at the bottom');
+    const region = liveOf(html);
+    expectThat(region && isLive(region.tag), 'no single hidden polite toast region with toasts up');
+    expectThat(JSON.stringify(region?.lines) === '["Path copied"]', `the polite region does not hold the confirmation alone: ${region?.lines}`);
+    expectThat(html.indexOf(region.tag) < html.indexOf(host), 'the polite region is not drawn before the host');
+    expectThat(attrOf(confirm, 'role') === null && attrOf(confirm, 'aria-live') === null, `a drawn confirmation is a live region of its own (said twice): ${confirm}`);
+    expectThat(attrOf(error, 'role') === 'alert' && attrOf(error, 'aria-live') === null, `an error is not an alert: ${error}`);
+    // A confirmation's drawn words are aria-hidden (the region holds them);
+    // an error's are not, and no whole toast or Dismiss is hidden.
+    const wordsTag = (text) => new RegExp(`(<div\\b[^>]*class="min-w-0 flex-1 break-words"[^>]*>)${text}</div>`).exec(html)?.[1] ?? null;
+    expectThat(attrOf(wordsTag('Path copied') ?? '', 'aria-hidden') === 'true', `a drawn confirmation's words are read besides the region's: ${wordsTag('Path copied')}`);
+    expectThat(wordsTag('Path not copied') && attrOf(wordsTag('Path not copied'), 'aria-hidden') === null, `an error's words are hidden: ${wordsTag('Path not copied')}`);
+    expectThat(toasts.every((tag) => attrOf(tag, 'aria-hidden') === null), 'a whole toast is aria-hidden');
+    expectThat(!/<button\b[^>]*aria-hidden/.test(html.slice(html.indexOf(host))), 'a Dismiss is aria-hidden');
+    for (const tag of toasts) {
+      for (const cls of ['pointer-events-auto', 'bg-vsc-widget', 'border', 'border-vsc-widget-border', 'shadow-widget', 'rounded-popover', 'text-ui']) {
+        expectThat(classesOf(tag).includes(cls), `a toast is not ${cls}, as the corner notices are: ${tag}`);
+      }
+    }
+    expectThat(classesOf(confirm).includes('animate-toast-in-out') && !classesOf(confirm).includes('animate-toast-in'), `a confirmation does not fade in and out: ${confirm}`);
+    expectThat(classesOf(error).includes('animate-toast-in') && !classesOf(error).includes('animate-toast-in-out'), `an error fades out: ${error}`);
+    const drawnPart = html.slice(html.indexOf(host));
+    expectThat(visibleText(drawnPart).indexOf('Path copied') < visibleText(drawnPart).indexOf('Path not copied'), 'the toasts are not oldest first');
+    expectThat(!/autofocus|tabindex/i.test(drawnPart.slice(0, drawnPart.indexOf('</button></div></div>') + 20)), 'a toast takes focus');
+    expectThat(buttonsIn(drawnPart).filter((b) => b.title === 'Dismiss').length >= 2, 'a toast has no Dismiss');
+
+    // Beside the corner notices, never over them; the notices drawn as before.
+    const one = drawn({ openFailure: true });
+    expectThat(JSON.stringify(offsetOf(hostOf(one))) === '["right-[416px]"]', `beside the open failure, not: ${hostOf(one)}`);
+    expectText(one, 'Could not open a.bin');
+    const failure = /<div\b[^>]*\srole="alert"[^>]*\bright-2\b[^>]*>/.exec(one)?.[0];
+    expectThat(failure && /bottom-statusbar/.test(failure), 'the open failure notice moved');
+    const other = drawn({ agentNotice: true });
+    expectThat(JSON.stringify(offsetOf(hostOf(other))) === '["right-[416px]"]', `beside the agent session notice, not: ${hostOf(other)}`);
+    expectText(other, 'No longer in the list');
+    const both = drawn({ openFailure: true, agentNotice: true });
+    expectThat(JSON.stringify(offsetOf(hostOf(both))) === '["right-[824px]"]', `beside both notices, not: ${hostOf(both)}`);
+    const notice = /<div\b[^>]*\sdata-agent-history-notice="gone"[^>]*>/.exec(both)?.[0];
+    expectThat(notice && /right-\[416px\]/.test(notice), `the agent session notice is not beside the open failure: ${notice}`);
+    // Both notices' roots carry what the host measures them by in a narrow window.
+    const cornerRoots = [...both.matchAll(/<div\b[^>]*\sdata-corner-notice=""[^>]*>/g)].map((m) => m[0]);
+    expectThat(cornerRoots.length === 2, `${cornerRoots.length} corner notice roots marked, not 2`);
+    expectThat(cornerRoots.some((tag) => /data-agent-history-notice="gone"/.test(tag)) && cornerRoots.some((tag) => attrOf(tag, 'role') === 'alert' && /\bright-2\b/.test(tag)), `the marked roots are not the two notices: ${cornerRoots}`);
+    expectThat(!/style="/.test(hostOf(both)), `a server render lifts the host: ${hostOf(both)}`);
+    expectText(both, 'Could not open a.bin');
+    expectText(both, 'Path copied');
+  } finally {
+    resetToasts();
+  }
+
+  // index.css: two finite fades of opacity alone, the fade-out ending as the
+  // store takes a confirmation away, cut to 0.01ms by both reduced-motion switches.
+  const css = readSource('src/styles/index.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const frames = new Map([...css.matchAll(/@keyframes (toast-[\w-]+) \{([\s\S]*?)\n\}/g)].map((m) => [m[1], m[2]]));
+  expectThat(JSON.stringify([...frames.keys()].sort()) === '["toast-fade-in","toast-fade-out"]', `the toast keyframes: ${[...frames.keys()]}`);
+  for (const [name, body] of frames) {
+    const props = [...body.matchAll(/([\w-]+)\s*:/g)].map((m) => m[1]);
+    expectThat(props.length > 0 && props.every((p) => p === 'opacity'), `${name} animates more than opacity: ${props}`);
+    expectThat(!/transform|translate|scale|rotate/.test(body), `${name} moves the toast: ${body}`);
+  }
+  expectThat(/@keyframes toast-fade-in \{\s*from \{ opacity: 0; \}\s*to\s+\{ opacity: 1; \}/.test(css), 'toast-fade-in is not 0 to 1');
+  expectThat(/@keyframes toast-fade-out \{\s*from \{ opacity: 1; \}\s*to\s+\{ opacity: 0; \}/.test(css), 'toast-fade-out is not 1 to 0');
+  const ruleOf = (selector) => new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`).exec(css)?.[1] ?? null;
+  const fadeIn = ruleOf('.animate-toast-in');
+  const fadeInOut = ruleOf('.animate-toast-in-out');
+  expectThat(fadeIn && /^\s*animation: toast-fade-in 150ms ease-out both;\s*$/.test(fadeIn), `.animate-toast-in: ${fadeIn}`);
+  const parts = /^\s*animation: ([^;]+);\s*$/.exec(fadeInOut ?? '')?.[1]?.split(',').map((p) => p.trim()) ?? [];
+  expectThat(parts.length === 2 && parts[0] === 'toast-fade-in 150ms ease-out both', `.animate-toast-in-out does not fade in first: ${fadeInOut}`);
+  const out = /^toast-fade-out (\d+)ms ease-in (\d+)ms forwards$/.exec(parts[1] ?? '');
+  expectThat(out, `the fade-out is not last, with a delay, filling forwards only: ${parts[1]}`);
+  expectThat(Number(out[1]) + Number(out[2]) === TOAST_MS, `the fade-out ends at ${Number(out[1]) + Number(out[2])}ms, not at TOAST_MS (${TOAST_MS})`);
+  for (const [, selector, body] of css.matchAll(/([^{}\n][^{}]*)\{([^}]*)\}/g)) {
+    if (!/toast/.test(selector) || /^\s*@keyframes|^\s*(from|to)\s*$/.test(selector)) continue;
+    expectThat(!/infinite|transform|transition/.test(body), `${selector.trim()} loops, moves or transitions: ${body.trim()}`);
+  }
+  expectThat(/@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{\s*animation-duration: 0\.01ms !important;/.test(css), 'the OS switch no longer cuts every animation');
+  expectThat(/:root\.reduce-motion \*,[\s\S]*?\{\s*animation-duration: 0\.01ms !important;/.test(css), 'the setting no longer cuts every animation');
+
+  // The host's source: the notices' offsets from their own stores, nothing that takes focus.
+  const toastHost = withoutComments(readSource('src/components/common/ToastHost.jsx'));
+  expectThat(/const OFFSETS = \['right-2', 'right-\[416px\]', 'right-\[824px\]'\];/.test(toastHost), 'the three offsets are not right-2, right-[416px], right-[824px]');
+  expectThat(/useEditorStore\(\(s\) => Boolean\(s\.openFailure\)\)/.test(toastHost) && /useTerminalStore\(\(s\) => Boolean\(s\.agentHistoryNotice\)\)/.test(toastHost), 'the offset does not read the notices');
+  expectThat(/const notices = Number\(openFailure\) \+ Number\(agentHistoryNotice\);/.test(toastHost) && /return \{ offset: OFFSETS\[notices\], lift: 0 \};/.test(toastHost), 'the offset is not one step per notice up');
+  // The narrow-window fallback: measured from the notices' roots, on resize and
+  // by a ResizeObserver, from a layout effect that cleans both up; no polling.
+  expectThat(/export const CORNER_NOTICE_SELECTOR = '\[data-corner-notice\]';/.test(toastHost) && /document\.querySelectorAll\(CORNER_NOTICE_SELECTOR\)/.test(toastHost), 'the host does not find the notices by data-corner-notice');
+  expectThat(/window\.addEventListener\('resize', onResize\)/.test(toastHost) && /window\.removeEventListener\('resize', onResize\)/.test(toastHost), 'the resize listener is not added and removed');
+  expectThat(/new ResizeObserver\(/.test(toastHost) && /observer\.disconnect\(\)/.test(toastHost), 'the notices are not observed, or the observer not disconnected');
+  expectThat(!/setInterval|requestAnimationFrame/.test(toastHost), 'the host polls');
+  for (const rel of ['src/components/editor/OpenFailureNotice.jsx', 'src/components/terminal/AgentHistoryNotice.jsx']) {
+    expectThat((readSource(rel).match(/data-corner-notice=""/g) || []).length === 1, `${rel} does not mark its root once with data-corner-notice`);
+  }
+  expectThat(!/autoFocus|\.focus\(|tabIndex/.test(toastHost), 'ToastHost moves focus');
+  expectThat(/onMouseDown=\{\(e\) => e\.preventDefault\(\)\}/.test(toastHost), "Dismiss takes focus when pressed");
+  expectThat(!/return null/.test(toastHost) && /return \(\s*<>\s*(?:\{\s*\}\s*)?<div data-toast-live="" role="status" aria-live="polite"/.test(toastHost), 'the polite region is not drawn first and always');
+  const app = readSource('src/App.jsx');
+  expectThat(/<AgentHistoryNotice \/>[\s\S]*?<ToastHost \/>/.test(app) && (app.match(/<ToastHost \/>/g) || []).length === 1, 'App does not mount one ToastHost after AgentHistoryNotice');
+
+  // The style guide and README say it.
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const guide = flat(readSource('STYLEGUIDE.md'));
+  const feedback = guide.slice(guide.indexOf('## In-flight feedback'), guide.indexOf('## Recorded decisions'));
+  for (const words of ['toast', 'short confirmations', 'Errors stay until they are dismissed', 'never takes focus', 'At most three']) {
+    expectThat(feedback.includes(words), `STYLEGUIDE.md's In-flight feedback does not say ${words}`);
+  }
+  expectThat(guide.includes('a toast fading in'), "STYLEGUIDE.md's Motion does not list the toast's 150 ms");
+  const readme = flat(readSource('README.md'));
+  for (const words of ['**Toasts.**', 'fades after about 3 seconds', 'stays until you dismiss it', 'never takes focus', 'never over them']) {
+    expectThat(readme.includes(words), `README.md does not say ${words}`);
+  }
+});
 
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');

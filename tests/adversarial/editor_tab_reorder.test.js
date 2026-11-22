@@ -20,11 +20,12 @@
  */
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import { useEditorStore } from '../../src/stores/editorStore.js';
+import { setEditorLayout, editorTree, editorPane, EMPTY_EDITOR_ROOT } from '../e2e/harness/workbench.js';
 import { invoke } from '../../src/lib/ipc.js';
 
 const S = useEditorStore;
 const ROOT = 'editor-pane-root';
-const tree = () => S.getState().editorSplitTree;
+const tree = () => editorTree();
 const move = (tabId, paneId, index) => S.getState().moveEditorTabInStrip(tabId, paneId, index);
 
 function leaves(node = tree(), acc = []) {
@@ -121,9 +122,8 @@ describe('Editor tabs: reordering within a strip and inserting into another', ()
       tabs: [],
       activeTabId: null,
       pendingClose: null,
-      editorSplitTree: { type: 'leaf', id: ROOT, tabIds: [], activeTabId: null },
-      activeEditorPaneId: ROOT,
     });
+    setEditorLayout({ type: 'leaf', id: ROOT, tabIds: [], activeTabId: null }, ROOT);
     ids = await openScratchFiles(5);
   });
 
@@ -229,7 +229,7 @@ describe('Editor tabs: reordering within a strip and inserting into another', ()
 
     assert.deepEqual(strips(), { [ROOT]: [b, c], [right]: [d, a, e] });
     assert.equal(pane(right).activeTabId, a, 'the dropped tab is not the one its new group shows');
-    assert.equal(S.getState().activeEditorPaneId, right, 'focus did not follow the tab');
+    assert.equal(editorPane(), right, 'focus did not follow the tab');
     assert.equal(S.getState().activeTabId, a);
     assert.ok(pane(ROOT).tabIds.includes(pane(ROOT).activeTabId), 'the group it left shows a tab it no longer has');
   });
@@ -257,7 +257,7 @@ describe('Editor tabs: reordering within a strip and inserting into another', ()
 
     assert.equal(leaves().length, 1, 'an empty group was left behind');
     assert.deepEqual(strip(ROOT), [a, e, b, c, d]);
-    assert.equal(S.getState().activeEditorPaneId, ROOT);
+    assert.equal(editorPane(), ROOT);
   });
 
   test('ETR-11: a move never collapses an empty group the user split off and has not filled', () => {
@@ -324,10 +324,9 @@ describe('Editor tabs: reordering within a strip and inserting into another', ()
     for (let round = 0; round < 15; round++) {
       // Three groups: the root, one to its right, one below that.
       S.setState({
-        editorSplitTree: { type: 'leaf', id: ROOT, tabIds: [...all], activeTabId: all[0] },
-        activeEditorPaneId: ROOT,
         activeTabId: all[0],
       });
+      setEditorLayout({ type: 'leaf', id: ROOT, tabIds: [...all], activeTabId: all[0] }, ROOT);
       const right = splitAfter(all, 2);
       S.getState().dropEditorTabOnPane(all[4], right, 'bottom');
       S.getState().dropEditorTabOnPane(all[5], leafOf(all[4]).id, 'center');
@@ -353,7 +352,7 @@ describe('Editor tabs: reordering within a strip and inserting into another', ()
         const where = `round ${round}, step ${step}: ${tabId} to gap ${gap} of ${target}`;
         assert.deepEqual(strips(), expected, where);
         assert.equal(pane(target).activeTabId, tabId, `${where}: not the visible tab`);
-        assert.equal(S.getState().activeEditorPaneId, target, `${where}: focus did not follow`);
+        assert.equal(editorPane(), target, `${where}: focus did not follow`);
         for (const l of leaves()) {
           assert.ok(l.tabIds.includes(l.activeTabId), `${where}: ${l.id} shows a tab it does not hold`);
         }
@@ -369,9 +368,8 @@ describe('Editor tabs: reordering within a strip and inserting into another', ()
       tabs: [],
       activeTabId: null,
       pendingClose: null,
-      editorSplitTree: { type: 'leaf', id: ROOT, tabIds: [], activeTabId: null },
-      activeEditorPaneId: ROOT,
     });
+    setEditorLayout();
     for (const dir of scratchDirs.splice(0)) {
       await invoke('fs_delete_path', { path: dir, recursive: true });
     }

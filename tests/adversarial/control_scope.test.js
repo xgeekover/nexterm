@@ -27,8 +27,8 @@ const ok = (r) => {
 const code = (r) => r.error?.code;
 
 describe('Control API: requests', () => {
-  test('CS-01: the eight commands, and nothing else', () => {
-    assert.deepEqual([...COMMANDS].sort(), ['focus', 'list', 'new-split', 'notify', 'read-screen', 'send', 'set-progress', 'set-status']);
+  test('CS-01: the nine commands, and nothing else', () => {
+    assert.deepEqual([...COMMANDS].sort(), ['focus', 'list', 'new-split', 'notify', 'read-screen', 'send', 'set-progress', 'set-status', 'set-title']);
     assert.equal(code(validateRequest('rm', {})), CONTROL_ERROR.UNKNOWN_COMMAND);
     assert.equal(code(validateRequest('toString', {})), CONTROL_ERROR.UNKNOWN_COMMAND, 'not a property of every object');
     assert.equal(code(validateRequest('__proto__', {})), CONTROL_ERROR.UNKNOWN_COMMAND);
@@ -42,6 +42,8 @@ describe('Control API: requests', () => {
       ['notify', { title: '빌드 끝' }],
       ['set-status', { text: 'Running tests', tone: 'info' }],
       ['set-status', { text: null }],
+      ['set-title', { text: 'npm test' }],
+      ['set-title', { text: null }],
       ['set-progress', { state: 'normal', value: 40 }],
       ['set-progress', { state: 'remove' }],
       ['list', {}],
@@ -68,6 +70,9 @@ describe('Control API: requests', () => {
       ['set-status', {}, 'no text key'],
       ['set-status', { text: '' }, 'empty text'],
       ['set-status', { text: 'a', tone: 'loud' }, 'unknown tone'],
+      ['set-title', {}, 'set-title with no text key'],
+      ['set-title', { text: '' }, 'set-title with an empty text'],
+      ['set-title', { text: 'x'.repeat(201) }, 'set-title past 200'],
       ['set-progress', {}, 'no state'],
       ['set-progress', { state: 'normal', value: 101 }, 'over 100'],
       ['set-progress', { state: 'normal', value: 4.5 }, 'not whole'],
@@ -112,10 +117,12 @@ describe('Control API: settings', () => {
       assert.equal(code(checkPolicy(cmd, {}, { typeAndRead: false })), CONTROL_ERROR.DISABLED, cmd);
       assert.equal(checkPolicy(cmd, {}, { typeAndRead: true }), null, cmd);
     }
-    for (const cmd of ['notify', 'set-status', 'set-progress', 'list', 'new-split', 'focus']) {
+    for (const cmd of ['notify', 'set-status', 'set-title', 'set-progress', 'list', 'new-split', 'focus']) {
       assert.equal(needsTypeAndRead(cmd), false);
       assert.equal(checkPolicy(cmd, {}, {}), null, cmd);
     }
+    // A title only relabels the caller's tab, whatever else it carries.
+    assert.equal(checkPolicy('set-title', { text: 'x', command: 'rm -rf build' }, {}), null);
   });
 
   test('CP-03: a new split with a command is typing, and needs that setting — one without stays allowed', () => {
@@ -180,5 +187,32 @@ describe('Control API: status text', () => {
     assert.ok(cut.endsWith('\u{2026}'));
     assert.equal(cut, cut.toWellFormed(), 'no half of an emoji left');
     assert.equal(cleanStatusText('x'.repeat(STATUS_MAX)), 'x'.repeat(STATUS_MAX), 'exactly the limit is not cut');
+  });
+});
+
+describe('Control API: set-title text', () => {
+  test('CX-03: set-title takes text and nothing else — null (clear) or a string of 1 to 200 characters', () => {
+    assert.deepEqual(ok(validateRequest('set-title', { text: null })).args, { text: null });
+    assert.deepEqual(ok(validateRequest('set-title', { text: 'x' })).args, { text: 'x' });
+    assert.deepEqual(ok(validateRequest('set-title', { text: 'x'.repeat(200) })).args, { text: 'x'.repeat(200) }, 'exactly 200 passes');
+    assert.deepEqual(ok(validateRequest('set-title', { text: '빌드 중' })).args, { text: '빌드 중' });
+    // Control characters are the store's to remove (one line, as an agent
+    // title is kept): here they are text like any other.
+    ok(validateRequest('set-title', { text: 'a\tb\u{1b}[31m' }));
+    const bad = [
+      [undefined, 'no args at all'],
+      [{}, 'no text key: null clears, absent is a mistake'],
+      [{ text: '' }, 'empty'],
+      [{ text: 'x'.repeat(201) }, '201 characters'],
+      [{ text: 7 }, 'a number'],
+      [{ text: ['a'] }, 'a list'],
+      [{ text: false }, 'false is no clear'],
+      [{ text: 'a\u{d800}' }, 'a lone surrogate'],
+      [{ text: 'a', tone: 'warn' }, "set-status's tone"],
+      [{ text: 'a', title: 'b' }, 'a key it does not name'],
+    ];
+    for (const [args, why] of bad) assert.equal(code(validateRequest('set-title', args)), CONTROL_ERROR.BAD_REQUEST, why);
+    assert.match(validateRequest('set-title', { text: 'x'.repeat(201) }).error.message, /^set-title: text must be at most 200 characters$/);
+    assert.match(validateRequest('set-title', {}).error.message, /^set-title: text is required$/);
   });
 });

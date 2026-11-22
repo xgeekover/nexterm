@@ -451,6 +451,202 @@ describe("A program's status line (reportedStatus)", () => {
   });
 });
 
+// ---- the title a program gave its tab (set-title) -------------------------------------
+
+describe("Control requests: set-title (a program's title for its own tab)", () => {
+  test("CD-55: set-title keeps the caller's programTitle cleaned, masked and cut to 200 as an agent title is; null clears it; nothing left is bad_request", async () => {
+    await inStore(async () => {
+      const [a, b, c] = await threeTerminals();
+      const { ask } = harness();
+      const titleBefore = tabById(b).title;
+      const token = fx('gh·p_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8');
+      const answer = await ask(b, 'set-title', { text: `  Deploy\u{7} with ${token}\u{202e}\r\nnow\t ` });
+      assert.equal(errorCode(answer), 'ok');
+      assert.deepEqual(answer.result, { title: 'Deploy with ghp_[hidden] now' }, 'the answer is what was kept');
+      const tab = tabById(b);
+      assert.equal(tab.programTitle, 'Deploy with ghp_[hidden] now');
+      assert.equal(typeof tab.programTitleAt, 'number');
+      assert.ok(!tab.programTitle.includes(token.slice(4)), 'the secret is not kept');
+      assert.equal(tab.title, titleBefore, "the tab's own title is not touched");
+      for (const id of [a, c]) {
+        assert.ok(!('programTitle' in tabById(id)), `the caller only: ${id} has none`);
+      }
+
+      // Control characters (C0, DEL, C1, bidi) go; what is left is one line.
+      const esc = await ask(b, 'set-title', { text: '\u{1b}[31mred\u{1b}[0m\u{85}\u{7f}\u{2066}x' });
+      assert.equal(errorCode(esc), 'ok');
+      assert.ok(!/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/u.test(tabById(b).programTitle), JSON.stringify(tabById(b).programTitle));
+      assert.equal(tabById(b).programTitle, '[31mred [0m x');
+
+      // An environment secret, as read-screen masks one.
+      const envSecret = fx('NEXTERM_CONTROL_TO·KEN=Zm9vYmFyYmF6cXV4cXV1eHh5enp6MTIz');
+      const env = await ask(b, 'set-title', { text: `env ${envSecret}` });
+      assert.ok(env.result.title.includes('[hidden]'), env.result.title);
+      assert.ok(!env.result.title.includes('Zm9vYmFy'), env.result.title);
+      assert.equal(tabById(b).programTitle, env.result.title);
+
+      // At most 200 characters, cut again once masking made it longer —
+      // never through a [hidden].
+      const over = await ask(b, 'set-title', { text: `${'x'.repeat(193)} ghp_ab` });
+      assert.equal(over.result.title, `${'x'.repeat(192)}[hidden]`);
+      assert.equal(tabById(b).programTitle.length, 200);
+      const wide = await ask(b, 'set-title', { text: '가'.repeat(200) });
+      assert.equal(wide.result.title, '가'.repeat(200), 'exactly 200 is kept whole');
+
+      // The same title again writes nothing and keeps its time.
+      const at = tabById(b).programTitleAt;
+      const tabs = S.getState().tabs;
+      let wrote = 0;
+      const stop = S.subscribe(() => {
+        wrote += 1;
+      });
+      assert.equal(errorCode(await ask(b, 'set-title', { text: '가'.repeat(200) })), 'ok');
+      stop();
+      assert.equal(wrote, 0, 'a hook saying the same title again redraws nothing');
+      assert.equal(S.getState().tabs, tabs);
+      assert.equal(tabById(b).programTitleAt, at);
+
+      // Nothing left once cleaned: refused, and what was kept stays.
+      const empty = await ask(b, 'set-title', { text: '\u{1b}\u{7}\u{202e} ' });
+      assert.equal(errorCode(empty), 'bad_request');
+      assert.match(empty.error.message, /^set-title: nothing is left to show/);
+      assert.equal(tabById(b).programTitle, '가'.repeat(200));
+
+      // null (--clear) removes it, its time too; clearing again changes nothing.
+      const cleared = await ask(b, 'set-title', { text: null });
+      assert.equal(errorCode(cleared), 'ok');
+      assert.deepEqual(cleared.result, { title: null });
+      assert.ok(!('programTitle' in tabById(b)) && !('programTitleAt' in tabById(b)), 'gone, its time too');
+      assert.equal(tabById(b).title, titleBefore);
+      const after = S.getState().tabs;
+      assert.equal(errorCode(await ask(b, 'set-title', { text: null })), 'ok');
+      assert.equal(S.getState().tabs, after, 'nothing to clear is no write');
+
+      // A wrong shape never reaches the store.
+      for (const args of [{}, { text: '' }, { text: 'x'.repeat(201) }, { text: 3 }, { text: 'a', tone: 'warn' }]) {
+        assert.equal(errorCode(await ask(b, 'set-title', args)), 'bad_request', JSON.stringify(args).slice(0, 60));
+      }
+      assert.ok(!('programTitle' in tabById(b)));
+    });
+  });
+
+  test('CD-56: set-title is refused with the API off, as every first-tier verb is; it needs nothing more; it switches no tab, pane or group and marks nothing', async () => {
+    await inStore(async () => {
+      const [a, b] = await threeTerminals();
+      const { ask, focusedViews, attentionAsked } = harness();
+      settings().setSetting('terminalControl', false);
+      for (const [cmd, args] of [
+        ['set-title', { text: 'npm test' }],
+        ['set-title', { text: null }],
+        ['set-status', { text: 'npm test' }],
+      ]) {
+        assert.equal(errorCode(await ask(b, cmd, args)), 'disabled', cmd);
+      }
+      assert.ok(!('programTitle' in tabById(b)), 'nothing kept while it is off');
+      settings().setSetting('terminalControl', true);
+
+      // "Type into and read" and "other terminals" stay off: not needed.
+      S.getState().switchTab(a);
+      assert.equal(S.getState().activeTabId, a, "premise: the caller is not the active tab");
+      const before = S.getState();
+      const where = {
+        activeTabId: before.activeTabId,
+        activeGroupId: before.activeGroupId,
+        groups: before.groups,
+        panes: before.groups.map((g) => g.activePaneId),
+      };
+      const typed = await writes(async () => {
+        assert.equal(errorCode(await ask(b, 'set-title', { text: 'npm test' })), 'ok');
+      });
+      const now = S.getState();
+      assert.equal(tabById(b).programTitle, 'npm test');
+      assert.equal(now.activeTabId, where.activeTabId, 'the active tab stays');
+      assert.equal(now.activeGroupId, where.activeGroupId, 'the active group stays');
+      assert.equal(now.groups, where.groups, 'no pane or group changes at all');
+      assert.deepEqual(now.groups.map((g) => g.activePaneId), where.panes);
+      assert.deepEqual(focusedViews, [], 'no view is focused');
+      assert.deepEqual(attentionAsked, [], 'no attention asked');
+      assert.deepEqual(typed, [], 'nothing typed');
+      assert.deepEqual(S.getState().controlled, {}, 'no tab is marked as controlled');
+      const [entry] = useControlLogStore.getState().entries.filter((e) => e.cmd === 'set-title' && e.result === 'ok');
+      assert.deepEqual([entry.caller, entry.target], [b, null]);
+      assert.ok(!JSON.stringify(useControlLogStore.getState().entries).includes('npm test'), 'the log never keeps the title');
+
+      // Never written anywhere: not the workspace, not a saved group or workspace.
+      S.getState().renameTab(a, 'renamed');
+      S.getState().saveWorkspace('kept');
+      S.getState().saveGroup(S.getState().activeGroupId, 'group kept');
+      S.getState().dispose();
+      const stored = [...backing.values()].join('\n');
+      assert.ok(stored.includes('renamed'), 'premise: the workspace was written');
+      assert.ok(!stored.includes('programTitle') && !stored.includes('npm test'), stored.slice(0, 200));
+    });
+  });
+
+  test("CD-57: a program title never says who acted — a caller set-title'd as another terminal controls a third: the mark and the log name caller and target by NexTerm's own names, never a program's; `list` still shows the titles (review A-R1)", async () => {
+    await inStore(async () => {
+      previousMark = terminalStore.__setControlledMarkMs(200);
+      const [a, b, c] = await threeTerminals();
+      assert.deepEqual([a, b, c].map((id) => tabById(id).title), ['Terminal 1', 'Terminal 2', 'Terminal 3'], 'setup: unnamed');
+      allowTyping();
+      allowOthers();
+      const { ask } = harness();
+      const both = { typeAndRead: true, other: true };
+      // The program in a passes as Terminal 2; the one in c, its target, names itself too.
+      assert.equal(errorCode(await ask(a, 'set-title', { text: 'Terminal 2' })), 'ok');
+      assert.equal(errorCode(await ask(c, 'set-title', { text: 'Deploy staging' })), 'ok');
+      assert.deepEqual([tabById(a).programTitle, tabById(c).programTitle], ['Terminal 2', 'Deploy staging'], 'premise: both kept');
+      useControlLogStore.setState({ entries: [] });
+
+      const marks = [];
+      const markOf = (id) => {
+        const mark = S.getState().controlled[id];
+        if (mark) marks.push(mark);
+        return mark ? [mark.by, mark.byTitle, mark.cmd] : null;
+      };
+      let split = null;
+      await writes(async () => {
+        for (const cmd of ['send', 'read-screen', 'focus']) {
+          S.setState({ controlled: {} });
+          const args = cmd === 'send' ? { target: c, keys: ['Enter'] } : { target: c };
+          assert.equal(errorCode(await ask(a, cmd, args, both)), 'ok', cmd);
+          assert.deepEqual(markOf(c), [a, 'Terminal 1', cmd], `${cmd}: the mark names the caller by its own name`);
+        }
+        S.setState({ controlled: {} });
+        split = (await ask(a, 'new-split', {})).result.id;
+        assert.deepEqual(markOf(split), [a, 'Terminal 1', 'new-split'], 'a split it opened too');
+      });
+      const acted = useControlLogStore.getState().entries.filter((e) => e.caller === a);
+      assert.deepEqual(acted.map((e) => e.cmd).sort(), ['focus', 'new-split', 'read-screen', 'send'], 'premise: every call logged');
+      for (const e of acted) {
+        assert.equal(e.callerTitle, 'Terminal 1', `${e.cmd}: the log names the caller by its own name`);
+        assert.equal(e.targetTitle, e.target === c ? 'Terminal 3' : tabById(split).title, `${e.cmd}: and the target by its own`);
+      }
+      const shown = JSON.stringify({ marks, log: useControlLogStore.getState().entries });
+      for (const spoof of ['Terminal 2', 'Deploy staging']) {
+        assert.ok(!shown.includes(spoof), `"${spoof}" reached the mark or the log: ${shown.slice(0, 400)}`);
+      }
+
+      // A name the user gave the caller is its own name: that is what both say.
+      S.getState().renameTab(a, 'agent');
+      S.setState({ controlled: {} });
+      await writes(async () => {
+        assert.equal(errorCode(await ask(a, 'send', { target: c, keys: ['Enter'] }, both)), 'ok');
+      });
+      assert.deepEqual(markOf(c), [a, 'agent', 'send']);
+      const [last] = useControlLogStore.getState().entries.filter((e) => e.caller === a && e.cmd === 'send').slice(-1);
+      assert.deepEqual([last.callerTitle, last.targetTitle], ['agent', 'Terminal 3']);
+
+      // `list` is drawn as the chips are: there the program titles stay.
+      const rows = Object.fromEntries((await ask(b, 'list', {})).result.map((row) => [row.id, row.title]));
+      assert.deepEqual([rows[a], rows[b], rows[c]], ['agent', 'Terminal 2', 'Deploy staging']);
+      S.getState().renameTab(a, '');
+      const again = Object.fromEntries((await ask(b, 'list', {})).result.map((row) => [row.id, row.title]));
+      assert.equal(again[a], 'Terminal 2', "list shows a's program title once its name is cleared");
+    });
+  });
+});
+
 // ---- list -----------------------------------------------------------------------------
 
 describe('Control requests: list', () => {
@@ -1276,7 +1472,7 @@ describe('Review round 2: focus, self, fan-out, prompts, deadlines, one notifica
     });
   });
 
-  test('CD-47: past deadline_at nothing is done — not a status, a split, a note, a key or a focus — and the log says not_responding; a deadline passing mid-wait types nothing later', async () => {
+  test('CD-47: past deadline_at nothing is done — not a status, a title, a split, a note, a key or a focus — and the log says not_responding; a deadline passing mid-wait types nothing later', async () => {
     await inStore(async () => {
       const [a, b] = await threeTerminals();
       allowTyping();
@@ -1287,6 +1483,7 @@ describe('Review round 2: focus, self, fan-out, prompts, deadlines, one notifica
       const typed = await writes(async () => {
         for (const [cmd, args] of [
           ['set-status', { text: 'late' }],
+          ['set-title', { text: 'late' }],
           ['notify', { title: 'late' }],
           ['new-split', {}],
           ['send', { text: 'late' }],
@@ -1298,11 +1495,12 @@ describe('Review round 2: focus, self, fan-out, prompts, deadlines, one notifica
       });
       assert.deepEqual(typed, []);
       assert.equal(S.getState().reportedStatus[a], undefined);
+      assert.ok(!('programTitle' in tabById(a)), 'no title either');
       assert.deepEqual(
         [S.getState().tabs.length, S.getState().notifications.length, S.getState().activeTabId],
         [before.tabs, before.notes, before.active]
       );
-      assert.ok(useControlLogStore.getState().entries.slice(-5).every((e) => e.result === 'not_responding'));
+      assert.ok(useControlLogStore.getState().entries.slice(-6).every((e) => e.result === 'not_responding'));
       // A shell that draws its prompt only after the caller stopped waiting.
       terminalStore.__setAgentPromptWaitMs(5000);
       const { ask: ask2 } = harness({ typingWaitMs: 2000 });
@@ -1567,7 +1765,10 @@ describe('The first shells wait for the backend to know the settings', () => {
   test('CD-35: every pty_spawn goes through the gate — a fresh start, a restore, a new terminal, a split and a restart alike — and a backend that never answers costs a bounded wait', async () => {
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.equal((store.match(/invoke\('pty_spawn'/g) || []).length, 1, 'a pty_spawn that does not wait for the settings');
-    assert.match(store, /async function spawnPty\(args\) \{\n\s*if \(spawnGate\) await spawnGate;\n\s*return invoke\('pty_spawn', args\);/);
+    // The args go out with the Claude Code normal-screen flag added
+    // (`withClaudeNormalScreen`, Settings ▸ Terminal ▸ Claude Code on the
+    // Normal Screen); the gate is still waited for first.
+    assert.match(store, /async function spawnPty\(args\) \{\n\s*if \(spawnGate\) await spawnGate;\n\s*return invoke\('pty_spawn', withClaudeNormalScreen\(args\)\);/);
     assert.ok((store.match(/spawnPty\(\{/g) || []).length >= 5, 'the five places a shell is started');
     const bridge = readFileSync(new URL('../../src/lib/controlBridge.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     assert.match(bridge, /const stopReporting = reportControlSettings\(\);\n\s*holdSpawnsUntil\(controlSettingsReported\(\)\);/);
@@ -1586,6 +1787,84 @@ describe('The first shells wait for the backend to know the settings', () => {
       } finally {
         terminalStore.holdSpawnsUntil(previous);
       }
+    });
+  });
+});
+
+// Editor placement C2 (FC12, AC-C11): the control API beside editor panes.
+// Editor leaves hold editor tab ids only, so every handler that finds a
+// terminal by its tab id (`placeOf`) is unchanged; these pin it.
+describe('Control requests beside editor panes (editor placement C2)', () => {
+  const withEditors = async (fn) => {
+    const before = terminalStore.__editorBridge();
+    terminalStore.setEditorBridge({ tabIds: () => new Set(['e1', 'e2']), closeTabs: () => {} });
+    try {
+      await inStore(fn);
+    } finally {
+      terminalStore.setEditorBridge(before);
+    }
+  };
+  const leavesIn = (node, acc = []) => {
+    if (node?.type === 'leaf') acc.push(node);
+    else node?.children?.forEach((c) => leavesIn(c, acc));
+    return acc;
+  };
+  const parentIn = (node, id) => {
+    if (!node || node.type !== 'split') return null;
+    for (const child of node.children) {
+      if (child.id === id) return node;
+      const found = parentIn(child, id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  test('CD-C2-01: list returns the terminals only, in screen order, with file panes beside the caller', async () => {
+    await withEditors(async () => {
+      const [a, b, c] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      assert.ok(filePane, 'setup: a file pane above the terminals');
+      S.getState().placeEditorTab('e2', { paneId: filePane });
+      const { ask } = harness();
+      const answer = await ask(a, 'list', {});
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      assert.deepEqual(answer.result.map((r) => r.id), [a, b, c], 'no file, no editor pane');
+    });
+  });
+
+  test("CD-C2-02: new-split splits beside the caller's pane, whatever its neighbours; the file pane is left as it was", async () => {
+    await withEditors(async () => {
+      const [a] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      const callerPane = leavesIn(S.getState().getActiveGroup().tree).find((l) => l.tabIds.includes(a)).id;
+      const { ask } = harness();
+      const answer = await ask(a, 'new-split', { direction: 'right' });
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      const tree = S.getState().getActiveGroup().tree;
+      const childPane = leavesIn(tree).find((l) => l.tabIds.includes(answer.result.id));
+      const around = parentIn(tree, childPane.id);
+      assert.equal(around.direction, 'horizontal', 'split right');
+      assert.deepEqual(around.children.map((n) => n.id), [callerPane, childPane.id], "beside the caller's pane");
+      const file = leavesIn(tree).find((l) => l.id === filePane);
+      assert.deepEqual({ kind: file.kind, tabIds: file.tabIds }, { kind: 'editor', tabIds: ['e1'] }, 'the file pane is untouched');
+    });
+  });
+
+  test('CD-C2-03: focus never moves the keyboard (round 4) — with a file pane as THE active pane it stays the active pane, and the target is marked', async () => {
+    await withEditors(async () => {
+      const [a] = await threeTerminals();
+      const { paneId: filePane } = S.getState().placeEditorTab('e1');
+      S.getState().setActivePane(filePane);
+      const group = () => S.getState().getActiveGroup();
+      assert.equal(terminalStore.activeKindOf(group()), 'editor', 'setup: the file pane is THE active pane');
+      const { ask, focusedViews } = harness();
+      const answer = await ask(a, 'focus', {});
+      assert.equal(answer.ok, true, JSON.stringify(answer.error));
+      assert.deepEqual(answer.result, { switched: false });
+      assert.equal(terminalStore.activePaneOf(group()), filePane, 'the file pane is still THE active pane');
+      assert.equal(terminalStore.activeKindOf(group()), 'editor');
+      assert.deepEqual(focusedViews, [], 'no terminal is handed the keyboard');
+      assert.equal(S.getState().controlled[a]?.cmd, 'focus', 'the target is marked');
     });
   });
 });

@@ -71,8 +71,8 @@ export function NameInput({ initialValue = '', placeholder, onCommit, onCancel, 
           }
         }}
         className={cn(
-          'flex-1 min-w-0 h-[19px] bg-vsc-input border rounded-[2px] px-1 text-ui text-vsc-fg outline-none',
-          error ? 'border-vsc-error' : 'border-vsc-focus'
+          'ui-field flex-1 min-w-0 h-[19px] px-1 text-ui text-vsc-fg',
+          error && 'ui-field-invalid'
         )}
       />
       {error && (
@@ -83,7 +83,7 @@ export function NameInput({ initialValue = '', placeholder, onCommit, onCancel, 
         <span
           role="alert"
           title={error}
-          className="absolute left-0 right-0 top-full z-20 mt-px px-1 py-0.5 rounded-[2px] border border-vsc-error bg-vsc-input text-ui-sm text-vsc-error whitespace-normal break-words"
+          className="absolute left-0 right-0 top-full z-20 mt-px px-1 py-0.5 rounded-control border border-vsc-error bg-vsc-input text-ui-sm text-vsc-error whitespace-normal break-words"
         >
           {failureReason(error)}
         </span>
@@ -124,6 +124,7 @@ export function TreeRow({
   gitStatus,
   isSelected,
   isFocused,
+  isFocusRow,
   isCut,
   onSelect,
   onActivate,
@@ -177,6 +178,11 @@ export function TreeRow({
             ? 'bg-vsc-selection text-vsc-selection-fg'
             : 'bg-vsc-inactive-selection text-vsc-fg'
           : 'text-vsc-fg hover:bg-vsc-hover',
+        // Where the keyboard is, while the tree has focus and no row is
+        // selected: the keyboard ring's colour, 1px inside the row. The tree
+        // itself draws no ring (FileExplorer), so without this a focused
+        // tree with nothing selected showed nothing at all.
+        isFocusRow && 'outline outline-1 -outline-offset-1 outline-vsc-focus-ring',
         isCut && 'opacity-50'
       )}
     >

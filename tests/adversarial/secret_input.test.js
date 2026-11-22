@@ -532,13 +532,14 @@ describe('Password lock: nothing is typed into a hidden prompt on the user\'s be
     const store = read('../../src/stores/terminalStore.js');
     assert.match(store, /reply: \(tabId, text\) => \{\n\s*if \(typingHidden\(useTerminalStore\.getState\(\), tabId\)\) return undefined;/);
     // Every write the app makes for the user goes through the guard: the
-    // four that type a line or keys, each after `untilTypingSafe` — an agent
-    // started, one resumed, `typeWhenSafe`, which types a startup command
-    // and a project command (stage 5) alike, and `typeForProgram`, which
-    // types what `nexterm-cli send` sent (stage 7), its wait raced against
-    // the time a control request has.
+    // five that type a line or keys, each after `untilTypingSafe` — an agent
+    // started, one resumed, a conversation forked (`forkConversation`),
+    // `typeWhenSafe`, which types a startup command and a project command
+    // (stage 5) alike, and `typeForProgram`, which types what `nexterm-cli
+    // send` sent (stage 7), its wait raced against the time a control
+    // request has.
     const lines = [...store.matchAll(/await get\(\)\.writeRaw\([^\n]*\\r`\)|get\(\)\.writeRaw\(tabId, data\)/g)].map((m) => m.index);
-    assert.equal(lines.length, 4, 'a new writer on the user\'s behalf: put it behind untilTypingSafe and count it here');
+    assert.equal(lines.length, 5, 'a new writer on the user\'s behalf: put it behind untilTypingSafe and count it here');
     for (const typer of ['typeStartupCommand', 'typeProjectCommand']) {
       assert.match(store, new RegExp(`${typer}: async[\\s\\S]{0,1500}?return typeWhenSafe\\(`), `${typer} types through typeWhenSafe`);
     }

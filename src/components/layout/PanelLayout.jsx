@@ -1,22 +1,29 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Group, Panel, Separator, useGroupRef } from 'react-resizable-panels';
+import { Group, Panel, Separator } from 'react-resizable-panels';
 import { useSettingsStore, viewsIn, shownView } from '../../stores/settingsStore.js';
-import { useEditorStore } from '../../stores/editorStore.js';
 import { TerminalSplitContainer } from '../terminal/index.js';
 import { TerminalsPanel } from '../terminal/index.js';
 import { FileExplorer } from '../explorer/FileExplorer.jsx';
 import { SearchPanel } from '../search/SearchPanel.jsx';
-import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react';
+// Not lazy: the unsaved and overwrite prompts must be drawn whatever the group
+// on screen holds, and this imports no Monaco.
+import { EditorPrompts } from '../editor/EditorPrompts.jsx';
+import { GripVertical, X } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
+import { installSeparatorFocusRelease } from '../../lib/separatorFocus.js';
+import { useEdgeFade } from '../../hooks/useEdgeFade.js';
 
-// The editor brings Monaco with it, the largest part of the app's JavaScript.
-// Loaded the first time the editor region is shown instead of at launch.
+// There is no editor area here any more (editor placement, sibling C, FC4):
+// files open in editor panes inside the workbench, the `terminal` view, among
+// its terminals. Monaco, the largest part of the app's JavaScript, still loads
+// the first time a file is shown and not at launch: the editor pane
+// (EditorPane.jsx) loads it lazily for its body.
 //
 // Measured (2026-09-18, production build, Chrome), because `dist/assets` is
 // 15 MB and that number invites someone to "fix" it:
 //
 //   launch         2 files, 229 KB, first paint at 160 ms
-//   first file     4 more files, ~1.1 MB — this chunk, one language, one worker
+//   first file     4 more files, ~1.1 MB — the Monaco chunk, one language, one worker
 //
 // So the 15 MB is INSTALL size, not start-up cost: nothing here is on the
 // launch path, and Monaco fetches a language's worker only when a file of that
@@ -25,16 +32,9 @@ import { cn } from '../../lib/utils.js';
 // download at the price of highlighting in files this app exists to open —
 // there is nothing to win here, which is why this comment exists rather than a
 // build-config change.
-const EditorPanel = React.lazy(() =>
-  import('../editor/EditorPanel.jsx').then((module) => ({ default: module.EditorPanel }))
-);
 
 const panelButton =
   'w-6 h-6 flex items-center justify-center rounded text-vsc-muted hover:text-vsc-fg hover:bg-vsc-item-hover active:bg-vsc-item-active transition-colors';
-
-// Fallback restore layout used the first time the panel is maximized in a
-// session (before we have a captured "layout before maximize" to return to).
-const DEFAULT_EDITOR_PANEL_LAYOUT = { 'editor-group': 60, 'bottom-panel': 40 };
 
 // Regions/panels fade+scale in and out over this long (150-200ms, ease-out —
 // see the .animate-panel-in/out keyframes in src/styles/index.css). Reduced
@@ -112,23 +112,6 @@ function usePanelPresence(active, durationMs) {
   return { mounted, exiting };
 }
 
-// Terminal-only toolbar for the region chrome. Split/new-tab are already on
-// the terminal's own per-pane tab strip (TerminalSplitContainer), so the only
-// action that still needs a home here is maximize — kept as its own
-// component so it's the only part of the header subscribed to panelMaximized.
-function TerminalExtraControls({ maximized, onToggleMaximize }) {
-  return (
-    <button
-      type="button"
-      className={panelButton}
-      title={maximized ? 'Restore Panel Size' : 'Maximize Panel'}
-      onClick={onToggleMaximize}
-    >
-      {maximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-    </button>
-  );
-}
-
 // Header for a region hosting 2+ views: one draggable tab per view (the tab
 // IS the drag handle), plus a hide button. This is the tab strip proper.
 function RegionHeader({
@@ -142,9 +125,14 @@ function RegionHeader({
   onDragEndView,
   extra,
 }) {
+  // The tabs scroll when the region is too narrow for them; the side with
+  // more fades (useEdgeFade). Not while a view is dragged: the region is a
+  // drop target then.
+  const tabsRef = useRef(null);
+  useEdgeFade(tabsRef, Boolean(draggingView));
   return (
     <div className="h-panel-header shrink-0 flex items-center justify-between border-b border-vsc-border pr-1.5 select-none">
-      <div className="h-full flex items-center overflow-x-auto no-scrollbar">
+      <div ref={tabsRef} className="h-full flex items-center overflow-x-auto no-scrollbar">
         {views.map((view) => {
           const meta = VIEW_META[view];
           const isActive = view === activeView;
@@ -166,7 +154,7 @@ function RegionHeader({
               className={cn(
                 'h-full flex items-center px-3 text-ui-sm font-medium tracking-wide cursor-grab select-none border-b -mb-px whitespace-nowrap',
                 isActive
-                  ? 'text-vsc-fg border-vsc-focus'
+                  ? 'text-vsc-fg border-vsc-accent'
                   : 'text-vsc-muted border-transparent hover:text-vsc-fg'
               )}
             >
@@ -338,7 +326,7 @@ function RegionBody({
           className={cn(
             'absolute inset-0 z-10 pointer-events-none outline outline-1 animate-overlay-in drop-zone-fade',
             isOver
-              ? 'outline-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
+              ? 'outline-vsc-accent bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
               : 'outline-vsc-border'
           )}
           aria-hidden="true"
@@ -360,7 +348,7 @@ function EdgeDropZone({ region, edgeClassName, isOver, onDragEnter, onDragOver, 
       className={cn(
         'absolute z-20 outline outline-1 animate-overlay-in drop-zone-fade',
         isOver
-          ? 'outline-vsc-focus bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
+          ? 'outline-vsc-accent bg-[color-mix(in_srgb,var(--vsc-accent)_10%,transparent)]'
           : 'outline-vsc-border bg-[color-mix(in_srgb,var(--vsc-fg)_4%,transparent)]',
         edgeClassName
       )}
@@ -383,11 +371,6 @@ export function PanelLayout() {
   const moveView = useSettingsStore((s) => s.moveView);
   const reducedMotionSetting = useSettingsStore((s) => s.reducedMotion);
 
-  // The editor area only exists once a file is open (task: workspace starts
-  // empty, terminal fills the space until Explorer opens something).
-  const editorTabCount = useEditorStore((s) => s.tabs.length);
-  const hasEditorTabs = editorTabCount > 0;
-
   // Two independent "reduce motion" gates: the OS accessibility preference
   // and the Workbench setting. Either one disables motion. The OS query also
   // neutralizes animation/transition durations directly in CSS (see
@@ -401,6 +384,17 @@ export function PanelLayout() {
     if (typeof document === 'undefined') return;
     document.documentElement.classList.toggle('reduce-motion', reducedMotionSetting);
   }, [reducedMotionSetting]);
+
+  // Every split divider in the app (the regions here, the terminal and editor
+  // splits) is a react-resizable-panels separator, which the library focuses
+  // on a press and never blurs; a focused one stops highlighting across its
+  // hit area. A window and a document listener, for the life of the
+  // workbench, let go of it when the press ends (src/lib/separatorFocus.js).
+  // Keyboard focus is left alone.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    return installSeparatorFocusRelease(document);
+  }, []);
 
   // Which view a region shows when it hosts more than one (tabs) lives in the
   // store, so the activity bar lights the view this draws: a tab clicked here,
@@ -478,68 +472,11 @@ export function PanelLayout() {
   const rightHandlers = useMemo(() => makeRegionDragHandlers('right'), [makeRegionDragHandlers]);
   const bottomHandlers = useMemo(() => makeRegionDragHandlers('bottom'), [makeRegionDragHandlers]);
 
-  // --- Maximize / restore the bottom panel ------------------------------
-  // react-resizable-panels v4: `defaultSize` only applies at the panel's
-  // initial mount — changing it afterwards is a no-op. The imperative
-  // GroupImperativeHandle (getLayout/setLayout, percentages 0..100 keyed by
-  // panel id) is the only way to resize a live Group, so we grab a ref to
-  // the editor|panel vertical Group and drive it directly.
-  const editorPanelGroupRef = useGroupRef();
-  const preMaximizeLayoutRef = useRef(null);
-  const [panelMaximized, setPanelMaximized] = useState(false);
-
-  // Briefly true right after a programmatic setLayout (maximize/restore) so
-  // the Group's direct Panel children pick up a flex-grow transition — see
-  // .panel-maximize-transition in index.css. Never set during a live
-  // Separator drag, so pointer-driven resize always stays 1:1.
-  const [maximizeTransitioning, setMaximizeTransitioning] = useState(false);
-  const maximizeTransitionTimeoutRef = useRef(null);
-
+  // There is no Maximize Panel (sibling C, FC4): with the editor area gone the
+  // region holding the `terminal` view fills the centre column, and Toggle
+  // Pane Zoom gives one pane of the workbench the whole of it.
   const bottomHasViews = regionViews.bottom.length > 0;
   const bottomRendered = panelVisible && bottomHasViews;
-
-  const handleToggleMaximize = useCallback(() => {
-    const handle = editorPanelGroupRef.current;
-    if (!handle) return;
-    // With no file open the editor group is not rendered, so the vertical group
-    // holds a single panel and setLayout with two ids throws
-    // ("Invalid 1 panel layout"). There is nothing to maximize against anyway.
-    if (!hasEditorTabs) return;
-
-    const applyLayout = (layout) => {
-      handle.setLayout(layout);
-      if (presenceDuration <= 0) return;
-      setMaximizeTransitioning(true);
-      window.clearTimeout(maximizeTransitionTimeoutRef.current);
-      maximizeTransitionTimeoutRef.current = window.setTimeout(() => {
-        setMaximizeTransitioning(false);
-      }, presenceDuration);
-    };
-
-    if (!panelMaximized) {
-      preMaximizeLayoutRef.current = handle.getLayout();
-      applyLayout({ 'editor-group': 0, 'bottom-panel': 100 });
-      setPanelMaximized(true);
-    } else {
-      const restored = preMaximizeLayoutRef.current || DEFAULT_EDITOR_PANEL_LAYOUT;
-      applyLayout(restored);
-      preMaximizeLayoutRef.current = null;
-      setPanelMaximized(false);
-    }
-  }, [panelMaximized, editorPanelGroupRef, presenceDuration, hasEditorTabs]);
-
-  useEffect(() => () => window.clearTimeout(maximizeTransitionTimeoutRef.current), []);
-
-  // If the bottom region gets hidden or emptied (Close Panel, or the
-  // terminal view got dragged elsewhere) while maximized, drop the
-  // maximized flag and any stale captured layout so a later maximize starts
-  // clean instead of "restoring" into a panel that no longer exists.
-  useEffect(() => {
-    if (!bottomRendered && panelMaximized) {
-      setPanelMaximized(false);
-      preMaximizeLayoutRef.current = null;
-    }
-  }, [bottomRendered, panelMaximized]);
 
   const leftActive = activeViewFor('left');
   const rightActive = activeViewFor('right');
@@ -547,12 +484,10 @@ export function PanelLayout() {
 
   const leftRendered = sidebarVisible && regionViews.left.length > 0;
   const rightRendered = secondarySidebarVisible && regionViews.right.length > 0;
-  const showEditorGroup = hasEditorTabs;
 
   const leftPresence = usePanelPresence(leftRendered, presenceDuration);
   const rightPresence = usePanelPresence(rightRendered, presenceDuration);
   const bottomPresence = usePanelPresence(bottomRendered, presenceDuration);
-  const editorPresence = usePanelPresence(showEditorGroup, presenceDuration);
 
   const presenceClass = (presence) => (presence.exiting ? 'animate-panel-out' : 'animate-panel-in');
 
@@ -585,31 +520,12 @@ export function PanelLayout() {
         )}
 
         <Panel id="center" minSize="20" className="h-full overflow-hidden">
-          {editorPresence.mounted || bottomPresence.mounted ? (
-            <Group
-              orientation="vertical"
-              groupRef={editorPanelGroupRef}
-              className={cn('h-full w-full overflow-hidden', maximizeTransitioning && 'panel-maximize-transition')}
-            >
-              {editorPresence.mounted && (
-                <Panel
-                  id="editor-group"
-                  minSize="20"
-                  className={cn('h-full overflow-hidden bg-vsc-editor', presenceClass(editorPresence))}
-                >
-                  <React.Suspense fallback={null}>
-                    <EditorPanel />
-                  </React.Suspense>
-                </Panel>
-              )}
-
-              {editorPresence.mounted && bottomPresence.mounted && <Separator className="h-px" />}
-
-              {bottomPresence.mounted && (
+          {bottomPresence.mounted ? (
+            <Group orientation="vertical" className="h-full w-full overflow-hidden">
                 <Panel
                   id="bottom-panel"
                   defaultSize="40"
-                  minSize="15"
+                  minSize={128}
                   className={cn(
                     'h-full overflow-hidden bg-vsc-panel flex flex-col',
                     presenceClass(bottomPresence)
@@ -621,11 +537,6 @@ export function PanelLayout() {
                     activeView={bottomActive}
                     onSelectView={(view) => handleSelectView('bottom', view)}
                     onHide={togglePanel}
-                    extra={
-                      bottomActive === 'terminal' && hasEditorTabs ? (
-                        <TerminalExtraControls maximized={panelMaximized} onToggleMaximize={handleToggleMaximize} />
-                      ) : null
-                    }
                     draggingView={draggingView}
                     isOver={dragOverRegion === 'bottom'}
                     onDragStartView={handleDragStartView}
@@ -633,7 +544,6 @@ export function PanelLayout() {
                     {...bottomHandlers}
                   />
                 </Panel>
-              )}
             </Group>
           ) : (
             <div className="h-full w-full overflow-hidden bg-vsc-editor" />
@@ -695,6 +605,13 @@ export function PanelLayout() {
           {...bottomHandlers}
         />
       )}
+
+      {/* The editor's Save / Don't Save / Cancel and "File Changed on Disk"
+          prompts, onto <body>. Mounted whatever the layout: the editor panes
+          are drawn only in the group on screen, and only while the terminal
+          view is, and a window close, Quit, a folder switch or closing
+          another group asks about files in any group. */}
+      <EditorPrompts />
     </div>
   );
 }

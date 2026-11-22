@@ -25,6 +25,8 @@ import { encodeModifiedEnter, installModifyOtherKeys } from '../../src/lib/modif
 import { isWindowCloseChord, legacyAltArrowSequence } from '../../src/lib/terminalCompat.js';
 import { suggestionKeyAction, lineAfterKey, rankedSuggestions, NEW_LINE } from '../../src/lib/suggestionLayer.js';
 import { handleClipboardKey } from '../../src/lib/terminalClipboard.js';
+import { macEditingKeySequence } from '../../src/lib/macEditingKeys.js';
+import { typingHidden } from '../../src/lib/secretInput.js';
 import { installHangulInlineIme } from '../../src/lib/hangulInlineIme.js';
 import { RECORDINGS } from './hangul_ime_recordings.js';
 
@@ -113,6 +115,11 @@ function keyHandler({
     writeRaw: (tabId, text) => calls.writeRaw.push([tabId, text]),
     tabId: 'tab-1',
     EMPTY_SUGGEST_STATE,
+    // The macOS editing keys (src/lib/macEditingKeys.js), on as by default, no password prompt up.
+    macEditingKeySequence,
+    typingHidden,
+    useSettingsStore: { getState: () => ({ terminalMacEditingKeys: true }) },
+    useTerminalStore: { getState: () => ({ secretInput: {} }) },
   };
   const names = Object.keys(scope);
   const make = new Function(...names, `${src.slice(start, end)}\nreturn handleKeyEvent;`);

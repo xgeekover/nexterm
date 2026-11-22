@@ -17,6 +17,7 @@ pub mod fs;
 pub mod menu;
 pub mod models;
 pub mod perf;
+pub mod power;
 pub mod pty;
 pub mod scrollback;
 
@@ -235,18 +236,26 @@ fn main() {
             commands::fs::fs_list_files,
             commands::fs::fs_path_kinds,
             commands::fs::fs_reveal_path,
+            commands::fs::fs_open_in_external_editor,
             commands::system::system_get_info,
             commands::system::system_list_shells,
             commands::system::menu_set_accelerators,
             commands::notification::show_desktop_notification,
             commands::taskbar::set_taskbar_progress,
             commands::clipboard::clipboard_read,
+            commands::clipboard::clipboard_write_text,
             commands::control::control_reply,
             commands::control::control_set_settings,
             commands::agent::agent_sessions,
+            commands::agent::opencode_version,
             commands::agent::claude_conversations,
             commands::agent_history::agent_history_list,
+            commands::agent_history::agent_history_groups,
             commands::agent_history::agent_history_upsert,
+            commands::agent_history::agent_history_update,
+            commands::agent_history::agent_history_group_create,
+            commands::agent_history::agent_history_group_update,
+            commands::agent_history::agent_history_group_delete,
             commands::agent_history::agent_history_remove,
             commands::agent_history::agent_history_clear,
             commands::app::app_set_unsaved,
@@ -262,14 +271,19 @@ fn main() {
             commands::perf::perf_info,
             commands::perf::perf_counters,
             commands::perf::perf_write,
+            commands::power::power_set_keep_awake,
+            commands::power::power_keep_awake_support,
         ])
         .build(tauri::generate_context!())
         .expect("error while building nexterm application");
     // The control socket is removed as the app exits (src/control/unix.rs);
-    // a crash leaves it to the next start's sweep.
+    // a crash leaves it to the next start's sweep. Keep-awake is let go of
+    // here too, whichever way the app is left (src/power.rs); a crash leaves
+    // that to its helper, which ends with NexTerm.
     app.run(move |_, event| {
         if let tauri::RunEvent::Exit = event {
             control.shutdown();
+            power::release();
         }
     });
 }

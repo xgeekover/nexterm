@@ -755,6 +755,12 @@ mod tests {
         assert_eq!(asked.cmd, "set-status");
         shared.bridge.reply(asked.id, true, None, None);
         assert_eq!(code_of(&mut client).await, "ok");
+        client.get_mut().write_all(&request(3, &token, "set-title", json!({"text":"npm test"}))).await.unwrap();
+        let asked = requests.recv().await.unwrap();
+        assert_eq!(asked.cmd, "set-title");
+        assert_eq!(asked.args.get("text"), Some(&json!("npm test")));
+        shared.bridge.reply(asked.id, true, None, None);
+        assert_eq!(code_of(&mut client).await, "ok");
 
         *shared.settings.lock() = on();
         client.get_mut().write_all(&request(4, &token, "send", json!({"text":"ls\n"}))).await.unwrap();

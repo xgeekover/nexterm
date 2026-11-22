@@ -40,7 +40,7 @@ export const MULTI_LINE_VALUE = 'Not pasted: it is more than one line, and a val
 const LINE_ORDER = { direction: 'ltr', unicodeBidi: 'bidi-override' };
 
 const buttonClass =
-  'h-[26px] px-3 text-ui rounded-[3px] disabled:opacity-50 disabled:cursor-default focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-vsc-focus';
+  'h-[26px] px-3 text-ui rounded-control transition-colors disabled:opacity-50 disabled:cursor-default';
 
 /**
  * One blank of the command: its label, what it is for, and a field — a
@@ -57,8 +57,8 @@ export function BlankField({ placeholder, value, error, onChange, onRefusePaste,
     onRefusePaste?.();
   };
   const fieldClass = cn(
-    'mt-1 w-full h-[24px] px-1.5 rounded-sm bg-vsc-input border text-ui font-mono text-vsc-fg outline-none',
-    error ? 'border-vsc-error' : 'border-vsc-input-border focus:border-vsc-focus'
+    'ui-field mt-1 w-full h-[24px] px-1.5 text-ui font-mono text-vsc-fg',
+    error && 'ui-field-invalid'
   );
   return (
     <div data-blank-field={placeholder.name} className="py-0.5">
@@ -149,7 +149,7 @@ export function RunPreview({ rendered, label, previewId, headingId, overflows = 
         aria-multiline="true"
         aria-labelledby={headingId}
         style={LINE_ORDER}
-        className="m-0 mt-1 h-[64px] overflow-y-auto font-mono text-ui text-vsc-fg whitespace-pre-wrap break-all bg-vsc-input border border-vsc-input-border rounded-sm px-1.5 py-1 outline-none focus:border-vsc-focus"
+        className="ui-field m-0 mt-1 h-[64px] overflow-y-auto font-mono text-ui text-vsc-fg whitespace-pre-wrap break-all px-1.5 py-1 outline-none"
       >
         {rendered.parts.map((part, i) =>
           'blank' in part ? (
@@ -195,7 +195,7 @@ export function RunTargets({ targets, choice, name, onChoose }) {
         disabled={Boolean(why)}
         data-run-focus=""
         onChange={() => onChoose(value)}
-        className="h-[14px] w-[14px] accent-current flex-shrink-0"
+        className="h-[14px] w-[14px] accent-vsc-accent flex-shrink-0"
       />
       {/* One line, so the options below never move as one becomes busy:
           the reason's first part here, all of it in the tooltip and — for
@@ -476,7 +476,7 @@ function RunDialog({ run }) {
           // select.
           if (!backdropCancels(openedAtRef.current, Date.now()) && !e.target.closest?.('input, select, button, label')) e.preventDefault();
         }}
-        className="w-[600px] max-w-[94vw] max-h-[80vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-vsc-fg outline-none"
+        className="w-[600px] max-w-[94vw] max-h-[80vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-vsc-fg outline-none"
       >
         <div className="h-[35px] shrink-0 px-3 flex items-center justify-between gap-2 border-b border-vsc-border">
           <h2 id={titleId} title={command.name} className="m-0 text-ui font-semibold truncate">
@@ -560,7 +560,7 @@ function RunDialog({ run }) {
               if (e.detail === 0) swallowRepeatsOf('Enter');
               cancel();
             }}
-            className={cn(buttonClass, 'bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover')}
+            className={cn(buttonClass, 'bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover')}
           >
             Cancel
           </button>
@@ -577,7 +577,7 @@ function RunDialog({ run }) {
             onClick={(e) => press(e, false)}
             className={cn(
               buttonClass,
-              typeOnly ? 'text-vsc-accent-fg bg-vsc-accent hover:bg-vsc-accent-hover' : 'bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover'
+              typeOnly ? 'text-vsc-accent-fg bg-vsc-accent-solid hover:bg-vsc-accent-hover active:bg-vsc-accent-pressed' : 'bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover'
             )}
           >
             {typeOnly ? 'Type' : 'Type Only'}
@@ -593,7 +593,7 @@ function RunDialog({ run }) {
             onClick={(e) => press(e, true)}
             className={cn(
               buttonClass,
-              typeOnly ? 'bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover' : 'text-vsc-accent-fg bg-vsc-accent hover:bg-vsc-accent-hover'
+              typeOnly ? 'bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover' : 'text-vsc-accent-fg bg-vsc-accent-solid hover:bg-vsc-accent-hover active:bg-vsc-accent-pressed'
             )}
           >
             Run

@@ -31,19 +31,24 @@ pub fn pty_spawn(
     // path; empty or absent means the platform default.
     shell: Option<String>,
     strict_cwd: Option<bool>,
+    // Settings ▸ Terminal ▸ Claude Code on the Normal Screen: whether the
+    // shell gets CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 when it inherits no
+    // such variable (src/pty/manager.rs). Absent means on.
+    claude_normal_screen: Option<bool>,
 ) -> Result<PtySessionInfo, String> {
+    let claude_normal_screen = claude_normal_screen != Some(false);
     if strict_cwd != Some(true) {
         let cwd = state
             .workspace
             .spawn_dir(cwd.as_deref())
             .to_string_lossy()
             .to_string();
-        return state.pty_manager.spawn(app, cols, rows, Some(cwd), shell);
+        return state.pty_manager.spawn(app, cols, rows, Some(cwd), shell, claude_normal_screen);
     }
     let dir = state.workspace.strict_spawn_dir(cwd.as_deref())?;
     let info = state
         .pty_manager
-        .spawn(app, cols, rows, Some(dir.to_string_lossy().to_string()), shell)?;
+        .spawn(app, cols, rows, Some(dir.to_string_lossy().to_string()), shell, claude_normal_screen)?;
     // The manager starts the shell without a directory when the one given is
     // no longer one by then, and says so with no `cwd`.
     if info.cwd.is_none() {

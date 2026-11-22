@@ -3,62 +3,115 @@
 @tailwind utilities;
 
 /* ---------------------------------------------------------------------------
-   NexTerm design tokens — VS Code "Dark Modern" palette.
-   The app is dark-only (light mode was removed); these are the only values
-   these tokens ever take. Names still mirror VS Code's theme keys so the
-   mapping stays auditable. Components consume these through Tailwind
-   (bg-vsc-sidebar, text-vsc-fg, …); never hard-code a hex in a component.
+   NexTerm design tokens — the NexTerm palette: ActionMacro's bluish-grey
+   surfaces and its violet accent. The app is dark-only (light mode was
+   removed); these are the only values these tokens ever take. The names
+   still mirror VS Code's theme keys (the palette began as VS Code's "Dark
+   Modern"), so the mapping stays auditable. Components consume these
+   through Tailwind (bg-vsc-sidebar, text-vsc-fg, …); never hard-code a hex
+   in a component.
+
+   STYLEGUIDE.md at the repo root is the full rule set (palette, accent,
+   focus, radii, elevation, motion, density, copy, in-flight feedback) with
+   the recorded decisions; RN-234 keeps it in step with the tokens here. The
+   list below is the short form.
+
+   The tiers, darkest first: chrome and terminal (#0E1014); the editor and
+   the active tab, joined (#15171C); popovers, menus and dialogs (#1B1E25);
+   fields and hover (#232731). Every text and UI-part pair on them is
+   checked by RN-222 (WCAG: text 4.5:1, UI parts 3:1); src/lib/monaco.js
+   mirrors the editor's share of them, checked by RN-229.
+
+   The rules for anything new:
+   - Colours come from these tokens only.
+   - "Active" (a pane, a tab, a view, a drop target) is --vsc-accent.
+   - Keyboard focus is the one global ring below; a text field is .ui-field.
+   - Anything that floats is rounded-popover with shadow-widget; fields,
+     buttons and small controls are rounded-control.
+   - A divider is a react-resizable-panels Separator, drawn by
+     [data-separator] below.
+   - The terminal minimap: the terminal's scrollbar is xterm's own (VS
+     Code's scrollable element, which the ::-webkit-scrollbar rules below
+     never reach), made 10px wide through `overviewRuler.width`
+     (terminalRegistry.js), with xterm's overview ruler under it. Its
+     slider — the translucent box for the part on screen — is
+     --vsc-scrollbar, and --vsc-scrollbar-hover while hovered or dragged,
+     handed to xterm in the terminal theme. On the normal screen it is
+     always shown, faint, also with nothing to scroll and with the pointer
+     elsewhere ("Always visible" below); on the alternate screen, where a
+     full-screen program has no scrollback, it stays hidden. Prompt marks
+     are --vsc-accent (4.49:1 on the terminal) and the marks of messages
+     sent to Claude Code --vsc-info; in forced colours they are Highlight
+     and LinkText and the slider keeps a CanvasText outline, inside the
+     existing forced-colours block; nothing fades under either
+     reduced-motion path.
+   - Editor panes follow the PaneFrame rule (editor placement C): THE
+     active pane of a group, of either kind, draws the one active line —
+     PaneFrame's ring-1 ring-inset ring-vsc-accent (AttentionIndicators.jsx)
+     — and only while more than one pane is on screen and the group is not
+     zoomed. An editor pane draws no ring of its own.
    --------------------------------------------------------------------------- */
 :root {
   color-scheme: dark;
 
-  --vsc-titlebar-bg:        #181818;
-  --vsc-activitybar-bg:     #181818;
-  --vsc-activitybar-fg:     #d7d7d7;
-  --vsc-activitybar-muted:  #868686;
-  --vsc-sidebar-bg:         #181818;
-  --vsc-editor-bg:          #1f1f1f;
-  --vsc-tab-active-bg:      #1f1f1f;
-  --vsc-tab-inactive-bg:    #181818;
+  --vsc-titlebar-bg:        #0E1014;
+  --vsc-activitybar-bg:     #0E1014;
+  --vsc-activitybar-fg:     #E7E9EE;
+  --vsc-activitybar-muted:  #9BA3AF;
+  --vsc-sidebar-bg:         #0E1014;
+  --vsc-editor-bg:          #15171C;
+  --vsc-tab-active-bg:      #15171C;
+  --vsc-tab-inactive-bg:    #0E1014;
   --vsc-tab-active-fg:      #ffffff;
-  --vsc-tab-inactive-fg:    #9d9d9d;
-  --vsc-panel-bg:           #181818;
-  --vsc-terminal-bg:        #181818;
-  --vsc-statusbar-bg:       #181818;
-  --vsc-widget-bg:          #202020;
-  --vsc-quickinput-bg:      #222222;
-  --vsc-menu-bg:            #1f1f1f;
-  --vsc-input-bg:           #313131;
-  --vsc-input-border:       #3c3c3c;
-  --vsc-input-placeholder:  #989898;
-  --vsc-button-secondary:   #313131;
+  --vsc-tab-inactive-fg:    #9BA3AF;
+  --vsc-panel-bg:           #0E1014;
+  --vsc-terminal-bg:        #0E1014;
+  --vsc-statusbar-bg:       #0E1014;
+  --vsc-widget-bg:          #1B1E25;
+  --vsc-quickinput-bg:      #1B1E25;
+  --vsc-menu-bg:            #1B1E25;
+  --vsc-input-bg:           #232731;
+  --vsc-input-border:       #3A4150;
+  --vsc-input-border-hover: #4F586B;
+  --vsc-input-placeholder:  #8B93A0;
+  --vsc-button-secondary:   #232731;
 
-  --vsc-fg:                 #cccccc;
+  --vsc-fg:                 #E7E9EE;
   --vsc-fg-bright:          #ffffff;
-  --vsc-muted:              #9d9d9d;
-  --vsc-border:             #2b2b2b;
-  --vsc-widget-border:      #313131;
-  --vsc-shadow:             rgba(0, 0, 0, 0.36);
+  --vsc-muted:              #9BA3AF;
+  --vsc-border:             #2A2F3A;
+  --vsc-widget-border:      #3A4150;
+  --vsc-shadow:             rgba(0, 0, 0, 0.5);
 
-  --vsc-accent:             #0078d4;
-  --vsc-accent-hover:       #026ec1;
+  /* Violet. --vsc-accent marks what is active (lines, bars, dots, drop
+     marks, separators) but never sits under text: white on it is 4.23:1.
+     Text on a violet fill uses --vsc-accent-solid (5.70:1), with
+     --vsc-accent-hover and --vsc-accent-pressed for its states. Text or a
+     glyph drawn IN violet uses --vsc-accent-text. --vsc-focus is only the
+     border of a focused text field; --vsc-focus-ring is the keyboard ring. */
+  --vsc-accent:             #8B5CF6;
+  --vsc-accent-hover:       #6D28D9;
+  --vsc-accent-solid:       #7C3AED;
+  --vsc-accent-pressed:     #5B21B6;
+  --vsc-accent-text:        #C4B5FD;
   --vsc-accent-fg:          #ffffff;
-  --vsc-focus:              #0078d4;
-  --vsc-link:               #4daafc;
-  --vsc-badge-bg:           #616161;
-  --vsc-badge-fg:           #f8f8f8;
-  --vsc-badge-accent:       #0078d4;
+  --vsc-focus:              #8B5CF6;
+  --vsc-focus-ring:         #C4B5FD;
+  --vsc-link:               #A78BFA;
+  --vsc-badge-bg:           #3A4150;
+  --vsc-badge-fg:           #E7E9EE;
+  --vsc-badge-accent:       #7C3AED;
 
-  --vsc-hover:              #2a2d2e;
-  --vsc-selection:          #04395e;
+  --vsc-hover:              #232731;
+  --vsc-selection:          #3B2C5B;
   --vsc-selection-fg:       #ffffff;
-  --vsc-inactive-selection: #37373d;
+  --vsc-inactive-selection: #2B303C;
   /* Terminal find. #RRGGBB and nothing else: xterm's search decorations parse
      these themselves and silently drop anything with an alpha channel. */
   --vsc-find-match:         #9e6a03;
   --vsc-find-match-other:   #613214;
-  --vsc-item-hover:         rgba(255, 255, 255, 0.10);
-  --vsc-item-active:        rgba(255, 255, 255, 0.18);
+  --vsc-item-hover:         rgba(155, 163, 175, 0.18);
+  --vsc-item-active:        rgba(155, 163, 175, 0.30);
 
   --vsc-error:              #f85149;
   --vsc-warn:               #cca700;
@@ -67,11 +120,11 @@
      paused progress bar (drawn in --vsc-warn) and an unread count at once,
      and an amber close to #cca700 made the two one colour. Not the red of
      --vsc-error, which the bell keeps for a failure, nor the blue of
-     --vsc-focus, which says "this pane is active" — both lines can be on one
-     pane and must read as two things. The fg is for text on it (a pill's
-     count): 7:1. */
+     the old active mark, now the violet of --vsc-accent, which says "this
+     pane is active" — both lines can be on one pane and must read as two
+     things. The fg is for text on it (a pill's count): 8:1. */
   --vsc-attention:          #ff8a3d;
-  --vsc-attention-fg:       #1f1f1f;
+  --vsc-attention-fg:       #0E1014;
   --vsc-ok:                 #2ea043;
   --vsc-info:               #3794ff;
   --vsc-git-modified:       #e2c08d;
@@ -79,12 +132,12 @@
   --vsc-git-deleted:        #f14c4c;
   --vsc-git-untracked:      #73c991;
 
-  --vsc-line-number:        #6e7681;
-  --vsc-line-number-active: #cccccc;
-  --vsc-indent-guide:       #404040;
-  --vsc-indent-guide-active:#707070;
-  --vsc-scrollbar:          rgba(121, 121, 121, 0.4);
-  --vsc-scrollbar-hover:    rgba(100, 100, 100, 0.7);
+  --vsc-line-number:        #6B7280;
+  --vsc-line-number-active: #E7E9EE;
+  --vsc-indent-guide:       #3A4150;
+  --vsc-indent-guide-active:#6B7280;
+  --vsc-scrollbar:          rgba(155, 163, 175, 0.28);
+  --vsc-scrollbar-hover:    rgba(155, 163, 175, 0.45);
 
   --vsc-ansi-black:         #000000;
   --vsc-ansi-red:           #cd3131;
@@ -102,6 +155,11 @@
   --vsc-ansi-bright-magenta:#d670d6;
   --vsc-ansi-bright-cyan:   #29b8db;
   --vsc-ansi-bright-white:  #ffffff;
+
+  /* Corners: 4px for fields, buttons and small controls; 8px for anything
+     that floats (popovers, menus, dialogs, the palette, notices). */
+  --radius-control: 4px;
+  --radius-popover: 8px;
 
   --font-ui:   -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
   --font-mono: "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
@@ -122,14 +180,65 @@ body {
   overflow: hidden;
 }
 
+/* Selected text: the solid violet, white on it at 5.70:1. */
+::selection {
+  background: var(--vsc-accent-solid);
+  color: var(--vsc-accent-fg);
+}
+
 code, kbd, pre, .font-mono {
   font-family: var(--font-mono);
 }
 
-/* VS Code keeps focus rings crisp and single-colour */
-:focus-visible {
-  outline: 1px solid var(--vsc-focus);
-  outline-offset: -1px;
+/* Focus, the one rule for it.
+   ---------------------------------------------------------------------------
+   A text field shows focus through its own 1px border turning violet
+   (.ui-field below), with no outline around it. Everything else a keyboard
+   can reach (buttons, tabs, chips, cards, rows, links, separators) shows a
+   light-violet ring, on keyboard focus only: `:focus-visible` is what the
+   browser matches after Tab or an arrow key, never after a mouse click on a
+   button. Text inputs always match it, which is why fields lose the outline
+   here and draw their border instead.
+
+   In the base layer on purpose. Unlayered, after `@tailwind utilities`, it
+   beat `outline-none` at equal specificity: every focused input drew a 1px
+   blue rectangle on its own box, inside a wrapper whose border also turned
+   blue, the double frame. Here a component's `outline-none` really opts out,
+   and a component that does must show focus some other way (an active row,
+   a field border). */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--vsc-focus-ring);
+    outline-offset: -2px;
+  }
+  :is(input:not([type=checkbox], [type=radio], [type=range], [type=file], [type=color]), textarea, select):focus-visible {
+    outline: none;
+  }
+}
+
+/* A text field, or the box around a bare input. The border is 1px in every
+   state and focus changes only its colour, so focus moves no pixel. The
+   bare input inside a box stays transparent and borderless. */
+@layer components {
+  .ui-field {
+    border: 1px solid var(--vsc-input-border);
+    background-color: var(--vsc-input-bg);
+    border-radius: var(--radius-control);
+    transition: border-color 120ms ease;
+  }
+  .ui-field:hover {
+    border-color: var(--vsc-input-border-hover);
+  }
+  .ui-field:focus-within {
+    border-color: var(--vsc-focus);
+  }
+  /* A value that cannot be used keeps the error colour at rest, on hover and
+     while focused. */
+  .ui-field.ui-field-invalid,
+  .ui-field.ui-field-invalid:hover,
+  .ui-field.ui-field-invalid:focus-within {
+    border-color: var(--vsc-error);
+  }
 }
 
 /* A strip of tabs scrolls, but must not show a bar for it.
@@ -149,6 +258,30 @@ code, kbd, pre, .font-mono {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* …but it says there is more: the side with more content fades out.
+   ---------------------------------------------------------------------------
+   `useEdgeFade` (src/hooks/useEdgeFade.js, the rule in src/lib/edgeFade.js)
+   sets `data-edge-fade` on a strip's scroller: `start` when there is more to
+   the left, `end` to the right, `both`, or `none`. The last 20px on that side
+   are masked from opaque to clear. A mask, not an overlay: no element, no
+   pseudo-element, so nothing takes a pointer event and a half-faded tab still
+   takes its click. Black and transparent only — a mask reads alpha, so it
+   takes no colour token — and no transition: the fade follows the scroll
+   position, it does not animate. While a drag is over a strip the hook sets
+   `none`, so the insertion and drop markers are never faded. */
+[data-edge-fade="start"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 20px);
+  mask-image: linear-gradient(to right, transparent, black 20px);
+}
+[data-edge-fade="end"] {
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - 20px), transparent);
+}
+[data-edge-fade="both"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
 }
 
 /* Ellipsis at the START of a line, not the end.
@@ -190,18 +323,55 @@ code, kbd, pre, .font-mono {
   background: transparent;
 }
 
-/* react-resizable-panels v4 separators: 1px rule that grows a hit area on hover */
+/* react-resizable-panels v4 separators, every one of them: the regions
+   (PanelLayout), the terminal splits and the editor splits.
+   ---------------------------------------------------------------------------
+   A 1px line in the border colour. The hit area is the library's: it treats
+   a pointer within `resizeTargetMinimumSize` of the line (10px across for a
+   mouse, 20px for touch, centred on it; no Group here overrides it) as on
+   the separator, shows the resize cursor there, and says so in the
+   attribute's own value: `data-separator="hover"`, `"active"` while
+   dragging, `"focus"`, `"inactive"`. (There is no `data-state`; v3's
+   `[data-state="dragging"]` never matched in v4.) So the line turns violet
+   under the pointer and while it is dragged, and it can be grabbed a few
+   pixels either side of it.
+   Hovering waits 200ms before the line turns violet, then fades in over
+   120ms, so a pointer passing over a divider on its way elsewhere does not
+   flash it; leaving starts the fade back at once (the rest rule's
+   transition has no delay). A drag shows violet at once: `"active"` has no
+   transition (`transition-property: none`, which also cancels a hover delay
+   still running when the press comes; the hover rule sets only its delay, so
+   its higher specificity cannot bring the transition back). Reduced motion
+   (both switches, below) drops the transition and the delay: the state shows
+   as it changes.
+   The library focuses a separator on the press and nothing blurred it, and a
+   focused separator reports `"focus"`, not `"hover"`, so after the first
+   drag only the line's own pixel used to turn violet under the pointer.
+   PanelLayout now blurs it when the press ends (src/lib/separatorFocus.js),
+   so the whole hit area highlights again. It still takes keyboard focus (the
+   arrow keys move it), which is left alone, and a ring 2px inside a 1px
+   element is invisible: a 3px light-violet line instead. */
 [data-separator] {
   background: var(--vsc-border);
   transition: background-color 120ms ease;
 }
 [data-separator]:hover,
-[data-separator][data-state="dragging"] {
-  background: var(--vsc-focus);
+[data-separator="hover"] {
+  background: var(--vsc-accent);
+  transition-delay: 200ms;
+}
+[data-separator="active"] {
+  background: var(--vsc-accent);
+  transition-property: none;
+}
+[data-separator]:focus-visible {
+  background: var(--vsc-focus-ring);
+  outline: 1px solid var(--vsc-focus-ring);
+  outline-offset: 0;
 }
 
 /* ---------------------------------------------------------------------------
-   Shell motion — panel/region mount+unmount, drag overlays, maximize/restore.
+   Shell motion — panel/region mount+unmount, drag overlays.
    Everything here is neutralized by EITHER the OS `prefers-reduced-motion`
    media query below, OR the Workbench "Reduced motion" setting
    (settingsStore.reducedMotion), which PanelLayout mirrors onto `<html>` as
@@ -238,15 +408,27 @@ code, kbd, pre, .font-mono {
 .drop-zone-fade {
   transition: background-color 150ms ease-out, outline-color 150ms ease-out;
 }
-
-/* Programmatic maximize/restore of the editor|panel Group only (the
-   `useGroupRef().setLayout` call in PanelLayout) gets a brief flex-grow
-   transition, scoped to that Group's own direct Panel children via `>` so it
-   never reaches a nested Group (e.g. the terminal's own split panes). This
-   class is toggled on for ~180ms and then removed, so a live Separator drag
-   — which never gets this class — always tracks the pointer 1:1. */
-.panel-maximize-transition > [data-panel] {
-  transition: flex-grow 180ms ease-out;
+/* Toasts (ToastHost.jsx): opacity only, never a transform, so a toast
+   appears and goes where it stands and nothing slides. An error fades in and
+   stays; a confirmation also fades out over the last 150ms of its TOAST_MS
+   (3000ms, toastStore.js), just before the store takes it away. The fade-out
+   comes last in the list and fills forwards only, so while it waits the
+   fade-in is what shows. Both are finite, so the two reduced-motion switches
+   below cut them to 0.01ms like the rest: a toast shows at once and, a
+   confirmation, goes at once, with no animation. */
+@keyframes toast-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes toast-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+.animate-toast-in {
+  animation: toast-fade-in 150ms ease-out both;
+}
+.animate-toast-in-out {
+  animation: toast-fade-in 150ms ease-out both, toast-fade-out 150ms ease-in 2850ms forwards;
 }
 
 /* ---------------------------------------------------------------------------
@@ -340,6 +522,18 @@ code, kbd, pre, .font-mono {
     forced-color-adjust: none;
     background: Highlight;
   }
+  /* The activity marks (ActivityDot): the running dot is a background,
+     which this mode would paint over in the page's own colour, so it keeps a
+     Highlight fill; the failed cross sets its red on itself, which an SVG
+     keeps here, so it takes the text colour like the state icons below. The
+     two still differ by shape: a filled dot, a circled cross. */
+  [data-activity="running"] {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  [data-activity="failed"] {
+    color: CanvasText;
+  }
   [data-progress-fill] {
     forced-color-adjust: none;
     background: Highlight;
@@ -400,12 +594,73 @@ code, kbd, pre, .font-mono {
     forced-color-adjust: none;
     background: Highlight;
   }
+  /* A focused field says so by its border's colour, which this mode
+     repaints away: an outline in Highlight instead. (!important: the base
+     layer's rule that takes the outline off a focused input is the more
+     specific of the two.) */
+  .ui-field:focus-within {
+    outline: 2px solid Highlight !important;
+    outline-offset: -2px;
+  }
+  /* The terminal's scrollbar slider — the box for the part on screen —
+     is a translucent background this mode would repaint to nothing. It keeps
+     its colour and gets an outline in CanvasText. The prompt marks under it
+     are a canvas, recoloured to Highlight by terminalRegistry.js. */
+  .xterm .xterm-scrollable-element > .scrollbar > .slider {
+    forced-color-adjust: none;
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+}
+
+/* The terminal's scrollbar, always visible on the normal screen. xterm
+   (VS Code's scrollable element) makes it `invisible` — opacity 0, no
+   pointer events — with nothing to scroll and whenever the pointer is
+   elsewhere and nothing scrolls, and fades it there over 800ms. Here that
+   state is shown as it is, at once: the slider in --vsc-scrollbar over the
+   marks, a press on a mark taken without a hover first. Its width is the
+   10px of `overviewRuler.width`, so no terminal's columns change. On the
+   alternate screen (`xterm-alternate-screen`, set by terminalRegistry.js as
+   the buffer changes) it is hidden in every state, as before. Nothing fades
+   in either: shown or hidden is a step. In front of the screen and the ruler
+   canvas as xterm puts it while `visible` (z-index 11), so the press reaches
+   it. And visible: Tailwind's own `invisible` utility (visibility: hidden),
+   generated because the word is in the sources, lands on xterm's class of
+   the same name — found in the browser suite, a press went straight
+   through. Outside every layer, and more specific than xterm.css. */
+.xterm .xterm-scrollable-element > .scrollbar.vertical.visible,
+.xterm .xterm-scrollable-element > .scrollbar.vertical.invisible {
+  transition-property: none;
+}
+.xterm .xterm-scrollable-element > .scrollbar.vertical.invisible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 11;
+}
+.xterm.xterm-alternate-screen .xterm-scrollable-element > .scrollbar.vertical {
+  opacity: 0;
+  pointer-events: none;
+  transition-property: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+  /* xterm's scrollbar fades in over 100ms and out over 800ms (xterm.css):
+     it shows and goes at once instead (on the normal screen it is always
+     shown anyway, with no transition). */
+  .xterm .xterm-scrollable-element > .scrollbar {
+    transition-property: none !important;
+  }
+  /* A split divider's hover waits 200ms (transition-delay), which the cut
+     duration above leaves in place: no transition at all and no delay, so
+     its highlight shows as the state changes. */
+  [data-separator] {
+    transition-property: none !important;
+    transition-delay: 0s !important;
   }
 }
 
@@ -417,4 +672,11 @@ code, kbd, pre, .font-mono {
 :root.reduce-motion *::after {
   animation-duration: 0.01ms !important;
   transition-duration: 0.01ms !important;
+}
+:root.reduce-motion .xterm .xterm-scrollable-element > .scrollbar {
+  transition-property: none !important;
+}
+:root.reduce-motion [data-separator] {
+  transition-property: none !important;
+  transition-delay: 0s !important;
 }

@@ -1,4 +1,6 @@
 import { describe, test, beforeEach, assert, AppEnvironment } from '../harness/index.js';
+import { buildOpenActionItems } from '../../../src/components/explorer/explorerOpenActions.js';
+import { openInExternalEditor, revealInFileManager } from '../../../src/lib/ipc.js';
 
 /**
  * `fs_read_dir` returns a NESTED tree — a directory carries its own
@@ -99,5 +101,104 @@ describe('Tier 1: File Explorer Tree & Click-to-Open Feature Coverage', () => {
 
     assert.equal(app.expandedFolders.has('/workspace/src'), true, 'Expanded src folder state preserved');
     assert.equal(app.expandedFolders.has('/workspace/tests'), true, 'Expanded tests folder state preserved');
+  });
+
+  /**
+   * The Explorer menu's Reveal and Open Terminal Here (A12-1, A12-2) with the
+   * real `fs_reveal_path` wrapper and the real terminal store, through the
+   * mock bridge: what was revealed is the bridge's `revealed`, and the shell
+   * is the bridge's `pty_spawn`.
+   */
+  function openActions(target, errors, externalEditorCommand = '') {
+    return buildOpenActionItems(target, {
+      os: 'linux',
+      rootPath: '/workspace',
+      reveal: revealInFileManager,
+      createTab: (options) => app.terminal.createTab(options),
+      focusTerminal: () => {},
+      externalEditorCommand,
+      openInExternalEditor,
+      setError: (text) => errors.push(text),
+    });
+  }
+  const pick = (items, key) => items.find((i) => i.key === key);
+
+  test('TC-EXPL-B2-01: Reveal sends fs_reveal_path for the row, and the open folder for the empty area', async () => {
+    app.ipc.bridge.revealed.length = 0;
+    const errors = [];
+    const file = { type: 'file', path: '/workspace/src/calculator.js', isDir: false, name: 'calculator.js' };
+    const empty = { type: 'empty', path: '/workspace', isDir: true, name: '/workspace' };
+
+    const reveal = pick(openActions(file, errors), 'reveal');
+    assert.equal(reveal.label, 'Reveal in File Manager');
+    await reveal.onSelect();
+    await pick(openActions(empty, errors), 'reveal').onSelect();
+    assert.deepEqual(app.ipc.bridge.revealed, [
+      { path: '/workspace/src/calculator.js', kind: 'file' },
+      { path: '/workspace', kind: 'dir' },
+    ]);
+    assert.deepEqual(
+      app.ipc.calls.filter((c) => c.command === 'fs_reveal_path').map((c) => c.args),
+      [{ path: '/workspace/src/calculator.js' }, { path: '/workspace' }]
+    );
+    assert.deepEqual(errors, []);
+
+    // What the backend refuses is the Explorer's error, and nothing is revealed.
+    const gone = { type: 'file', path: '/workspace/src/gone.js', isDir: false, name: 'gone.js' };
+    await pick(openActions(gone, errors), 'reveal').onSelect();
+    assert.equal(app.ipc.bridge.revealed.length, 2, 'nothing new revealed');
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /No such file or directory/);
+  });
+
+  test("TC-EXPL-B2-02: Open Terminal Here starts a shell in the file's folder, strictly, as the active terminal", async () => {
+    const errors = [];
+    const before = app.terminal.tabs.length;
+    const file = { type: 'file', path: '/workspace/src/calculator.js', isDir: false, name: 'calculator.js' };
+    await pick(openActions(file, errors), 'open-terminal-here').onSelect();
+    assert.deepEqual(errors, []);
+    const spawns = app.ipc.calls.filter((c) => c.command === 'pty_spawn').map((c) => c.args);
+    const last = spawns.at(-1);
+    assert.equal(last.cwd, '/workspace/src', "the file's folder");
+    assert.equal(last.strict_cwd, true, 'there or nowhere');
+    assert.equal(app.terminal.tabs.length, before + 1, 'one new terminal');
+    const added = app.terminal.tabs.at(-1);
+    assert.equal(app.activeTerminalTabId, added.id, 'and it is the active one');
+
+    // A folder the shell cannot start in: no terminal, and an error naming it.
+    const count = app.terminal.tabs.length;
+    const missing = { type: 'folder', path: '/workspace/not-there', isDir: true, name: 'not-there' };
+    await pick(openActions(missing, errors), 'open-terminal-here').onSelect();
+    assert.equal(app.terminal.tabs.length, count, 'no terminal anywhere else');
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].startsWith('No terminal could be started in /workspace/not-there'), errors[0]);
+  });
+
+  test('TC-EXPL-B2-03: Open in External Editor sends fs_open_in_external_editor only while an editor is set', async () => {
+    app.ipc.bridge.externalEditorOpens.length = 0;
+    const errors = [];
+    const file = { type: 'file', path: '/workspace/src/calculator.js', isDir: false, name: 'calculator.js' };
+    const empty = { type: 'empty', path: '/workspace', isDir: true, name: '/workspace' };
+
+    // Not set: not in the menu, and nothing asked of the backend.
+    assert.equal(pick(openActions(file, errors, '   '), 'open-in-external-editor'), undefined);
+
+    await pick(openActions(file, errors, 'subl -w'), 'open-in-external-editor').onSelect();
+    await pick(openActions(empty, errors, 'code'), 'open-in-external-editor').onSelect();
+    assert.deepEqual(errors, []);
+    assert.deepEqual(
+      app.ipc.calls.filter((c) => c.command === 'fs_open_in_external_editor').map((c) => c.args),
+      [{ command: 'subl -w', path: '/workspace/src/calculator.js' }, { command: 'code', path: '/workspace' }]
+    );
+    assert.deepEqual(app.ipc.bridge.externalEditorOpens, [
+      { command: 'subl -w', path: '/workspace/src/calculator.js' },
+      { command: 'code', path: '/workspace' },
+    ]);
+
+    // A shell is refused, in the backend's words, and nothing is recorded.
+    await pick(openActions(file, errors, 'zsh -c'), 'open-in-external-editor').onSelect();
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /^'zsh' is a shell or opens files in their default app/);
+    assert.equal(app.ipc.bridge.externalEditorOpens.length, 2, 'nothing new recorded');
   });
 });

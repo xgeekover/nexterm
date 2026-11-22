@@ -35,6 +35,12 @@ export const SETTINGS_DEFAULTS = {
    * See src/lib/scrollbackSession.js.
    */
   terminalRestoreScrollback: true,
+  /**
+   * How many of a terminal's last lines Copy Context puts on the clipboard
+   * (bundle 1, A3): 1 to 10000, read through `clampContextLines`
+   * (src/lib/copyContext.js), so a value a hand edit broke copies 200.
+   */
+  terminalCopyContextLines: 200,
   terminalTheme: 'dark-modern',
   /**
    * Terminal themes the user imported in the gallery (spec P5): at most 20
@@ -56,6 +62,38 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalStickyHeader: true,
   /**
+   * Draw a mark on each terminal's scrollbar at every shell prompt, the row
+   * the next command is typed on, from the OSC 133 "D" every integrated shell
+   * prints in front of its prompt (src/lib/promptMarks.js), and at every
+   * message sent to Claude Code, on its echoed `❯` row
+   * (src/lib/agentMessageMarks.js). A click on a mark scrolls that row to the
+   * top. Off, only the marks go: they are still tracked, so they come back at
+   * once, and the scrollbar stays 10px wide, so no terminal reflows. The
+   * previous/next prompt commands step through both kinds either way.
+   */
+  terminalPromptMarks: true,
+  /**
+   * Start every shell with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 unless it
+   * inherits that variable already (src-tauri/src/pty/manager.rs), so Claude
+   * Code draws on the normal screen: its conversation goes to the scrollback,
+   * scrolls with the scrollbar, and each message sent gets a mark. The trade:
+   * no fullscreen renderer (a little more flicker, no mouse scrolling of its
+   * own). Read when a shell starts, so a change applies to terminals started
+   * or restarted afterwards.
+   */
+  terminalClaudeNormalScreen: true,
+  /**
+   * Start and resume OpenCode V1 as `opencode --mini --no-replay` (with `-s
+   * <id>` or `--continue` on resume) when `opencode --version` says 1.17.10
+   * or newer (src/lib/opencodeLaunch.js), so its conversation is printed on
+   * the normal screen: it scrolls with the scrollbar and every message sent
+   * gets a mark. The trade: not the full-screen TUI's own layout and mouse.
+   * Any other OpenCode, and this off, get plain `opencode` as before; typing
+   * `opencode` yourself always gives the full TUI. Read when NexTerm types
+   * the line, so a change applies to the next start or resume.
+   */
+  terminalOpencodeMini: true,
+  /**
    * Copy a selection to the clipboard the moment the mouse makes it — a drag,
    * a double- or triple-click. Warp's default, and the reason a selection can
    * be pasted elsewhere without a second key. Only mouse selections: a find
@@ -72,6 +110,38 @@ export const SETTINGS_DEFAULTS = {
    * src/lib/mouseReporting.js.
    */
   terminalMouseReporting: true,
+  /**
+   * macOS only (bundle 2, A6): ⌘← and ⌘→ go to the start and the end of the
+   * line, ⌘Backspace deletes to its start and ⌘Forward-Delete to its end, sent
+   * as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K. On the normal screen only — a
+   * full-screen program keeps the keys as xterm sends them — and not once the
+   * program has turned modifyOtherKeys on. While a password prompt is up only
+   * ⌘Backspace is sent. Off: every one of them is xterm's, as before. The
+   * Settings row is shown on macOS only. See src/lib/macEditingKeys.js.
+   */
+  terminalMacEditingKeys: true,
+  /**
+   * macOS only (bundle 2, A7): ⌥ acts as Meta — xterm's `macOptionIsMeta` —
+   * so ⌥ and a key send Esc and that key (⌥B / ⌥F move a word in zsh). Off
+   * by default, because with it on ⌥ no longer types ⌥-characters (™, €, and
+   * @ [ ] { } | ~ on many non-US layouts) or dead keys. Applied to every open
+   * terminal when it changes. The ⌥ mouse-select override, ⌥Enter (Esc
+   * Enter) and ⌥←/→ (Esc b / Esc f) are the same either way. The Settings
+   * row is shown on macOS only. See src/lib/optionAsMeta.js.
+   */
+  terminalOptionAsMeta: false,
+  /**
+   * Bundle 2, A8: whether a program in a terminal may put text on the
+   * clipboard with OSC 52 (tmux, vim, a shell over ssh). Off by default:
+   * anything that can print to a terminal — a file shown with `cat`, a log
+   * line, a server over ssh — could otherwise set the clipboard, and the next
+   * paste would run what it put there. Writes only: reads and clears are
+   * always refused, more than 128 KiB is refused whole, and output kept from
+   * before a terminal was shown is ignored. Read at each sequence. While off,
+   * the first write in a terminal prints one notice naming this setting.
+   * Nothing a program writes is logged. See src/lib/osc52.js.
+   */
+  terminalOsc52Write: false,
   /**
    * What a right-click in a terminal does. 'copyPaste': copy the selection
    * when one is on screen, paste otherwise — and the program under the
@@ -165,6 +235,15 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalNotifyAfterSeconds: 10,
   /**
+   * Tell me when Claude Code in a terminal I am not looking at stops working
+   * and waits for me, once it has worked at least this long — read from the
+   * title Claude Code sets, so it needs no Claude Code setting. 0 turns it off.
+   * Its own setting rather than Notify After's: turning finished commands off
+   * must not silence the agent, nor the reverse. Ten seconds for Notify
+   * After's reason: below it, you are most likely still watching.
+   */
+  terminalAgentDoneAfterSeconds: 10,
+  /**
    * Show what a program in a terminal asks to tell you — OpenCode's "Session
    * done" or "Permission needs input", Claude Code waiting for you — in the
    * status bar's bell, and as a desktop notification while NexTerm is in the
@@ -199,6 +278,13 @@ export const SETTINGS_DEFAULTS = {
    * See src/lib/terminalProgress.js.
    */
   terminalProgress: true,
+  /**
+   * Keep the computer from going to sleep on its own while a Claude Code
+   * terminal is Working (bundle 1, A4): the side bar's Working, nothing else
+   * — not OpenCode, not a progress bar. Never the display. Off by default:
+   * nothing is held until the user asks for it. See src/lib/keepAwake.js.
+   */
+  terminalKeepAwakeWhileAgentsWork: false,
   /**
    * Settings ▸ Terminal ▸ Control (stage 7, spec D5): what a program running
    * in a terminal NexTerm started may ask of NexTerm through `nexterm-cli` —
@@ -271,6 +357,14 @@ export const SETTINGS_DEFAULTS = {
    * src-tauri/src/fs/trash.rs.
    */
   filesEnableTrash: true,
+  /**
+   * The external editor for the Explorer's Open in External Editor: a program
+   * and its arguments (`code`, `subl -w`), split without a shell and run with
+   * the path added as the last argument. Empty: no such item in the menu —
+   * nothing is ever opened with the OS default app. See
+   * src-tauri/src/fs/external_editor.rs.
+   */
+  externalEditorCommand: '',
   reducedMotion: false,
   /**
    * Shortcut overrides, `{ [commandId]: 'mod+shift+b' | ['a','b'] | null }`.

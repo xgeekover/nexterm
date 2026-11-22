@@ -47,8 +47,15 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'Swap Pane With…',
         'Rename Terminal…',
         'Close Terminal',
+        // The prompt marks on the scrollbar, one prompt at a time.
+        'Terminal: Go to Previous Prompt',
+        'Terminal: Go to Next Prompt',
         'Go to Latest Unread Notification',
         'Mark All Notifications Read',
+        // Editor placement C2 (FC11): a file split out of its pane, as Move
+        // to New Pane does for a terminal.
+        'Move Editor to New Pane Right',
+        'Move Editor to New Pane Down',
         'Save All Files',
         // Stage 5: the project commands' own three. The commands themselves
         // are listed in a group of their own, never among these.
@@ -59,9 +66,14 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'Show Control Log',
         // The agent session history (AGENT SESSIONS): the pick, and emptying it after asking.
         'Resume Agent Session…',
+        // Bundle 1: fork the active terminal's Claude Code conversation, and
+        // copy its last lines (the Copy Context Lines setting, 200 by default)
+        // with secrets masked.
+        'Fork Conversation',
+        'Copy Last 200 Lines (Secrets Masked)',
         'Clear Agent Session History…',
       ],
-      'The palette offers exactly the sixteen commands the app implements'
+      'The palette offers exactly the twenty-two commands the app implements'
     );
   });
 

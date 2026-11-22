@@ -8,8 +8,10 @@ import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { ControlLogDialog } from './components/common/ControlLogDialog.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { AgentHistoryNotice } from './components/terminal/AgentHistoryNotice.jsx';
+import { ToastHost } from './components/common/ToastHost.jsx';
 import { AgentHistoryClearDialog } from './components/terminal/AgentHistoryClearDialog.jsx';
 import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
+import { TabSwitcher } from './components/terminal/TabSwitcher.jsx';
 import { ProjectCommandDialog } from './components/command/ProjectCommandDialog.jsx';
 import { ProjectCommandsTrustDialog } from './components/command/ProjectCommandsTrustDialog.jsx';
 import { useKeybindings } from './hooks/useKeybindings.js';
@@ -26,8 +28,10 @@ import { useProjectCommandsStore } from './stores/projectCommandsStore.js';
 import { mockBridge } from './lib/ipc.js';
 import { startPerfMode } from './lib/perf/perfMode.js';
 import { startControl } from './lib/controlBridge.js';
+import { startKeepAwake } from './lib/keepAwake.js';
 import { useControlLogStore } from './stores/controlLogStore.js';
 import { useAgentHistoryStore } from './stores/agentHistoryStore.js';
+import { ensureTabMruStarted } from './stores/tabSwitcherStore.js';
 
 // QA hook: expose stores + the browser mock so tests/scripts can seed state.
 // Only in dev builds or when the page is opened with `?debug`.
@@ -67,6 +71,12 @@ export default function App() {
   // the store records nothing it did not ask for; stopped on unmount / HMR.
   useEffect(() => useAgentHistoryStore.getState().start(), []);
 
+  // The terminals most recently used, for the Ctrl+Tab switcher: followed
+  // from here on, in memory only (tabSwitcherStore.js). Once, before the
+  // first terminal starts; the stop it returns is the effect's cleanup, so
+  // an unmount or a hot reload does not leave the subscription behind.
+  useEffect(() => ensureTabMruStarted(), []);
+
   useEffect(() => {
     // What earlier sessions ran. Read once, before anything can record over
     // it — the history palette is worth much more when it outlives the window.
@@ -89,6 +99,11 @@ export default function App() {
   // and when something under `.nexterm` does, and the user's own commands
   // from Settings. Reading is all it does: nothing is ever run on its own.
   useEffect(() => useProjectCommandsStore.getState().start(), []);
+
+  // Settings ▸ Terminal ▸ Keep the Computer Awake While an Agent Works (off
+  // by default): the backend told only when a Claude Code terminal starts or
+  // stops Working, and told "off" on unmount / HMR. See src/lib/keepAwake.js.
+  useEffect(() => startKeepAwake({ store: useTerminalStore, settings: useSettingsStore }), []);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-vsc-editor text-vsc-fg font-ui">
@@ -114,6 +129,12 @@ export default function App() {
 
       {/* What picking an AGENT SESSIONS entry did instead of opening a terminal */}
       <AgentHistoryNotice />
+
+      {/* Short confirmations ("Path copied") and errors, beside the notices above */}
+      <ToastHost />
+
+      {/* Ctrl+Tab: the terminals most recently used, every group's */}
+      <TabSwitcher />
 
       {/* Global ⌘K Command Palette */}
       <CommandPalette />

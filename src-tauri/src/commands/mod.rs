@@ -6,6 +6,7 @@ pub mod control;
 pub mod fs;
 pub mod notification;
 pub mod perf;
+pub mod power;
 pub mod pty;
 pub mod scrollback;
 pub mod system;

@@ -17,6 +17,8 @@ import {
 } from '../../lib/suggestionLayer.js';
 import { hangulImeFor, isHangulCharacter } from '../../lib/hangulInlineIme.js';
 import { handleClipboardKey } from '../../lib/terminalClipboard.js';
+import { macEditingKeySequence } from '../../lib/macEditingKeys.js';
+import { typingHidden } from '../../lib/secretInput.js';
 import { isFailure } from '../../lib/tabActivity.js';
 import { listen } from '../../lib/ipc.js';
 import { cn } from '../../lib/utils.js';
@@ -410,9 +412,31 @@ export function TerminalView({ tabId, active = false }) {
       }
     };
 
+    // ⌘← / ⌘→ / ⌘Backspace / ⌘Forward-Delete on macOS: Ctrl+A, Ctrl+E,
+    // Ctrl+U and Ctrl+K, the line editor's start, end and kills
+    // (src/lib/macEditingKeys.js). Read at the key, not captured: the
+    // setting, the screen, the program's modifyOtherKeys level and a password
+    // prompt all change while the terminal lives. Sent and cancelled as
+    // `sendLegacyAltArrow` sends and cancels a key.
+    const sendMacEditingKey = (event) => {
+      const sequence = macEditingKeySequence(event, {
+        mac: isMac,
+        enabled: useSettingsStore.getState().terminalMacEditingKeys,
+        alternate: isAlternate(),
+        modifyOtherKeysLevel: entry.modifyOtherKeys?.level ?? 0,
+        secret: typingHidden(useTerminalStore.getState(), tabId),
+      });
+      if (!sequence) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      entry.term.input(sequence, true);
+      return true;
+    };
+
     // A key this view sends itself instead of leaving it to xterm, once the
-    // clipboard and the suggestion layer have let it go on.
-    const sendKeyItself = (event) => sendLegacyAltArrow(event) || sendModifiedEnter(event);
+    // clipboard and the suggestion layer have let it go on. No key is two of
+    // these: ⌥ without ⌘, ⌘ without ⌥, and Enter, which no ⌘ rule maps.
+    const sendKeyItself = (event) => sendLegacyAltArrow(event) || sendMacEditingKey(event) || sendModifiedEnter(event);
 
     // Intercepts specific keys ourselves (→ to accept, ↑/↓ to move the popup
     // selection, Esc to dismiss) — and only while something is actually drawn,
@@ -620,7 +644,7 @@ export function TerminalView({ tabId, active = false }) {
           // the row it describes — every one does — but it has to cover it.
           className="absolute top-0 left-0 right-0 z-10 px-2 py-[2px] flex items-center gap-2 pointer-events-none bg-vsc-panel border-b border-vsc-border text-ui-sm font-mono text-vsc-muted"
         >
-          <span className="shrink-0 text-vsc-accent">❯</span>
+          <span className="shrink-0 text-vsc-accent-text">❯</span>
           <span className="truncate">{stickyCommand}</span>
         </div>
       )}
@@ -642,7 +666,7 @@ export function TerminalView({ tabId, active = false }) {
           )}
           {suggestState.items.length > 1 && (
             <div
-              className="absolute bg-vsc-quickinput border border-vsc-widget-border shadow-widget"
+              className="absolute bg-vsc-quickinput border border-vsc-widget-border shadow-widget rounded-popover overflow-hidden"
               style={{ left: suggestState.left, top: suggestState.top + suggestState.cellHeight }}
             >
               {suggestState.items.map((item, i) => (

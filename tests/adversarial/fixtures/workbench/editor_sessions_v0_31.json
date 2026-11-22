@@ -1,0 +1,74 @@
+{
+  "version": 2,
+  "data": {
+    "format": 1,
+    "folders": [
+      {
+        "root": "/work/app",
+        "tree": {
+          "type": "split",
+          "direction": "horizontal",
+          "children": [
+            {
+              "type": "leaf",
+              "files": [
+                "/work/app/src/main.js",
+                "/work/app/src/app.js"
+              ],
+              "active": "/work/app/src/app.js"
+            },
+            {
+              "type": "split",
+              "direction": "vertical",
+              "children": [
+                {
+                  "type": "leaf",
+                  "files": [
+                    "/work/app/README.md"
+                  ],
+                  "active": "/work/app/README.md"
+                },
+                {
+                  "type": "leaf",
+                  "files": [
+                    "/work/app/src/lib/util.js",
+                    "/work/app/package.json"
+                  ],
+                  "active": "/work/app/src/lib/util.js"
+                }
+              ]
+            }
+          ]
+        },
+        "activePane": 2,
+        "activeFile": "/work/app/src/lib/util.js",
+        "recent": [
+          "/work/app/src/lib/util.js",
+          "/work/app/src/app.js",
+          "/work/app/README.md",
+          "/work/app/src/main.js",
+          "/work/app/package.json"
+        ],
+        "misses": {
+          "/work/app/package.json": 1
+        }
+      },
+      {
+        "root": "/work/other",
+        "tree": {
+          "type": "leaf",
+          "files": [
+            "/work/app/README.md"
+          ],
+          "active": "/work/app/README.md"
+        },
+        "activePane": 0,
+        "activeFile": "/work/app/README.md",
+        "recent": [
+          "/work/app/README.md"
+        ],
+        "misses": {}
+      }
+    ]
+  }
+}

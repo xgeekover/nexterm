@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import {
   BellRing,
   ChartPie,
+  Circle,
   CircleAlert,
   CirclePause,
   CirclePlay,
@@ -19,11 +20,15 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { folderForBranch, useFolderBranch } from '../../stores/branchStore.js';
 import { unreadCountByTab } from '../../lib/attention.js';
+import { useMinuteNow } from '../../hooks/useMinuteNow.js';
 import {
   agentLabel,
   agoLabel,
   branchLabel,
   branchTitle,
+  elapsedLabel,
+  elapsedSince,
+  elapsedWords,
   groupSummaryItems,
   groupSummaryLabel,
   noteLine,
@@ -38,6 +43,7 @@ import {
   secondaryText,
   summaryCounts,
   summaryWords,
+  terminalStatusIn,
 } from './statusBoardModel.js';
 import { cn } from '../../lib/utils.js';
 
@@ -72,12 +78,24 @@ const STATE_ICON = Object.freeze({
   progress: [ChartPie, 'text-vsc-info'],
   paused: [CirclePause, 'text-vsc-warn'],
   working: [LoaderCircle, 'text-vsc-info'],
+  // Claude Code waiting for you: an empty ring, as quiet as the line's text.
+  idle: [Circle, 'text-vsc-muted'],
   running: [CirclePlay, 'text-vsc-info'],
   exited: [CircleStop, 'text-vsc-muted'],
 });
 
 /** `[Icon, colour]` for a status (`terminalStatus`'s), a paused bar being its own. */
 const iconOf = (status) => STATE_ICON[status.paused ? 'paused' : status.state] ?? null;
+
+/**
+ * A status's icon, in its colour, hidden from screen readers (the word beside
+ * it is what is read) and drawn in CanvasText in forced colours
+ * (`data-status-icon`); nothing for a state without one.
+ */
+function StateIcon({ status, size = 12 }) {
+  const [Icon, colour] = iconOf(status) ?? [null, ''];
+  return Icon ? <Icon size={size} aria-hidden="true" data-status-icon="" className={cn('shrink-0', colour)} /> : null;
+}
 
 /**
  * The icon of a status a program reported (`nexterm-cli set-status --tone`),
@@ -90,6 +108,32 @@ const TONE_ICON = Object.freeze({
   error: [OctagonAlert, 'text-vsc-error', 'error: '],
 });
 
+
+// ---- An agent session held open in a terminal (AGENT SESSIONS) -------------------
+
+/**
+ * The badge of an AGENT SESSIONS row whose conversation is open in terminal
+ * `tabId`: what that terminal's TERMINALS row says it is doing — its icon
+ * and word (Working, Idle, Waiting, Running…) — or 'open' when that is
+ * nothing, or the terminal is not found. Subscribed to that terminal's
+ * entries alone, compared field by field, so a spinner frame or another
+ * terminal's change redraws nothing; not tied to 'Show Agent and Status'.
+ */
+export const AgentSessionState = memo(function AgentSessionState({ tabId }) {
+  const status = useTerminalStore(useShallow((s) => terminalStatusIn(s, tabId)));
+  const words = statusText(status);
+  return (
+    <span
+      data-agent-holder="open"
+      data-agent-state={status.state}
+      title={`Open in a terminal of this window: ${words || 'open'}`}
+      className="px-1 rounded-sm border border-vsc-border text-vsc-fg leading-[14px] flex items-center gap-[3px]"
+    >
+      {words && <StateIcon status={status} size={11} />}
+      {words || 'open'}
+    </span>
+  );
+});
 
 // ---- What a program says its terminal is doing (stage 7) -------------------------
 
@@ -229,6 +273,14 @@ function useAgentFits(lineRef, agent, shape) {
  * notification, unread: Session done"): the icons are hidden, and what the
  * gaps say to the eye is said in words.
  *
+ * HOW LONG (bundle 3, U5): a line that names an agent says how long its
+ * state has held — "Working 3m", "Idle 12m", "Waiting 12m", "Running 4m"
+ * (`elapsedSince`, `elapsedLabel`, terminalStatus.js) — and its tooltip and
+ * what is read out say it in words ("Working for 3 minutes"). Only such a
+ * line, with a start to count from, listens to the minute clock
+ * (`useMinuteNow`); every other line passes it false, so the clock's tick
+ * redraws the lines that show a time and no other.
+ *
  * WHAT A PROGRAM SAYS IT IS DOING (stage 7, `nexterm-cli set-status`): while
  * it has said something, that takes the last note's place — it is the newer
  * and the more particular of the two — with an icon for its tone; the note
@@ -247,6 +299,8 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const tabId = tab.id;
   const unread = useTerminalStore((s) => (showAgent ? unreadCountByTab(s.notifications)[tabId] ?? 0 : 0));
   const bar = useTerminalStore((s) => (showAgent ? s.progress?.[tabId] ?? null : null));
+  // Whether its Claude Code works or waits: this tab's entry alone.
+  const activity = useTerminalStore((s) => (showAgent ? s.agentActivity?.[tabId] ?? null : null));
   const note = useTerminalStore((s) => (showLastNote ? lastNoteOf(s.notifications, tabId) : null));
   const reported = useTerminalStore((s) => s.reportedStatus?.[tabId] ?? null);
   const os = useSystemStore((s) => s.os);
@@ -254,11 +308,17 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const lineRef = useRef(null);
 
   const agent = showAgent ? agentLabel(tab) : '';
-  const status = showAgent ? terminalStatus(tab, { unread, progress: bar }) : null;
-  const words = status ? statusText(status) : '';
-  const shortWords = status ? compactStatusText(status) : '';
+  const status = showAgent ? terminalStatus(tab, { unread, progress: bar, activity }) : null;
+  // How long the state has held, on a line that names an agent: the clock is
+  // listened to only while there is a start to count from.
+  const since = status ? elapsedSince(tab, status, { activity, agentRow: Boolean(agent) }) : null;
+  const now = useMinuteNow(since !== null);
+  const elapsed = since !== null ? elapsedLabel(now - since) : '';
+  const elapsedSaid = since !== null ? elapsedWords(now - since) : '';
+  const words = status ? [statusText(status), elapsedSaid].filter(Boolean).join(' ') : '';
+  const shortWords = status ? [compactStatusText(status), elapsed].filter(Boolean).join(' ') : '';
   const branchName = showBranch ? branchLabel(branch) : '';
-  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${Boolean(branchName)}|${Boolean(note || reported)}`);
+  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${elapsed}|${Boolean(branchName)}|${Boolean(note || reported)}`);
   const agentShown = Boolean(agent) && fits;
   // The agent's name, drawn, already says who spoke; left out for width, the
   // note keeps a title that says it (terminalStatus.js). A program's status,
@@ -286,15 +346,15 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
     );
   }
   if (words) {
-    const [Icon, colour] = iconOf(status) ?? [null, ''];
     items.push(
       <span
         key="status"
         data-status-state={status.state}
         data-status-value={status.value}
+        data-status-elapsed={elapsed || undefined}
         className="shrink-0 flex items-center gap-[3px] whitespace-nowrap"
       >
-        {Icon && <Icon size={12} aria-hidden="true" data-status-icon="" className={cn('shrink-0', colour)} />}
+        <StateIcon status={status} />
         {shortWords === words ? (
           <span className="tabular-nums">{words}</span>
         ) : (

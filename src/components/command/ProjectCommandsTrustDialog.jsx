@@ -49,7 +49,7 @@ export function TrustReviewBody({ project, trust }) {
         </p>
       ) : null}
       {commands.length > 0 ? (
-        <ul data-trust-commands="" className="m-0 p-0 list-none flex flex-col gap-2 border border-vsc-border rounded-[3px] px-2 py-1.5">
+        <ul data-trust-commands="" className="m-0 p-0 list-none flex flex-col gap-2 border border-vsc-border rounded-control px-2 py-1.5">
           {commands.map((cmd) => (
             <li key={cmd.key} data-trust-command={cmd.key} className="min-w-0">
               <div className="font-medium text-vsc-fg break-words">{cmd.name}</div>
@@ -129,7 +129,7 @@ function TrustDialog({ reviewing }) {
   useEffect(() => holdModal(), []);
 
   const stale = current ? null : (
-    <div data-trust-stale="" role="alert" className="mb-2 p-2 rounded-[3px] border border-vsc-warn text-vsc-warn">
+    <div data-trust-stale="" role="alert" className="mb-2 p-2 rounded-control border border-vsc-warn text-vsc-warn">
       <p className="m-0">
         {now.status === 'ok' && now.root === reviewing.root
           ? 'The file has changed since this opened. Trust is off until you have seen the new version.'
@@ -139,7 +139,7 @@ function TrustDialog({ reviewing }) {
         <button
           type="button"
           onClick={() => openReview()}
-          className="mt-1.5 h-[24px] px-2 text-ui-sm rounded-[3px] bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover"
+          className="mt-1.5 h-[24px] px-2 text-ui-sm rounded-control bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover"
         >
           Show the New Version
         </button>

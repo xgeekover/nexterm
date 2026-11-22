@@ -31,7 +31,11 @@ import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
-import { focusWorkspace } from '../../lib/workspaceFocus.js';
+import { PATH_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
+import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
+import { openInExternalEditor, revealInFileManager } from '../../lib/ipc.js';
+import { useTerminalStore } from '../../stores/terminalStore.js';
+import { buildOpenActionItems } from './explorerOpenActions.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
 import { useExplorerPathDrag } from '../../hooks/useExplorerPathDrag.js';
 
@@ -49,7 +53,7 @@ function ExplorerDragGhost({ ghost, ghostRef }) {
       ref={ghostRef}
       aria-hidden="true"
       className="fixed z-50 pointer-events-none flex items-center gap-1 px-2 h-[22px] rounded-sm text-ui-sm
-                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-focus shadow-widget"
+                 bg-vsc-tab-active text-vsc-tab-active-fg border border-vsc-accent"
     >
       <span className="shrink-0 flex items-center">
         {ghost.isFolder ? folderIconFor(ghost.name, false, 14) : fileIconFor(ghost.name, 14)}
@@ -211,7 +215,8 @@ export function FileExplorer() {
       label: 'Copy Path',
       disabled: isEmpty,
       disabledReason: noSelectionReason,
-      onSelect: () => copyText(target.path),
+      // Copied inside this click; a toast says once the clipboard took it.
+      onSelect: () => copyAndConfirm(target.path, PATH_COPIED),
     });
     items.push({
       key: 'copy-relative-path',
@@ -220,6 +225,25 @@ export function FileExplorer() {
       disabledReason: noSelectionReason,
       onSelect: () => copyText(relativeTo(rootPath, target.path)),
     });
+
+    // Reveal in Finder / File Explorer / File Manager, Open Terminal Here and,
+    // while an editor is set in Settings ▸ Files, Open in External Editor
+    // (A12-1 to A12-3): the row, or the open folder for the empty area.
+    pushSeparator();
+    items.push(
+      ...buildOpenActionItems(target, {
+        os,
+        rootPath,
+        reveal: revealInFileManager,
+        createTab: (options) => useTerminalStore.getState().createTab(options),
+        // After the new terminal has been drawn: it is the active pane's by
+        // then, and the keyboard goes to it rather than staying in the tree.
+        focusTerminal: () => requestAnimationFrame(() => focusTerminal()),
+        externalEditorCommand: useSettingsStore.getState().externalEditorCommand,
+        openInExternalEditor,
+        setError: setExplorerError,
+      })
+    );
 
     pushSeparator();
     items.push({
@@ -287,6 +311,20 @@ export function FileExplorer() {
 
   const activeFilePath = tabs.find((t) => t.id === activeTabId)?.filePath || null;
 
+  // The row the arrow keys move from, kept on a row: a folder closing or a
+  // filter narrowing under it can leave `focusIndex` past the last one.
+  const cursor = Math.min(focusIndex, rows.length - 1);
+  const rowSelected = (row) =>
+    samePath(selectedPath || '', row.node.path) ||
+    (!selectedPath && samePath(activeFilePath || '', row.node.path));
+  // The tree draws no ring of its own while it has rows (`outline-none`
+  // below): it shows focus through a row. The selected row does that by its
+  // look; with none on screen, the row the keys move from is marked instead,
+  // or Tab into a tree with nothing selected showed nothing at all. Not while
+  // an inline name field has the keyboard: the field shows that focus itself.
+  const focusRowIndex =
+    treeFocused && !creatingEntry && !renamingPath && !rows.some(rowSelected) ? cursor : -1;
+
   // Where the inline "new file/folder" input goes: the first child of the
   // folder being added to, or the top of the tree for the workspace root.
   const createIndex = useMemo(() => {
@@ -353,7 +391,7 @@ export function FileExplorer() {
       beginRename(selectedPath);
       return;
     }
-    const action = navigate(rows, focusIndex, e.key);
+    const action = navigate(rows, cursor, e.key);
     if (!action) return;
     e.preventDefault();
     if (action.index !== undefined) {
@@ -364,7 +402,7 @@ export function FileExplorer() {
     } else if (action.collapse) {
       setFolderExpanded(action.collapse, false);
     } else if (action.open) {
-      const row = rows[focusIndex];
+      const row = rows[cursor];
       if (row) activateRow(row);
     }
   };
@@ -400,7 +438,7 @@ export function FileExplorer() {
           <button
             type="button"
             onClick={() => pickRoot()}
-            className="px-3 py-1 rounded-sm text-ui-sm bg-vsc-accent hover:bg-vsc-accent-hover text-vsc-accent-fg transition"
+            className="px-3 py-1 rounded-sm text-ui-sm bg-vsc-accent-solid hover:bg-vsc-accent-hover active:bg-vsc-accent-pressed text-vsc-accent-fg transition"
           >
             Open Folder
           </button>
@@ -471,7 +509,7 @@ export function FileExplorer() {
 
       {filterOpen && (
         <div className="px-2 pb-1 shrink-0">
-          <div className="flex items-center gap-1 px-1 bg-vsc-input border border-vsc-input-border rounded-[2px] focus-within:border-vsc-focus">
+          <div className="ui-field flex items-center gap-1 px-1">
             <input
               autoFocus
               type="text"
@@ -581,7 +619,8 @@ export function FileExplorer() {
           onFocus={() => setTreeFocused(true)}
           onBlur={() => setTreeFocused(false)}
           onKeyDown={handleTreeKeyDown}
-          className="flex-1 overflow-auto outline-none"
+          // With no row to mark, the tree takes the keyboard ring itself.
+          className={cn('flex-1 overflow-auto', rows.length > 0 && 'outline-none')}
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) setSelectedPath(null);
           }}
@@ -610,11 +649,9 @@ export function FileExplorer() {
                   <TreeRow
                     row={row}
                     gitStatus={fileStatusIn(gitStatus, row.node.path)}
-                    isSelected={
-                      samePath(selectedPath || '', row.node.path) ||
-                      (!selectedPath && samePath(activeFilePath || '', row.node.path))
-                    }
+                    isSelected={rowSelected(row)}
                     isFocused={treeFocused}
+                    isFocusRow={i === focusRowIndex}
                     isCut={clipboard?.mode === 'cut' && samePath(clipboard.path, row.node.path)}
                     onSelect={selectRow}
                     onActivate={activateRow}

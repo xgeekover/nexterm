@@ -61,9 +61,9 @@ export function StartupCommandField({ id, title, cwd, value, error, onChange, on
           }
         }}
         className={cn(
-          'mt-1 w-full h-[24px] px-1.5 rounded-sm bg-vsc-input border text-ui font-mono text-vsc-fg outline-none',
+          'ui-field mt-1 w-full h-[24px] px-1.5 text-ui font-mono text-vsc-fg',
           'placeholder:text-vsc-placeholder placeholder:font-sans',
-          error ? 'border-vsc-error' : 'border-vsc-input-border focus:border-vsc-focus'
+          error && 'ui-field-invalid'
         )}
       />
       {error ? (
@@ -141,7 +141,7 @@ export function StartupCommandsDialog({ title, intro, sections = [], onSave, onC
           e.stopPropagation();
           onCancel?.();
         }}
-        className="w-[560px] max-w-[94vw] max-h-[76vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-[3px] text-vsc-fg"
+        className="w-[560px] max-w-[94vw] max-h-[76vh] flex flex-col bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-vsc-fg"
       >
         <div className="h-[35px] shrink-0 px-3 flex items-center justify-between border-b border-vsc-border">
           <h2 id="startup-commands-title" className="m-0 text-ui font-semibold truncate">
@@ -194,14 +194,14 @@ export function StartupCommandsDialog({ title, intro, sections = [], onSave, onC
           <button
             type="button"
             onClick={onCancel}
-            className="h-[26px] px-3 text-ui rounded-[3px] bg-vsc-button-secondary text-vsc-fg hover:bg-vsc-item-hover"
+            className="h-[26px] px-3 text-ui rounded-control transition-colors bg-vsc-button-secondary border border-vsc-input-border text-vsc-fg hover:bg-vsc-item-hover"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={save}
-            className="h-[26px] px-3 text-ui rounded-[3px] text-vsc-accent-fg bg-vsc-accent hover:bg-vsc-accent-hover"
+            className="h-[26px] px-3 text-ui rounded-control transition-colors text-vsc-accent-fg bg-vsc-accent-solid hover:bg-vsc-accent-hover active:bg-vsc-accent-pressed"
           >
             Save
           </button>
