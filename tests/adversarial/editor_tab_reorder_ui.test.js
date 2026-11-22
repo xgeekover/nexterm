@@ -36,8 +36,13 @@ import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework
 
 const EDITOR_DIR = fileURLToPath(new URL('../../src/components/editor/', import.meta.url));
 
-/** Bundled as they are: the files under test, and a helper with no imports. */
-const BUNDLED = [/^\.\/Editor(Panel|Tabs)\.jsx$/, /\/lib\/utils\.js$/];
+/**
+ * Bundled as they are: the files under test, a helper with no imports, and
+ * the row's edge fade (bundle 3, U3) — a hook whose effect a server render
+ * never runs, so it draws nothing here, but an empty stand-in would leave
+ * EditorTabs calling undefined.
+ */
+const BUNDLED = [/^\.\/Editor(Panel|Tabs)\.jsx$/, /\/lib\/utils\.js$/, /\/hooks\/useEdgeFade\.js$/, /\/lib\/edgeFade\.js$/];
 /** Kept real, so that the strip really draws. */
 const REAL = new Set(['react', 'react/jsx-runtime', 'lucide-react']);
 

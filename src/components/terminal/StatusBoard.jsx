@@ -20,11 +20,15 @@ import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { folderForBranch, useFolderBranch } from '../../stores/branchStore.js';
 import { unreadCountByTab } from '../../lib/attention.js';
+import { useMinuteNow } from '../../hooks/useMinuteNow.js';
 import {
   agentLabel,
   agoLabel,
   branchLabel,
   branchTitle,
+  elapsedLabel,
+  elapsedSince,
+  elapsedWords,
   groupSummaryItems,
   groupSummaryLabel,
   noteLine,
@@ -269,6 +273,14 @@ function useAgentFits(lineRef, agent, shape) {
  * notification, unread: Session done"): the icons are hidden, and what the
  * gaps say to the eye is said in words.
  *
+ * HOW LONG (bundle 3, U5): a line that names an agent says how long its
+ * state has held — "Working 3m", "Idle 12m", "Waiting 12m", "Running 4m"
+ * (`elapsedSince`, `elapsedLabel`, terminalStatus.js) — and its tooltip and
+ * what is read out say it in words ("Working for 3 minutes"). Only such a
+ * line, with a start to count from, listens to the minute clock
+ * (`useMinuteNow`); every other line passes it false, so the clock's tick
+ * redraws the lines that show a time and no other.
+ *
  * WHAT A PROGRAM SAYS IT IS DOING (stage 7, `nexterm-cli set-status`): while
  * it has said something, that takes the last note's place — it is the newer
  * and the more particular of the two — with an icon for its tone; the note
@@ -297,10 +309,16 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
 
   const agent = showAgent ? agentLabel(tab) : '';
   const status = showAgent ? terminalStatus(tab, { unread, progress: bar, activity }) : null;
-  const words = status ? statusText(status) : '';
-  const shortWords = status ? compactStatusText(status) : '';
+  // How long the state has held, on a line that names an agent: the clock is
+  // listened to only while there is a start to count from.
+  const since = status ? elapsedSince(tab, status, { activity, agentRow: Boolean(agent) }) : null;
+  const now = useMinuteNow(since !== null);
+  const elapsed = since !== null ? elapsedLabel(now - since) : '';
+  const elapsedSaid = since !== null ? elapsedWords(now - since) : '';
+  const words = status ? [statusText(status), elapsedSaid].filter(Boolean).join(' ') : '';
+  const shortWords = status ? [compactStatusText(status), elapsed].filter(Boolean).join(' ') : '';
   const branchName = showBranch ? branchLabel(branch) : '';
-  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${Boolean(branchName)}|${Boolean(note || reported)}`);
+  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${elapsed}|${Boolean(branchName)}|${Boolean(note || reported)}`);
   const agentShown = Boolean(agent) && fits;
   // The agent's name, drawn, already says who spoke; left out for width, the
   // note keeps a title that says it (terminalStatus.js). A program's status,
@@ -333,6 +351,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
         key="status"
         data-status-state={status.state}
         data-status-value={status.value}
+        data-status-elapsed={elapsed || undefined}
         className="shrink-0 flex items-center gap-[3px] whitespace-nowrap"
       >
         <StateIcon status={status} />

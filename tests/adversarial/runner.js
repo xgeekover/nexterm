@@ -207,6 +207,16 @@ import './option_as_meta.test.js';
 import './osc52.test.js';
 // Explorer Reveal and Open Terminal Here (bundle 2, A12-1/A12-2): fs_reveal_path and a strict createTab; EXO-99 tears down.
 import './explorer_open_actions.test.js';
+// A split divider let go after a press (bundle 3, U2-F2/F3): a window pointerdown and a document pointerup/pointercancel blur only the separator the press focused; DV-99 tears down.
+import './separator_focus.test.js';
+// The fade at the edge of an overflowing tab strip (bundle 3, U3-F1/F2): edgeFadeSides, the watcher, the hook's per-render step, the masks.
+import './edge_fade.test.js';
+// How long a TERMINALS agent row's state has held (bundle 3, U5-F1/F2): elapsedLabel, elapsedSince, the minute clock and useMinuteNow.
+import './elapsed_time.test.js';
+// Toasts (bundle 3, U6-F1/F2): the store on fake timers (TOAST_MS, three at most, a repeat replaces) and ToastHost mounted; TO-99 tears down.
+import './toast_store.test.js';
+// Copy feedback (bundle 3, U6-F3): Copy Path, Copy Context and Copy Session ID say what they did in a toast; CF-99 tears down.
+import './copy_feedback.test.js';
 
 async function run() {
   console.log('====================================================');

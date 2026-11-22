@@ -32,7 +32,8 @@ import {
 } from '../../src/stores/agentHistoryPromptStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
-import { copyText } from '../../src/lib/copyText.js';
+import { SESSION_ID_COPIED, copyAndConfirm } from '../../src/lib/copyFeedback.js';
+import { resetToasts, setToastTimers, useToastStore } from '../../src/stores/toastStore.js';
 import { entryOfAgent, forkedFromText, historyDisplay, historyTitle, renameChange } from '../../src/lib/agentHistory.js';
 import { agentSessionRows, buildPaletteGroups } from '../../src/lib/paletteItems.js';
 import { LIST_MENUS, resumeAgentSessionWith, subjectExists } from '../../src/components/terminal/statusBoardModel.js';
@@ -269,8 +270,11 @@ describe('AGENT SESSIONS menus: items, reasons, questions, palette (F25-F30)', (
     assert.equal(byKey(agentSessionRowItems({ ...E, sessionId: '' }, { on }), 'copy-id').disabled, true, 'an empty id is none');
     assert.deepEqual(calls, []);
 
-    // What the panel wires it to: copyText, here onto a stood-in clipboard.
+    // What the panel wires it to: copyAndConfirm (copyText, then a toast),
+    // here onto a stood-in clipboard.
     const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    resetToasts();
+    setToastTimers({ setTimeout: () => 0, clearTimeout: () => {} });
     const written = [];
     Object.defineProperty(globalThis, 'navigator', {
       value: { clipboard: { writeText: async (text) => void written.push(text) } },
@@ -279,15 +283,17 @@ describe('AGENT SESSIONS menus: items, reasons, questions, palette (F25-F30)', (
     });
     try {
       for (const e of [E, { ...E, key: `opencode:${SES}`, kind: 'opencode', sessionId: SES, title: 'Named so' }]) {
-        const item = byKey(agentSessionRowItems(e, { on: { copyId: (sessionId) => copyText(sessionId) } }), 'copy-id');
+        const item = byKey(agentSessionRowItems(e, { on: { copyId: (sessionId) => copyAndConfirm(sessionId, SESSION_ID_COPIED) } }), 'copy-id');
         assert.equal(await item.onSelect(), true, 'copied');
       }
+      assert.deepEqual(useToastStore.getState().toasts.map((t) => [t.kind, t.text]), [['confirm', 'Session ID copied']], 'one confirmation for the two copies');
     } finally {
+      resetToasts();
       if (saved) Object.defineProperty(globalThis, 'navigator', saved);
       else delete globalThis.navigator;
     }
     assert.deepEqual(written, [UUID, SES], 'exactly the ids, nothing around them');
-    assert.match(source('../../src/components/terminal/TerminalsPanel.jsx'), /copyId: \(sessionId\) => copyText\(sessionId\),/);
+    assert.match(source('../../src/components/terminal/TerminalsPanel.jsx'), /copyId: \(sessionId\) => copyAndConfirm\(sessionId, SESSION_ID_COPIED\),/);
   });
 
   test('ASM-03: Delete… is off, saying why, while a terminal of this window runs the entry; on when offered or held by none (AC38, F26)', () => {

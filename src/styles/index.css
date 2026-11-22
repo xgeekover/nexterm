@@ -11,6 +11,11 @@
    through Tailwind (bg-vsc-sidebar, text-vsc-fg, …); never hard-code a hex
    in a component.
 
+   STYLEGUIDE.md at the repo root is the full rule set (palette, accent,
+   focus, radii, elevation, motion, density, copy, in-flight feedback) with
+   the recorded decisions; RN-234 keeps it in step with the tokens here. The
+   list below is the short form.
+
    The tiers, darkest first: chrome and terminal (#0E1014); the editor and
    the active tab, joined (#15171C); popovers, menus and dialogs (#1B1E25);
    fields and hover (#232731). Every text and UI-part pair on them is
@@ -255,6 +260,30 @@ code, kbd, pre, .font-mono {
   display: none;
 }
 
+/* …but it says there is more: the side with more content fades out.
+   ---------------------------------------------------------------------------
+   `useEdgeFade` (src/hooks/useEdgeFade.js, the rule in src/lib/edgeFade.js)
+   sets `data-edge-fade` on a strip's scroller: `start` when there is more to
+   the left, `end` to the right, `both`, or `none`. The last 20px on that side
+   are masked from opaque to clear. A mask, not an overlay: no element, no
+   pseudo-element, so nothing takes a pointer event and a half-faded tab still
+   takes its click. Black and transparent only — a mask reads alpha, so it
+   takes no colour token — and no transition: the fade follows the scroll
+   position, it does not animate. While a drag is over a strip the hook sets
+   `none`, so the insertion and drop markers are never faded. */
+[data-edge-fade="start"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 20px);
+  mask-image: linear-gradient(to right, transparent, black 20px);
+}
+[data-edge-fade="end"] {
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - 20px), transparent);
+}
+[data-edge-fade="both"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+}
+
 /* Ellipsis at the START of a line, not the end.
 
    A directory path is identified by its tail — `…/nexterm/src-tauri/src` says
@@ -305,20 +334,35 @@ code, kbd, pre, .font-mono {
    dragging, `"focus"`, `"inactive"`. (There is no `data-state`; v3's
    `[data-state="dragging"]` never matched in v4.) So the line turns violet
    under the pointer and while it is dragged, and it can be grabbed a few
-   pixels either side of it. Across the whole hit area only until the first
-   drag: the library focuses a separator on the press and keeps it focused,
-   and a focused separator reports `"focus"`, not `"hover"`, so from then on
-   only the line's own pixel turns violet under the pointer. It takes
-   keyboard focus (the arrow keys move it), and a ring 2px inside a 1px
+   pixels either side of it.
+   Hovering waits 200ms before the line turns violet, then fades in over
+   120ms, so a pointer passing over a divider on its way elsewhere does not
+   flash it; leaving starts the fade back at once (the rest rule's
+   transition has no delay). A drag shows violet at once: `"active"` has no
+   transition (`transition-property: none`, which also cancels a hover delay
+   still running when the press comes; the hover rule sets only its delay, so
+   its higher specificity cannot bring the transition back). Reduced motion
+   (both switches, below) drops the transition and the delay: the state shows
+   as it changes.
+   The library focuses a separator on the press and nothing blurred it, and a
+   focused separator reports `"focus"`, not `"hover"`, so after the first
+   drag only the line's own pixel used to turn violet under the pointer.
+   PanelLayout now blurs it when the press ends (src/lib/separatorFocus.js),
+   so the whole hit area highlights again. It still takes keyboard focus (the
+   arrow keys move it), which is left alone, and a ring 2px inside a 1px
    element is invisible: a 3px light-violet line instead. */
 [data-separator] {
   background: var(--vsc-border);
   transition: background-color 120ms ease;
 }
 [data-separator]:hover,
-[data-separator="hover"],
+[data-separator="hover"] {
+  background: var(--vsc-accent);
+  transition-delay: 200ms;
+}
 [data-separator="active"] {
   background: var(--vsc-accent);
+  transition-property: none;
 }
 [data-separator]:focus-visible {
   background: var(--vsc-focus-ring);
@@ -363,6 +407,28 @@ code, kbd, pre, .font-mono {
 /* The isOver highlight swap on those overlays should fade, not pop. */
 .drop-zone-fade {
   transition: background-color 150ms ease-out, outline-color 150ms ease-out;
+}
+/* Toasts (ToastHost.jsx): opacity only, never a transform, so a toast
+   appears and goes where it stands and nothing slides. An error fades in and
+   stays; a confirmation also fades out over the last 150ms of its TOAST_MS
+   (3000ms, toastStore.js), just before the store takes it away. The fade-out
+   comes last in the list and fills forwards only, so while it waits the
+   fade-in is what shows. Both are finite, so the two reduced-motion switches
+   below cut them to 0.01ms like the rest: a toast shows at once and, a
+   confirmation, goes at once, with no animation. */
+@keyframes toast-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes toast-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+.animate-toast-in {
+  animation: toast-fade-in 150ms ease-out both;
+}
+.animate-toast-in-out {
+  animation: toast-fade-in 150ms ease-out both, toast-fade-out 150ms ease-in 2850ms forwards;
 }
 
 /* ---------------------------------------------------------------------------
@@ -455,6 +521,18 @@ code, kbd, pre, .font-mono {
   [data-unread-dot] {
     forced-color-adjust: none;
     background: Highlight;
+  }
+  /* The activity marks (ActivityDot): the running dot is a background,
+     which this mode would paint over in the page's own colour, so it keeps a
+     Highlight fill; the failed cross sets its red on itself, which an SVG
+     keeps here, so it takes the text colour like the state icons below. The
+     two still differ by shape: a filled dot, a circled cross. */
+  [data-activity="running"] {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  [data-activity="failed"] {
+    color: CanvasText;
   }
   [data-progress-fill] {
     forced-color-adjust: none;
@@ -577,6 +655,13 @@ code, kbd, pre, .font-mono {
   .xterm .xterm-scrollable-element > .scrollbar {
     transition-property: none !important;
   }
+  /* A split divider's hover waits 200ms (transition-delay), which the cut
+     duration above leaves in place: no transition at all and no delay, so
+     its highlight shows as the state changes. */
+  [data-separator] {
+    transition-property: none !important;
+    transition-delay: 0s !important;
+  }
 }
 
 /* Workbench "Reduced motion" setting — same neutralization as the OS media
@@ -590,4 +675,8 @@ code, kbd, pre, .font-mono {
 }
 :root.reduce-motion .xterm .xterm-scrollable-element > .scrollbar {
   transition-property: none !important;
+}
+:root.reduce-motion [data-separator] {
+  transition-property: none !important;
+  transition-delay: 0s !important;
 }

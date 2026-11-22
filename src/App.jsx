@@ -8,6 +8,7 @@ import { SettingsWindow } from './components/common/SettingsWindow.jsx';
 import { ControlLogDialog } from './components/common/ControlLogDialog.jsx';
 import { OpenFailureNotice } from './components/editor/OpenFailureNotice.jsx';
 import { AgentHistoryNotice } from './components/terminal/AgentHistoryNotice.jsx';
+import { ToastHost } from './components/common/ToastHost.jsx';
 import { AgentHistoryClearDialog } from './components/terminal/AgentHistoryClearDialog.jsx';
 import { PasteWarningDialog } from './components/terminal/PasteWarningDialog.jsx';
 import { TabSwitcher } from './components/terminal/TabSwitcher.jsx';
@@ -128,6 +129,9 @@ export default function App() {
 
       {/* What picking an AGENT SESSIONS entry did instead of opening a terminal */}
       <AgentHistoryNotice />
+
+      {/* Short confirmations ("Path copied") and errors, beside the notices above */}
+      <ToastHost />
 
       {/* Ctrl+Tab: the terminals most recently used, every group's */}
       <TabSwitcher />

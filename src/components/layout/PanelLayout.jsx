@@ -10,6 +10,8 @@ import { SearchPanel } from '../search/SearchPanel.jsx';
 import { EditorPrompts } from '../editor/EditorPrompts.jsx';
 import { GripVertical, X } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
+import { installSeparatorFocusRelease } from '../../lib/separatorFocus.js';
+import { useEdgeFade } from '../../hooks/useEdgeFade.js';
 
 // There is no editor area here any more (editor placement, sibling C, FC4):
 // files open in editor panes inside the workbench, the `terminal` view, among
@@ -123,9 +125,14 @@ function RegionHeader({
   onDragEndView,
   extra,
 }) {
+  // The tabs scroll when the region is too narrow for them; the side with
+  // more fades (useEdgeFade). Not while a view is dragged: the region is a
+  // drop target then.
+  const tabsRef = useRef(null);
+  useEdgeFade(tabsRef, Boolean(draggingView));
   return (
     <div className="h-panel-header shrink-0 flex items-center justify-between border-b border-vsc-border pr-1.5 select-none">
-      <div className="h-full flex items-center overflow-x-auto no-scrollbar">
+      <div ref={tabsRef} className="h-full flex items-center overflow-x-auto no-scrollbar">
         {views.map((view) => {
           const meta = VIEW_META[view];
           const isActive = view === activeView;
@@ -377,6 +384,17 @@ export function PanelLayout() {
     if (typeof document === 'undefined') return;
     document.documentElement.classList.toggle('reduce-motion', reducedMotionSetting);
   }, [reducedMotionSetting]);
+
+  // Every split divider in the app (the regions here, the terminal and editor
+  // splits) is a react-resizable-panels separator, which the library focuses
+  // on a press and never blurs; a focused one stops highlighting across its
+  // hit area. A window and a document listener, for the life of the
+  // workbench, let go of it when the press ends (src/lib/separatorFocus.js).
+  // Keyboard focus is left alone.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    return installSeparatorFocusRelease(document);
+  }, []);
 
   // Which view a region shows when it hosts more than one (tabs) lives in the
   // store, so the activity bar lights the view this draws: a tab clicked here,

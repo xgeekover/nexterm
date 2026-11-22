@@ -31,6 +31,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog.jsx';
 import { basename, dirname, join, relativeTo, samePath } from '../../lib/paths.js';
 import { cn } from '../../lib/utils.js';
 import { copyText } from '../../lib/copyText.js';
+import { PATH_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { openInExternalEditor, revealInFileManager } from '../../lib/ipc.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
@@ -214,7 +215,8 @@ export function FileExplorer() {
       label: 'Copy Path',
       disabled: isEmpty,
       disabledReason: noSelectionReason,
-      onSelect: () => copyText(target.path),
+      // Copied inside this click; a toast says once the clipboard took it.
+      onSelect: () => copyAndConfirm(target.path, PATH_COPIED),
     });
     items.push({
       key: 'copy-relative-path',

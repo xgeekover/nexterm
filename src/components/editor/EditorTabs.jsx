@@ -4,6 +4,7 @@ import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
 import { moveEditorToNewPane } from '../../lib/workbenchCommands.js';
+import { useEdgeFade } from '../../hooks/useEdgeFade.js';
 
 const paneHeaderBtn =
   'p-1 rounded-sm text-vsc-muted hover:text-vsc-fg-bright hover:bg-vsc-item-hover transition-colors';
@@ -516,10 +517,12 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
   useEffect(() => revealActiveChipOnResize(rowRef.current, activeId), [activeId]);
   // The gap a drop here would land in, while a drag is over this strip —
   // unless that drop would leave the tab where it is (see `markerSlot`).
-  const dropIndex =
-    drag?.active && drag.targetPaneId === paneId && drag.zone === 'tabs'
-      ? markerSlot(drag.index, paneTabs.map((t) => t.id), drag.tabId)
-      : null;
+  const tabsTargeted = Boolean(drag?.active) && drag.targetPaneId === paneId && drag.zone === 'tabs';
+  const dropIndex = tabsTargeted ? markerSlot(drag.index, paneTabs.map((t) => t.id), drag.tabId) : null;
+  // The row fades on the side with more tabs (useEdgeFade) — not while a tab
+  // is dragged over it, so the drop marker is drawn whole. `rowRef` is still
+  // the reveal's above; the fade only reads it.
+  useEdgeFade(rowRef, tabsTargeted || dropIndex !== null);
 
   return (
     <div

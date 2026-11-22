@@ -81,7 +81,7 @@ import { useGroupSummaryLabels } from './statusBoardModel.js';
 import { activityLabel, groupActivity } from '../../lib/tabActivity.js';
 import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js';
 import { useShortcuts } from '../../hooks/useShortcuts.js';
-import { copyText } from '../../lib/copyText.js';
+import { NO_DIRECTORY_REASON, NO_DIRECTORY_YET, PATH_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { copyContextItem } from '../../lib/copyContext.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
 import { pathDropLabel } from '../../lib/terminalFileDrop.js';
@@ -89,6 +89,7 @@ import { ControlledBadge, LockBadge, StripHandle, StripOverlay } from './HiddenS
 import { headerCloseGestures, stripShown, useRefocusAfterMenu, useStripOverlay } from './stripReveal.js';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import { displayTitle } from '../../lib/tabTitle.js';
+import { useEdgeFade } from '../../hooks/useEdgeFade.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -823,6 +824,10 @@ function TerminalPane({
   // Only the tabs that belong to this pane, in its own order.
   const paneTabs = node.tabIds.map((id) => tabs.find((t) => t.id === id)).filter(Boolean);
   const boundTab = paneTabs.find((t) => t.id === node.activeTabId) || paneTabs[0] || null;
+  // The tab a chip's menu is open for has no directory yet: its Copy Path is
+  // off with the reason, as in the TERMINALS row.
+  const chipTab = chipMenu ? paneTabs.find((t) => t.id === chipMenu.tabId) : null;
+  const chipNoDirectory = Boolean(chipTab) && !chipTab.cwd;
   // What its resume offer does when opencode's conversation is not found by
   // name: continue the most recent, or ask (see `resumeFallbackFor`).
   const resumeFallback = useTerminalStore((s) => (boundTab ? s.resumeFallbackFor(boundTab.id) : null));
@@ -863,6 +868,10 @@ function TerminalPane({
   // would land before, or `paneTabs.length` for after the last — or null.
   const insertAt =
     dropZone === 'tabs' ? markerSlot(drag.slot, paneTabs.map((t) => t.id), drag.tabId) : null;
+  // The row of chips fades on the side with more of them (useEdgeFade) —
+  // not while a tab is dragged over it, so the marker is drawn whole.
+  const chipRowRef = useRef(null);
+  useEdgeFade(chipRowRef, dropZone === 'tabs' || insertAt !== null);
 
   // ---- A hidden strip (spec P1) ------------------------------------------
   // With "Hide the Tab Strip of a Single Terminal" on, a pane holding one
@@ -986,7 +995,11 @@ function TerminalPane({
     >
       {/* The row of chips: it scrolls once they do not fit, and a drag near
           either end of it scrolls it (see `createAutoScroller`). */}
-      <div data-chip-row="" className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar">
+      <div
+        ref={chipRowRef}
+        data-chip-row=""
+        className="flex-1 flex items-center gap-0.5 px-1 h-full overflow-x-auto no-scrollbar"
+      >
         {paneTabs.map((tab, i) => {
           const isActive = tab.id === boundTab?.id;
           // A file being dragged never dims a terminal, whatever its id.
@@ -1285,13 +1298,19 @@ function TerminalPane({
                     duplicateTab(chipMenu.tabId);
                   },
                 },
+                // Copied inside this click; a toast says once the clipboard
+                // took it. Off while the tab has no directory yet;
+                // NO_DIRECTORY_YET only for a tab that went between the menu
+                // opening and the pick.
                 {
                   key: 'copy-path',
                   label: 'Copy Path',
                   icon: Copy,
+                  disabled: chipNoDirectory,
+                  disabledReason: chipNoDirectory ? NO_DIRECTORY_REASON : undefined,
                   onSelect: () => {
                     const target = paneTabs.find((t) => t.id === chipMenu.tabId);
-                    if (target?.cwd) copyText(target.cwd);
+                    copyAndConfirm(target?.cwd, PATH_COPIED, { nothing: NO_DIRECTORY_YET });
                   },
                 },
                 // Copy Context: the last N lines as plain text, secrets masked,
@@ -1717,6 +1736,10 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
     drag?.active && drag.kind === 'group'
       ? markerSlot(drag.slot, groups.map((g) => g.id), drag.groupId)
       : null;
+  // The chips fade on the side with more of them (useEdgeFade) — not during
+  // any drag: a group chip is a drop target for a dragged tab too.
+  const chipRowRef = useRef(null);
+  useEdgeFade(chipRowRef, Boolean(drag?.active));
 
   const beginRename = (group) => {
     setDraft(group.name || '');
@@ -1772,6 +1795,7 @@ function GroupSwitcher({ groups, activeGroupId, renamingGroupId, setRenamingGrou
       {/* `pl-0.5` is room for the insertion marker before the first chip: the
           row scrolls, so it clips whatever is drawn outside its own box. */}
       <div
+        ref={chipRowRef}
         role="tablist"
         aria-label="Terminal groups"
         data-chip-row=""

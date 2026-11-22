@@ -35,6 +35,7 @@ import {
   copyTerminalContext,
   setContextTerminalSource,
 } from '../../src/lib/copyContext.js';
+import { resetToasts, setToastTimers, useToastStore } from '../../src/stores/toastStore.js';
 
 const { Terminal } = headless;
 
@@ -174,6 +175,9 @@ describe('Copy Context: the last N lines of a terminal, plain, secrets masked', 
   });
 
   test('CC-05: a terminal never shown — the item is off and says why, and nothing is copied', async () => {
+    // The default onSelect says what it did in a toast (copy_feedback.test.js):
+    // no real timer behind it here, and none left up after.
+    setToastTimers({ setTimeout: () => 0, clearTimeout: () => {} });
     const copied = [];
     const copy = (text) => {
       copied.push(text);
@@ -217,6 +221,7 @@ describe('Copy Context: the last N lines of a terminal, plain, secrets masked', 
     } finally {
       unregister();
       term.dispose();
+      resetToasts();
     }
     assert.equal(contextTerminalOf('shown'), null, 'unregistered');
   });
@@ -250,11 +255,16 @@ describe('Copy Context: the last N lines of a terminal, plain, secrets masked', 
     } finally {
       t2.dispose();
     }
-    // The module itself reaches nothing else: read-screen's reader and copyText.
+    // The module itself reaches nothing else: read-screen's reader, copyText
+    // and the toast that says the copy is done (copyFeedback, U6), which
+    // reaches only copyText and the toast store.
     const src = source('src/lib/copyContext.js');
     const imports = [...src.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]);
-    assert.deepEqual(imports, ['./controlScreen.js', './copyText.js']);
+    assert.deepEqual(imports, ['./controlScreen.js', './copyText.js', './copyFeedback.js']);
     assert.doesNotMatch(src, /invoke\(|ipc\.js|writeFile|scrollback_|fs_/);
+    const feedback = source('src/lib/copyFeedback.js');
+    assert.deepEqual([...feedback.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]), ['./copyText.js', '../stores/toastStore.js']);
+    assert.doesNotMatch(feedback, /invoke\(|ipc\.js|writeFile|scrollback_|fs_/);
   });
 
   test('CC-07: listed in the palette — the label with N, off for a terminal never shown — and run without an await before the copy', () => {
@@ -302,12 +312,14 @@ describe('Copy Context: the last N lines of a terminal, plain, secrets masked', 
     }
   });
 
-  test('CC-99: the source, the globals and the mock as they were', () => {
+  test('CC-99: the source, the globals, the mock and the toasts as they were', () => {
     setContextTerminalSource(null);
     mockBridge.invoke = saved.invoke;
     if (saved.navigator) Object.defineProperty(globalThis, 'navigator', saved.navigator);
     else delete globalThis.navigator;
+    resetToasts();
     assert.equal(contextTerminalOf('shown'), null);
     assert.equal(mockBridge.invoke, saved.invoke);
+    assert.deepEqual(useToastStore.getState().toasts, [], 'no toast left up');
   });
 });

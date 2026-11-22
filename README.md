@@ -141,6 +141,32 @@ header, the pane strip and three rows. A long folder name in the title bar or
 the status bar is cut short with its whole path in the tooltip, so the search
 box and the bell always stay in view.
 
+**More tabs than fit.** A strip of tabs or chips — a side bar's view tabs, a
+pane's terminals, the group chips, an editor pane's files — that holds more
+than its width scrolls sideways with the wheel or the trackpad, with no scroll
+bar, and fades out on the side that has more. While you drag a tab or chip over
+a strip the fade goes away, so the marker where it will land is drawn whole.
+
+**Toasts.** A short confirmation of something that shows nowhere else appears
+as a toast in the bottom right corner, above the status bar, and fades after
+about 3 seconds; an error shown there stays until you dismiss it. At most three
+are up, the newest at the bottom, and the same message twice is shown once,
+for its full time again. A toast never takes focus, so you keep typing in the
+terminal, and it sits beside the notices in that corner, never over them (in
+a window too narrow for that, just above them). A screen reader says a
+confirmation when it is next idle and an error at once. With *Reduce Motion*
+on (Settings ▸ Workbench, or the system setting), toasts appear and go without
+fading.
+
+Three copies say they are done this way: Copy Path (a TERMINALS row's menu,
+a tab chip's menu and the Explorer) shows "Path copied", Copy Context (those
+two terminal menus and the command palette) shows "Copied 200 lines (secrets
+masked)" with the number of lines it copied, and Copy Session ID (AGENT
+SESSIONS) shows "Session ID copied". If the clipboard refuses, or there is
+nothing to copy, an error says so and stays. The other copy actions, such as
+Copy Relative Path in the Explorer or copying a terminal's selection, do not
+show a toast yet; that is later work.
+
 The words this README uses:
 
 - **Terminal** — one shell, shown as one tab.
@@ -831,12 +857,14 @@ the program leaves it, rather than drawing over it.
 
 ### Knowing what every terminal is doing
 
-**See what the other terminals are doing.** A tab shows a violet dot while a
-command is running in it and a red one when the last command failed, and a
-group's chip shows the same for every terminal inside it. The point is the ones
-you are not looking at: switching groups replaces the whole arrangement, so
-without this a build finishing — or failing — in another group is invisible.
-Hovering says it in words. Nothing flashes for an empty prompt line.
+**See what the other terminals are doing.** A tab shows a pulsing violet dot
+while a command is running in it and a red circled cross when the last command
+failed, and a group's chip shows the same for every terminal inside it: two
+shapes, so the two still differ for anyone who cannot tell the colours apart
+and in Windows High Contrast. The point is the ones you are not looking at:
+switching groups replaces the whole arrangement, so without this a build
+finishing — or failing — in another group is invisible. Hovering says it in
+words. Nothing flashes for an empty prompt line.
 
 **Be told when something finishes.** A command that runs for more than ten
 seconds in a terminal you are NOT looking at puts an entry in the status bar's
@@ -904,10 +932,11 @@ Neither program does this until you tell it to:
 
 A desktop notification needs the operating system to allow it — on macOS
 System Settings ▸ Notifications, on Windows Settings ▸ System ▸ Notifications,
-on Linux a running notification service. On Windows, toasts are for the
-installed app (the `setup.exe` or `.msi`): Tauri's notification plugin, which
-shows them, documents its Windows support as working only for installed apps.
-The portable `NexTerm.exe` is not installed, so do not count on a toast from it.
+on Linux a running notification service. On Windows, Windows notifications
+are for the installed app (the `setup.exe` or `.msi`): Tauri's notification
+plugin, which shows them, documents its Windows support as working only for
+installed apps. The portable `NexTerm.exe` is not installed, so do not count on
+a Windows notification from it.
 The bell works everywhere either way.
 
 #### Which terminal wants you
@@ -988,6 +1017,17 @@ what it is doing right now:
   *In progress* or *Paused*, then Claude Code's *Working* or *Idle*, then the
   rest. An idle Claude Code is not *Waiting*: a finished turn's entry in the
   bell is what makes it wait, until you have seen it.
+- **How long, on an agent's row.** When the row names an agent, its state
+  says how long it has held: *Working 3m* and *Idle 12m* since Claude Code
+  started working or went idle, *Waiting 12m* since it went idle, and
+  *Running 4m* since the agent's command started (OpenCode, whose title says
+  nothing of its state). In whole minutes — *3m*, *59m*, *1h 0m*, *2h 5m* —
+  never in seconds, and nothing under a minute: a state that just began says
+  only *Working*. Hovering says it in words (*Working for 3 minutes*), and
+  that is also what a screen reader says. Every row moves on together, once a
+  minute on the minute, from one clock that runs only while a row has a time
+  to count; a plain shell's row, and every row with Show Agent and Status
+  off, shows no time and is not redrawn for it.
 - **The git branch of its folder**, or *detached* and the commit when the head
   is detached.
 - **The last notification**, dimmed once read. Hover it for the whole text
@@ -2092,6 +2132,12 @@ npm install
 npm run tauri dev        # native window, hot-reloaded frontend
 npm run dev              # frontend only, in a browser, on :1420
 ```
+
+Anything new in the UI follows [STYLEGUIDE.md](STYLEGUIDE.md): the palette
+and its tokens, the accent, focus, corners, elevation, motion and reduced
+motion, sizes, wording and in-flight feedback, plus the decisions that were
+made on purpose. The render suite (RN-234) checks that it still matches
+`src/styles/index.css`.
 
 ## Build
 

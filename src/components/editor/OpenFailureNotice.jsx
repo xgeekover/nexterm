@@ -25,6 +25,7 @@ export function OpenFailureNotice() {
   return (
     <div
       role="alert"
+      data-corner-notice=""
       className="fixed right-2 bottom-statusbar mb-2 z-40 w-[400px] max-w-[calc(100vw-16px)] flex items-start gap-2 px-3 py-2 bg-vsc-widget border border-vsc-widget-border shadow-widget rounded-popover text-ui text-vsc-fg"
     >
       <CircleAlert size={16} className="shrink-0 mt-px text-vsc-error" />

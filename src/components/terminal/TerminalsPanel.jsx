@@ -66,7 +66,7 @@ import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js'
 import { startupCommandOf, startupCount } from '../../lib/startupCommands.js';
 import { sortByAttention } from '../../lib/terminalStatus.js';
 import { cn } from '../../lib/utils.js';
-import { copyText } from '../../lib/copyText.js';
+import { PATH_COPIED, SESSION_ID_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { copyContextItem } from '../../lib/copyContext.js';
 import { displayTitle } from '../../lib/tabTitle.js';
 
@@ -573,7 +573,8 @@ export function TerminalsPanel() {
         label: 'Copy Path',
         disabled: !tab.cwd,
         disabledReason: !tab.cwd ? 'This terminal has no directory yet' : undefined,
-        onSelect: () => copyText(tab.cwd),
+        // Copied inside this click; a toast says once the clipboard took it.
+        onSelect: () => copyAndConfirm(tab.cwd, PATH_COPIED),
       },
       // Copy Context: the last N lines as plain text, secrets masked, read and
       // copied inside this click; off for a terminal never shown.
@@ -711,7 +712,7 @@ export function TerminalsPanel() {
         // A new conversation from this one, in a new terminal in its folder;
         // anything that stops it is said in AgentHistoryNotice.
         fork: (e) => forkConversation({ sessionId: e.sessionId, cwd: e.cwd }),
-        copyId: (sessionId) => copyText(sessionId),
+        copyId: (sessionId) => copyAndConfirm(sessionId, SESSION_ID_COPIED),
         pin: (key) => agentHistory().pin(key),
         unpin: (key) => agentHistory().unpin(key),
         rename: (e) => startRename('agent-session', e.key, renamePrefill(e)),

@@ -18,12 +18,14 @@
  * for it — macOS WebKit may refuse `navigator.clipboard.writeText` once that
  * turn is over (release check H9) — so the screen is read synchronously,
  * through the source the terminal registry registers here, and never through
- * anything awaited first. This module imports no component module: the menus
+ * anything awaited first; only the toast that says so waits
+ * (src/lib/copyFeedback.js). This module imports no component module: the menus
  * and the palette are loaded in Node by the test suites, and the registry
  * brings xterm and its stylesheet with it.
  */
 import { readScreen } from './controlScreen.js';
 import { copyText } from './copyText.js';
+import { confirmContextCopy } from './copyFeedback.js';
 
 /** The Copy Context Lines setting: its default and its range. */
 export const COPY_CONTEXT_DEFAULT_LINES = 200;
@@ -133,6 +135,8 @@ export function copyContextOfTab(tabId, lines, options) {
  * The menu item (ContextMenu's shape) that copies terminal `tabId`'s last
  * `lines` lines: off, saying why, while the terminal has never been shown.
  * `available` overrides the lookup (tests); `onSelect` overrides the copy.
+ * The default copies inside the click and then, once the clipboard has
+ * answered, says so in a toast (confirmContextCopy, src/lib/copyFeedback.js).
  */
 export function copyContextItem({ tabId = null, lines, available, onSelect, icon, key = 'copy-context', copy } = {}) {
   const shown = typeof available === 'boolean' ? available : contextTerminalOf(tabId) !== null;
@@ -142,8 +146,7 @@ export function copyContextItem({ tabId = null, lines, available, onSelect, icon
     icon,
     disabled: !shown,
     disabledReason: shown ? undefined : NEVER_SHOWN_REASON,
-    onSelect: onSelect ?? (() => {
-      copyContextOfTab(tabId, lines, copy ? { copy } : undefined);
-    }),
+    // The copy first, synchronously; only the toast waits for its answer.
+    onSelect: onSelect ?? (() => confirmContextCopy(copyContextOfTab(tabId, lines, copy ? { copy } : undefined))),
   };
 }

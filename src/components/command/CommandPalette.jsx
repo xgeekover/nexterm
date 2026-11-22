@@ -40,6 +40,7 @@ import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette, forkTargetOfTa
 import { commandHistory } from '../../lib/commandIndex.js';
 import { notifyTerminal } from '../../lib/terminalNotice.js';
 import { contextTerminalOf, copyContextOfTab } from '../../lib/copyContext.js';
+import { confirmContextCopy } from '../../lib/copyFeedback.js';
 import { focusActivePane, focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { moveEditorToNewPane, toggleZoomActive } from '../../lib/workbenchCommands.js';
 import { swallowRepeatsOf } from '../../lib/heldKeys.js';
@@ -532,7 +533,11 @@ export function CommandPalette() {
         // Read and copied now, before anything is awaited: the clipboard
         // write must stay inside the Enter or click that picked it (macOS
         // WebKit, release check H9). A terminal never shown copies nothing.
-        copyContextOfTab(useTerminalStore.getState().activeTabId, useSettingsStore.getState().terminalCopyContextLines);
+        // Only the toast waits for the clipboard's answer, so it is not
+        // awaited here either.
+        confirmContextCopy(
+          copyContextOfTab(useTerminalStore.getState().activeTabId, useSettingsStore.getState().terminalCopyContextLines)
+        );
         return;
       case 'clear_agent_session_history':
         // Asks first ("Clear Agent Session History?"), which takes the

@@ -217,6 +217,8 @@ function loadPalette() {
         "export { calls } from 'stand-in:calls';",
         // The bundle's own copy of the module the registry registers its lookup in.
         "export { setContextTerminalSource } from '../../lib/copyContext.js';",
+        // And of the toast store the copy's confirmation goes to (U6).
+        "export { useToastStore, resetToasts, setToastTimers } from '../../stores/toastStore.js';",
       ].join('\n'),
       resolveDir: COMMAND_DIR,
       sourcefile: 'palette-under-test.js',
@@ -740,6 +742,8 @@ describe('Command palette, mounted: Copy Context', () => {
     const written = [];
     const before = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
     const unregister = ui.setContextTerminalSource((tabId) => (tabId === 't1' ? term : null));
+    // No real timer behind the confirmation's TOAST_MS.
+    ui.setToastTimers({ setTimeout: () => 0, clearTimeout: () => {} });
     try {
       await onPage(async (p) => {
         Object.defineProperty(globalThis, 'navigator', {
@@ -758,8 +762,10 @@ describe('Command palette, mounted: Copy Context', () => {
         const askedBefore = ui.bridge.asked.length;
         p.keydown('Enter');
         assert.equal(written.length, 1, 'the clipboard was not written inside the Enter');
+        assert.deepEqual(ui.useToastStore.getState().toasts, [], 'the toast waits for the clipboard');
         await letItRun();
         assert.deepEqual(written, ['make build\nusing sk-[hidden] now\ndone']);
+        assert.deepEqual(ui.useToastStore.getState().toasts.map((t) => [t.kind, t.text]), [['confirm', 'Copied 3 lines (secrets masked)']], 'the copy is confirmed');
         assert.deepEqual(ui.bridge.asked.slice(askedBefore).map(([c]) => c), [], 'nothing through the backend — no file, no scrollback command');
       });
       unregister();
@@ -772,6 +778,7 @@ describe('Command palette, mounted: Copy Context', () => {
       });
     } finally {
       unregister();
+      ui.resetToasts();
       if (before) Object.defineProperty(globalThis, 'navigator', before);
       else delete globalThis.navigator;
       term.dispose();

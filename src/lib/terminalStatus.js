@@ -133,6 +133,82 @@ export function statusText(s) {
   return typeof s.value === 'number' ? `${s.word} ${s.value}%` : s.word;
 }
 
+// ---- How long it has been so (bundle 3, U5) ----------------------------------
+
+const MINUTE_MS = 60 * 1000;
+
+/** Whole minutes in `ms`, or null for less than one or a time that is not one. */
+function wholeMinutes(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < MINUTE_MS) return null;
+  return Math.floor(ms / MINUTE_MS);
+}
+
+/**
+ * How long a state has held, as its line draws it: '' under a minute — a
+ * state that just began says only what it is ("Working", never "Working 0m")
+ * — then "3m", "59m", "1h 0m", "2h 5m". Never seconds: the line is redrawn
+ * once a minute (minuteClock.js), and a count of seconds would be wrong the
+ * moment it was drawn. Whole minutes, rounded down. '' for anything that is
+ * not a time.
+ */
+export function elapsedLabel(ms) {
+  const minutes = wholeMinutes(ms);
+  if (minutes === null) return '';
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/**
+ * The same in words, for the tooltip and what is read out: "for 3 minutes",
+ * "for 1 minute", "for 1 hour", "for 2 hours 5 minutes"; '' exactly where
+ * `elapsedLabel` is.
+ */
+export function elapsedWords(ms) {
+  const minutes = wholeMinutes(ms);
+  if (minutes === null) return '';
+  if (minutes < 60) return `for ${plural(minutes, 'minute')}`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `for ${plural(hours, 'hour')}` : `for ${plural(hours, 'hour')} ${plural(rest, 'minute')}`;
+}
+
+const wallTime = (t) => (typeof t === 'number' && Number.isFinite(t) && t > 0 ? t : null);
+
+/**
+ * When the state `status` (`terminalStatus`'s) of `tab` began, on the wall
+ * clock, for a line that names an agent (`agentRow`: `agentLabel` is not ''
+ * and Show Agent is on) — or null, and the line shows no time:
+ *
+ *   working, idle  `activity.since`, when the activity is that very state
+ *                  (Claude Code's title said so, agentActivity.js)
+ *   waiting        `activity.since` while the activity is idle: the agent
+ *                  stopped and waits for you, and has since that moment; a
+ *                  Waiting with no idle activity (a bell, a program's
+ *                  message) has no start the store knows
+ *   running        `tab.runStartedAt`: the agent is the command that runs —
+ *                  OpenCode, which says nothing of its state in its title
+ *
+ * Anything else — a bar's amount, an error, a failed or exited shell, no
+ * state, a row that names no agent — has no time. `activity` is the tab's
+ * entry in the store's `agentActivity` map (`{ state, since }`) or null.
+ */
+export function elapsedSince(tab, status, { activity = null, agentRow = false } = {}) {
+  if (!tab || agentRow !== true || !status?.state) return null;
+  switch (status.state) {
+    case 'working':
+    case 'idle':
+      return activity?.state === status.state ? wallTime(activity.since) : null;
+    case 'waiting':
+      return activity?.state === 'idle' ? wallTime(activity.since) : null;
+    case 'running':
+      return wallTime(tab.runStartedAt);
+    default:
+      return null;
+  }
+}
+
 // ---- The agent ---------------------------------------------------------------
 
 /**
