@@ -691,41 +691,13 @@ go without a mark, never with a wrong one, when it is sent while a todo list
 or tool progress shows above the box, or when the pane is resized while it
 waits for its echo.
 
-**OpenCode's messages on the scrollbar.** OpenCode's full TUI draws on the
-alternate screen, which has no scrollback, so NexTerm starts and resumes
-OpenCode in its mini mode instead: New OpenCode Terminal types `opencode
---mini --no-replay`, and Resume types `opencode --mini --no-replay -s <id>`
-or `opencode --mini --no-replay --continue`. Mini prints the conversation on
-the normal screen, where it scrolls with the wheel and the scrollbar, and
-every message you send gets a blue mark on its `›` row, wrapped and Korean
-messages and pastes included; the composer and the footer at the bottom never
-have one. The flags are added only when Settings ▸ Terminal ▸ *OpenCode in
-Mini Mode* is on (the default) and `opencode --version` says OpenCode V1
-1.17.10 or newer; any other OpenCode (older, or V2), one NexTerm cannot find
-or ask, and the setting off all get plain `opencode`, the full TUI, as
-before. NexTerm asks once per run and keeps a yes until it quits, so if
-opencode is upgraded or replaced while NexTerm runs (to V2, say), restart
-NexTerm or turn the setting off. It asks the `opencode` the login shell's
-PATH finds, which can differ from the one a folder pins with nvm, mise, asdf
-or volta, or from a PowerShell alias; such a folder may get the flags for an
-opencode that has none. Typing `opencode` yourself always gives the
-full TUI, as does a layout template's `opencode -c`; `opencode --mini`
-typed yourself is marked too. NexTerm finds an echo by the text the
-composer held at Enter, never by its colour, so other OpenCode themes work.
-The limits: no marks in the full TUI, in V2, over ssh or in WSL;
-a message whose text has an empty
-line in it may get no mark; with replay on (`opencode --mini` without
-`--no-replay`) the marks go when a resize makes mini print the conversation
-again, and the reprint is not marked unless a message was still waiting for
-its echo then. History a resumed conversation may print is meant to get no
-mark, and a message typed before mini has drawn gets none; this is still to
-be checked against a real resume (WINDOWS_VERIFICATION.md V50 O12). Mini
-sets no terminal title, so a new mini conversation does not learn its id
-while it runs: after a NexTerm restart it resumes through the
-usual lookup, `--continue` (with the mini flags) when it is the only OpenCode
-terminal in reach and otherwise the list in the banner, never into a
-conversation another terminal has; one started with `-s <id>` stays exact.
-Its side-bar title is no longer `OC | …`.
+**OpenCode on the alternate screen.** OpenCode's full TUI draws on the
+alternate screen, which has no scrollback, so while it is up the scrollbar is
+hidden and OpenCode's messages get no marks; the keys go to OpenCode. New
+OpenCode Terminal types `opencode`, and Resume types `opencode -s <id>` or
+`opencode --continue`. Versions 0.32.0 to 0.35.x could start OpenCode in a
+mini mode instead; that mode and its setting are gone, and a value of the
+setting saved by one of those versions is ignored.
 
 Marks leave with their text — the
 oldest lines leaving a full scrollback, `clear` / `cls` / Ctrl+L, a redraw of
@@ -1969,11 +1941,9 @@ right-click does, mouse reporting, *Prompt Marks on Scrollbar* (the marks
 at each shell prompt and each message sent to Claude Code on the terminal's
 scrollbar; on by default), and *Claude Code on the Normal Screen* (starts
 terminals with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` unless it is set
-already; on by default), and *OpenCode in Mini Mode* (starts and resumes
-OpenCode V1 1.17.10 and newer as `opencode --mini --no-replay`; on by
-default), and *Kitty Keyboard Protocol* (answers a program that asks for
-the kitty keyboard protocol and sends its first level's keys; on by
-default, see [Keyboard shortcuts](#keyboard-shortcuts)), and *Copy Context Lines* (how many lines *Copy Last N Lines (Secrets
+already; on by default), and *Kitty Keyboard Protocol* (answers a program
+that asks for the kitty keyboard protocol and sends its first level's keys;
+on by default, see [Keyboard shortcuts](#keyboard-shortcuts)), and *Copy Context Lines* (how many lines *Copy Last N Lines (Secrets
 Masked)* copies; 200 by default, 1 to 10000; very long output is cut at
 `read-screen`'s 512 KiB cap, the oldest lines dropped), and *Keep the Computer Awake
 While an Agent Works* (off by default: while a Claude Code terminal is

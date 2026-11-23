@@ -303,16 +303,6 @@ export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake =
       control: 'checkbox',
     },
     {
-      id: 'terminalOpencodeMini',
-      section: 'terminal',
-      key: 'terminalOpencodeMini',
-      settingKey: 'terminal.integrated.opencodeMiniMode',
-      title: 'OpenCode in Mini Mode',
-      description:
-        'Start and resume OpenCode as `opencode --mini --no-replay`, so its conversation goes into the scrollback: it scrolls with the scrollbar and every message you send gets a mark. The trade is the full TUI\'s own layout and mouse. Needs OpenCode V1 1.17.10 or newer; any other version gets the full TUI as before. Typing `opencode` yourself always gives the full TUI. Applies to the next start or resume.',
-      control: 'checkbox',
-    },
-    {
       id: 'terminalScrollback',
       section: 'terminal',
       key: 'terminalScrollback',
@@ -995,7 +985,6 @@ export function SettingsWindow() {
   const terminalStickyHeader = useSettingsStore((s) => s.terminalStickyHeader);
   const terminalPromptMarks = useSettingsStore((s) => s.terminalPromptMarks);
   const terminalClaudeNormalScreen = useSettingsStore((s) => s.terminalClaudeNormalScreen);
-  const terminalOpencodeMini = useSettingsStore((s) => s.terminalOpencodeMini);
   const terminalCopyOnSelect = useSettingsStore((s) => s.terminalCopyOnSelect);
   const terminalMouseReporting = useSettingsStore((s) => s.terminalMouseReporting);
   const terminalMacEditingKeys = useSettingsStore((s) => s.terminalMacEditingKeys);
@@ -1050,7 +1039,6 @@ export function SettingsWindow() {
     terminalStickyHeader,
     terminalPromptMarks,
     terminalClaudeNormalScreen,
-    terminalOpencodeMini,
     terminalCopyOnSelect,
     terminalMouseReporting,
     terminalMacEditingKeys,

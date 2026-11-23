@@ -68,7 +68,6 @@ import { shellPathOf } from '../../lib/terminalFileDrop.js';
 import { trackCommandMarks } from '../../lib/stickyCommand.js';
 import { listenForPrompts, mergeMarks, promptJumpLine, trackPromptMarks } from '../../lib/promptMarks.js';
 import { createScanScheduler, noteTerminalInput, trackAgentMessageMarks } from '../../lib/agentMessageMarks.js';
-import { trackOpencodeMiniMarks } from '../../lib/opencodeMiniMarks.js';
 import { agentRuns } from '../../lib/terminalStatus.js';
 import { submitsLine } from '../../lib/tabActivity.js';
 import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
@@ -686,7 +685,6 @@ function ensureSettingsSubscriptionStarted() {
       for (const entry of instances.values()) {
         entry.promptMarks?.setVisible(promptMarksShown(state));
         entry.messageMarks?.setVisible(promptMarksShown(state));
-        entry.miniMarks?.setVisible(promptMarksShown(state));
       }
     }
     // Restore Scrollback turned back on: what every terminal shows now is
@@ -1595,8 +1593,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
       color: promptMarkColour(),
       // Terminal: Clear (`clearTerminal`) takes every message mark as well;
       // Claude Code's rows start below the cursor from then on.
-      // OpenCode mini's as well.
-      onClear: () => clearMessageMarks(instances.get(tabId)),
+      onClear: () => instances.get(tabId)?.messageMarks?.afterClear(),
     }),
     promptMarkClicks,
     // Where each message sent to Claude Code is, on the same ruler, in its
@@ -1609,17 +1606,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
       visible: promptMarksShown(settingsState),
       color: messageMarkColour(),
     }),
-    // The same for the messages sent to OpenCode in mini mode, by its own
-    // rules (src/lib/opencodeMiniMarks.js), with a limit of its own; fed and
-    // scanned only while OpenCode runs there (`marksAgentIn`).
-    miniMarks: trackOpencodeMiniMarks(term, {
-      decorate: promptMarkDecorator(term),
-      visible: promptMarksShown(settingsState),
-      color: messageMarkColour(),
-    }),
     messageScans: null,
     claudeRan: false,
-    opencodeRan: false,
     messageInput,
     messageParsed,
     bufferChange,
@@ -1900,7 +1888,6 @@ function refreshPromptMarkColour() {
   for (const entry of instances.values()) {
     entry.promptMarks?.setColor(colour);
     entry.messageMarks?.setColor(messageColour);
-    entry.miniMarks?.setColor(messageColour);
   }
 }
 
@@ -2071,35 +2058,16 @@ function ensureLastCommandOutputListening() {
 }
 ensureLastCommandOutputListening();
 
-/** Every kind of mark of `entry`'s terminal as one — shell prompts, Claude Code's and OpenCode mini's messages — for the click and the keys (promptMarks.js `mergeMarks`). */
+/** Both kinds of marks of `entry`'s terminal as one, for the click and the keys (promptMarks.js `mergeMarks`). */
 function allMarks(entry) {
   if (!entry || entry.disposed) return null;
-  return mergeMarks(entry.promptMarks, entry.messageMarks, entry.miniMarks);
-}
-
-/** Terminal: Clear (the prompt marks' onClear): every message mark goes, of both agents. */
-function clearMessageMarks(entry) {
-  entry?.messageMarks?.afterClear();
-  entry?.miniMarks?.afterClear();
+  return mergeMarks(entry.promptMarks, entry.messageMarks);
 }
 
 /** Whether NexTerm believes Claude Code runs in `tabId`'s terminal (`agentRuns`, the agent record agentDone goes by). */
 function claudeRunsIn(tabId) {
   const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
   return Boolean(tab) && tab.agent?.kind === 'claude' && agentRuns(tab);
-}
-
-/** Whether NexTerm believes OpenCode runs in `tabId`'s terminal; its mini marks apply on the normal screen only. */
-function opencodeRunsIn(tabId) {
-  const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
-  return Boolean(tab) && tab.agent?.kind === 'opencode' && agentRuns(tab);
-}
-
-/** Whose message marks `tabId`'s terminal keeps now: 'claude', 'opencode', or null for neither. */
-function marksAgentIn(tabId) {
-  if (claudeRunsIn(tabId)) return 'claude';
-  if (opencodeRunsIn(tabId)) return 'opencode';
-  return null;
 }
 
 /**
@@ -2115,21 +2083,7 @@ function noteMessageInput(tabId, data) {
   const marks = entry?.messageMarks;
   if (!marks || entry.disposed) return;
   try {
-    // Typing is noted by both trackers (a flag each); an Enter goes to the
-    // running agent's tracker, or is the floor of both at a shell.
-    let running = null;
-    const both = {
-      noteTyped: () => {
-        marks.noteTyped();
-        entry.miniMarks?.noteTyped();
-      },
-      noteSubmit: () => (running === 'opencode' ? entry.miniMarks?.noteSubmit() : marks.noteSubmit()),
-      noteShellSubmit: () => {
-        marks.noteShellSubmit();
-        entry.miniMarks?.noteShellSubmit();
-      },
-    };
-    const kind = noteTerminalInput(both, data, { submits: submitsLine, agentRuns: () => (running = marksAgentIn(tabId)) !== null });
+    const kind = noteTerminalInput(marks, data, { submits: submitsLine, agentRuns: () => claudeRunsIn(tabId) });
     if (kind === 'submit') entry.messageScans?.poke();
   } catch (err) {
     console.warn('[Terminal] could not note a sent message:', err);
@@ -2147,25 +2101,14 @@ function noteMessageInput(tabId, data) {
 function messageScanner(entry) {
   const wanted = () => {
     if (entry.disposed) return false;
-    const kind = marksAgentIn(entry.tabId);
-    const runs = kind === 'claude';
+    const runs = claudeRunsIn(entry.tabId);
     if (!runs && entry.claudeRan) entry.messageMarks?.stop();
     entry.claudeRan = runs;
-    if (kind !== 'opencode' && entry.opencodeRan) entry.miniMarks?.stop();
-    entry.opencodeRan = kind === 'opencode';
-    return kind !== null && entry.term.buffer.active.type === 'normal';
-  };
-  // Only the running agent's tracker is scanned, and none when no agent
-  // runs any more (it may end between `wanted` and the scan).
-  const tracker = (e) => {
-    const kind = marksAgentIn(e.tabId);
-    if (kind === 'opencode') return e.miniMarks;
-    if (kind === 'claude') return e.messageMarks;
-    return null;
+    return runs && entry.term.buffer.active.type === 'normal';
   };
   return createScanScheduler({
     wanted,
-    scan: () => afterOutputSoFar(entry, (e) => tracker(e)?.scan()),
+    scan: () => afterOutputSoFar(entry, (e) => e.messageMarks?.scan()),
   });
 }
 
@@ -2243,10 +2186,7 @@ setLastOutputSource((tabId) => {
 // for it: the floor of the message marks goes to the row it is typed at once
 // xterm has read everything before it (the prompt), ahead of the line's echo.
 setAgentLaunchObserver((tabId) => {
-  afterOutputSoFar(instances.get(tabId), (entry) => {
-    entry.messageMarks?.noteShellSubmit();
-    entry.miniMarks?.noteShellSubmit();
-  });
+  afterOutputSoFar(instances.get(tabId), (entry) => entry.messageMarks?.noteShellSubmit());
 });
 
 // What the store waits for before taking a progress bar down at a command's
@@ -2428,7 +2368,6 @@ export function disposeTerminal(tabId) {
   entry.bufferChange?.dispose?.();
   entry.messageScans?.dispose();
   entry.messageMarks?.dispose();
-  entry.miniMarks?.dispose();
   // Its file is the store's to delete, with the tab (`forgetScrollback`).
   entry.scrollbackWatch?.dispose();
   entry.term.dispose();

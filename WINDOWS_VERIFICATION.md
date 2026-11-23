@@ -1451,9 +1451,8 @@ a NexTerm build. On a release build with real Claude Code, Windows first
 - **C11 WSL.** `wsl`, then `claude` there: the variable arrives (`echo
   $CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`) and the scrollback works; no marks
   are expected.
-- **C12 OpenCode**: see V50 (mini mode). With *OpenCode in Mini Mode* off
-  it is as in v0.30.0: the keys reach it, and the scrollbar is hidden while
-  it is up.
+- **C12 OpenCode** as in v0.31.0, its full TUI (see V50): the keys reach
+  it, the scrollbar is hidden while it is up, and its messages get no marks.
 - **C13 High Contrast and motion.** The box is visible at rest with its
   outline, and the two kinds of marks can be told apart; with reduced motion
   nothing fades.
@@ -1465,58 +1464,30 @@ a NexTerm build. On a release build with real Claude Code, Windows first
 
 On macOS: C1 to C6 with `⌘⇧↑` / `⌘⇧↓`, and the box at rest in WKWebView.
 
-### V50 — OpenCode in mini mode, and its messages on the scrollbar
+### V50 — OpenCode in its full TUI again
 
-The rules were built from opencode-ai 1.18.34 (V1) recorded in a pty
-(tests/adversarial/fixtures/opencode_mini/, replayed in
-opencode_mini_marks.test.js); no real OpenCode ran in a NexTerm build. On a
-release build with real OpenCode V1, Windows first, then macOS:
+Versions 0.32.0 to 0.35.x could start OpenCode V1 in a mini mode. That mode,
+its setting and the version check behind it are gone, and NexTerm types the
+lines v0.31.0 typed. No real OpenCode ran in a NexTerm build for this change.
+On a release build with real OpenCode, Windows first, then macOS:
 
-- **O1 the start.** New OpenCode Terminal types `opencode --mini --no-replay`;
-  mini starts on the normal screen, and the wheel and the slider scroll the
-  conversation.
-- **O2 the marks.** A short message, a Korean message long enough to wrap,
-  and a paste each get a mark on their `›` echo. The composer and the footer
-  never do, a click puts the message on the top row, and `Ctrl+Shift+↑` /
-  `Ctrl+Shift+↓` step through the messages and the shell prompts.
-- **O3 while it works.** A message sent while OpenCode works is marked when
-  its echo appears.
-- **O4 an empty line.** A message with an empty line in it (`Shift+Enter`
-  twice): write down whether it is marked.
-- **O5 resize.** Pane narrower and wider, and the window maximised: the marks
-  stay on their echoes; write down anything mini erases, and whether the
-  session survives (Windows issue #51167).
-- **O6 exit.** `/exit`: the marks stay, the session block shows, the next
-  prompt is marked, and a second run is marked too.
-- **O7 restart.** Quit NexTerm while mini runs, then Restore and Resume:
-  write down what is typed. No two terminals share a conversation, and a
-  session resumed with `-s` stays exact.
-- **O8 the setting off.** *OpenCode in Mini Mode* off: plain `opencode`, the
-  full TUI as in v0.31.0, and the keys reach OpenCode.
-- **O9 by hand.** `opencode` typed by hand gives the full TUI. `opencode
-  --mini` typed by hand is marked; resize it and write down what happens with
-  replay on.
-- **O10 notifications.** A turn that finishes, and a permission request,
-  while the window is unfocused: write down whether a toast shows, in mini
-  and in the full TUI (the v0.28.1 report).
-- **O11 themes.** Another OpenCode theme (a light one): the echoes are still
-  marked; write down their colour.
-- **O12 `-s` resume.** Write down whether mini prints earlier messages; none
-  of them gets a mark. Then Resume again, type a message and press Enter
-  right away, before mini has drawn: write down any mark on the history
-  (none is expected; that message itself may get none).
-- **O13 other versions.** If possible, an OpenCode older than 1.17.10, or V2:
-  NexTerm types plain `opencode`.
-  - **O13a upgraded mid-run.** Start OpenCode once, then upgrade or replace
-    opencode while NexTerm runs (to V2, if possible) and start it again: the
-    answer is kept for the run, so NexTerm still types the flags it chose
-    first. Write down what that opencode does; after a NexTerm restart, or
-    with the setting off, it gets plain `opencode`.
-  - **O13b a folder-pinned version.** In a folder where nvm, mise, asdf or
-    volta (or a PowerShell alias) gives another opencode than the login
-    PATH: write down `opencode --version` there and what NexTerm types.
+- **O1 the start.** New OpenCode Terminal types `opencode`: the full TUI
+  opens on the alternate screen, the scrollbar is hidden while it is up, and
+  the keys and `Shift+Enter` reach OpenCode.
+- **O2 resume.** Resume types `opencode -s <id>`, or `opencode --continue`
+  when the conversation's id is not known and it is the only OpenCode
+  terminal in reach. With two OpenCode terminals in one folder, Quit NexTerm,
+  then Restore and Resume both: they never come back in one conversation.
+- **O3 the title.** The side-bar title is `OC | …`. Start a new
+  conversation, quit NexTerm, Restore: its Resume types `opencode -s <id>`
+  and opens exactly that conversation.
+- **O4 notifications.** A turn that finishes, and a permission request,
+  while the window is unfocused: each shows a toast (the v0.28.1 report).
+- **O5 a settings file from v0.35.0.** Start this build with a settings file
+  that v0.35.0 saved with its mini mode setting turned off: it loads, the row
+  is gone from Settings ▸ Terminal, and the other settings are kept.
 
-On macOS: O1 to O3, O6, O8 and O10 with `⌘⇧↑` / `⌘⇧↓`.
+On macOS: O1 to O5.
 
 ### V51 — open files belong to terminal groups (editor placement, part B)
 

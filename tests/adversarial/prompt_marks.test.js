@@ -614,8 +614,7 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
 
   test('PRM-28: the click and the keys use both kinds, merged by line; the keys are claimed through one registry function', () => {
     assert.match(registry, /const promptMarkClicks = installPromptMarkClicks\(term, \(\) => allMarks\(instances\.get\(tabId\)\)\);/);
-    // Shell prompts, Claude Code's and OpenCode mini's messages (opencode_mini_marks.test.js).
-    assert.match(body('function allMarks('), /return mergeMarks\(entry\.promptMarks, entry\.messageMarks, entry\.miniMarks\);/);
+    assert.match(body('function allMarks('), /return mergeMarks\(entry\.promptMarks, entry\.messageMarks\);/);
     assert.match(body('export function jumpToPrompt('), /const line = promptJumpLine\(entry\.term\.buffer\.active, allMarks\(entry\), direction\);/);
     assert.match(body('export function terminalClaimsMarkKeys('), /return terminalShowsNormalBuffer\(tabId\);/);
     const hook = read('../../src/hooks/useKeybindings.js');
@@ -628,15 +627,14 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
     // Both through the read-only gate since bundle 4 (A3), the order unchanged.
     assert.ok(create.indexOf('const messageInput = term.onData(') < create.indexOf('const dataDisposable = onData ? term.onData(inputGate.forward(onData)) : null;'));
     const dispose = body('export function disposeTerminal(');
-    for (const part of ['entry.messageInput?.dispose();', 'entry.messageParsed?.dispose();', 'entry.messageScans?.dispose();', 'entry.messageMarks?.dispose();', 'entry.miniMarks?.dispose();']) {
+    for (const part of ['entry.messageInput?.dispose();', 'entry.messageParsed?.dispose();', 'entry.messageScans?.dispose();', 'entry.messageMarks?.dispose();']) {
       assert.ok(dispose.includes(part) && dispose.indexOf(part) < dispose.indexOf('entry.term.dispose();'), part);
     }
     // Terminal: Clear takes the message marks through the prompt marks' hook; clearTerminal keeps its shape.
-    assert.match(registry, /onClear: \(\) => clearMessageMarks\(instances\.get\(tabId\)\),/);
-    assert.match(body('function clearMessageMarks('), /entry\?\.messageMarks\?\.afterClear\(\);\s*entry\?\.miniMarks\?\.afterClear\(\);/);
+    assert.match(registry, /onClear: \(\) => instances\.get\(tabId\)\?\.messageMarks\?\.afterClear\(\),/);
     assert.doesNotMatch(body('export function clearTerminal('), /messageMarks/);
     // NexTerm's own start and resume lines set the floor (setAgentLaunchObserver).
-    assert.match(registry, /setAgentLaunchObserver\(\(tabId\) => \{\s*afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*entry\.messageMarks\?\.noteShellSubmit\(\);\s*entry\.miniMarks\?\.noteShellSubmit\(\);/);
+    assert.match(registry, /setAgentLaunchObserver\(\(tabId\) => \{\s*afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => entry\.messageMarks\?\.noteShellSubmit\(\)\);/);
     const store = read('../../src/stores/terminalStore.js');
     assert.equal((store.match(/noteAgentLaunch\(targetId\);\n\s*await get\(\)\.writeRaw\(targetId, /g) ?? []).length, 2, 'startAgent and resumeAgent tell it right before they type');
   });
@@ -690,21 +688,16 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
     assert.doesNotMatch(registry, /onWriteParsed\([^\n]*\.poke\(\)/);
     assert.match(body('function writeOutput('), /^function writeOutput\(entry, data, read = null\) \{\s*const \{ tabId, term \} = entry;\s*\/\/[^\n]*\n\s*entry\.messageScans\?\.wrote\(\);/);
     const scanner = body('function messageScanner(');
-    // Claude Code's tracker while Claude Code runs, OpenCode mini's while OpenCode does (opencode_mini_marks.test.js OMM-20 to OMM-22).
-    assert.match(scanner, /const kind = marksAgentIn\(entry\.tabId\);\s*const runs = kind === 'claude';/);
-    assert.match(scanner, /return kind !== null && entry\.term\.buffer\.active\.type === 'normal';/);
+    // Claude Code only: OpenCode's full TUI is on the alternate screen, which has no marks.
+    assert.match(scanner, /const runs = claudeRunsIn\(entry\.tabId\);/);
+    assert.match(scanner, /return runs && entry\.term\.buffer\.active\.type === 'normal';/);
     assert.match(scanner, /if \(!runs && entry\.claudeRan\) entry\.messageMarks\?\.stop\(\);/);
-    assert.match(scanner, /scan: \(\) => afterOutputSoFar\(entry, \(e\) => tracker\(e\)\?\.scan\(\)\),/);
-    // 'opencode' to the mini tracker, 'claude' to Claude Code's, no agent to no scan (OMM-31).
-    assert.match(scanner, /const tracker = \(e\) => \{\s*const kind = marksAgentIn\(e\.tabId\);\s*if \(kind === 'opencode'\) return e\.miniMarks;\s*if \(kind === 'claude'\) return e\.messageMarks;\s*return null;\s*\};/);
+    assert.match(scanner, /scan: \(\) => afterOutputSoFar\(entry, \(e\) => e\.messageMarks\?\.scan\(\)\),/);
     assert.match(body('function claudeRunsIn('), /return Boolean\(tab\) && tab\.agent\?\.kind === 'claude' && agentRuns\(tab\);/);
-    assert.match(body('function marksAgentIn('), /if \(claudeRunsIn\(tabId\)\) return 'claude';\s*if \(opencodeRunsIn\(tabId\)\) return 'opencode';\s*return null;/);
     // Input through agentMessageMarks.js `noteTerminalInput` (AMM-25: reports and escape keys are not typing, U-03); a submit to Claude Code pokes a scan.
     const input = body('function noteMessageInput(');
-    assert.match(input, /const kind = noteTerminalInput\(both, data, \{ submits: submitsLine, agentRuns: \(\) => \(running = marksAgentIn\(tabId\)\) !== null \}\);\s*if \(kind === 'submit'\) entry\.messageScans\?\.poke\(\);/);
-    // Only the fan-out to the two trackers: the submit to the running agent's, the floor and typing to both.
-    assert.match(input, /noteSubmit: \(\) => \(running === 'opencode' \? entry\.miniMarks\?\.noteSubmit\(\) : marks\.noteSubmit\(\)\),/);
-    assert.equal((input.match(/noteTyped|noteSubmit|noteShellSubmit/g) ?? []).length, 9, 'no other use of the tracker hooks');
+    assert.match(input, /const kind = noteTerminalInput\(marks, data, \{ submits: submitsLine, agentRuns: \(\) => claudeRunsIn\(tabId\) \}\);\s*if \(kind === 'submit'\) entry\.messageScans\?\.poke\(\);/);
+    assert.doesNotMatch(input, /noteTyped|noteSubmit|noteShellSubmit/);
   });
 });
 
@@ -747,7 +740,11 @@ describe('The scrollbar at rest, and the documents of the agent task (F13, F15)'
     assert.match(section, /\*Claude Code on\s+the Normal Screen\*/);
     assert.match(section, /Fullscreen\s+Claude Code has no marks/);
     assert.match(section, /The\s+thin scrollbar and its box are always visible on a terminal's normal screen/);
-    assert.match(section, /\*\*OpenCode's messages on the scrollbar\.\*\*/);
+    // OpenCode's full TUI: the alternate screen, no marks, the lines typed, the retired setting ignored.
+    assert.match(section, /\*\*OpenCode on the alternate screen\.\*\* OpenCode's full TUI draws on the\s+alternate screen, which has no scrollback, so while it is up the scrollbar is\s+hidden and OpenCode's messages get no marks/);
+    assert.match(section, /New\s+OpenCode Terminal types `opencode`, and Resume types `opencode -s <id>` or\s+`opencode --continue`\./);
+    assert.match(section, /Versions 0\.32\.0 to 0\.35\.x could start OpenCode/);
+    assert.match(section, /that mode and its setting are gone, and a value of the\s+setting saved by one of those versions is ignored\./);
     assert.match(section, /The input box at the\s+bottom never has one/);
     const settings = readme.slice(readme.indexOf('### Settings and themes'));
     assert.match(settings.slice(0, 1200), /\*Claude Code on the Normal Screen\*/);
