@@ -97,7 +97,7 @@ describe('Prompt marks: where a prompt is (F1)', () => {
     assert.equal(tracker.lines[1], 3, 'on the row the next command is typed on');
   });
 
-  test('PRM-02: PowerShell, zsh and a two-line prompt that comes in the D\'s read (the mark is on its second line)', async () => {
+  test('PRM-02: PowerShell, zsh and a two-line prompt that comes in the D\'s read (the mark is on its first line)', async () => {
     const ps = makeTerm();
     const psMarks = trackPromptMarks(ps);
     await prompt(ps, psMarks, 'PS C:\\work> ');
@@ -110,12 +110,20 @@ describe('Prompt marks: where a prompt is (F1)', () => {
     await prompt(zsh, zshMarks, 'ls\r\nREADME.md  src\r\nuser@host % ');
     assertPrompts(zsh, zshMarks, ['user@host % ls', 'user@host %']);
 
+    // Bundle 4 (A2): the backend used to send a read's output and then its
+    // D, so a two-line prompt in the D's read was marked on its second line
+    // (this test pinned that). It now sends the D where it was, in front of
+    // the prompt, before the prompt text of that same read: the first line.
     const two = makeTerm();
     const twoMarks = trackPromptMarks(two);
-    await prompt(two, twoMarks, '~/work on main\r\n❯ ');
-    await prompt(two, twoMarks, 'git status\r\nnothing to commit\r\n~/work on main\r\n❯ ');
-    assertPrompts(two, twoMarks, ['❯ git status', '❯'], 'the input row, the second line of the prompt');
-    assert.equal(lineText(two, twoMarks.lines[1] - 1), '~/work on main');
+    const inOneRead = async (before, promptText) => {
+      await prompt(two, twoMarks, before);
+      await write(two, promptText);
+    };
+    await inOneRead('', '~/work on main\r\n❯ ');
+    await inOneRead('git status\r\nnothing to commit\r\n', '~/work on main\r\n❯ ');
+    assertPrompts(two, twoMarks, ['~/work on main', '~/work on main'], 'the first line of the prompt');
+    assert.equal(lineText(two, twoMarks.lines[1] + 1), '❯');
   });
 
   test('PRM-03: a D on the row of the newest mark (a repaint) adds no second mark', async () => {
@@ -138,8 +146,9 @@ describe('Prompt marks: where a prompt is (F1)', () => {
   test('PRM-26: zsh and bash, a prompt that comes in a read after its D: the mark is on the row the prompt starts on', async () => {
     // zsh's precmd and bash's PROMPT_COMMAND print the D with a printf of
     // their own (shell_integration.rs), and ZLE or readline draws the prompt
-    // afterwards. The backend sends a read's output, then its D: when the
-    // prompt text is in a later read, the D is marked before it is there.
+    // afterwards. The backend sends the D where it was in the output (A2,
+    // manager.rs), so it is marked before the prompt text is there, in a
+    // later read or in the same one (PRM-02).
     const split = async (term, tracker, before, promptText) => {
       const mark = await prompt(term, tracker, before);
       await write(term, promptText);
@@ -616,7 +625,8 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
     assert.match(read('../../src/lib/keybindings.js'), /function promptKeysClaimed\(ctx\) \{\s*return Boolean\(ctx\?\.isInTerminal\) && Boolean\(ctx\?\.terminalClaimsMarkKeys\?\.\(\)\);/);
     // The message marks' own listener comes before the view's, and both go with the terminal.
     const create = registry.slice(registry.indexOf('export function getOrCreateTerminal('));
-    assert.ok(create.indexOf('const messageInput = term.onData(') < create.indexOf('const dataDisposable = onData ? term.onData(onData) : null;'));
+    // Both through the read-only gate since bundle 4 (A3), the order unchanged.
+    assert.ok(create.indexOf('const messageInput = term.onData(') < create.indexOf('const dataDisposable = onData ? term.onData(inputGate.forward(onData)) : null;'));
     const dispose = body('export function disposeTerminal(');
     for (const part of ['entry.messageInput?.dispose();', 'entry.messageParsed?.dispose();', 'entry.messageScans?.dispose();', 'entry.messageMarks?.dispose();', 'entry.miniMarks?.dispose();']) {
       assert.ok(dispose.includes(part) && dispose.indexOf(part) < dispose.indexOf('entry.term.dispose();'), part);
@@ -756,14 +766,23 @@ describe('The scrollbar at rest, and the documents of the agent task (F13, F15)'
 });
 
 describe('Prompt marks: the documents (F13)', () => {
-  test('PRM-25: the README says what is marked, the keys and the setting; V48 lists H1 to H12', () => {
+  test('PRM-25: the README says what is marked, the keys and the setting; V48 lists H1 to H13', () => {
     const readme = read('../../README.md');
     const terminal = readme.slice(readme.indexOf('### Working in a terminal'));
     const marks = terminal.slice(0, terminal.indexOf('\n### ', 5));
     assert.match(marks, /\*\*Prompt marks on the scrollbar\.\*\*/);
-    // Which row per shell (PRM-02, PRM-26), and whose keys the chords are.
-    assert.match(marks, /In cmd and PowerShell the signal is part of the prompt\s+string, so the mark is on the row you type on/);
-    assert.match(marks, /zsh and bash print the signal just before they draw the prompt: when\s+the prompt text arrives after it,[\s\S]*?the mark is on the row the prompt\s+starts on/);
+    // Which row (PRM-02, PRM-26), and whose keys the chords are. Bundle 4
+    // (A2): the backend now sends the D where it was in the output, not
+    // after its read's output, so the row no longer depends on the shell or
+    // on how the prompt was read: these pinned the old per-shell wording.
+    assert.match(marks, /The signal comes in front of the\s+prompt \(in cmd and PowerShell it starts the prompt string; zsh and bash print\s+it just before they draw the prompt\)/);
+    // Review B-R1: the row is the prompt's first only where the output
+    // reaches NexTerm in the order the shell wrote it; through ConPTY that
+    // is unverified, and the README says so (V48 H13) instead of "in every
+    // shell".
+    assert.match(marks, /NexTerm places it exactly where it\s+came in the output, so where the output reaches NexTerm in the order the\s+shell wrote it, the mark is on the row the prompt starts on: the first line\s+of a two-line prompt/);
+    assert.match(marks, /On Windows that order is ConPTY's[\s\S]*?has not been verified \(WINDOWS_VERIFICATION\.md V48, H13\)/);
+    assert.doesNotMatch(marks, /in every\s+shell: the first line/);
     assert.match(marks, /On a terminal's normal screen these keys belong to NexTerm, also where there\s+are no marks \(fish, ssh, WSL\)/);
     assert.doesNotMatch(marks, /marked on its\s+second line/);
     const keys = readme.slice(readme.indexOf('### Keyboard shortcuts'));
@@ -775,7 +794,9 @@ describe('Prompt marks: the documents (F13)', () => {
     const v48 = read('../../WINDOWS_VERIFICATION.md');
     const section = v48.slice(v48.indexOf('### V48 — prompt marks on the scrollbar'));
     assert.ok(section.length > 30, 'no V48');
-    for (let i = 1; i <= 12; i += 1) assert.match(section.slice(0, section.indexOf('\n## ')), new RegExp(`\\*\\*H${i} `), `V48 has no H${i}`);
+    // H13 (review B-R1): the two-line prompt through ConPTY, checked by hand.
+    for (let i = 1; i <= 13; i += 1) assert.match(section.slice(0, section.indexOf('\n## ')), new RegExp(`\\*\\*H${i} `), `V48 has no H${i}`);
+    assert.match(section.slice(0, section.indexOf('\n## ')), /\*\*H13 a two-line prompt through ConPTY\.\*\*[\s\S]*?a two-line PowerShell\s+prompt gets its mark on its first line/);
     assert.match(section.slice(0, section.indexOf('\n## ')), /On macOS with zsh:[\s\S]*?a two-line prompt, with\s+starship or powerlevel10k/);
   });
 });

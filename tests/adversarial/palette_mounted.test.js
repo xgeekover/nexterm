@@ -187,7 +187,8 @@ const STAND_INS = {
     export const Bot = icon('Bot');
     export const Trash2 = icon('Trash2');
     export const GitFork = icon('GitFork');
-    export const ClipboardCopy = icon('ClipboardCopy');`,
+    export const ClipboardCopy = icon('ClipboardCopy');
+    export const KeyboardOff = icon('KeyboardOff');`,
 };
 
 /** Which stand-in a module the component imports is replaced by, if any. */

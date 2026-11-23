@@ -27,8 +27,13 @@
  * Only for a program that asks. Every terminal starts at level 0, where Enter
  * is sent exactly as xterm.js sends it. Claude Code 2.1.289 sends `CSI > 4 m`
  * (off) as it starts, and turns modifyOtherKeys on (level 2) only in a
- * terminal it knows by name or one that answers `CSI ? u`; xterm.js is
- * neither. So it keeps getting `\r` for Shift+Enter, as before.
+ * terminal it knows by name or one that answers `CSI ? u`; xterm.js alone is
+ * neither. NexTerm answers `CSI ? u` itself now (src/lib/kittyKeyboard.js,
+ * Settings ▸ Terminal ▸ Kitty Keyboard Protocol), so Claude Code may turn
+ * this on as well; where the program also pushed a kitty keyboard flag, that
+ * encoding wins for the keys it covers (TerminalView's `sendModifiedEnter`).
+ * With that setting off nothing answers, and Claude Code keeps getting `\r`
+ * for Shift+Enter, as before.
  *
  * Off again whenever xterm.js goes back to the normal screen: on leaving the
  * alternate one, and on a reset (RIS, which the `reset` command sends). xterm

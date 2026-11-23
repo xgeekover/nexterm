@@ -24,6 +24,7 @@ import {
   GitFork,
   Trash2,
   ClipboardCopy,
+  KeyboardOff,
 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../../stores/settingsStore.js';
@@ -40,7 +41,18 @@ import { buildPaletteGroups, canHaveFocusBack, focusAfterPalette, forkTargetOfTa
 import { commandHistory } from '../../lib/commandIndex.js';
 import { notifyTerminal } from '../../lib/terminalNotice.js';
 import { contextTerminalOf, copyContextOfTab } from '../../lib/copyContext.js';
+import { isReadOnly } from '../../lib/readOnly.js';
 import { confirmContextCopy } from '../../lib/copyFeedback.js';
+import { copyLastOutputOfTabAndConfirm, lastOutputUnavailableOfTab } from '../../lib/lastCommandOutput.js';
+import {
+  SEND_TO_AGENT_MODE,
+  forgetPendingSend,
+  pendingAgentPick,
+  sendCommandState,
+  sendFileToAgent,
+  sendPendingTo,
+  sendSelectionToAgent,
+} from '../../lib/sendToAgent.js';
 import { focusActivePane, focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { moveEditorToNewPane, toggleZoomActive } from '../../lib/workbenchCommands.js';
 import { swallowRepeatsOf } from '../../lib/heldKeys.js';
@@ -80,11 +92,16 @@ function iconFor(item) {
   if (item.command === 'go_to_unread_notification') return <BellRing size={16} />;
   if (item.command === 'mark_notifications_read') return <CheckCheck size={16} />;
   if (item.command === 'equalize_splits') return <Columns3 size={16} />;
+  if (item.command === 'terminal_toggle_read_only') return <KeyboardOff size={16} />;
   if (item.command === 'swap_pane') return <ArrowLeftRight size={16} />;
   if (item.command === 'rename_terminal') return <Pencil size={16} />;
   if (item.command === 'close_terminal') return <X size={16} />;
   if (item.command === 'show_control_log') return <ScrollText size={16} />;
   if (item.type === 'agent-session' || item.command === 'resume_agent_session') return <Bot size={16} />;
+  // Send to Agent (bundle 4, A4): its two commands and its pick's terminals.
+  if (item.type === 'agent-target' || item.command === 'send_selection_to_agent' || item.command === 'send_file_to_agent') {
+    return <Bot size={16} />;
+  }
   if (item.command === 'clear_agent_session_history') return <Trash2 size={16} />;
   if (item.command === 'fork_conversation') return <GitFork size={16} />;
   if (item.command === 'copy_terminal_context') return <ClipboardCopy size={16} />;
@@ -174,11 +191,13 @@ const PaletteRow = memo(function PaletteRow({ item, index, selected, onPick, onH
   return (
     <div
       data-palette-row={index}
+      aria-disabled={item.disabledReason ? true : undefined}
       onClick={() => onPick(item)}
       onMouseEnter={() => onHover(index)}
       className={cn(
         'h-[22px] px-2 rounded-control flex items-center gap-2 text-ui cursor-pointer',
-        selected ? 'bg-vsc-selection text-vsc-selection-fg' : 'text-vsc-fg'
+        selected ? 'bg-vsc-selection text-vsc-selection-fg' : 'text-vsc-fg',
+        item.disabledReason && 'opacity-60 cursor-default'
       )}
     >
       <span className="flex-shrink-0">{iconFor(item)}</span>
@@ -336,6 +355,28 @@ export function CommandPalette() {
     if (isOpen && paletteMode === 'agent-sessions') useAgentHistoryStore.getState().load?.();
   }, [isOpen, paletteMode]);
 
+  // Send to Agent's pick (bundle 4, A4): the terminals running an agent and
+  // what waits to be typed, read as the pick opens, as the panes are. Its
+  // two commands, greyed out with the reason they cannot send now, read as
+  // the palette opens. Closed without a choice, nothing waits any more.
+  const agentPick = useMemo(
+    () => (isOpen && paletteMode === SEND_TO_AGENT_MODE ? pendingAgentPick() : null),
+    [isOpen, paletteMode]
+  );
+  const sendState = useMemo(() => (isOpen && paletteMode === 'all' ? sendCommandState() : undefined), [isOpen, paletteMode]);
+  // Why Copy Last Command Output cannot copy from the active terminal, read
+  // as the palette opens: its row greyed out with it (review B-R4).
+  const lastOutputState = useMemo(
+    () => (isOpen && paletteMode === 'all' && activeTabId ? lastOutputUnavailableOfTab(activeTabId) : undefined),
+    [isOpen, paletteMode, activeTabId]
+  );
+  const sendPickRef = useRef(false);
+  useEffect(() => {
+    const picking = isOpen && paletteMode === SEND_TO_AGENT_MODE;
+    if (sendPickRef.current && !picking) forgetPendingSend();
+    sendPickRef.current = picking;
+  }, [isOpen, paletteMode]);
+
   // Another mode while open — a row that opens a pick, a chord pressed over
   // the palette — starts its list from the top with nothing typed: what was
   // typed to find "Swap Pane With…" is not the name of a pane.
@@ -382,10 +423,14 @@ export function CommandPalette() {
             // Listed while the active terminal has a screen to copy — asked
             // of the registry as the palette opens, never made.
             copyContext: activeTabId && contextTerminalOf(activeTabId) ? { lines: copyContextLines } : null,
+            sendToAgent: sendState,
+            lastOutput: lastOutputState,
+            agentTargets: agentPick?.targets ?? [],
+            agentText: agentPick?.text ?? null,
             forkTarget,
           })
         : [],
-    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions, agentGroups, forkTarget, activeTabId, copyContextLines]
+    [isOpen, fileTree, listing, rootPath, query, paletteMode, bindings, recentRoots, history, swap, projectCommands, agentSessions, agentGroups, forkTarget, activeTabId, copyContextLines, sendState, lastOutputState, agentPick]
   );
   const allFiltered = useMemo(() => groups.flatMap((g) => g.items), [groups]);
   // The list can change while it is open — the backend's file list arrives,
@@ -404,6 +449,12 @@ export function CommandPalette() {
       const tabId = useTerminalStore.getState().activeTabId;
       if (tabId) {
         setActiveView('terminal');
+        // Nor into a read-only terminal (bundle 4, A3): it says why, and
+        // nothing is typed (writeRaw would refuse it as well).
+        if (isReadOnly(useTerminalStore.getState(), tabId)) {
+          useTerminalStore.getState().noteReadOnlyInput?.(tabId);
+          return;
+        }
         // Never into a password prompt (spec P4): typed there, the command
         // would be taken as the password, shown nowhere. Asked of the
         // backend too, which reads the terminal now.
@@ -425,6 +476,12 @@ export function CommandPalette() {
       // anything else is said in a notice (AgentHistoryNotice.jsx).
       setActiveView('terminal');
       await resumeFromHistory?.(item.historyKey);
+      return;
+    }
+    if (item.type === 'agent-target') {
+      // Send to Agent's pick: the reference waiting is typed into this
+      // terminal, which then takes the keyboard (src/lib/sendToAgent.js).
+      await sendPendingTo(item.tabId);
       return;
     }
     if (item.type === 'pane') {
@@ -461,6 +518,11 @@ export function CommandPalette() {
       case 'terminal_next_prompt':
         // The active terminal, as the keys do (the store's `jumpToPrompt`).
         await useTerminalStore.getState().jumpToPrompt?.(item.command === 'terminal_previous_prompt' ? 'previous' : 'next');
+        return;
+      case 'terminal_toggle_read_only':
+        // The active terminal, as a chord bound to it does (the store's
+        // `toggleReadOnly`, which says why when it cannot be turned on).
+        useTerminalStore.getState().toggleReadOnly?.();
         return;
       case 'toggle_pane_zoom':
         // THE active pane of the group on screen, as the shortcut and the
@@ -539,6 +601,21 @@ export function CommandPalette() {
           copyContextOfTab(useTerminalStore.getState().activeTabId, useSettingsStore.getState().terminalCopyContextLines)
         );
         return;
+      case 'copy_last_command_output':
+        // The same rule (H9): read and copied now, before anything is
+        // awaited; only the toast waits. Its row is greyed out while it
+        // cannot copy; should that change after the palette opened (a
+        // command started meanwhile), nothing is copied and the toast says why.
+        copyLastOutputOfTabAndConfirm(useTerminalStore.getState().activeTabId);
+        return;
+      case 'send_selection_to_agent':
+        // The editor focused last (bundle 4, A4): typed into the one agent
+        // terminal, or the pick opens on several; refused in a toast.
+        await sendSelectionToAgent();
+        return;
+      case 'send_file_to_agent':
+        await sendFileToAgent();
+        return;
       case 'clear_agent_session_history':
         // Asks first ("Clear Agent Session History?"), which takes the
         // keyboard and gives it back to what had it before the palette.
@@ -551,6 +628,10 @@ export function CommandPalette() {
 
   const handleSelect = async (item) => {
     if (!item) return;
+    // Greyed out (Send to Agent with no agent terminal, a modified file;
+    // Copy Last Command Output with nothing to copy): the row says why, and
+    // picking it does nothing.
+    if (item.disabledReason) return;
     // A row that opens a pick ("Swap Pane With…") does not close the
     // palette: it becomes the pick, and what had the keyboard when the
     // palette opened still gets it back when the pick is done.

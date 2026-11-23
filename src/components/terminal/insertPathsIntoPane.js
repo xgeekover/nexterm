@@ -12,6 +12,7 @@ import { useSettingsStore } from '../../stores/settingsStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
 import { performPathInsert, planPathInsert, showTabInPane } from '../../lib/terminalFileDrop.js';
 import { pasteIntoTerminal } from './terminalRegistry.js';
+import { isReadOnly } from '../../lib/readOnly.js';
 
 /** What `planPathInsert` needs to know besides the layout, read as it is now. */
 function dropEnvironment() {
@@ -29,7 +30,14 @@ function dropEnvironment() {
  * highlight shows while a drag is over the pane. See `planPathInsert`.
  */
 export function planPathsIntoPane(paneId, paths) {
-  return planPathInsert(useTerminalStore.getState(), paneId, paths, dropEnvironment());
+  const state = useTerminalStore.getState();
+  const plan = planPathInsert(state, paneId, paths, dropEnvironment());
+  // A read-only terminal takes no drop (bundle 4, A3): not highlighted, as
+  // an exited one is not, and refused with reason 'read-only'.
+  if (plan?.ok && isReadOnly(state, plan.tabId)) {
+    return { ok: false, reason: 'read-only', paneId: plan.paneId, tabId: plan.tabId, skipped: plan.skipped };
+  }
+  return plan;
 }
 
 /**
@@ -40,7 +48,10 @@ export function planPathsIntoPane(paneId, paths) {
  * `performPathInsert`).
  */
 export function insertPathsIntoPane(paneId, paths) {
-  return performPathInsert(planPathsIntoPane(paneId, paths), {
+  const plan = planPathsIntoPane(paneId, paths);
+  // Dropped on a read-only terminal: nothing goes in, and it says why.
+  if (plan?.reason === 'read-only') useTerminalStore.getState().noteReadOnlyInput?.(plan.tabId);
+  return performPathInsert(plan, {
     activate: (targetPaneId, tabId) => showTabInPane(useTerminalStore, targetPaneId, tabId),
     paste: pasteIntoTerminal,
   });

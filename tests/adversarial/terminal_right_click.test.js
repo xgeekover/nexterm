@@ -748,7 +748,9 @@ describe('Right-click: the binding, on a page that dispatches like a browser', (
 
     let installed = null;
     const store = { find: { open: false, tabId: null } };
-    const run = new Function('installTerminalRightClick', 'term', 'container', 'tabId', 'useSettingsStore', 'useTerminalStore', src.slice(start, end));
+    // `refusePaste` since bundle 4 (A3): a read-only terminal's right-click paste reads and pastes nothing.
+    const refusePaste = () => false;
+    const run = new Function('installTerminalRightClick', 'term', 'container', 'tabId', 'useSettingsStore', 'useTerminalStore', 'refusePaste', src.slice(start, end));
     const settingsStore = { getState: () => ({}) };
     run(
       (t, c, options) => {
@@ -758,8 +760,10 @@ describe('Right-click: the binding, on a page that dispatches like a browser', (
       'the-container',
       'tab-7',
       settingsStore,
-      { getState: () => store }
+      { getState: () => store },
+      refusePaste
     );
+    assert.equal(installed.options.refuse, refusePaste, 'the read-only refusal');
     assert.equal(installed.t, 'the-term');
     assert.equal(installed.c, 'the-container');
     assert.equal(installed.options.settings, settingsStore, 'the settings store, read at every press');

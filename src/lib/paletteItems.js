@@ -15,6 +15,9 @@ import { COMMANDS_FILE } from './projectCommands.js';
 import { historyCwd, historyDisplay, historyMatches } from './agentHistory.js';
 import { isSessionIdFor } from './agents.js';
 import { COPY_CONTEXT_DEFAULT_LINES, copyContextLabel } from './copyContext.js';
+import { TOGGLE_READ_ONLY_TITLE } from './readOnly.js';
+import { LAST_COMMAND_OUTPUT_LABEL } from './lastCommandOutput.js';
+import { NO_AGENT_REASON, PICK_AGENT_LABEL, SEND_FILE_TITLE, SEND_SELECTION_TITLE } from './agentReference.js';
 
 /**
  * The most files the palette lists for one query. An empty query matches
@@ -140,6 +143,16 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       subtitle: 'Scroll the active terminal to the next prompt, or to the bottom past the last one',
       hint: hint('terminal-next-prompt'),
     },
+    // Bundle 4, A3 (src/lib/readOnly.js): no chord of its own, so no hint
+    // unless one is bound. The active terminal, as the keys do.
+    {
+      type: 'command',
+      id: 'cmd-terminal-toggle-read-only',
+      command: 'terminal_toggle_read_only',
+      title: TOGGLE_READ_ONLY_TITLE,
+      subtitle: "Keep the active terminal's keys, pastes and drops from its program, or let them through again",
+      hint: hint('toggle-read-only'),
+    },
     {
       type: 'command',
       id: 'cmd-go-to-unread-notification',
@@ -253,6 +266,40 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       title: copyContextLabel(COPY_CONTEXT_DEFAULT_LINES),
       subtitle:
         "Copy Context: the active terminal's last lines on the clipboard as plain text, wrapped lines joined, API keys, tokens and passwords replaced with [hidden]",
+    },
+    // Copy Last Command Output (bundle 4, A2; src/lib/lastCommandOutput.js):
+    // what the active terminal's last command printed, masked. Listed with
+    // Copy Context, while the active terminal has been shown; greyed out
+    // with the reason (`buildPaletteGroups`' `lastOutput`) while it cannot
+    // copy — cmd, a command running, none finished (review B-R4).
+    {
+      type: 'command',
+      id: 'cmd-copy-last-command-output',
+      command: 'copy_last_command_output',
+      title: LAST_COMMAND_OUTPUT_LABEL,
+      subtitle:
+        "What the active terminal's last command printed, on the clipboard as plain text, wrapped lines joined, API keys, tokens and passwords replaced with [hidden]",
+    },
+    // Send to Agent (bundle 4, A4; src/lib/agentReference.js, sendToAgent.js):
+    // an @ reference typed into the terminal running Claude Code or OpenCode,
+    // as a paste, Enter not pressed. No chord of their own, so no hint until
+    // one is bound. Greyed out with the reason (`buildPaletteGroups`'
+    // `sendToAgent`) while there is no agent terminal or the file is modified.
+    {
+      type: 'command',
+      id: 'cmd-send-selection-to-agent',
+      command: 'send_selection_to_agent',
+      title: SEND_SELECTION_TITLE,
+      subtitle: 'Type @file (lines A-B) for the lines selected in the editor into the terminal running Claude Code or OpenCode; Enter is not pressed',
+      hint: hint('send-selection-to-agent'),
+    },
+    {
+      type: 'command',
+      id: 'cmd-send-file-to-agent',
+      command: 'send_file_to_agent',
+      title: SEND_FILE_TITLE,
+      subtitle: 'Type @file for the file in the editor into the terminal running Claude Code or OpenCode; Enter is not pressed',
+      hint: hint('send-file-to-agent'),
     },
     {
       type: 'command',
@@ -492,6 +539,11 @@ export function forkTargetOfTab(tab, os = null) {
  * Context Lines setting, named in its title) while the active terminal has
  * been shown, null while there is none or it never was — then it is not
  * listed. Undefined lists it as it is, with the default 200.
+ *
+ * `lastOutput` is why Copy Last Command Output cannot copy now
+ * (lastCommandOutput.js `lastOutputUnavailableOfTab` of the active
+ * terminal), or null: with a reason it is greyed out with it, as Send to
+ * Agent is by `sendToAgent`. Undefined lists it as it is.
  */
 export function buildPaletteGroups({
   fileTree = [],
@@ -510,9 +562,36 @@ export function buildPaletteGroups({
   agentGroups = [],
   forkTarget = undefined,
   copyContext = undefined,
+  sendToAgent = undefined,
+  lastOutput = undefined,
+  agentTargets = [],
+  agentText = null,
   limit = FILE_RESULT_LIMIT,
 } = {}) {
   const q = (query || '').toLowerCase().trim();
+
+  // Send to Agent's pick (bundle 4, A4): the terminals running Claude Code or
+  // OpenCode (`agentTargets`, src/lib/sendToAgent.js's `pendingAgentPick`),
+  // the most recently focused first, and what will be typed (`agentText`)
+  // in the note. With none left, the note says why.
+  if (mode === 'send-to-agent') {
+    const rows = (Array.isArray(agentTargets) ? agentTargets : [])
+      .filter((t) => !q || fuzzyMatch(q, t.title ?? '') || String(t.agent ?? '').toLowerCase().includes(q))
+      .map((t, at) => ({
+        type: 'agent-target',
+        id: `agent-target-${t.tabId}`,
+        tabId: t.tabId,
+        title: t.title,
+        subtitle: [t.agent, t.cwd].filter(Boolean).join(' · '),
+        hint: at === 0 && !q ? 'Last used' : '',
+      }));
+    const note = !agentText
+      ? 'Nothing is waiting to be sent.'
+      : rows.length === 0 && !q
+        ? NO_AGENT_REASON
+        : `Types ${agentText.trim()} — Enter is not pressed`;
+    return [{ label: PICK_AGENT_LABEL, items: rows, note }];
+  }
 
   // "Resume Agent Session…" as a pick: every entry of the history, pinned
   // first and then newest first, the archived ones in a group of their own
@@ -633,11 +712,25 @@ export function buildPaletteGroups({
       // Fork Conversation only while the active terminal holds a conversation to fork.
       (cmd.command !== 'fork_conversation' || forkTarget === undefined || isSessionIdFor('claude', forkTarget?.sessionId)) &&
       // Copy Context only while the active terminal has a screen to copy.
-      (cmd.command !== 'copy_terminal_context' || copyContext === undefined || Boolean(copyContext))
+      (cmd.command !== 'copy_terminal_context' || copyContext === undefined || Boolean(copyContext)) &&
+      // Copy Last Command Output too: no screen, no output to copy.
+      (cmd.command !== 'copy_last_command_output' || copyContext === undefined || Boolean(copyContext))
   ).map((cmd) =>
     // Its title names the N it copies.
     cmd.command === 'copy_terminal_context' && copyContext ? { ...cmd, title: copyContextLabel(copyContext.lines) } : cmd
-  );
+  ).map((cmd) => {
+    // Send to Agent, greyed out with the reason it cannot send now; Copy
+    // Last Command Output with the reason it cannot copy.
+    const reason =
+      cmd.command === 'send_selection_to_agent'
+        ? sendToAgent?.selection
+        : cmd.command === 'send_file_to_agent'
+          ? sendToAgent?.file
+          : cmd.command === 'copy_last_command_output'
+            ? lastOutput
+            : null;
+    return reason ? { ...cmd, subtitle: reason, disabledReason: reason } : cmd;
+  });
   const commands = mode === 'files' ? [] : matchingCommands(offered, q);
   // After NexTerm's own commands, in a group of their own (spec D10) —
   // unless a query names one of them while it only loosely matches the

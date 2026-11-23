@@ -123,6 +123,49 @@ export function contextTerminalOf(tabId) {
   }
 }
 
+let afterOutputSource = null;
+const AFTER_OUTPUT_WAIT_MS = 500;
+
+/**
+ * Register `fn(tabId)` → a Promise of the tab's xterm once it has parsed
+ * every byte it was handed so far, held output first, or of null (the
+ * registry's `terminalAfterOutput`). Returns an unregister function.
+ */
+export function setContextAfterOutputSource(fn) {
+  afterOutputSource = typeof fn === 'function' ? fn : null;
+  return () => {
+    if (afterOutputSource === fn) afterOutputSource = null;
+  };
+}
+
+/**
+ * A Promise of `tabId`'s xterm once it has read all the output it was given
+ * so far, for a check that reads its screen as the program left it (Send to
+ * Agent's password-prompt check, as `nexterm-cli send` reads it; review
+ * A-R1). Null for a terminal never shown or closed. With no registry (Node)
+ * there is no pacing, and `shown`'s own write queue is all there is to wait
+ * for. Never rejects.
+ */
+export async function contextTerminalAfterOutput(tabId, shown = null) {
+  try {
+    if (afterOutputSource) return tabId ? ((await afterOutputSource(tabId)) ?? null) : null;
+    if (!shown || typeof shown.write !== 'function') return null;
+    // At most AFTER_OUTPUT_WAIT_MS, as the registry's: a terminal still
+    // parsing a flood is read as it stands.
+    let timer = null;
+    await Promise.race([
+      new Promise((resolve) => shown.write('', resolve)),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, AFTER_OUTPUT_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    return shown;
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Copy the last `lines` lines of terminal `tabId` (copyTerminalContext with
  * the registered lookup). Synchronous, for a click or an Enter.

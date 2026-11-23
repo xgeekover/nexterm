@@ -68,6 +68,9 @@ import { sortByAttention } from '../../lib/terminalStatus.js';
 import { cn } from '../../lib/utils.js';
 import { PATH_COPIED, SESSION_ID_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { copyContextItem } from '../../lib/copyContext.js';
+import { lastCommandOutputItem } from '../../lib/lastCommandOutput.js';
+import { contextTerminalOf } from '../../lib/copyContext.js';
+import { READ_ONLY_LABEL, readOnlyItem } from '../../lib/readOnly.js';
 import { displayTitle } from '../../lib/tabTitle.js';
 
 const ROW = 'h-[22px] flex items-center gap-1.5 pr-2 text-ui cursor-default select-none w-full text-left';
@@ -192,6 +195,9 @@ export function TerminalsPanel() {
   // Which terminals are asking for a password, for the rows' tooltips (the
   // lock itself draws itself, `TabMarks`). The same object until one changes.
   const secretInput = useTerminalStore((s) => s.secretInput);
+  // Which are read-only (src/lib/readOnly.js), for the same tooltips and the
+  // row menu's Turn On / Turn Off Read-Only (the mark draws itself).
+  const readOnlyTabs = useTerminalStore((s) => s.readOnly);
   // The status bar already decides how a cwd is written (`~` off Windows,
   // last two segments, ellipsis in front). Same helper here so the bar and
   // this panel cannot describe one terminal's directory differently.
@@ -579,6 +585,17 @@ export function TerminalsPanel() {
       // Copy Context: the last N lines as plain text, secrets masked, read and
       // copied inside this click; off for a terminal never shown.
       copyContextItem({ tabId: tab.id, lines: copyContextLines }),
+      // Copy Last Command Output (bundle 4, A2): what the last command
+      // printed, masked, copied inside this click; off with the reason.
+      lastCommandOutputItem({ tabId: tab.id }),
+      // Turn On / Turn Off Read-Only (src/lib/readOnly.js); off for a
+      // terminal never shown, which has no input to gate yet.
+      readOnlyItem({
+        tabId: tab.id,
+        readOnly: Boolean(readOnlyTabs?.[tab.id]),
+        shown: contextTerminalOf(tab.id) !== null,
+        toggle: (id) => useTerminalStore.getState().toggleReadOnly(id),
+      }),
       { type: 'separator', key: 's2' },
       {
         key: 'move-group',
@@ -1067,7 +1084,12 @@ export function TerminalsPanel() {
     const unread = unreadCounts[tab.id] ?? 0;
     // The chip's sentence, lock included (spec P4), so the two cannot
     // describe one terminal differently.
-    const status = [activityLabel(tab), secretInput?.[tab.id] ? TYPING_HIDDEN_LABEL : '', unread > 0 ? unreadLabel(unread) : '']
+    const status = [
+      activityLabel(tab),
+      secretInput?.[tab.id] ? TYPING_HIDDEN_LABEL : '',
+      readOnlyTabs?.[tab.id] ? READ_ONLY_LABEL : '',
+      unread > 0 ? unreadLabel(unread) : '',
+    ]
       .filter(Boolean)
       .join(', ');
     const folder =

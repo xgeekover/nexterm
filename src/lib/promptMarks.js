@@ -3,20 +3,18 @@
  *
  * Every shell NexTerm integrates (cmd, PowerShell, zsh, bash and Git Bash)
  * prints OSC 133 "D" in front of every prompt, the first one included, and the
- * backend forwards it as `pty-command-done` once it has sent the output read
- * with it (src-tauri/src/pty/manager.rs). The mark goes on the row the cursor
- * is on once xterm has parsed everything delivered before that D. Which row of
- * the prompt that is depends on what came in the D's read:
- *
- *   - cmd and PowerShell: the D is part of the prompt string, so the prompt
- *     comes with it and the mark is on the row the next command is typed on
- *     (the second line of a two-line prompt).
- *   - zsh and bash: precmd / PROMPT_COMMAND print the D with a printf of their
- *     own, and ZLE or readline draws the prompt afterwards. When the prompt
- *     text comes in a later read, the mark is on the row the prompt starts
- *     on: the first line of a two-line prompt (starship, powerlevel10k), or
- *     the empty line of one that starts with a newline. When both come in one
- *     read, it is the row typed on. A one-line prompt is on its row either way.
+ * backend forwards it as `pty-command-done` exactly where it was in the
+ * stream: after the output before it, ahead of the output after it, even in
+ * one read (src-tauri/src/pty/manager.rs, osc.rs `into_ordered`). The mark
+ * goes on the row the cursor is on once xterm has parsed everything delivered
+ * before that D, which is the exact row the prompt starts on in every shell:
+ * cmd and PowerShell start the prompt string with the D, and zsh's precmd /
+ * bash's PROMPT_COMMAND print it with a printf of their own before ZLE or
+ * readline draws the prompt. So it is the first line of a two-line prompt
+ * (starship, powerlevel10k), or the empty line of one that starts with a
+ * newline; a one-line prompt is on its row. (Before bundle 4 a read's markers
+ * came after all of its output, and a prompt in the D's read was marked on
+ * the row typed on.)
  *
  * Each such row gets an xterm marker (`term.registerMarker`), which moves with
  * its line as the buffer scrolls, trims and reflows, and a decoration drawn on

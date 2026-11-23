@@ -32,6 +32,8 @@ import {
 } from '../../src/lib/projectCommandRun.js';
 import { useSystemStore } from '../../src/stores/systemStore.js';
 import { useProjectCommandsStore } from '../../src/stores/projectCommandsStore.js';
+import { AUTOMATIC } from '../../src/lib/readOnly.js';
+import { KITTY_SUPPORTED_FLAGS, kittySequence } from '../../src/lib/kittyKeyboard.js';
 
 const S = terminalStore.useTerminalStore;
 const { untypableLine } = terminalStore;
@@ -661,6 +663,35 @@ describe('Run dialog: NexTerm\'s own line', () => {
         mockBridge.invoke = original;
       }
       assert.equal(S.getState().projectCommandBlock(second), null, "NexTerm's own line read as the user's typeahead");
+    });
+  });
+
+  test("PCR-26: the kitty keyboard query's answer is not text at the prompt, and Ctrl+C sent as CSI 99;5u abandons the line as 0x03 does — the next line is followed (review A-R3)", async () => {
+    await inStore(async () => {
+      const tab = S.getState().activeTabId;
+      const ctrlC = kittySequence({ key: 'c', ctrl: true }, KITTY_SUPPORTED_FLAGS);
+      assert.equal(ctrlC, '\x1b[99;5u', 'premise: Ctrl+C as the encoder sends it under flag 1');
+      await prompt(tab);
+      await writes(async () => {
+        // A shell that pushed flag 1 at its own prompt asks which flags are on.
+        await S.getState().writeRaw(tab, '\x1b[?1u', AUTOMATIC);
+        await S.getState().writeRaw(tab, '\x1b[?0u', AUTOMATIC);
+      });
+      assert.equal(S.getState().projectCommandBlock(tab), null, 'the answer read as typed text');
+      await writes(async () => {
+        for (const ch of 'git sta') await S.getState().writeRaw(tab, ch);
+      });
+      assert.equal(S.getState().projectCommandBlock(tab), TYPED_REASON, 'premise: text at the prompt blocks');
+      await writes(() => S.getState().writeRaw(tab, ctrlC));
+      assert.equal(S.getState().projectCommandBlock(tab), null, 'Ctrl+C as CSI u abandoned the line');
+      // The answer between keys, and the next line, followed to its end.
+      await writes(async () => {
+        for (const ch of 'opencode') await S.getState().writeRaw(tab, ch);
+        await S.getState().writeRaw(tab, '\x1b[?1u', AUTOMATIC);
+        await S.getState().writeRaw(tab, '\r');
+      });
+      assert.equal(tabById(tab).commandLine, 'opencode', 'the line typed after Ctrl+C, with the answer in it, is followed');
+      assert.equal(tabById(tab).agent?.kind, 'opencode', 'and the agent typed there is recorded');
     });
   });
 });

@@ -351,6 +351,34 @@ export const COMMANDS = {
     passThrough: (ctx) => !promptKeysClaimed(ctx),
     run: (ctx) => ctx.jumpToPrompt?.('next'),
   },
+  // Read-only on or off for the active terminal (bundle 4, A3;
+  // src/lib/readOnly.js). A palette command with no chord of its own and no
+  // place in the native menu, so nothing is taken from a shell as shipped.
+  // Claimed over a focused terminal all the same: a chord the user gives it
+  // must turn read-only OFF from inside the read-only terminal, where xterm
+  // would drop the key. As for every command claimed over a terminal, a
+  // bare Ctrl+letter chosen for it is then the app's. KB-11 holds the list.
+  'toggle-read-only': {
+    title: 'Terminal: Toggle Read-Only',
+    menuId: null,
+    overTerminal: true,
+    run: (ctx) => ctx.toggleReadOnly?.(),
+  },
+  // Send to Agent (bundle 4, A4; src/lib/sendToAgent.js): an @ reference to
+  // the editor's selection or file typed into the terminal running Claude
+  // Code or OpenCode, Enter not pressed. Palette commands with no chord of
+  // their own and no place in the native menu — the editor's context menu
+  // has them — and not claimed over a terminal: they are the editor's.
+  'send-selection-to-agent': {
+    title: 'Send Selection to Agent',
+    menuId: null,
+    run: (ctx) => ctx.sendSelectionToAgent?.(),
+  },
+  'send-file-to-agent': {
+    title: 'Send File to Agent',
+    menuId: null,
+    run: (ctx) => ctx.sendFileToAgent?.(),
+  },
   'search-in-files': {
     title: 'Search in Files',
     // The terminal has no use for ⇧⌘F, and off macOS Ctrl+Shift+F is not a

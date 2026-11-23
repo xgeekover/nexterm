@@ -194,8 +194,9 @@ function bracketingOf(term) {
 
 /** The binding, as an xterm addon so it is disposed with its terminal. */
 class PasteWarningAddon {
-  constructor(container, { mode, ask, withdraw }) {
+  constructor(container, { mode, ask, withdraw, refuse = () => false }) {
     this._container = container;
+    this._refuse = refuse;
     this._mode = mode;
     this._ask = ask;
     this._withdraw = withdraw;
@@ -231,12 +232,30 @@ class PasteWarningAddon {
    * exactly as it came.
    */
   _paste(e) {
+    // A paste the terminal would drop (read-only, src/lib/readOnly.js) is
+    // refused here, with no question asked about it: kept from xterm and the
+    // webview, the empty image paste included, and said by `refuse`.
+    if (this._refused()) {
+      e?.preventDefault?.();
+      e?.stopImmediatePropagation?.();
+      return;
+    }
     const text = e?.clipboardData?.getData?.('text/plain') ?? '';
     if (text === '') return;
     const claimed = this.hold(text) || this._pasteCleaned(text);
     if (!claimed) return;
     e.preventDefault?.();
     e.stopImmediatePropagation?.();
+  }
+
+  /** Whether `refuse` says this terminal takes no paste now (it says why itself). Never throws. */
+  _refused() {
+    try {
+      return Boolean(this._refuse?.());
+    } catch (err) {
+      console.warn('[Terminal] could not ask whether the terminal takes a paste:', err);
+      return false;
+    }
   }
 
   /** Paste `text` without its markers when it had any; false when it had none (xterm pastes it). */
@@ -257,6 +276,8 @@ class PasteWarningAddon {
   hold(text, { returnFocusTo = null } = {}) {
     const term = this._term;
     if (this._disposed || !term || typeof this._ask !== 'function') return false;
+    // Nothing to ask about a paste that would be dropped: taken, and refused.
+    if (this._refused()) return true;
     const question = pasteWarning(text, { mode: this._mode(), ...bracketingOf(term) });
     if (!question) return false;
     let answer;
@@ -327,9 +348,11 @@ class PasteWarningAddon {
  * setting takes effect at once; absent, the setting is 'auto'. `ask(question)`
  * puts `{ lines, bracketed }` to the user and resolves with one of
  * PASTE_CHOICES; without it nothing is ever held. `withdraw()` takes the
- * question back when the terminal is disposed while it is up.
+ * question back when the terminal is disposed while it is up. `refuse()` says
+ * whether the terminal takes no paste at all now (read-only), and says so to
+ * the user itself; a refused paste is never asked about or pasted.
  */
-export function installPasteWarning(term, container, { settings = null, ask = null, withdraw = null } = {}) {
+export function installPasteWarning(term, container, { settings = null, ask = null, withdraw = null, refuse = () => false } = {}) {
   if (!term || !container) return null;
   const existing = installed.get(term);
   if (existing) return existing;
@@ -341,7 +364,7 @@ export function installPasteWarning(term, container, { settings = null, ask = nu
       return 'auto';
     }
   };
-  const addon = new PasteWarningAddon(container, { mode, ask, withdraw });
+  const addon = new PasteWarningAddon(container, { mode, ask, withdraw, refuse });
   if (typeof term.loadAddon === 'function') term.loadAddon(addon);
   else addon.activate(term);
   installed.set(term, addon);

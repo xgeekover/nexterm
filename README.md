@@ -38,13 +38,15 @@ that layout the next time you open it.
   its own commands in the palette, with blanks to fill in, once you have read
   and trusted them.
 - **Made for coding agents.** OpenCode and Claude Code notifications,
-  `Shift+Enter`, resuming a conversation, several agents printing at full speed
-  without freezing the window, and `nexterm-cli` for their hooks.
+  `Shift+Enter` (modifyOtherKeys, and the kitty keyboard protocol's first
+  level), resuming a conversation, an `@` reference to a file or the lines
+  you selected typed into the agent's terminal, several agents printing at
+  full speed without freezing the window, and `nexterm-cli` for their hooks.
 - **Guards a terminal usually lacks.** A lock marks a password prompt and
-  nothing is typed for you into it (macOS, Linux), a multi-line paste that
-  would run line by line asks first, Delete goes to the Trash, secrets are
-  hidden before output is saved, and file commands stay inside the open
-  folder.
+  nothing is typed for you into it (macOS, Linux), a terminal can be made
+  read-only, a multi-line paste that would run line by line asks first,
+  Delete goes to the Trash, secrets are hidden before output is saved, and
+  file commands stay inside the open folder.
 - **A real terminal on macOS, Windows and Linux.** xterm.js with WebGL over a
   native PTY, ConPTY's quirks handled, OSC 133 and OSC 7 shell integration, 9
   dark themes and your own imported ones.
@@ -158,14 +160,16 @@ confirmation when it is next idle and an error at once. With *Reduce Motion*
 on (Settings ▸ Workbench, or the system setting), toasts appear and go without
 fading.
 
-Three copies say they are done this way: Copy Path (a TERMINALS row's menu,
+Four copies say they are done this way: Copy Path (a TERMINALS row's menu,
 a tab chip's menu and the Explorer) shows "Path copied", Copy Context (those
 two terminal menus and the command palette) shows "Copied 200 lines (secrets
-masked)" with the number of lines it copied, and Copy Session ID (AGENT
-SESSIONS) shows "Session ID copied". If the clipboard refuses, or there is
-nothing to copy, an error says so and stays. The other copy actions, such as
-Copy Relative Path in the Explorer or copying a terminal's selection, do not
-show a toast yet; that is later work.
+masked)" with the number of lines it copied, Copy Last Command Output names
+the command, and Copy Session ID (AGENT SESSIONS) shows "Session ID copied".
+If the clipboard refuses, or there is nothing to copy, an error says so and
+stays. The other copy actions, such as Copy Relative Path in the Explorer or
+copying a terminal's selection, do not show a toast yet; that is later work.
+Send to Agent says what it typed and where, and a read-only terminal says
+why it dropped what you typed, the same way.
 
 The words this README uses:
 
@@ -578,6 +582,31 @@ palette does not offer it. What is copied is what the terminal has drawn, so
 output NexTerm still holds back for a busy background terminal is not
 included.
 
+**Copy what the last command printed, secrets masked.** *Copy Last Command
+Output (Secrets Masked)* sits beside *Copy Last N Lines* in a tab's menu, a
+TERMINALS row's menu and the Command Palette. It puts the output of the most
+recent command that finished in that terminal on the clipboard: from where
+its output starts to where the shell's next prompt begins, as plain text,
+wrapped lines joined, blank lines at either end left out, and masked as
+*Copy Last N Lines* and `read-screen` mask it. The toast names the command
+(its secrets hidden too, shortened past 60 characters) and how many lines
+it copied. It needs the shell to say where a command's output starts and
+where it ends (OSC 133 C and D): PowerShell, zsh, bash and Git Bash do.
+cmd marks its prompts but never where output starts, so for cmd the item
+is greyed out and says to use *Copy Last N Lines*. It is greyed out, with
+its reason, too: while a command is still running (so while Claude Code,
+OpenCode or a dev server started at the prompt runs), before any command
+has finished, in a shell that sends no such marks (fish, sh, WSL, ssh), and
+for a terminal never shown. The Command Palette lists it whenever the
+active terminal has been shown, and greys its row out the same way, with
+the reason, while it cannot copy. What a full-screen program
+drew (vim, `less`, a TUI on the alternate screen) is not in the scrollback
+and is not copied. After *Clear Terminal* or `clear`, or once the output has
+left the top of a full scrollback, it says the output is no longer in the
+scrollback; when only its start has gone, the rest is copied and the toast
+says the start is missing. Output over `read-screen`'s 512 KiB cap loses
+its oldest lines, and the toast says so.
+
 **Find something in the scrollback.** `⌘F` opens a find bar over the focused
 terminal — incremental as you type, `Enter` / `Shift+Enter` to walk the matches,
 `Esc` to close. Match case, whole word and regular expressions are there, every
@@ -611,15 +640,16 @@ given other keys in Settings ▸ Keyboard Shortcuts. A mark comes from the "a
 prompt is here" signal (OSC 133 D) the shell integration prints in front of
 every prompt, the first one included: **cmd**, **PowerShell** (Windows
 PowerShell and pwsh), **zsh**, **bash** and **Git Bash** all send it, so every
-prompt gets a mark, an empty Enter included. Which row of the prompt is marked
-depends on the shell. In cmd and PowerShell the signal is part of the prompt
-string, so the mark is on the row you type on, the second line of a two-line
-prompt. zsh and bash print the signal just before they draw the prompt: when
-the prompt text arrives after it, which a prompt that takes a moment to build
-(starship, powerlevel10k) makes likely, the mark is on the row the prompt
-starts on, the first line of a two-line prompt or the empty line above a
-prompt that begins with one; when both arrive together, it is the row you type
-on. A one-line prompt is marked on its row either way. A batch file run with
+prompt gets a mark, an empty Enter included. The signal comes in front of the
+prompt (in cmd and PowerShell it starts the prompt string; zsh and bash print
+it just before they draw the prompt), and NexTerm places it exactly where it
+came in the output, so where the output reaches NexTerm in the order the
+shell wrote it, the mark is on the row the prompt starts on: the first line
+of a two-line prompt (starship, powerlevel10k) or the empty line above a
+prompt that begins with one. On Windows that order is ConPTY's, which redraws
+the screen it hands on: whether it keeps the signal in front of the prompt's
+first line has not been verified (WINDOWS_VERIFICATION.md V48, H13). A
+one-line prompt is marked on its row. A batch file run with
 `echo on` marks each line cmd prints its prompt for; cmd's `More?` gets none.
 A shell or program that sends no such signal — fish without its own OSC 133,
 sh, nushell, WSL, a shell on the far end of ssh — shows the box and no marks:
@@ -786,7 +816,8 @@ cursor takes `⌘→` as it takes `→`, and accepts it.
   htop, `less`, a full-screen TUI — the four keys go to the program exactly as
   before, because there `Ctrl+A` or `Ctrl+U` is a command of that program's,
   not "start of line". So does a program that turned on xterm's
-  *modifyOtherKeys* (OpenCode does): it reads its keys itself.
+  *modifyOtherKeys* (OpenCode does) or the kitty keyboard protocol (see
+  [Keyboard shortcuts](#keyboard-shortcuts)): it reads its keys itself.
 - **At a password prompt only `⌘Backspace` works.** While the lock shows
   ([Safety nets](#safety-nets)), `⌘Backspace` sends `Ctrl+U`, which the
   terminal itself reads as "erase the line" and so clears what was typed of
@@ -814,7 +845,10 @@ The other `⌥` keys are the same with it on or off:
   ([Select, copy and paste](#working-in-a-terminal)): that is a mouse
   modifier, not a key.
 - **`⌥Enter` still sends `Esc Enter`**, which OpenCode and Claude Code read as
-  a newline.
+  a newline. The one exception: with the setting on, a program that turned
+  on the kitty keyboard protocol gets it as `CSI 13;3u`, the protocol's
+  Alt+Enter, as it does on Windows and Linux. With the setting off, `⌥`
+  chords are never encoded that way.
 - **`⌥←` / `⌥→` still move a word**: NexTerm sends `Esc b` / `Esc f` for them
   itself, ahead of the terminal.
 
@@ -1570,7 +1604,10 @@ in particular. Where to find each one:
 | start one in a new terminal | type it, or right-click the empty part of a tab strip → *New opencode Terminal* / *New Claude Code Terminal* |
 | hear when it is done or needs you | [Notifications from programs](#notifications-from-programs) — each agent needs one setting turned on |
 | see what each one is doing | [The TERMINALS panel as a status board](#the-terminals-panel-as-a-status-board) |
-| type a newline in OpenCode | `Shift+Enter` — see [Keyboard shortcuts](#keyboard-shortcuts) |
+| type a newline in OpenCode or Claude Code | `Shift+Enter` — see [Keyboard shortcuts](#keyboard-shortcuts); in Claude Code not yet checked by hand |
+| point it at a file, a folder or the lines you selected | *Send to Agent* — see [Send a file or a selection to an agent](#send-a-file-or-a-selection-to-an-agent) |
+| copy what the last command printed | *Copy Last Command Output* — see [Working in a terminal](#working-in-a-terminal) |
+| watch it work with no stray key reaching it | read-only — see [Safety nets](#safety-nets) |
 | select text inside Claude Code | just drag — see [Working in a terminal](#working-in-a-terminal) |
 | paste an image (Windows) | `Alt+V` in Claude Code; a right-click in OpenCode — see [Keyboard shortcuts](#keyboard-shortcuts) |
 | have its hooks tell NexTerm things | [`nexterm-cli`](#control-nexterm-from-a-terminal) |
@@ -1581,6 +1618,56 @@ in particular. Where to find each one:
 | start several at once | a [layout template](#sessions-what-comes-back) with `opencode -c` or `claude` |
 | run several without freezing the window | [Many terminals printing at once](#many-terminals-printing-at-once) |
 | leave OpenCode with `Ctrl+C` in cmd | [Safety nets](#safety-nets) — cmd's *Terminate batch job* question is answered |
+
+#### Send a file or a selection to an agent
+
+Right-click in the editor and pick *Send Selection to Agent* or *Send File
+to Agent*, run either from the Command Palette, or right-click a file or a
+folder in the Explorer and pick *Send to Agent*: NexTerm types an `@`
+reference to it into the terminal running Claude Code or OpenCode, for you
+to finish the message. A file or a folder is `@/Users/me/app/src/auth.js `,
+a selection `@/Users/me/app/src/auth.js (lines 10-20) ` — `(line 12)` for
+one line, and with nothing selected the line the caret is on. The path is
+always absolute: the terminal's folder is the shell's, and the agent may not
+be working in it. It goes in as a paste, bracketed when the program asked
+for bracketed paste, and **Enter is never pressed**: what is sent, and when,
+is yours. The space after it lets you type your question straight on. Once
+it is typed, that terminal is shown with the keyboard in it, and a toast
+says what was typed and where.
+
+- **Which terminal.** Only a terminal whose TERMINALS row names Claude Code
+  or OpenCode as running is typed into. With one, it goes there; with
+  several, the Command Palette lists them, the one used last first, to
+  choose from; with none, the items are greyed out: "No terminal is running
+  Claude Code or OpenCode".
+- **The agent reads the file on disk.** The editor's two items refuse a file
+  with unsaved changes and an untitled one ("Save the file first"); the
+  Explorer sends a file or a folder as it is on disk.
+- **Refused, with an error toast saying why, and nothing typed:** a target
+  terminal that is read-only, asks for a password (the lock, or a password
+  prompt on screen), has something running as another user in the
+  foreground (sudo, su), has exited, no longer runs the agent, or has not
+  been shown since NexTerm started; and a path holding a space, another
+  blank or a control character, because quoting inside an `@` reference is
+  not documented and a blank would end it early.
+- **Where an item says why.** The Command Palette and the Explorer grey an
+  item out and give the reason. Monaco's menu cannot say why an entry is
+  off, so the editor's two entries are always there and say it in an error
+  toast. None of them has a key of its own; Settings ▸ Keyboard Shortcuts
+  can give *Send Selection to Agent* and *Send File to Agent* one.
+
+What the agent makes of it is the agent's. Claude Code's documentation says
+`@` includes a file or a directory and that "file paths can be relative or
+absolute"; it documents no syntax for a range of lines, so NexTerm invents
+none (no `#L10-20`) and names the lines in plain words after the
+reference, typed as part of your message. These checks
+still need a person, and none has been made yet:
+
+- **H6** — Claude Code reads a pasted `@<absolute path> (lines A-B)` as
+  that file and those lines, on macOS and with Windows paths (`C:\…`;
+  [WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V71).
+- **H7** — what OpenCode does with an `@` reference typed this way: its own
+  `@` file references were not tried.
 
 ### Control NexTerm from a terminal
 
@@ -1678,9 +1765,9 @@ one first.
 `nexterm-cli help <command>` explains each one; `--json` prints NexTerm's
 answer for scripts. It exits 0 when done, 2 for wrong usage (found by the
 tool or by NexTerm — nothing was done), 3 outside a NexTerm terminal, 4 when
-refused (not allowed, no such terminal), 5 when NexTerm is busy (a rate
-limit), not running, not answering, or has its control turned off — try
-again later.
+refused (not allowed, no such terminal, `send` to a read-only terminal), 5
+when NexTerm is busy (a rate limit), not running, not answering, or has its
+control turned off — try again later.
 
 `nexterm-cli guide` is a short guide for agents and scripts: which command
 to use when (`notify` when the user is needed, `set-status` and
@@ -1743,7 +1830,8 @@ nexterm-cli read-screen --lines 200             # what a terminal shows, secrets
 ```
 
 Keys follow what the program there asked for (application cursor keys,
-Shift+Enter for OpenCode). One line break at the end is Enter, so
+Shift+Enter for OpenCode, and the kitty keyboard protocol's keys for a
+program that turned it on, the same bytes the keyboard sends). One line break at the end is Enter, so
 `echo npm test | nexterm-cli send -` types the command and runs it; several
 lines go as one paste where the program asked for bracketed paste and are
 refused elsewhere unless you pass `--raw`. Keys cannot spell an escape
@@ -1753,7 +1841,10 @@ NexTerm also reads the prompt line — `Password:`, `pass phrase`, `PIN`,
 `암호:`, `비밀번호:`), into a terminal where anything in the foreground runs
 as another user or elevated (sudo, su, gsudo — NexTerm looks at every
 process there), or into a terminal you have not opened since NexTerm
-started.
+started. A terminal you made read-only ([Safety nets](#safety-nets)) takes
+nothing from `send`: it is refused with exit 4 ("that terminal is
+read-only"), whatever the switches below say, until you turn read-only off
+there; `read-screen` still reads it.
 
 **Who can do what.** Settings ▸ Terminal ▸ *Control*:
 
@@ -1811,6 +1902,48 @@ terminal says why. What you type and paste is never held back, so a password
 manager still works. Windows gives no way to read this from outside a console
 program, so there is no lock on Windows.
 
+**A read-only terminal takes nothing you type.** For a terminal you are
+watching — a build, a server, an agent at work — where a stray key would do
+harm: *Turn On Read-Only* in its tab's menu or its TERMINALS row's menu, or
+*Terminal: Toggle Read-Only* in the Command Palette for the active terminal.
+From then on nothing you type reaches its program: keys (`Ctrl+C` and the
+kitty keyboard protocol's keys included), pastes, dropped files, Korean and
+other input-method text, an accepted command suggestion and mouse reports.
+The wheel still scrolls the scrollback, but over a pager such as `less` or
+`man`, which gets the wheel as arrow keys, it does nothing. What the
+terminal answers its program by itself still goes — device and cursor
+position reports, focus reports, the answers to the kitty keyboard and
+modifyOtherKeys questions — so a program waiting for one does not hang.
+Selecting and copying, scrolling (`Shift+PageUp` / `Shift+PageDown`), `⌘A`
+on macOS and NexTerm's own shortcuts still work. Input it drops is said in
+a toast, at most once every 3 seconds. On macOS a Korean syllable being
+composed may be drawn in the terminal for a moment while you type; it is
+never sent.
+
+- **You can see it.** The tab chip has a small badge, a keyboard with a
+  stroke through it, under the lock's corner; the TERMINALS row has the same
+  mark after the lock; the pane has a strip above the terminal, "Read-only:
+  what you type does not reach this terminal", with a **Turn Off** button.
+  The handle of a hidden tab strip has no mark of its own; the strip in the
+  pane is there either way. The tab menu, the row's menu and the palette
+  command turn it off too.
+- **Nothing is typed for you either.** `nexterm-cli send` is refused with
+  exit 4 and types nothing; a layout's startup command and a project command
+  are not typed, and the terminal or the run dialog says why (a project
+  command offers a new split instead); an agent is not started or resumed
+  in it, and a notice there says so; Send to Agent refuses it.
+- **A key of your own.** *Terminal: Toggle Read-Only* has no key out of the
+  box. Give it one in Settings ▸ Keyboard Shortcuts and that key works inside
+  the read-only terminal too, so you can turn it off from the keyboard.
+- **Not saved.** Read-only lasts until you turn it off or NexTerm quits:
+  after a restart every terminal is writable again, restored or not.
+- **Fails closed.** NexTerm tells your input from the terminal's own replies
+  by a signal inside xterm.js. Should a future xterm.js not give it,
+  read-only cannot be turned on at all, and says so, rather than either
+  block the program's replies or let your keys through. A terminal never
+  shown since NexTerm started cannot be made read-only until it has been
+  shown once.
+
 **Pasting several lines asks first.** A paste of two or more lines into a
 program that has not asked for bracketed paste — cmd never does, so each line
 would run as it arrives — asks *Paste*, *Paste as One Line* or *Cancel*, with
@@ -1838,7 +1971,9 @@ scrollbar; on by default), and *Claude Code on the Normal Screen* (starts
 terminals with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` unless it is set
 already; on by default), and *OpenCode in Mini Mode* (starts and resumes
 OpenCode V1 1.17.10 and newer as `opencode --mini --no-replay`; on by
-default), and *Copy Context Lines* (how many lines *Copy Last N Lines (Secrets
+default), and *Kitty Keyboard Protocol* (answers a program that asks for
+the kitty keyboard protocol and sends its first level's keys; on by
+default, see [Keyboard shortcuts](#keyboard-shortcuts)), and *Copy Context Lines* (how many lines *Copy Last N Lines (Secrets
 Masked)* copies; 200 by default, 1 to 10000; very long output is cut at
 `read-screen`'s 512 KiB cap, the oldest lines dropped), and *Keep the Computer Awake
 While an Agent Works* (off by default: while a Claude Code terminal is
@@ -1995,9 +2130,72 @@ tab-page keys. Everything else in the table above is left to the shell.
 **`Shift+Enter` for a newline in OpenCode.** A program that turns on xterm's
 *modifyOtherKeys*, as OpenCode does, gets `Shift+Enter` and `Ctrl+Enter` as
 keys of their own (`CSI 27;2;13~`, `CSI 27;5;13~`), so they insert a newline
-there instead of submitting. Where nothing asked for that — the shell, Claude
-Code — they are plain `Enter`, as before. `⌥Enter` / `Alt+Enter` sends
-`Esc Enter` either way.
+there instead of submitting. Where nothing asked for that or for the kitty
+keyboard protocol (below) — a shell — they are plain `Enter`, as before.
+`⌥Enter` / `Alt+Enter` sends `Esc Enter` to a program that did not turn the
+kitty keyboard protocol on.
+
+**`Shift+Enter` for a newline in Claude Code: the kitty keyboard protocol.**
+Claude Code asks the terminal, as it starts, whether it has the kitty
+keyboard protocol, and its documentation says a terminal that has it needs
+no setup (Claude Code 2.1.269 or later). xterm.js, which draws NexTerm's
+terminals, has the protocol only in a beta, so NexTerm answers the question
+itself and implements the protocol's first level, "disambiguate escape
+codes", and no other. A program that turns it on gets `Shift+Enter` as
+`CSI 13;2u`, `Ctrl+Enter` as `CSI 13;5u`, `Alt+Enter` as `CSI 13;3u`,
+`Shift+Tab` as `CSI 9;2u`, `Esc` as `CSI 27u`, and `Ctrl` or `Alt` with a
+letter, digit, Space or punctuation key as `CSI <key>;<modifiers>u` — so
+`Ctrl+C` reaches it as `CSI 99;5u`, not `0x03`, which such a program reads
+as its interrupt. Plain `Enter`, `Tab` and `Backspace` are sent as before,
+and so is every other key: text, arrows, F-keys, `Home`, `End`, the keypad.
+Asked which levels are on, NexTerm names only that first level, and only
+while it is on, whatever the program asked for, so the program can tell
+what it got.
+
+- **Only while the program that asked is in charge.** The normal screen and
+  the full-screen one each keep their own stack of what programs turned on,
+  16 deep. It is emptied when a program leaves its full-screen view, on
+  `reset`, at every shell prompt (where the shell marks its prompts: cmd,
+  PowerShell, zsh, bash, Git Bash) and when a new shell starts in the
+  terminal, so a program killed before it turned the protocol off does not
+  leave the shell getting `CSI 99;5u` for `Ctrl+C`. In a shell without
+  prompt marks (fish, sh, WSL, ssh) a program that dies that way on the
+  normal screen leaves it on until `reset`.
+- **Keys that stay as they were**, whatever was turned on: every key while
+  a password prompt is up; a key an input method is composing, and under
+  the Korean input source `Ctrl+C` is still `0x03`; a key with `⌘`; `AltGr`
+  chords; and on macOS, while *Use Option as Meta* is off, every `⌥` chord,
+  so `⌥` still types its characters and `⌥Enter` stays `Esc Enter`.
+- **Beside modifyOtherKeys.** A program may turn both on, as Claude Code
+  may; then the kitty keys win for the keys they cover, and modifyOtherKeys
+  keeps the rest. The macOS text-editing keys leave such a program its own
+  keys, as they leave one with modifyOtherKeys. `nexterm-cli send --keys`
+  sends what the keyboard would.
+- **Turn it off** with Settings ▸ Terminal ▸ *Kitty Keyboard Protocol* (on
+  by default): the question goes unanswered again and keys are sent as
+  before, at once, in every terminal. If one of the checks below goes wrong
+  for you, this is the way back.
+
+Not verified, and not claimed: which levels Claude Code and OpenCode turn
+on, and so which keys they read this way; and whether Windows' own console
+layer (ConPTY), which sits between NexTerm and every Windows program, passes
+the question, the answer and these keys through (Windows Terminal ships a
+ConPTY of its own). These checks still need a person, and none has been
+made yet:
+
+- **H1** — Claude Code 2.1.269 or later in NexTerm on macOS: `Shift+Enter`
+  inserts a newline, `Enter` sends, and `Ctrl+C` and `Esc` do what they do
+  in Claude Code.
+- **H2** — OpenCode: `Shift+Enter` is still a newline and `Enter` still
+  sends.
+- **H3** — after `kill -9` of a running Claude Code, `Ctrl+C` interrupts
+  `sleep 10` at the shell prompt that follows.
+- **H4** — H1 again on Windows, through ConPTY
+  ([WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V68).
+- **H5** — typing Korean into Claude Code works as it did.
+
+The checks for Send to Agent (H6, H7) are in
+[Send a file or a selection to an agent](#send-a-file-or-a-selection-to-an-agent).
 
 Packaged builds also refuse the reload chords (`F5`, `Ctrl+Shift+R`, `⌘R`).
 Reloading restarts the frontend, and start-up reaps every terminal the backend

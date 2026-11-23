@@ -115,3 +115,40 @@ export function confirmContextCopy(result) {
     return ok;
   });
 }
+
+/**
+ * Copy Last Command Output's confirmation (bundle 4, A2): the command — as
+ * lastCommandOutput.js gives it, secrets masked and shortened
+ * (`commandForToast`) — or, unknown, a generic wording; the line count; that
+ * secrets are masked; and when only part of it could be copied, why.
+ */
+export function lastOutputCopiedText({ command = null, lines = 0, startGone = false, truncated = false } = {}) {
+  const named = typeof command === 'string' && command !== '' ? command : null;
+  const what = named ? `the output of "${named}"` : "the last command's output";
+  const count = `${lines} ${lines === 1 ? 'line' : 'lines'}`;
+  const part = startGone
+    ? ' — its start is no longer in the scrollback'
+    : truncated
+      ? ' — its oldest lines left out, too long to copy whole'
+      : '';
+  return `Copied ${count} of ${what} (secrets masked)${part}`;
+}
+
+/**
+ * The toast for what copyCommandOutput returned (lastCommandOutput.js, the
+ * copy already begun): lastOutputCopiedText once `copied` resolves true,
+ * NOT_COPIED when it resolves false, and the reason as an error
+ * (notCopiedBecause) when nothing was copied. Resolves with whether it was
+ * copied.
+ */
+export function confirmLastOutputCopy(result) {
+  if (!result || result.ok !== true) {
+    fail(notCopiedBecause(result?.reason));
+    return Promise.resolve(false);
+  }
+  return settle(result.copied).then((ok) => {
+    if (ok) confirm(lastOutputCopiedText(result));
+    else fail(NOT_COPIED);
+    return ok;
+  });
+}

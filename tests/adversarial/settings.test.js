@@ -81,6 +81,8 @@ const SETTINGS_KEYS = [
   // Option as Meta (A7).
   'terminalMacEditingKeys',
   'terminalOptionAsMeta',
+  // Bundle 4, A1: the kitty keyboard protocol's first flag (on).
+  'terminalKittyKeyboard',
   // Bundle 2, A8: programs putting text on the clipboard with OSC 52 (off).
   'terminalOsc52Write',
   // Settings ▸ Terminal ▸ Control (stage 7, spec D5): what programs in
@@ -157,6 +159,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalMouseReporting: false,
       terminalMacEditingKeys: false,
       terminalOptionAsMeta: true,
+      terminalKittyKeyboard: false,
       terminalOsc52Write: true,
       terminalProgramNotifications: false,
       terminalAttentionFlashFocused: true,

@@ -64,6 +64,94 @@ pub struct Filtered {
     /// typed-input echo and command output alike.
     pub output: String,
     pub markers: Vec<Marker>,
+    /// Where each marker was in the stream: `marker_at[k]` bytes of `output`
+    /// came before `markers[k]` (for a title, the sequence it came in
+    /// included). Non-decreasing, and always a character boundary of
+    /// `output` — a marker never splits a UTF-8 sequence. `into_ordered`
+    /// cuts the output there, so a read holding "C, output, D, prompt" is
+    /// delivered in that order rather than all its output and then its
+    /// markers.
+    pub marker_at: Vec<usize>,
+}
+
+/// One piece of a read, in stream order (`Filtered::into_ordered`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Piece {
+    Output(String),
+    Marker(Marker),
+}
+
+impl Filtered {
+    /// The read as it came: the output before each marker, the marker, and
+    /// so on, then what followed the last one. Joined, the output pieces are
+    /// `output` byte for byte; no piece is empty.
+    pub fn into_ordered(self) -> Vec<Piece> {
+        let Filtered { output, markers, marker_at } = self;
+        if markers.is_empty() {
+            // The usual read: no copy.
+            return if output.is_empty() { Vec::new() } else { vec![Piece::Output(output)] };
+        }
+        let mut pieces = Vec::with_capacity(markers.len() * 2 + 1);
+        let mut from = 0;
+        for (marker, at) in markers.into_iter().zip(marker_at) {
+            // Never out of range or mid-character (see `marker_at`); clamped
+            // all the same, so a slip is a late marker and never a panic.
+            let mut at = at.clamp(from, output.len());
+            while !output.is_char_boundary(at) {
+                at += 1;
+            }
+            if at > from {
+                pieces.push(Piece::Output(output[from..at].to_string()));
+                from = at;
+            }
+            pieces.push(Piece::Marker(marker));
+        }
+        if from < output.len() {
+            pieces.push(Piece::Output(output[from..].to_string()));
+        }
+        pieces
+    }
+}
+
+/// `raw` offsets into `bytes` (non-decreasing), moved to the same places in
+/// `String::from_utf8_lossy(bytes)`: by the U+FFFD that replaced an invalid
+/// run, and up to the end of a character an offset fell inside (an escape
+/// in the middle of one — never sent by a shell, but never split either).
+fn lossy_offsets(bytes: &[u8], raw: &[usize]) -> Vec<usize> {
+    const REPLACEMENT: usize = '\u{FFFD}'.len_utf8();
+    let mut mapped = Vec::with_capacity(raw.len());
+    let mut k = 0;
+    let (mut from, mut to) = (0usize, 0usize); // bytes read, output written
+    for chunk in bytes.utf8_chunks() {
+        let valid = chunk.valid();
+        let valid_end = from + valid.len();
+        while k < raw.len() && raw[k] <= valid_end {
+            let mut o = raw[k].saturating_sub(from).min(valid.len());
+            while !valid.is_char_boundary(o) {
+                o += 1;
+            }
+            mapped.push(to + o);
+            k += 1;
+        }
+        from = valid_end;
+        to += valid.len();
+        if !chunk.invalid().is_empty() {
+            let invalid_end = from + chunk.invalid().len();
+            // Inside the invalid run (its start was taken above): after its
+            // replacement character.
+            while k < raw.len() && raw[k] <= invalid_end {
+                mapped.push(to + REPLACEMENT);
+                k += 1;
+            }
+            from = invalid_end;
+            to += REPLACEMENT;
+        }
+    }
+    while k < raw.len() {
+        mapped.push(to);
+        k += 1;
+    }
+    mapped
 }
 
 #[derive(Default)]
@@ -92,6 +180,8 @@ impl OscFilter {
 
         let mut out: Vec<u8> = Vec::with_capacity(buf.len());
         let mut markers = Vec::new();
+        // How much of `out` came before each marker (see `Filtered::marker_at`).
+        let mut at = Vec::new();
         let mut i = 0;
 
         while i < buf.len() {
@@ -154,14 +244,18 @@ impl OscFilter {
             let payload = &buf[start..payload_end];
             match parse_marker(payload) {
                 Some(Marker::Title(title)) => {
-                    // Observed, and passed through exactly as it came.
+                    // Observed, and passed through exactly as it came; the
+                    // marker sits after the sequence that set the title.
                     markers.push(Marker::Title(title));
                     out.extend_from_slice(&buf[i..resume]);
+                    at.push(out.len());
                 }
                 Some(marker) => {
                     // Recognised OSC 133 marker: strip it from the stream but
-                    // report it — never gate the surrounding output on it.
+                    // report it — never gate the surrounding output on it —
+                    // at the point of the stream it was stripped from.
                     markers.push(marker);
+                    at.push(out.len());
                 }
                 None => {
                     // Foreign OSC (window title, hyperlinks, ...) — always
@@ -178,10 +272,16 @@ impl OscFilter {
         // this is safe alongside the escape scanner above.
         if !self.utf8_tail.is_empty() {
             let mut joined = std::mem::take(&mut self.utf8_tail);
+            // The re-attached bytes come before everything in this read.
+            for offset in &mut at {
+                *offset += joined.len();
+            }
             joined.extend_from_slice(&out);
             out = joined;
         }
+        let mut valid_utf8 = true;
         if let Err(e) = std::str::from_utf8(&out) {
+            valid_utf8 = false;
             // `error_len() == None` means "ran out of bytes", i.e. truncated
             // rather than genuinely malformed. Only that is worth waiting for;
             // real garbage still goes through the lossy conversion.
@@ -190,14 +290,33 @@ impl OscFilter {
                 if out.len() - valid <= 3 {
                     self.utf8_tail = out[valid..].to_vec();
                     out.truncate(valid);
+                    valid_utf8 = true;
+                    // A marker after the held-back half goes before it: the
+                    // half is the next read's first output.
+                    for offset in &mut at {
+                        *offset = (*offset).min(valid);
+                    }
                 }
             }
         }
 
-        Filtered {
-            output: String::from_utf8_lossy(&out).to_string(),
-            markers,
-        }
+        let output = String::from_utf8_lossy(&out).to_string();
+        let marker_at = if valid_utf8 {
+            // Nothing replaced: the same offsets, moved off a character's
+            // inside should an escape have come in the middle of one.
+            at.into_iter()
+                .map(|o| {
+                    let mut o = o.min(output.len());
+                    while !output.is_char_boundary(o) {
+                        o += 1;
+                    }
+                    o
+                })
+                .collect()
+        } else {
+            lossy_offsets(&out, &at)
+        };
+        Filtered { output, markers, marker_at }
     }
 }
 
@@ -780,5 +899,186 @@ mod tests {
         let (output, markers) = feed_cut(&text, &reads);
         assert!(output == copy, "only our own markers are removed");
         assert_eq!(markers, vec![Marker::CommandExecuted, Marker::CommandFinished(Some(0))]);
+    }
+
+    // A2 (AC12): markers in stream order. Before, a read's output went out
+    // whole and its markers after it, so a prompt mark or the sticky header
+    // read the cursor where the read ended, not where the marker was.
+
+    /// The pieces' output joined: must be `output` byte for byte.
+    fn joined(pieces: &[Piece]) -> String {
+        pieces
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Output(text) => Some(text.as_str()),
+                Piece::Marker(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_read_with_a_command_comes_out_in_stream_order() {
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07user@host % ");
+        // Forwarded bytes as before.
+        assert_eq!(r.output, "hi\r\nuser@host % ");
+        assert_eq!(r.marker_at, vec![0, 4]);
+        assert_eq!(
+            r.into_ordered(),
+            vec![
+                Piece::Marker(Marker::CommandExecuted),
+                Piece::Output("hi\r\n".to_string()),
+                Piece::Marker(Marker::CommandFinished(Some(0))),
+                Piece::Output("user@host % ".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_read_without_markers_is_one_piece_and_an_empty_read_none() {
+        let mut f = OscFilter::new();
+        assert_eq!(feed_str(&mut f, "plain").into_ordered(), vec![Piece::Output("plain".to_string())]);
+        assert_eq!(feed_str(&mut f, "").into_ordered(), vec![]);
+        // Back to back, with nothing between: no empty output piece.
+        let r = feed_str(&mut f, "\x1b]133;D;1\x07\x1b]133;A\x07");
+        assert_eq!(
+            r.into_ordered(),
+            vec![Piece::Marker(Marker::CommandFinished(Some(1))), Piece::Marker(Marker::PromptStart)]
+        );
+    }
+
+    #[test]
+    fn a_title_marker_comes_after_the_sequence_that_set_it() {
+        let mut f = OscFilter::new();
+        let r = feed_str(&mut f, "a\x1b]0;T\x07b");
+        assert_eq!(r.output, "a\x1b]0;T\x07b");
+        assert_eq!(
+            r.into_ordered(),
+            vec![
+                Piece::Output("a\x1b]0;T\x07".to_string()),
+                Piece::Marker(Marker::Title("T".to_string())),
+                Piece::Output("b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_escape_held_from_the_last_read_lands_where_it_was() {
+        let mut f = OscFilter::new();
+        let a = f.feed(b"out\x1b");
+        assert_eq!(a.into_ordered(), vec![Piece::Output("out".to_string())]);
+        let b = f.feed(b"]133;D;0\x07% ");
+        assert_eq!(
+            b.into_ordered(),
+            vec![Piece::Marker(Marker::CommandFinished(Some(0))), Piece::Output("% ".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_marker_never_splits_a_character() {
+        let han = "한".as_bytes();
+        // A character cut by the read before a marker: its first half is
+        // re-attached ahead of this read, and the marker goes after it whole.
+        let mut f = OscFilter::new();
+        let a = f.feed(&han[..1]);
+        assert_eq!(a.output, "");
+        let mut rest = han[1..].to_vec();
+        rest.extend_from_slice(b"\x1b]133;D;0\x07%");
+        let b = f.feed(&rest);
+        assert_eq!(b.output, "한%");
+        assert_eq!(b.marker_at, vec![3]);
+        let pieces = b.into_ordered();
+        assert_eq!(joined(&pieces), "한%");
+        assert_eq!(pieces[1], Piece::Marker(Marker::CommandFinished(Some(0))));
+
+        // A marker after a character the read cut in half: before the half,
+        // which is the next read's.
+        let mut f = OscFilter::new();
+        let mut bytes = b"x\x1b]133;C\x07".to_vec();
+        bytes.extend_from_slice(&han[..2]);
+        let r = f.feed(&bytes);
+        assert_eq!(r.output, "x");
+        assert_eq!(r.marker_at, vec![1]);
+
+        // An escape inside a character (no shell sends this): the bytes
+        // still decode as before, and the marker moves past the character.
+        let mut f = OscFilter::new();
+        let mut bytes = han[..2].to_vec();
+        bytes.extend_from_slice(b"\x1b]133;C\x07");
+        bytes.push(han[2]);
+        let r = f.feed(&bytes);
+        assert_eq!(r.output, "한");
+        assert_eq!(r.marker_at, vec![3]);
+        assert_eq!(joined(&r.into_ordered()), "한");
+    }
+
+    #[test]
+    fn invalid_bytes_keep_their_replacement_and_the_marker_its_place() {
+        let mut f = OscFilter::new();
+        let r = f.feed(b"a\xffb\x1b]133;D;2\x07\xfe");
+        let output = r.output.clone();
+        assert_eq!(output, String::from_utf8_lossy(b"a\xffb\xfe"));
+        let pieces = r.into_ordered();
+        assert_eq!(joined(&pieces), output, "forwarded bytes unchanged");
+        assert_eq!(
+            pieces,
+            vec![
+                Piece::Output("a\u{FFFD}b".to_string()),
+                Piece::Marker(Marker::CommandFinished(Some(2))),
+                Piece::Output("\u{FFFD}".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lossy_offsets_follow_the_replacement_characters() {
+        // "a", an invalid byte, "é", a truncated 3-byte start, "z".
+        let bytes = b"a\xff\xc3\xa9\xe4\xb8z";
+        let lossy = String::from_utf8_lossy(bytes);
+        assert_eq!(lossy, "a\u{FFFD}é\u{FFFD}z");
+        // raw 0,1 → before/at the bad byte; 2 → after its U+FFFD (4);
+        // 3 is inside "é" → after it (6); 5 inside the truncated run → after
+        // its U+FFFD (9); 7 (the end) → 10.
+        assert_eq!(lossy_offsets(bytes, &[0, 1, 2, 3, 5, 7]), vec![0, 1, 4, 6, 9, 10]);
+        for o in lossy_offsets(bytes, &[0, 1, 2, 3, 4, 5, 6, 7]) {
+            assert!(lossy.is_char_boundary(o), "{o}");
+        }
+    }
+
+    #[test]
+    fn a_long_mixed_stream_cut_anywhere_joins_to_the_same_output() {
+        // Every cut of a stream with Korean, emoji, our markers and a title:
+        // the ordered pieces join to what `output` was, marker by marker.
+        let text = "가\x1b]133;C\x07😀 out\r\n\x1b]0;제목\x07\x1b]133;D;0\x07\x1b]7;file:///tmp\x07한 % ";
+        let bytes = text.as_bytes();
+        for cut in 1..bytes.len() {
+            let mut f = OscFilter::new();
+            let a = f.feed(&bytes[..cut]);
+            let b = f.feed(&bytes[cut..]);
+            let mut out = String::new();
+            let mut markers = Vec::new();
+            for r in [a, b] {
+                let whole = r.output.clone();
+                let pieces = r.into_ordered();
+                assert_eq!(joined(&pieces), whole, "cut {cut}");
+                for p in pieces {
+                    match p {
+                        Piece::Output(t) => out.push_str(&t),
+                        Piece::Marker(m) => markers.push((m, out.len())),
+                    }
+                }
+            }
+            assert_eq!(out, "가😀 out\r\n\x1b]0;제목\x07한 % ", "cut {cut}");
+            assert_eq!(
+                markers,
+                vec![
+                    (Marker::CommandExecuted, 3),
+                    (Marker::Title("제목".to_string()), 24),
+                    (Marker::CommandFinished(Some(0)), 24),
+                    (Marker::WorkingDirectory("/tmp".to_string()), 24),
+                ],
+                "cut {cut}"
+            );
+        }
     }
 }

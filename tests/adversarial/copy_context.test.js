@@ -297,7 +297,8 @@ describe('Copy Context: the last N lines of a terminal, plain, secrets masked', 
 
   test('CC-08: wired — the registry registers its lookup; the chip menu and the TERMINALS row offer it after Copy Path, with the setting', () => {
     const registry = source('src/components/terminal/terminalRegistry.js');
-    assert.match(registry, /import \{ setContextTerminalSource \} from '\.\.\/\.\.\/lib\/copyContext\.js';/);
+    // The same import also brings Send to Agent's after-output lookup (review A-R1, send_to_agent.test.js STA-17).
+    assert.match(registry, /import \{ setContextAfterOutputSource, setContextTerminalSource \} from '\.\.\/\.\.\/lib\/copyContext\.js';/);
     assert.match(registry, /\nsetContextTerminalSource\(existingTerminal\);/, 'read synchronously from the registry, not after output');
 
     for (const file of ['src/components/terminal/TerminalSplitContainer.jsx', 'src/components/terminal/TerminalsPanel.jsx']) {

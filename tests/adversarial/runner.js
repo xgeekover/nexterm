@@ -217,6 +217,14 @@ import './elapsed_time.test.js';
 import './toast_store.test.js';
 // Copy feedback (bundle 3, U6-F3): Copy Path, Copy Context and Copy Session ID say what they did in a toast; CF-99 tears down.
 import './copy_feedback.test.js';
+// The kitty keyboard protocol (bundle 4, A1): flag 1 only, its stacks, the guards, and the keys beside modifyOtherKeys.
+import './kitty_keyboard.test.js';
+// A read-only terminal (bundle 4, A3): its gate on xterm's user-input signal, the replies that pass, the programmatic refusals.
+import './read_only.test.js';
+// Copy Last Command Output (bundle 4, A2): the tracker on OSC 133 C/D markers, the range, the reasons, the toasts; LCO-99 tears down.
+import './last_command_output.test.js';
+// Send to Agent (bundle 4, A4): the @ reference, the agent terminal it goes to, the paste and every refusal.
+import './send_to_agent.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -157,11 +157,12 @@ const installed = new WeakMap();
 
 /** The DOM side, as an xterm addon so it is disposed with its terminal. */
 class TerminalRightClickAddon {
-  constructor(container, { behavior, isFindOpen, read }) {
+  constructor(container, { behavior, isFindOpen, read, refuse = () => false }) {
     this._container = container;
     this._behavior = behavior;
     this._isFindOpen = isFindOpen;
     this._read = read;
+    this._refuse = refuse;
     this._term = null;
     /**
      * The handled press whose other events are still to come: its release,
@@ -296,6 +297,9 @@ class TerminalRightClickAddon {
    */
   _paste(returnFocusTo = null) {
     const term = this._term;
+    // A terminal that takes no paste now (read-only): the clipboard is not
+    // even read, and `refuse` has said why.
+    if (this._guard('refuse', () => Boolean(this._refuse?.()))) return;
     let reading;
     try {
       reading = Promise.resolve(this._read());
@@ -352,12 +356,14 @@ class TerminalRightClickAddon {
  * setting takes effect at once; absent, the setting is this platform's
  * default. `isFindOpen` says whether the find bar is open over this terminal
  * — its highlighted match is a selection, but not one to copy. `read` reads
- * the clipboard; the suites hand in their own.
+ * the clipboard; the suites hand in their own. `refuse()` says whether the
+ * terminal takes no paste now (read-only) and says why itself: a right-click
+ * paste then reads nothing and pastes nothing; its copy still works.
  */
 export function installTerminalRightClick(
   term,
   container,
-  { settings = null, platform = currentPlatform(), isFindOpen = () => false, read = readClipboard } = {}
+  { settings = null, platform = currentPlatform(), isFindOpen = () => false, read = readClipboard, refuse = () => false } = {}
 ) {
   if (!term || !container) return null;
   const existing = installed.get(term);
@@ -373,7 +379,7 @@ export function installTerminalRightClick(
       return false;
     }
   };
-  const addon = new TerminalRightClickAddon(container, { behavior, isFindOpen: findOpen, read });
+  const addon = new TerminalRightClickAddon(container, { behavior, isFindOpen: findOpen, read, refuse });
   if (typeof term.loadAddon === 'function') term.loadAddon(addon);
   else addon.activate(term);
   installed.set(term, addon);

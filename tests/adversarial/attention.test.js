@@ -422,7 +422,8 @@ describe('Attention: the store marks what has been seen', () => {
     // and `onData` also carries xterm's own replies, which must not clear a
     // ring. So writes to the shell are not read.
     const store = readFileSync(new URL('../../src/stores/terminalStore.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-    const writeRaw = store.slice(store.indexOf('    writeRaw: async (tabId, data) => {'), store.indexOf('    restartShell: async (tabId) => {'));
+    // `{ automatic }` since bundle 4 (A3, read-only): what passes a read-only terminal.
+    const writeRaw = store.slice(store.indexOf('    writeRaw: async (tabId, data, { automatic = false } = {}) => {'), store.indexOf('    restartShell: async (tabId) => {'));
     assert.ok(writeRaw.length > 100, 'setup: found writeRaw');
     assert.doesNotMatch(writeRaw, /markTabRead|markRead|notifications/);
   });

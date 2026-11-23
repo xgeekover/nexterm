@@ -353,6 +353,10 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // commands are; menu.rs has no ⌘⇧T.
       'reopen-closed-terminal',
       'run-project-command',
+      // Send Selection / Send File to Agent (bundle 4, A4): palette commands
+      // that the editor's context menu also carries; menu.rs has no entry.
+      'send-file-to-agent',
+      'send-selection-to-agent',
       'stop-trusting-project-commands',
       'swap-pane',
       // The Ctrl+Tab switcher (Bundle 2, A5-3): keyboard-only, as the tab
@@ -363,6 +367,10 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // commands, as the split polish pair are; menu.rs has no entry for them.
       'terminal-next-prompt',
       'terminal-previous-prompt',
+      // Terminal: Toggle Read-Only (bundle 4, A3): a palette command, as the
+      // prompt commands are, also in the tab chip and TERMINALS row menus;
+      // menu.rs has no entry for it.
+      'toggle-read-only',
     ]);
   });
 
@@ -454,6 +462,13 @@ describe('Keybinding table: the menu and the keyboard cannot drift apart', () =>
       // macOS a program that turned on modifyOtherKeys (OpenCode) no longer
       // gets its `CSI 27;6;13~` — it binds nothing to it. KB-16 holds that.
       'toggle-pane-zoom',
+      // Terminal: Toggle Read-Only (bundle 4, A3). No chord of its own, so
+      // nothing is taken from the shell as shipped. Claimed so that a chord
+      // the user gives it turns read-only OFF from inside the read-only
+      // terminal itself, where xterm would drop the key (RO-15). As for
+      // everything on this list, a bare Ctrl+letter chosen for it is then
+      // the app's (SW-10 names it in Settings).
+      'toggle-read-only',
       'toggle-secondary',
       'toggle-sidebar',
       // Punctuation and a digit — no control byte is given up for these.

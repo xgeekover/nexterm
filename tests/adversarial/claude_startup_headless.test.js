@@ -38,6 +38,7 @@ import { describe, test, assert, skip } from '../e2e/harness/testFramework.js';
 import { HEADLESS_AVAILABLE, BrowserUnavailable, openHarness } from './headless_browser.js';
 import { activateGraphemeWidths, installXtVersionReply } from '../../src/lib/terminalCompat.js';
 import { installModifyOtherKeys } from '../../src/lib/modifyOtherKeys.js';
+import { installKittyKeyboard } from '../../src/lib/kittyKeyboard.js';
 import { installFocusReports } from '../../src/lib/focusReport.js';
 import { installProgramNotifications } from '../../src/lib/programNotifications.js';
 import { installTerminalProgress } from '../../src/lib/terminalProgress.js';
@@ -58,21 +59,25 @@ const XTVERSION = '\x1bP>|xterm.js(6.0.0)\x1b\\';
 const DA1 = '\x1b[?1;2c';
 const DECRQM_2026 = '\x1b[?2026;2$y';
 const DECRQM_1016 = '\x1b[?1016;2$y';
+// The kitty keyboard query (`CSI ? u`), answered since bundle 4 (A1) with
+// the flags of the screen it is asked on: none pushed (src/lib/kittyKeyboard.js).
+const KITTY_FLAGS = '\x1b[?0u';
 
 /**
  * What a terminal answers each recorded chunk with, by its index in the
  * recording: the first batch (#2 – #4, answered in the app), the second
  * (#8 – #10, never answered there) and the third (#18). Focus reports only
- * where the terminal has the focus — not in Node.
+ * where the terminal has the focus — not in Node. The kitty keyboard query in
+ * #3 and #18 went unanswered in the recording; NexTerm answers it now.
  */
 const ANSWERS = {
   2: [FOCUS_IN],
-  3: [XTVERSION],
+  3: [XTVERSION, KITTY_FLAGS],
   4: [DA1],
   8: [DECRQM_2026],
   10: [DECRQM_1016, DA1],
   12: [FOCUS_IN],
-  18: [XTVERSION, DA1],
+  18: [XTVERSION, KITTY_FLAGS, DA1],
 };
 const answersWithout = (drop) =>
   Object.fromEntries(
@@ -112,6 +117,7 @@ function nextermParser() {
   activateGraphemeWidths(term, loadGraphemesAddonAsInBrowser().UnicodeGraphemesAddon);
   installXtVersionReply(term);
   installModifyOtherKeys(term);
+  installKittyKeyboard(term, { enabled: () => true });
   installFocusReports(term);
   installProgramNotifications(term, { enabled: () => true, keptAt: () => null, onNotify: () => {} });
   installTerminalProgress(term, { enabled: () => true, onProgress: () => {} });

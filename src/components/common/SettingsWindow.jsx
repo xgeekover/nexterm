@@ -678,7 +678,7 @@ export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake =
             settingKey: 'terminal.integrated.macEditingKeys',
             title: 'macOS Text-Editing Keys',
             description:
-              '⌘← and ⌘→ go to the start and the end of the line, ⌘Backspace deletes to its start and ⌘Delete (Fn+Backspace) to its end — sent as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K, which shells and most line editors read that way. Only on the normal screen: in a full-screen program such as vim, htop or less the keys are its own, as before, and so they are once a program turns modifyOtherKeys on. While a password prompt is up only ⌘Backspace works, clearing what was typed; the other three would type a character into the password. Disabled: the keys are the terminal\'s, as before.',
+              '⌘← and ⌘→ go to the start and the end of the line, ⌘Backspace deletes to its start and ⌘Delete (Fn+Backspace) to its end — sent as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K, which shells and most line editors read that way. Only on the normal screen: in a full-screen program such as vim, htop or less the keys are its own, as before, and so they are once a program turns modifyOtherKeys or the kitty keyboard protocol on. While a password prompt is up only ⌘Backspace works, clearing what was typed; the other three would type a character into the password. Disabled: the keys are the terminal\'s, as before.',
             control: 'checkbox',
           },
           {
@@ -693,6 +693,17 @@ export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake =
           },
         ]
       : []),
+    // ---- The kitty keyboard protocol (bundle 4, A1), on every platform ----
+    {
+      id: 'terminalKittyKeyboard',
+      section: 'terminal',
+      key: 'terminalKittyKeyboard',
+      settingKey: 'terminal.integrated.kittyKeyboardProtocol',
+      title: 'Kitty Keyboard Protocol',
+      description:
+        'Lets a program that asks for the kitty keyboard protocol tell keys apart that otherwise send the same bytes: Shift+Enter, Ctrl+Enter and Alt+Enter from Enter, Esc from the start of an escape sequence, Ctrl and Alt chords from control characters. Claude Code and OpenCode ask whether the terminal has it as they start; which keys they then read this way is up to them. Only the protocol\'s first level (disambiguate) is implemented, and NexTerm tells the program so. Plain Enter, Tab and Backspace are sent as before, and so is every key while a password prompt is up, while an input method such as Korean is composing, and to a program that did not ask. The keys go back to normal when a program leaves its full-screen view, at the next shell prompt (where the shell marks its prompts), when a new shell starts in the terminal, and on reset. Disabled: NexTerm does not answer the question, and keys are sent as before.',
+      control: 'checkbox',
+    },
     // ---- OSC 52 (bundle 2, A8): a program putting text on the clipboard ----
     {
       id: 'terminalOsc52Write',
@@ -990,6 +1001,7 @@ export function SettingsWindow() {
   const terminalMacEditingKeys = useSettingsStore((s) => s.terminalMacEditingKeys);
   const terminalOptionAsMeta = useSettingsStore((s) => s.terminalOptionAsMeta);
   const terminalOsc52Write = useSettingsStore((s) => s.terminalOsc52Write);
+  const terminalKittyKeyboard = useSettingsStore((s) => s.terminalKittyKeyboard);
   const terminalRightClick = useSettingsStore((s) => s.terminalRightClick);
   const terminalMultiLinePasteWarning = useSettingsStore((s) => s.terminalMultiLinePasteWarning);
   const terminalAutoReplyBatchJob = useSettingsStore((s) => s.terminalAutoReplyBatchJob);
@@ -1043,6 +1055,7 @@ export function SettingsWindow() {
     terminalMouseReporting,
     terminalMacEditingKeys,
     terminalOptionAsMeta,
+    terminalKittyKeyboard,
     terminalOsc52Write,
     terminalRightClick,
     terminalMultiLinePasteWarning,

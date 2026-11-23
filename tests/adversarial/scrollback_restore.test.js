@@ -424,7 +424,8 @@ describe('Scrollback restore: once, and only what the start brought back', () =>
     assert.match(create.slice(create.indexOf('entry = {')), /^\s+scrollbackWatch,$/m, 'kept on the entry');
     const clear = registrySource.slice(registrySource.indexOf('export function clearTerminal(tabId) {'));
     // The prompt marks' clear step sits between the two (prompt_marks.test.js, PRM-08).
-    assert.match(clear, /entry\.term\.clear\(\);\s*(?:entry\.promptMarks\?\.afterClear\(promptMarked\);\s*)?noteCleared\(entry\);/);
+    // Bundle 4, A2: Copy Last Command Output's markers go with the clear (`entry.lastOutput?.cleared()`), still before the save.
+    assert.match(clear, /entry\.term\.clear\(\);\s*(?:entry\.promptMarks\?\.afterClear\(promptMarked\);\s*)?(?:\/\/[^\n]*\n\s*)*entry\.lastOutput\?\.cleared\(\);\s*noteCleared\(entry\);/);
     // Terminal: Clear is saved at once every time — never through the clears' 2 s gap.
     assert.match(registrySource, /function noteCleared\(entry\) \{\s*scrollbackSaver\.saveNow\(entry\.tabId\);\s*\}/);
     const dispose = registrySource.slice(registrySource.indexOf('export function disposeTerminal('));
@@ -463,6 +464,8 @@ function compileRegistryKit({ listen, saver }) {
     cut('function noteCleared(entry) {'),
     cut('export function writeNotice(tabId, message) {'),
     cut('function bindSession(entry, sessionId) {'),
+    // Bundle 4, A1: bindSession empties the kitty keyboard stacks for the new shell; the registry's own function, copied.
+    cut('function resetKittyKeyboard(entry) {'),
     cut('setTerminalOutputBarrier((tabId, fn) => {', '\n});\n'),
     'return { afterOutputSoFar, clearTerminal, writeNotice, bindSession };',
   ].join('\n');

@@ -36,12 +36,14 @@ import {
   Pencil,
   Copy,
   ClipboardCopy,
+  ClipboardList,
   Files,
   LayoutGrid,
   Sparkles,
   Maximize2,
   Minimize2,
   ArrowLeftRight,
+  KeyboardOff,
 } from 'lucide-react';
 import {
   useTerminalStore,
@@ -83,9 +85,13 @@ import { unreadCountByTab, unreadIn, unreadLabel } from '../../lib/attention.js'
 import { useShortcuts } from '../../hooks/useShortcuts.js';
 import { NO_DIRECTORY_REASON, NO_DIRECTORY_YET, PATH_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { copyContextItem } from '../../lib/copyContext.js';
+import { lastCommandOutputItem } from '../../lib/lastCommandOutput.js';
+import { contextTerminalOf } from '../../lib/copyContext.js';
+import { READ_ONLY_LABEL, readOnlyItem } from '../../lib/readOnly.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
 import { pathDropLabel } from '../../lib/terminalFileDrop.js';
-import { ControlledBadge, LockBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
+import { ControlledBadge, LockBadge, ReadOnlyBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
+import { ReadOnlyStrip } from './ReadOnlyStrip.jsx';
 import { headerCloseGestures, stripShown, useRefocusAfterMenu, useStripOverlay } from './stripReveal.js';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import { displayTitle } from '../../lib/tabTitle.js';
@@ -918,6 +924,10 @@ function TerminalPane({
   // on their chips (the badge draws itself): booleans, compared one by one.
   const lockedByTab = useTerminalStore(useShallow((s) => node.tabIds.map((id) => Boolean(s.secretInput?.[id]))));
   const lockedOf = (tabId) => lockedByTab[node.tabIds.indexOf(tabId)] ?? false;
+  // Which of them are read-only (src/lib/readOnly.js), for the same words and
+  // the chip menu's Turn On / Turn Off Read-Only.
+  const readOnlyByTab = useTerminalStore(useShallow((s) => node.tabIds.map((id) => Boolean(s.readOnly?.[id]))));
+  const readOnlyOf = (tabId) => readOnlyByTab[node.tabIds.indexOf(tabId)] ?? false;
 
   /** What "Swap With" in the pane menu offers from this pane, read as the menu opens. */
   const swapMenuFor = () => {
@@ -1011,6 +1021,7 @@ function TerminalPane({
           const status = [
             activityLabel(tab),
             lockedOf(tab.id) ? TYPING_HIDDEN_LABEL : '',
+            readOnlyOf(tab.id) ? READ_ONLY_LABEL : '',
             unread > 0 ? unreadLabel(unread) : '',
           ]
             .filter(Boolean)
@@ -1141,6 +1152,9 @@ function TerminalPane({
               {/* Over the chip's own top-left corner, taking no room: a lock
                   coming must not move the ✕ or the "+" under a pointer. */}
               <LockBadge tabId={tab.id} />
+              {/* Under the lock, on the chip's bottom-left corner, also
+                  taking no room: the terminal is read-only (bundle 4, A3). */}
+              <ReadOnlyBadge tabId={tab.id} />
               {/* Over the top edge beside the lock, also taking no room:
                   another terminal's program just typed here, read it or
                   focused it (stage 7, spec D6), and it says which. */}
@@ -1316,6 +1330,19 @@ function TerminalPane({
                 // Copy Context: the last N lines as plain text, secrets masked,
                 // read and copied inside this click (src/lib/copyContext.js).
                 copyContextItem({ tabId: chipMenu.tabId, lines: copyContextLines, icon: ClipboardCopy }),
+                // Copy Last Command Output: what the last command printed,
+                // masked, copied inside this click; off with the reason
+                // otherwise (bundle 4, A2; src/lib/lastCommandOutput.js).
+                lastCommandOutputItem({ tabId: chipMenu.tabId, icon: ClipboardList }),
+                // Turn On / Turn Off Read-Only (src/lib/readOnly.js); off for
+                // a terminal never shown, which has no input to gate yet.
+                readOnlyItem({
+                  tabId: chipMenu.tabId,
+                  readOnly: readOnlyOf(chipMenu.tabId),
+                  shown: contextTerminalOf(chipMenu.tabId) !== null,
+                  toggle: (id) => useTerminalStore.getState().toggleReadOnly(id),
+                  icon: KeyboardOff,
+                }),
                 // Where the opened strip of a hidden one (which has no ✕)
                 // lets a terminal be closed: a menu, two deliberate clicks.
                 { type: 'separator', key: 'close-sep' },
@@ -1427,6 +1454,9 @@ function TerminalPane({
               onListSessions={() => listAgentSessions(boundTab.id)}
               onResumeWith={(choice) => resumeAgent(boundTab.id, choice)}
             />
+            {/* A row of its own too, for the same reason: the terminal is
+                read-only, with Turn Off (bundle 4, A3). */}
+            <ReadOnlyStrip tabId={boundTab.id} />
             <div className="relative flex-1 min-h-0">
               <TerminalView tabId={boundTab.id} active={isActivePane} />
             </div>

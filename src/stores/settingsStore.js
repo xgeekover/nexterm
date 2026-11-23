@@ -115,7 +115,8 @@ export const SETTINGS_DEFAULTS = {
    * line, ⌘Backspace deletes to its start and ⌘Forward-Delete to its end, sent
    * as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K. On the normal screen only — a
    * full-screen program keeps the keys as xterm sends them — and not once the
-   * program has turned modifyOtherKeys on. While a password prompt is up only
+   * program has turned modifyOtherKeys on or pushed a kitty keyboard flag.
+   * While a password prompt is up only
    * ⌘Backspace is sent. Off: every one of them is xterm's, as before. The
    * Settings row is shown on macOS only. See src/lib/macEditingKeys.js.
    */
@@ -130,6 +131,18 @@ export const SETTINGS_DEFAULTS = {
    * row is shown on macOS only. See src/lib/optionAsMeta.js.
    */
   terminalOptionAsMeta: false,
+  /**
+   * Bundle 4, A1: the kitty keyboard protocol, its first flag
+   * ("disambiguate") only. A program that pushes it gets Shift+Enter,
+   * Ctrl+Enter, Esc and Ctrl/Alt chords as keys of their own (`CSI 13;2u`,
+   * `CSI 27u`, `CSI 99;5u`), and `CSI ? u` is answered with the flags NexTerm
+   * applies. Plain Enter, Tab and Backspace are unchanged, as is every key
+   * for a program that does not ask. On by default; read at each sequence
+   * and each key, so off takes effect at once: the query goes unanswered and
+   * any flags held are dropped, which is how NexTerm was before. See
+   * src/lib/kittyKeyboard.js.
+   */
+  terminalKittyKeyboard: true,
   /**
    * Bundle 2, A8: whether a program in a terminal may put text on the
    * clipboard with OSC 52 (tmux, vim, a shell over ssh). Off by default:

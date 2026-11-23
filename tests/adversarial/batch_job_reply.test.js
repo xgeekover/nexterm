@@ -536,7 +536,8 @@ describe('cmd batch-job reply: through the store, the bus and real xterm', () =>
 
   test('BJ-13: wired — every key goes through `writeRaw`, every chunk through `writeOutput`', () => {
     const view = read('../../src/components/terminal/TerminalView.jsx');
-    assert.match(view, /onData: \(data\) => writeRaw\(tabId, data\),/, 'the keyboard types through the store');
+    // With the read-only gate's options since bundle 4 (A3): the terminal's own replies are marked AUTOMATIC.
+    assert.match(view, /onData: \(data, options\) => writeRaw\(tabId, data, options\),/, 'the keyboard types through the store');
     const registry = read('../../src/components/terminal/terminalRegistry.js');
     // Every chunk, kept or live: kept ones are only marked as history around
     // the same write (TP-43).
@@ -548,7 +549,9 @@ describe('cmd batch-job reply: through the store, the bus and real xterm', () =>
     assert.match(registry, /const waiting = useTerminalStore\.getState\(\)\.batchJobOutputArrived\?\.\(tabId\);/, 'judged as each chunk arrives');
     assert.match(registry, /setBatchJobScreenReader\(\(tabId\) => \{\s*const entry = instances\.get\(tabId\);\s*return entry && !entry\.disposed \? screenRow\(entry\.term\) : null;/);
     const store = read('../../src/stores/terminalStore.js');
-    const writeRaw = store.slice(store.indexOf('writeRaw: async (tabId, data) => {'));
+    // The signature gained `{ automatic }` in bundle 4 (A3, read-only: only the
+    // terminal's own replies pass a read-only terminal); the body is unchanged.
+    const writeRaw = store.slice(store.indexOf('writeRaw: async (tabId, data, { automatic = false } = {}) => {'));
     assert.match(writeRaw, /followTyping\(tab, data\);\s*batchJobReplies\.noteInput\(targetId, data\);/);
   });
 });

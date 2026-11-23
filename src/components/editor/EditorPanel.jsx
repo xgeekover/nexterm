@@ -17,6 +17,7 @@ import {
   trackEditor,
   watchEditorModels,
 } from '../../lib/editorModels.js';
+import { addAgentEditorActions, trackAgentEditor } from '../../lib/sendToAgent.js';
 
 // The pane around the editor — its strip, breadcrumb, frame and drop target —
 // is EditorPane.jsx, drawn by the workbench (editor placement, sibling C).
@@ -211,6 +212,11 @@ export function EditorBody({ activeTab, paneId = null }) {
       onMount={(editor) => {
         holdEditor(editorRef, editor);
         trackEditor(editor);
+        // Send to Agent (bundle 4, A4): its context menu entries, and the
+        // selection the palette's Send Selection to Agent reads.
+        const shownPath = () => shownTabRef.current?.filePath ?? null;
+        trackAgentEditor(editor, shownPath);
+        addAgentEditorActions(editor, shownPath);
         const tab = shownTabRef.current;
         showFile(editor, tab, tab?.language);
         applyPendingReveal(editor, tab?.filePath);

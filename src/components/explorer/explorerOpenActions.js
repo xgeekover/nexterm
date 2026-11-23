@@ -142,3 +142,23 @@ export function buildOpenActionItems(target, deps) {
   }
   return items;
 }
+
+/**
+ * Send to Agent (bundle 4, A4) on a file or a folder row: an `@` reference
+ * to it, as it is on disk, typed into the terminal running Claude Code or
+ * OpenCode (src/lib/sendToAgent.js). Null for the empty area, which names no
+ * file. Greyed out with `problemOf(path)`'s reason — no agent terminal, a
+ * path no reference can hold.
+ */
+export function sendToAgentItem(target, { label, problemOf, send }) {
+  if (target?.type !== 'file' && target?.type !== 'folder') return null;
+  const path = target.path;
+  const problem = problemOf(path);
+  return {
+    key: 'send-to-agent',
+    label,
+    disabled: problem !== null,
+    disabledReason: problem ?? undefined,
+    onSelect: () => send(path),
+  };
+}
