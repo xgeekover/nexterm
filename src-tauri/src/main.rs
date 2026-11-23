@@ -214,6 +214,7 @@ fn main() {
             commands::pty::pty_list_sessions,
             commands::pty::pty_input_hidden,
             commands::pty::pty_foreground_owner,
+            commands::pty::pty_resource_usage,
             commands::pty::pty_ack,
             commands::pty::pty_flow_reset,
             commands::fs::fs_get_root,

@@ -6,7 +6,7 @@
 //! it reads the same in cmd, PowerShell and any other console.
 
 /// The topics, in the order the index lists them (the order of the help).
-pub const TOPICS: &[&str] = &["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen"];
+pub const TOPICS: &[&str] = &["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen", "wait"];
 
 const INDEX: &str = "\
 nexterm-cli guide - how an agent or a script uses nexterm-cli
@@ -20,10 +20,11 @@ Topics:
   set-progress  how far along a long job is, on the tab
   new-split     open a terminal beside this one for a server or a watcher
   read-screen   read what a terminal shows, and type into one with send
+  wait          wait for another terminal to be idle, blocked or exited
 
 In short: set-status (and set-progress) while you work, notify when the
-user is needed, set-title once per task. Clear what you set when you are
-done.
+user is needed, set-title once per task, wait for work you handed to a
+split. Clear what you set when you are done.
 
 nexterm-cli works only inside a NexTerm terminal, which sets
 NEXTERM_CONTROL and NEXTERM_CONTROL_TOKEN. Check its exit status:
@@ -36,6 +37,10 @@ NEXTERM_CONTROL and NEXTERM_CONTROL_TOKEN. Check its exit status:
      user if it matters.
   5  NexTerm is busy, not running, or its control is turned off: try
      again later, or skip the call
+  6  wait timed out: wait again, or tell the user
+  7  wait found the terminal blocked on a person (a question, a
+     permission prompt): tell the user
+  8  wait: the terminal exited or was closed before it was idle
 
 This guide needs no NexTerm and changes nothing. The exact flags of a
 command: nexterm-cli help <command>.
@@ -188,6 +193,54 @@ Control Log lists it.
 Exact flags: nexterm-cli help read-screen, nexterm-cli help send
 "
         }
+        "wait" => {
+            "\
+nexterm-cli guide wait - wait until another terminal is idle or has exited
+
+Use wait when you handed work to another terminal (Claude Code in a split
+you opened with new-split, say) and need to know it is done before you go
+on. It asks NexTerm for the list once a second and never reads the
+screen, so it needs only \"Let programs in terminals control NexTerm\",
+like list. Ctrl+C stops it.
+
+  nexterm-cli wait child:tab-term-7
+  nexterm-cli wait child:tab-term-7 --timeout 30m
+  nexterm-cli wait tab-term-3 --for exit --timeout 90
+  nexterm-cli --json wait child:tab-term-7 --timeout 0
+
+TARGET is a tab id from list, or child:<id> for a split this terminal
+opened (one it did not open is exit 4); never self (exit 2).
+
+  0  idle: it stayed settled (idle, nothing going on, its last command
+     failed, or its agent idle with a notification unread) for 1s after
+     it was seen busy, or for 3.5s if it never was. With --for exit:
+     its shell has exited or it was closed.
+  6  timed out: --timeout passed first (default 10m, at most 24h, 0 for
+     no limit). Wait again, or tell the user.
+  7  blocked: an unread notification while its agent is not idle, such
+     as a question or a permission prompt only a person can answer. Tell
+     the user.
+  8  it exited or was closed before it was idle (--for idle only).
+
+It prints one line, on stdout for 0 and on stderr for 6, 7 and 8. --json
+prints one object on stdout instead: target, outcome (idle, exited,
+closed, blocked, timed_out), status and waited_ms.
+
+What it cannot see. Blocked comes only from what NexTerm hears: an unread
+notification, and Claude Code's working or idle title. A permission
+prompt is a 7 only when a notification reached NexTerm (Claude Code's
+Kitty notifications, OSC 99, or a PermissionRequest hook that runs
+nexterm-cli notify) while its title does not say idle. With none, it
+reads as idle (exit 0) if the title says idle, or as busy until the
+timeout (exit 6). Another agent or a plain shell reports no activity, so
+any unread notification there counts as blocked. A split new-split just
+opened looks settled until its command shows as started: if that takes
+over 3.5s, wait calls it idle. list gives at most 200 terminals: one past
+them looks absent (exit 4 at first, closed later).
+
+Exact flags: nexterm-cli help wait
+"
+        }
         _ => return None,
     })
 }
@@ -199,12 +252,30 @@ pub fn text(name: Option<&str>) -> Result<&'static str, String> {
         None => Ok(INDEX),
         Some(name) => topic(name).ok_or_else(|| {
             format!(
-                "nexterm-cli: unknown guide topic '{}'\nTopics: {}\nRun 'nexterm-cli guide' for the index.\n",
+                "nexterm-cli: unknown guide topic '{}'\n{}\nRun 'nexterm-cli guide' for the index.\n",
                 crate::output::one_line(name),
-                TOPICS.join(", ")
+                topic_list()
             )
         }),
     }
+}
+
+/// `Topics: notify, set-status, ...`, wrapped at 80 columns with each
+/// further line lined up under the first topic.
+fn topic_list() -> String {
+    let mut out = String::from("Topics:");
+    let mut width = out.len();
+    for (i, t) in TOPICS.iter().enumerate() {
+        let word = if i + 1 < TOPICS.len() { format!("{t},") } else { (*t).to_owned() };
+        if width + 1 + word.len() > 80 {
+            out.push_str("\n       ");
+            width = 7;
+        }
+        out.push(' ');
+        out.push_str(&word);
+        width += 1 + word.len();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -229,7 +300,7 @@ mod tests {
             assert!(body.contains(&format!("nexterm-cli help {t}")), "{t}: {body}");
             assert!(body.ends_with('\n') && !body.ends_with("\n\n"), "{t}");
         }
-        assert_eq!(TOPICS, ["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen"]);
+        assert_eq!(TOPICS, ["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen", "wait"]);
         assert!(INDEX.starts_with("nexterm-cli guide - "), "{INDEX}");
         assert!(INDEX.contains("Usage: nexterm-cli guide [topic]\n"));
         assert!(INDEX.contains("nexterm-cli help <command>"));
@@ -264,9 +335,15 @@ mod tests {
         assert_eq!(
             e,
             "nexterm-cli: unknown guide topic 'frob'\n\
-             Topics: notify, set-status, set-title, set-progress, new-split, read-screen\n\
+             Topics: notify, set-status, set-title, set-progress, new-split, read-screen,\n        \
+             wait\n\
              Run 'nexterm-cli guide' for the index.\n"
         );
+        // Wrapped at 80 columns: every topic once, in order, nothing else.
+        let list = &e[e.find("Topics: ").unwrap() + "Topics: ".len()..e.find("\nRun 'nexterm-cli guide'").unwrap()];
+        let named: Vec<&str> = list.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()).collect();
+        assert_eq!(named, TOPICS, "{e}");
+        assert!(e.lines().all(|l| l.len() <= 80), "{e}");
         // A command that is not a topic is still unknown here; so is a case
         // that differs, and a name with a line break stays on one line.
         for name in ["list", "send", "focus", "Notify", "", "set-status "] {
@@ -318,7 +395,7 @@ mod tests {
                 }
             }
         }
-        assert!(seen >= 16, "{seen} examples");
+        assert!(seen >= 22, "{seen} examples");
         assert_eq!(words(r#"send --to x "npm test" --keys Enter"#), ["send", "--to", "x", "npm test", "--keys", "Enter"]);
     }
 
@@ -395,10 +472,102 @@ mod tests {
             ("set-progress", "Use set-progress for a job that takes a while"),
             ("new-split", "Use new-split for something that runs on its own"),
             ("read-screen", "Use read-screen to see what a terminal shows"),
+            ("wait", "Use wait when you handed work to another terminal"),
         ] {
             assert!(text(Some(t)).unwrap().contains(when), "{t}");
         }
         assert!(text(Some("notify")).unwrap().contains("rate-limited: exit 5"));
         assert!(INDEX.contains("  3  not inside a NexTerm terminal: skip the call"));
+    }
+
+    #[test]
+    fn the_readme_describes_wait_its_exit_codes_and_every_guide_topic() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+        // Words only: a line break, or a list item's indent, is one space.
+        let control = control_section(&readme).split_whitespace().collect::<Vec<_>>().join(" ");
+        let topics = &control[control.find("`nexterm-cli guide <topic>` prints one of").expect("README: the guide's topics")..];
+        let topics = &topics[..topics.find("; another word exits 2").expect("README: the guide's topics end")];
+        for t in TOPICS {
+            assert!(topics.contains(&format!("`{t}`")), "README: guide topic {t}");
+        }
+        for said in [
+            "`wait` adds three of its own: 6 when it timed out, 7 when the terminal is blocked on a person, and 8 when the terminal exited or was closed before it was idle",
+            "**Waiting for another terminal.** `nexterm-cli wait TARGET`",
+            "for 1 second after it was seen busy",
+            "or for 3.5 seconds if it was never seen busy",
+            "at most `24h`, `0` for no limit; 10 minutes by default",
+            "**Blocked is only what NexTerm hears**",
+            "**`list` gives at most 200 terminals**",
+            "**H12** — Claude Code in a child split",
+            "(AC-B2-H1;",
+            "**H13** — on Windows, `wait` works from cmd, from PowerShell and from WSL",
+            "(AC-B2-H2;",
+        ] {
+            assert!(control.contains(said), "README: {said}");
+        }
+    }
+
+    #[test]
+    fn wait_says_what_each_outcome_means_with_wait_s_own_numbers() {
+        use crate::args::{Command, Until, DEFAULT_WAIT_TIMEOUT, MAX_WAIT_TIMEOUT};
+        use crate::exit;
+        use crate::wait::{SETTLE, START_GRACE};
+        let body = text(Some("wait")).unwrap();
+        // The times are wait.rs's and args.rs's: change one, change the guide.
+        assert!(body.contains(&format!("for {}s after\n", SETTLE.as_secs_f64())), "{body}");
+        assert!(body.contains(&format!("or for {}s if it never was", START_GRACE.as_secs_f64())), "{body}");
+        assert!(body.contains(&format!("(default {}m, at most {}h, 0 for\n", DEFAULT_WAIT_TIMEOUT.as_secs() / 60, MAX_WAIT_TIMEOUT.as_secs() / 3600)), "{body}");
+        // The exit codes are the crate's, each with what it means.
+        for (code, means) in [
+            (exit::OK, "idle: it stayed settled"),
+            (exit::TIMED_OUT, "timed out: --timeout passed first"),
+            (exit::BLOCKED, "blocked: an unread notification while its agent is not idle"),
+            (exit::ENDED, "it exited or was closed before it was idle (--for idle only)"),
+        ] {
+            assert!(body.contains(&format!("\n  {code}  {means}")), "{code}: {body}");
+        }
+        assert!(body.contains("With --for exit:\n     its shell has exited or it was closed."), "{body}");
+        assert!(body.contains("never self (exit 2)"), "{body}");
+        assert!(body.contains("(one it did not open is exit 4)"), "{body}");
+        assert!(body.contains("one line, on stdout for 0 and on stderr for 6, 7 and 8"), "{body}");
+        assert!(body.contains("prints one object on stdout instead: target, outcome (idle, exited,\nclosed, blocked, timed_out), status and waited_ms"), "{body}");
+        assert!(body.contains("never reads the\nscreen, so it needs only \"Let programs in terminals control NexTerm\""), "{body}");
+        // What it cannot see: blocked needs a notification NexTerm heard and a
+        // title that is not idle; other agents have no activity; 200 rows.
+        assert!(body.contains("Kitty notifications, OSC 99, or a PermissionRequest hook"), "{body}");
+        assert!(body.contains("it\nreads as idle (exit 0) if the title says idle, or as busy until the\ntimeout (exit 6)"), "{body}");
+        assert!(body.contains("any unread notification there counts as blocked"), "{body}");
+        let dispatcher = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/lib/controlDispatcher.js")).unwrap();
+        assert!(dispatcher.contains("export const LIST_MAX = 200;"), "list's limit moved: fix the guide");
+        assert!(body.contains("list gives at most 200 terminals: one past\nthem looks absent"), "{body}");
+        assert!(body.contains(&format!("if that takes\nover {}s, wait calls it idle", START_GRACE.as_secs_f64())), "{body}");
+
+        // The examples are real wait command lines, covering --for exit, no
+        // limit and --json.
+        let waits: Vec<(bool, Command)> = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("  nexterm-cli "))
+            .map(|l| match args::parse(&words(l).into_iter().map(OsString::from).collect::<Vec<_>>()) {
+                Ok(Parsed::Run { json, command: c @ Command::Wait { .. } }) => (json, c),
+                other => panic!("{l}: {other:?}"),
+            })
+            .collect();
+        assert_eq!(waits.len(), 4, "{body}");
+        assert!(waits.iter().any(|(_, c)| matches!(c, Command::Wait { until: Until::Exit, .. })));
+        assert!(waits.iter().any(|(_, c)| matches!(c, Command::Wait { timeout: None, .. })));
+        assert!(waits.iter().any(|(json, _)| *json));
+        assert!(waits.iter().any(|(_, c)| matches!(c, Command::Wait { target, .. } if target.starts_with("child:"))));
+
+        // The index lists wait's exit codes after 5, in order, each once.
+        let codes: Vec<&str> = INDEX[INDEX.find("Check its exit status:\n").unwrap()..]
+            .lines()
+            .filter_map(|l| l.strip_prefix("  ").and_then(|l| l.split("  ").next()))
+            .filter(|code| !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        assert_eq!(codes, ["0", "1", "2", "3", "4", "5", "6", "7", "8"], "{INDEX}");
+        assert!(INDEX.contains("  6  wait timed out: wait again, or tell the user\n"), "{INDEX}");
+        assert!(INDEX.contains("  7  wait found the terminal blocked on a person"), "{INDEX}");
+        assert!(INDEX.contains("  8  wait: the terminal exited or was closed before it was idle\n"), "{INDEX}");
+        assert!(INDEX.contains("\n  wait          wait for another terminal to be idle, blocked or exited\n"), "{INDEX}");
     }
 }

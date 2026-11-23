@@ -138,7 +138,10 @@ use:
 - 120 ms: colour changes on a field's border and a separator.
 - 200 ms: the wait before a hovered separator turns violet, so a pointer
   passing over it does not flash it. Leaving starts back at once, and a drag
-  shows violet at once (no transition). This is the one delay in use.
+  shows violet at once (no transition).
+- 600 ms: the wait before a terminal tab's hover card opens, and 100 ms of
+  grace after the pointer leaves (below). These and the separator's are the
+  only delays in use.
 - 150 ms: drag overlays and drop zones fading in and swapping.
 - 150 ms: a toast fading in, and a confirmation toast fading out over the
   last 150 ms of its 3 s. By opacity only: a toast never slides.
@@ -193,6 +196,55 @@ NexTerm is dense, like VS Code. The sizes in `tailwind.config.js`:
   token and no transition. A mask, never an overlay element, so a half-faded
   tab still takes its click. While a drag is over a strip it does not fade,
   so the insertion or drop marker is drawn whole.
+
+## Hover cards
+
+A terminal tab chip's tooltip is its hover card (`src/lib/tabHoverCard.js`,
+`TabHoverCard.jsx`), and neither the chip nor anything on it the pointer
+reaches without leaving it (its ✕, the unread count, the *controlled*
+badge) has a native `title`: two tooltips would show at once. What such a
+part says is its `aria-label`, and the card's.
+
+- It opens 600 ms after the pointer rests on the chip, or after keyboard
+  focus (`:focus-visible`) lands on it, and goes 100 ms after the pointer
+  leaves. Moving to the next chip while one is shown switches at once.
+  `Escape` closes it and the keyboard stays on the chip; while it is only
+  about to open, `Escape` drops the wait and goes on to whatever else takes
+  it. Never during a drag, a rename or an open menu, nor after a press on
+  the chip. It goes when its chip's element does (the strip moving into or
+  out of the hidden strip's overlay).
+- It is a floating surface (Elevation): `rounded-popover`, `shadow-widget`,
+  `bg-vsc-widget`, a `border-vsc-widget-border` edge, drawn below the chip in
+  a portal, above the chip when there is no room below; placed again
+  whenever its size changes (a ResizeObserver), so a row arriving never
+  pushes it over the chip or past the window's edge. `role="tooltip"`,
+  `pointer-events: none`, nothing in it to press or focus, so a click where
+  it is lands on the terminal. The chip names it in `aria-describedby` only
+  while it is shown.
+- It fades in by opacity over 150 ms (`animate-overlay-in`) and, under
+  either reduced-motion switch, not at all (`[data-hover-card]`).
+- What may appear, in this order: the full title; glyph, agent, state and how
+  long in words, from the TERMINALS row's own helpers (terminalStatus.js);
+  the folder, shortened in the middle; the shell; with Show CPU and Memory
+  on, *Usage* and 'CPU% · memory' in the TERMINALS row's own words
+  (resourceUsage.js); the flags (typing hidden, read-only, controlled by
+  another terminal, N unread); the
+  last notification, dimmed; the dimmed hint "Drag to reorder or move ·
+  Double-click to rename".
+- The CPU and memory figure, on the card and at the end of a TERMINALS
+  row's second line, is plain dimmed text in `tabular-nums`, never coloured
+  however high it is: colour is for state, and a figure is not one. Its
+  words ("CPU 12% of one core, …") are its tooltip and what a screen reader
+  reads; with the setting off, or no sample yet, nothing is drawn, not even
+  a gap — and after sampling stops nothing old is kept to draw, so a figure
+  is never one from before a pause. Its CPU reads *measuring* for the first
+  sample of each start and has a figure 1 s later
+  (`RESOURCE_FOLLOW_UP_MS`). It refreshes from its own store entry while
+  shown, never from the minute clock.
+- What may never appear: anything of the terminal's screen or scrollback,
+  and the command line running in it.
+- Every row is someone else's text and is cleaned where it is drawn
+  (`displayText`): no control, bidirectional or zero-width character.
 
 ## Copy
 

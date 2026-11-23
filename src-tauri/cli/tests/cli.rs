@@ -72,6 +72,32 @@ fn set_title_usage_and_help() {
     assert!(text(&o.stdout).contains("\n  set-title <text>\n  set-title --clear\n"), "{}", text(&o.stdout));
 }
 
+#[test]
+fn wait_help_and_guide_are_ascii_80_and_the_overview_places_wait() {
+    // Bundle 4, B2 (AC-B2-4): the built binary, outside NexTerm.
+    for args in [&["help", "wait"][..], &["wait", "--help"], &["guide", "wait"], &["help"]] {
+        let o = run(cli_with(args), b"");
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", text(&o.stderr));
+        assert!(o.stderr.is_empty(), "{args:?}: {}", text(&o.stderr));
+        let out = text(&o.stdout);
+        assert!(out.ends_with('\n'), "{args:?}");
+        for line in out.lines() {
+            assert!(line.is_ascii() && !line.chars().any(|c| c.is_ascii_control()) && line.len() <= 80, "{args:?}: {line:?}");
+        }
+    }
+    let help = text(&run(cli_with(&["help", "wait"]), b"").stdout);
+    assert!(help.starts_with("Usage: nexterm-cli wait TARGET [--for idle|exit] [--timeout DURATION]\n"), "{help}");
+    let guide = text(&run(cli_with(&["guide", "wait"]), b"").stdout);
+    assert!(guide.starts_with("nexterm-cli guide wait - "), "{guide}");
+    for code in ["\n  0  idle", "\n  6  timed out", "\n  7  blocked", "\n  8  it exited or was closed"] {
+        assert!(guide.contains(code), "{code}: {guide}");
+    }
+    let overview = text(&run(cli_with(&["help"]), b"").stdout);
+    let at = |s: &str| overview.find(s).unwrap_or_else(|| panic!("{s:?} not in {overview}"));
+    assert!(at("\n  focus [TARGET]\n") < at("\n  wait TARGET ") && at("\n  wait TARGET ") < at("\n  guide [topic]\n"), "{overview}");
+    assert!(at("\n  5  ") < at("\n  6  wait: timed out\n") && at("\n  6  ") < at("\n  7  wait: blocked") && at("\n  7  ") < at("\n  8  wait: "), "{overview}");
+}
+
 /// A new, empty folder of this test's own in the system's temp folder,
 /// removed again when the test ends, passed or failed.
 struct EmptyDir(std::path::PathBuf);
@@ -105,7 +131,7 @@ fn entries(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
     std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect()
 }
 
-const GUIDE_TOPICS: [&str; 6] = ["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen"];
+const GUIDE_TOPICS: [&str; 7] = ["notify", "set-status", "set-title", "set-progress", "new-split", "read-screen", "wait"];
 
 #[test]
 fn guide_needs_no_nexterm_and_writes_nothing() {
@@ -179,7 +205,11 @@ fn guide_needs_no_nexterm_and_writes_nothing() {
         assert!(err.starts_with("nexterm-cli: "), "{err}");
         assert!(err.contains("'nexterm-cli guide'"), "{err}");
         if wrong.len() == 2 {
-            assert!(err.contains(&format!("Topics: {}\n", GUIDE_TOPICS.join(", "))), "{err}");
+            // Wrapped at 80 columns: every topic once, in order, nothing else.
+            let list = &err[err.find("Topics: ").expect("Topics:") + "Topics: ".len()..err.find("\nRun 'nexterm-cli guide'").unwrap()];
+            let named: Vec<&str> = list.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()).collect();
+            assert_eq!(named, GUIDE_TOPICS, "{err}");
+            assert!(err.lines().all(|l| l.len() <= 80), "{err}");
         }
     }
 

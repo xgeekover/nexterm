@@ -10,7 +10,7 @@
 
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { invoke, listen, isTauri, mockBridge, openInExternalEditor, pathKinds, revealInFileManager, writeClipboardText } from '../../src/lib/ipc.js';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 
 /** Run `fn` while the page claims to be inside Tauri, with no runtime behind it. */
 async function pretendingToBeInTauri(fn) {
@@ -340,5 +340,59 @@ describe('IPC: fs_open_in_external_editor', () => {
     await openInExternalEditor('python -m idlelib', '/workspace/README.md');
     assert.equal(mockBridge.externalEditorOpens.length, before + 1, 'python is not refused');
     mockBridge.externalEditorOpens.length = before;
+  });
+});
+
+// Each terminal's CPU and memory (B8, src-tauri/src/pty/resources.rs →
+// pty_resource_usage). The page's command alone: numbers and a count, never
+// a process's name, arguments or path, and nothing the control API serves.
+describe('IPC: pty_resource_usage', () => {
+  const source = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+  test('registered, off the IPC thread, and taking the session ids by their snake_case name', () => {
+    const main = source('../../src-tauri/src/main.rs');
+    const handler = main.slice(main.indexOf('generate_handler!['), main.indexOf('])', main.indexOf('generate_handler![')));
+    assert.ok(handler.includes('commands::pty::pty_resource_usage,'), 'in generate_handler!');
+    const rust = source('../../src-tauri/src/commands/pty.rs');
+    assert.match(
+      rust,
+      /#\[tauri::command\(rename_all = "snake_case", async\)\]\npub fn pty_resource_usage\(state: State<AppState>, session_ids: Vec<String>\) -> Result<Vec<ResourceUsage>, String> \{\n\s*state\.pty_manager\.resource_usage\(&session_ids\)\n\}/
+    );
+  });
+
+  test('each answer holds the session id, numbers and a count: nothing else', () => {
+    const rust = source('../../src-tauri/src/pty/resources.rs');
+    const body = rust.match(/^pub struct ResourceUsage \{\n([\s\S]*?)\n\}$/m);
+    assert.ok(body, 'ResourceUsage is where it is expected');
+    const fields = [...body[1].matchAll(/^\s*pub (\w+): ([^,]+),$/gm)].map((m) => `${m[1]}: ${m[2]}`);
+    assert.deepEqual(fields, [
+      'session_id: String',
+      'cpu_percent: Option<f64>',
+      'memory_bytes: u64',
+      'processes: u32',
+      'partial: bool',
+    ]);
+  });
+
+  test('not a control API command: neither the backend\'s control code, the CLI nor the dispatcher knows it', () => {
+    const dirs = ['../../src-tauri/src/control/', '../../src-tauri/cli/src/', '../../src-tauri/cli/src/transport/'];
+    const files = dirs.flatMap((dir) =>
+      readdirSync(new URL(dir, import.meta.url))
+        .filter((name) => name.endsWith('.rs'))
+        .map((name) => `${dir}${name}`)
+    );
+    assert.ok(files.length > 5, 'the control sources were found');
+    for (const file of [...files, '../../src/lib/controlDispatcher.js']) {
+      assert.equal(/resource_usage|resourceUsage/.test(source(file)), false, `${file} serves no CPU or memory`);
+    }
+  });
+
+  test('the mock\'s shells are no processes: nothing measured, and its argument checked as Tauri checks it', async () => {
+    assert.deepEqual(await mockBridge.invoke('pty_resource_usage', { session_ids: [] }), []);
+    assert.deepEqual(await mockBridge.invoke('pty_resource_usage', { session_ids: ['pty-none', 'pty-1'] }), []);
+    await assert.rejects(() => mockBridge.invoke('pty_resource_usage', {}), /missing required key session_ids/);
+    await assert.rejects(() => mockBridge.invoke('pty_resource_usage', { sessionIds: [] }), /missing required key session_ids/);
+    await assert.rejects(() => mockBridge.invoke('pty_resource_usage', { session_ids: 'pty-1' }), /invalid type/);
+    await assert.rejects(() => mockBridge.invoke('pty_resource_usage', { session_ids: [1] }), /invalid type/);
   });
 });

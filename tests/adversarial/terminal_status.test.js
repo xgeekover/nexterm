@@ -707,6 +707,10 @@ describe('Terminal status: the settings (S8)', () => {
       'together, in the order Settings shows them'
     );
     assert.ok(at > keys.indexOf('terminalProgress'), 'after the notification rows');
+    // Bundle 4, B8 (OQ1): Show CPU and Memory, off by default, right after them.
+    assert.equal(SETTINGS_DEFAULTS.terminalShowResources, false, 'Show CPU and Memory is off by default');
+    assert.equal(keys.indexOf('terminalShowResources'), at + 5, 'Show CPU and Memory comes right after the side bar rows');
+    assert.equal(keys.filter((k) => k === 'terminalShowResources').length, 1);
   });
 });
 

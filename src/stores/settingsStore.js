@@ -338,6 +338,17 @@ export const SETTINGS_DEFAULTS = {
    * shows it again.
    */
   terminalsPanelSortAttention: false,
+  /**
+   * Bundle 4, B8: Show CPU and Memory — how much CPU and memory each
+   * terminal's programs use, its shell's whole process tree, on the TERMINALS
+   * row and in a tab's hover card. Off by default (OQ1): measuring costs a
+   * little, every 5 s, and most rows need no figures. While on, the page asks
+   * the backend (`pty_resource_usage`) only while the window can be seen and
+   * the TERMINALS panel or a hover card is on screen; off, nothing is asked
+   * and every figure is forgotten. See src/lib/resourceUsage.js and
+   * src/hooks/useResourceSampler.js.
+   */
+  terminalShowResources: false,
   editorFontSize: 12,
   editorTabSize: 2,
   editorWordWrap: false,

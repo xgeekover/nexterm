@@ -4,6 +4,7 @@
 //! a wrong command line is exit 2 with nothing sent, inside NexTerm or not.
 
 use std::ffi::OsString;
+use std::time::Duration;
 
 /// The commands, in the order the help lists them.
 pub const COMMANDS: &[&str] = &[
@@ -16,12 +17,17 @@ pub const COMMANDS: &[&str] = &[
     "send",
     "read-screen",
     "focus",
+    "wait",
 ];
 
 pub const OCCASIONS: &[&str] = &["always", "unfocused", "invisible"];
 pub const TONES: &[&str] = &["info", "warn", "error"];
 /// `read-screen --lines` at most (D4: `lines?: 0..2000`).
 pub const MAX_LINES: u16 = 2000;
+/// `wait --timeout` when none is given.
+pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// `wait --timeout` at most; 0 means no limit instead.
+pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Parsed {
@@ -47,6 +53,16 @@ pub enum Command {
     Send { target: String, text: Option<Text>, keys: Vec<String>, raw: bool },
     ReadScreen { target: String, lines: Option<u16>, mask: bool },
     Focus { target: String },
+    /// Not sent to NexTerm as such: wait.rs polls `list`. `timeout: None`
+    /// waits with no limit (`--timeout 0`).
+    Wait { target: String, until: Until, timeout: Option<Duration> },
+}
+
+/// What `wait` waits for (`--for`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Until {
+    Idle,
+    Exit,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,6 +158,7 @@ pub fn parse(argv: &[OsString]) -> Result<Parsed, UsageError> {
         "send" => send(&mut lx)?,
         "read-screen" => read_screen(&mut lx)?,
         "focus" => focus(&mut lx)?,
+        "wait" => wait(&mut lx)?,
         _ => unreachable!("every name in COMMANDS has a parser"),
     };
     Ok(Parsed::Run { json: json || lx.json, command })
@@ -539,6 +556,84 @@ fn focus(lx: &mut Lexer) -> Result<Command, UsageError> {
     Ok(Command::Focus { target: target.unwrap_or_else(|| "self".to_owned()) })
 }
 
+fn wait(lx: &mut Lexer) -> Result<Command, UsageError> {
+    let mut target = None;
+    let mut until = None;
+    let mut timeout = None;
+    while let Some(t) = lx.next() {
+        match t {
+            Tok::Opt("--for", v) => {
+                if until.is_some() {
+                    return Err(lx.err("--for is given twice"));
+                }
+                until = Some(match lx.choice("--for", v, &["idle", "exit"])? {
+                    "exit" => Until::Exit,
+                    _ => Until::Idle,
+                });
+            }
+            Tok::Opt("--timeout", v) => {
+                if timeout.is_some() {
+                    return Err(lx.err("--timeout is given twice"));
+                }
+                let raw = lx.value("--timeout", v)?;
+                timeout = Some(wait_timeout(lx.cmd, raw)?);
+            }
+            Tok::Opt(o, _) => return Err(lx.unknown(o)),
+            Tok::Word(w) if target.is_none() => target = Some(wait_target(lx.cmd, w)?),
+            Tok::Word(_) => return Err(lx.err("wait takes one TARGET")),
+        }
+    }
+    let Some(target) = target else {
+        return Err(lx.err("wait needs a TARGET: a tab id from 'list', or child:<id>"));
+    };
+    Ok(Command::Wait {
+        target,
+        until: until.unwrap_or(Until::Idle),
+        timeout: timeout.unwrap_or(Some(DEFAULT_WAIT_TIMEOUT)),
+    })
+}
+
+/// Another terminal: a terminal waiting for itself would never be idle
+/// while it waits.
+fn wait_target(cmd: &'static str, v: &str) -> Result<String, UsageError> {
+    if v.is_empty() {
+        return Err(UsageError::of(cmd, "TARGET is empty (a tab id, or child:<id>)"));
+    }
+    if v == "self" {
+        return Err(UsageError::of(cmd, "wait cannot wait for its own terminal (self); give a tab id or child:<id>"));
+    }
+    if v == "child:" {
+        return Err(UsageError::of(cmd, "child: needs a tab id after it"));
+    }
+    Ok(v.to_owned())
+}
+
+/// `90` (seconds), `30s`, `5m` or `1h`; `0` in any of them is no limit
+/// (`None`). More than MAX_WAIT_TIMEOUT is a usage error.
+fn wait_timeout(cmd: &'static str, v: &str) -> Result<Option<Duration>, UsageError> {
+    let (digits, unit) = match v.as_bytes().last() {
+        Some(b's') => (&v[..v.len() - 1], 1),
+        Some(b'm') => (&v[..v.len() - 1], 60),
+        Some(b'h') => (&v[..v.len() - 1], 60 * 60),
+        _ => (v, 1),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(UsageError::of(
+            cmd,
+            format!("--timeout takes 90 (seconds), 30s, 5m or 1h, at most 24h, or 0 for no limit; not '{v}'"),
+        ));
+    }
+    let too_long = || UsageError::of(cmd, format!("--timeout is at most 24h, not '{v}'"));
+    let seconds = digits.parse::<u64>().ok().and_then(|n| n.checked_mul(unit)).ok_or_else(too_long)?;
+    if seconds == 0 {
+        return Ok(None);
+    }
+    if seconds > MAX_WAIT_TIMEOUT.as_secs() {
+        return Err(too_long());
+    }
+    Ok(Some(Duration::from_secs(seconds)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,6 +900,72 @@ mod tests {
         assert!(bad(&["focus", "a", "b"]).message.contains("one TARGET"));
         assert!(bad(&["focus", ""]).message.contains("TARGET is empty"));
         assert!(bad(&["focus", "--raise"]).message.contains("unknown option"));
+    }
+
+    #[test]
+    fn wait() {
+        let w = |target: &str, until, secs: Option<u64>| Command::Wait {
+            target: s(target),
+            until,
+            timeout: secs.map(Duration::from_secs),
+        };
+        assert_eq!(cmd(&["wait", "child:tab-term-7"]), w("child:tab-term-7", Until::Idle, Some(600)));
+        assert_eq!(cmd(&["wait", "tab-term-2", "--for", "exit"]), w("tab-term-2", Until::Exit, Some(600)));
+        assert_eq!(cmd(&["wait", "--for=idle", "tab-term-2"]), w("tab-term-2", Until::Idle, Some(600)));
+        for (given, secs) in [
+            ("90", Some(90)),
+            ("30s", Some(30)),
+            ("5m", Some(300)),
+            ("1h", Some(3600)),
+            ("24h", Some(86_400)),
+            ("1440m", Some(86_400)),
+            ("86400", Some(86_400)),
+            ("0", None),
+            ("0s", None),
+            ("0h", None),
+        ] {
+            assert_eq!(cmd(&["wait", "tab-term-2", "--timeout", given]), w("tab-term-2", Until::Idle, secs), "{given}");
+        }
+        assert_eq!(cmd(&["wait", "--timeout=5m", "--for", "exit", "tab-term-2"]), w("tab-term-2", Until::Exit, Some(300)));
+        assert_eq!(DEFAULT_WAIT_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(MAX_WAIT_TIMEOUT, Duration::from_secs(86_400));
+        assert_eq!(p(&["wait", "tab-term-2", "--json"]), Ok(Parsed::Run { json: true, command: w("tab-term-2", Until::Idle, Some(600)) }));
+        assert_eq!(p(&["help", "wait"]), Ok(Parsed::Help(Some("wait"))));
+        assert_eq!(p(&["wait", "--help"]), Ok(Parsed::Help(Some("wait"))));
+        // Every mistake is exit 2 with wait's usage.
+        let wrong: &[&[&str]] = &[
+            &["wait"],
+            &["wait", "self"],
+            &["wait", ""],
+            &["wait", "child:"],
+            &["wait", "a", "b"],
+            &["wait", "x", "--for", "busy"],
+            &["wait", "x", "--for"],
+            &["wait", "x", "--for", "idle", "--for", "idle"],
+            &["wait", "x", "--timeout", "5m", "--timeout", "5m"],
+            &["wait", "x", "--timeout"],
+            &["wait", "x", "--timeout", "--for"],
+            &["wait", "x", "--bogus"],
+            &["wait", "x", "-t"],
+        ];
+        for args in wrong {
+            assert_eq!(bad(args).command, Some("wait"), "{args:?}");
+        }
+        assert!(bad(&["wait"]).message.contains("needs a TARGET"));
+        assert!(bad(&["wait", "self"]).message.contains("its own terminal (self)"));
+        assert!(bad(&["wait", ""]).message.contains("TARGET is empty"));
+        assert!(bad(&["wait", "x", "--for", "busy"]).message.contains("idle, exit"));
+        assert!(bad(&["wait", "x", "--for=idle", "--for=exit"]).message.contains("twice"));
+        assert!(bad(&["wait", "x", "--bogus"]).message.contains("unknown option '--bogus'"));
+        for timeout in ["", "-5", "+5", "1.5m", "5d", "m", "5 m", "1h30m", "5M", "ten", "\u{665}"] {
+            let e = bad(&["wait", "x", &format!("--timeout={timeout}")]);
+            assert_eq!(e.command, Some("wait"), "{timeout}");
+            assert!(e.message.contains("90 (seconds), 30s, 5m or 1h"), "{timeout}: {}", e.message);
+        }
+        for timeout in ["25h", "1441m", "86401", "86401s", "99999999999999999999", "18446744073709551615h"] {
+            let e = bad(&["wait", "x", "--timeout", timeout]);
+            assert_eq!((e.command, e.message.as_str()), (Some("wait"), format!("--timeout is at most 24h, not '{timeout}'").as_str()));
+        }
     }
 
     #[test]

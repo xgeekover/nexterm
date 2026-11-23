@@ -84,6 +84,16 @@ fn open_pipe(name: &str, by: Instant) -> Result<File, Failure> {
     }
 }
 
+/// Nothing (review A-R6): a pipe opened as a `File` has no read or write
+/// timeout in std, and its reads are synchronous. Ending one that blocks
+/// needs `CancelSynchronousIo` on the worker thread (a windows-sys feature
+/// this crate does not build with) or overlapped reads; until then the
+/// caller's timeout holds, and a worker thread blocked on a NexTerm that
+/// froze stays until NexTerm answers or goes.
+pub fn limit(_pipe: &File, _each: Duration) -> io::Result<()> {
+    Ok(())
+}
+
 /// The process serving `pipe` runs as `me`.
 pub fn check_server(pipe: &File, me: &Identity) -> Result<(), Failure> {
     let pid = server_pid(pipe).map_err(|e| {

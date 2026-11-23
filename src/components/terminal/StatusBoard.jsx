@@ -18,9 +18,12 @@ import {
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSystemStore } from '../../stores/systemStore.js';
+import { useSettingsStore } from '../../stores/settingsStore.js';
+import { useResourceUsageStore } from '../../stores/resourceUsageStore.js';
 import { folderForBranch, useFolderBranch } from '../../stores/branchStore.js';
 import { unreadCountByTab } from '../../lib/attention.js';
 import { useMinuteNow } from '../../hooks/useMinuteNow.js';
+import { isWslTerminal, resourceUsageLabel, resourceUsageWords } from '../../lib/resourceUsage.js';
 import {
   agentLabel,
   agoLabel,
@@ -203,6 +206,36 @@ function textWidth(el, text) {
 }
 
 /**
+ * What terminal `tabId`'s programs use, on its second line (bundle 4, B8,
+ * Show CPU and Memory): '12% · 340 MB', 'measuring · 340 MB' on a first
+ * sample, '… · partial' when a process could not be read, 'not measurable'
+ * for a WSL terminal (`wsl`) — src/lib/resourceUsage.js's words — and
+ * nothing at all, not even a gap, while there is no sample.
+ *
+ * Subscribed to this terminal's figure alone, as strings: a sample every 5 s
+ * redraws the figures that changed and nothing else — not the line, not the
+ * row, not the panel. Dimmed like the line's other text, never coloured
+ * (STYLEGUIDE.md: colour is for state). Hovering it says it in words ('CPU
+ * 12% of one core, memory 340 MB, in 3 processes.'), and those words are
+ * what a screen reader reads, the short form being hidden from it.
+ */
+const ResourceUsage = memo(function ResourceUsage({ tabId, wsl = false, quiet = '' }) {
+  const label = useResourceUsageStore((s) => resourceUsageLabel(s.byTab[tabId], { wsl }));
+  const words = useResourceUsageStore((s) => resourceUsageWords(s.byTab[tabId], { wsl }));
+  if (!label) return null;
+  return (
+    <span
+      data-resource-usage={wsl ? 'not-measurable' : 'figures'}
+      title={words || undefined}
+      className={cn('ml-auto shrink-0 whitespace-nowrap tabular-nums', quiet)}
+    >
+      <span aria-hidden="true">{label}</span>
+      <span className="sr-only">{words || label}</span>
+    </span>
+  );
+});
+
+/**
  * Whether the agent's name `agent` fits whole on the second line `lineRef`
  * (`agentFits`), measured before paint and again whenever the line's width
  * changes. `shape` names what else is on the line, so a state growing from
@@ -227,6 +260,8 @@ function useAgentFits(lineRef, agent, shape) {
           hasBranch: Boolean(line.querySelector('[data-branch]')),
           // A program's status takes the note's place, and its share.
           hasNote: Boolean(line.querySelector('[data-last-note], [data-reported-status]')),
+          // The CPU and memory figure (B8) never gives way.
+          usagePx: line.querySelector('[data-resource-usage]')?.getBoundingClientRect().width ?? 0,
         })
       );
     };
@@ -287,12 +322,21 @@ function useAgentFits(lineRef, agent, shape) {
  * is still in its tooltip. Subscribed to this tab's entry of
  * `reportedStatus` alone, so a hook setting it on every tool use redraws this
  * one line and nothing else (statusBoardModel.js).
+ *
+ * WHAT IT USES (bundle 4, B8, `showResources`: Settings ▸ Terminal ▸ Show
+ * CPU and Memory): the CPU and memory of its programs, last on the line and
+ * at its right end (`ResourceUsage`), short and never giving way. The line
+ * listens only to how many characters that figure has, so a sample redraws
+ * it only when the figure grows or shrinks (and the agent's name is measured
+ * again); the figure listens to its own value. A WSL terminal says 'not
+ * measurable' while its shell runs. Off: nothing is read, nothing is drawn.
  */
 export const TerminalStatusLine = memo(function TerminalStatusLine({
   tab,
   showAgent,
   showBranch,
   showLastNote,
+  showResources = false,
   active = false,
   className,
 }) {
@@ -305,6 +349,12 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const reported = useTerminalStore((s) => s.reportedStatus?.[tabId] ?? null);
   const os = useSystemStore((s) => s.os);
   const branch = useFolderBranch(showBranch ? folderForBranch(tab, os) : null);
+  // Show CPU and Memory: a WSL terminal has no figures (nothing in it can be
+  // seen from Windows), one whose shell has exited has nothing to measure.
+  const defaultShell = useSettingsStore((s) => (showResources ? s.terminalDefaultShell : null));
+  const systemShell = useSystemStore((s) => (showResources ? s.defaultShell : null));
+  const wsl = showResources && !tab.exited && isWslTerminal(tab, { defaultShell, systemShell, platform: os });
+  const usageLength = useResourceUsageStore((s) => (showResources ? resourceUsageLabel(s.byTab[tabId], { wsl }).length : 0));
   const lineRef = useRef(null);
 
   const agent = showAgent ? agentLabel(tab) : '';
@@ -318,7 +368,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
   const words = status ? [statusText(status), elapsedSaid].filter(Boolean).join(' ') : '';
   const shortWords = status ? [compactStatusText(status), elapsed].filter(Boolean).join(' ') : '';
   const branchName = showBranch ? branchLabel(branch) : '';
-  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${elapsed}|${Boolean(branchName)}|${Boolean(note || reported)}`);
+  const fits = useAgentFits(lineRef, agent, `${shortWords.length}|${elapsed}|${Boolean(branchName)}|${Boolean(note || reported)}|${usageLength}`);
   const agentShown = Boolean(agent) && fits;
   // The agent's name, drawn, already says who spoke; left out for width, the
   // note keeps a title that says it (terminalStatus.js). A program's status,
@@ -425,6 +475,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine({
       </span>
     );
   }
+  if (usageLength > 0) items.push(<ResourceUsage key="usage" tabId={tabId} wsl={wsl} quiet={quiet} />);
 
   return (
     <span

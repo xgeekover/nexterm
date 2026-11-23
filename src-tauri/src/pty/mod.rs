@@ -9,6 +9,9 @@ mod echo_watch;
 // the shell and what it started on Windows.
 mod owner;
 pub mod manager;
+// The CPU and memory of each terminal's shell and everything it started
+// (`pty_resource_usage`).
+pub mod resources;
 pub mod flow_gate;
 pub mod osc;
 pub mod output_batch;

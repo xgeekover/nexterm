@@ -70,8 +70,8 @@ pub fn judge(seen: impl IntoIterator<Item = Seen>) -> bool {
 /// `root` and every process descended from it in `table` (`(pid, parent)`
 /// pairs, as a process snapshot lists them): breadth first, each once, so a
 /// parent id reused by a descendant cannot make it go round for ever. Empty
-/// when `root` is not in the table.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// when `root` is not in the table. Also each terminal's tree whose CPU and
+/// memory are added up (resources.rs).
 pub fn family(root: u32, table: &[(u32, u32)]) -> Vec<u32> {
     if !table.iter().any(|&(pid, _)| pid == root) {
         return Vec::new();
@@ -122,6 +122,9 @@ pub fn hidepid_in(mountinfo: &str) -> bool {
 pub use unix::foreground_runs_as;
 #[cfg(windows)]
 pub use windows::descendants_run_as_us;
+/// The process snapshot, also what resources.rs takes each terminal's tree from.
+#[cfg(windows)]
+pub(crate) use windows::snapshot;
 
 #[cfg(unix)]
 mod unix {
@@ -268,7 +271,7 @@ mod windows {
 
     /// Every process now, as `(pid, parent)`; `None` when no snapshot can be
     /// taken.
-    fn snapshot() -> Option<Vec<(u32, u32)>> {
+    pub(crate) fn snapshot() -> Option<Vec<(u32, u32)>> {
         // SAFETY: a plain call; INVALID_HANDLE_VALUE is its failure.
         let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
         if raw == INVALID_HANDLE_VALUE || raw.is_null() {

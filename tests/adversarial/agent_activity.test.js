@@ -756,6 +756,37 @@ describe('Agent activity: the control API (F5, AC6)', () => {
       useSettingsStore.setState({ terminalControl: SETTINGS_DEFAULTS.terminalControl });
     });
   });
+
+  test("AA-51: list's activity field says idle, then working, for a Claude Code terminal — what the store's agentActivity holds (bundle 4, B2-F7)", async () => {
+    await withClaude(async ({ claude }) => {
+      const replies = [];
+      useSettingsStore.setState({ terminalControl: true });
+      const dispatcher = createControlDispatcher({
+        reply: async (message) => replies.push(message),
+        attention: () => FOCUSED,
+        later: (fn) => fn(),
+      });
+      const rowOf = async () => {
+        replies.length = 0;
+        await dispatcher.handle({ id: 51, session_id: claude.sessionId, cmd: 'list', args: {} });
+        assert.equal(replies[0]?.ok, true, JSON.stringify(replies));
+        return replies[0].result.find((r) => r.id === claude.id);
+      };
+      try {
+        await show(claude, `${IDLE} Claude Code`);
+        let row = await rowOf();
+        assert.deepEqual([row.activity, row.status], ['idle', 'idle']);
+        assert.equal(row.activity, T.getState().agentActivity[claude.id].state);
+        await show(claude, `${SPIN_A} Claude Code`);
+        row = await rowOf();
+        assert.deepEqual([row.activity, row.status], ['working', 'working']);
+        assert.equal(row.activity, T.getState().agentActivity[claude.id].state);
+      } finally {
+        dispatcher.dispose?.();
+        useSettingsStore.setState({ terminalControl: SETTINGS_DEFAULTS.terminalControl });
+      }
+    });
+  });
 });
 
 describe('Agent activity: teardown', () => {

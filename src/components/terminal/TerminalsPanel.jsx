@@ -209,11 +209,15 @@ export function TerminalsPanel() {
   const showBranch = useSettingsStore((s) => s.terminalsPanelBranch !== false);
   const showAgent = useSettingsStore((s) => s.terminalsPanelAgent !== false);
   const showLastNote = useSettingsStore((s) => s.terminalsPanelLastNote !== false);
+  // Show CPU and Memory (bundle 4, B8): the setting only. The figures are
+  // read by each second line's own figure, never here, so a sample every
+  // 5 s redraws no row (StatusBoard.jsx, `ResourceUsage`).
+  const showResources = useSettingsStore((s) => s.terminalShowResources === true);
   const sorted = useSettingsStore((s) => s.terminalsPanelSortAttention === true);
   // Copy Context's N (a row's Copy Last N Lines).
   const copyContextLines = useSettingsStore((s) => s.terminalCopyContextLines);
   const setSetting = useSettingsStore((s) => s.setSetting);
-  const twoLine = showBranch || showAgent || showLastNote;
+  const twoLine = showBranch || showAgent || showLastNote || showResources;
 
   const switchTab = useTerminalStore((s) => s.switchTab);
   const setActivePane = useTerminalStore((s) => s.setActivePane);
@@ -1156,6 +1160,7 @@ export function TerminalsPanel() {
               showAgent={showAgent}
               showBranch={showBranch}
               showLastNote={showLastNote}
+              showResources={showResources}
               active={isActive}
               className={LINE_TWO_INDENT}
             />

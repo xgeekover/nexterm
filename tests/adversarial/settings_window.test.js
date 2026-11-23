@@ -545,3 +545,30 @@ describe('Settings: bundle 2 rows', () => {
     assert.equal(SETTINGS_DEFAULTS.externalEditorCommand, '');
   });
 });
+
+describe('Settings: Show CPU and Memory (bundle 4, B8)', () => {
+  test('SW-B8-01: one checkbox row in the terminal section, right after Sort by Attention, off by default, saying what it measures and when', async () => {
+    const buildItems = await exported('buildItems');
+    const { SETTINGS_DEFAULTS } = await import('../../src/stores/settingsStore.js');
+    for (const mac of [true, false]) {
+      const items = buildItems('', [], '', null, { mac });
+      const rows = items.filter((r) => r.key === 'terminalShowResources' || r.id === 'terminalShowResources');
+      assert.equal(rows.length, 1, `one row for the setting (mac: ${mac})`);
+      const [row] = rows;
+      assert.deepEqual(
+        [row.section, row.key, row.control, row.title, row.settingKey],
+        ['terminal', 'terminalShowResources', 'checkbox', 'Show CPU and Memory', 'terminal.integrated.showCpuAndMemory']
+      );
+      const at = items.indexOf(row);
+      assert.equal(items[at - 1]?.key, 'terminalsPanelSortAttention', 'right after Sort by Attention');
+      for (const words of [/TERMINALS side bar/, /hover card/, /100% is one core\./, /every 5 seconds/, /once more 1 second after the first measurement/, /not minimised/, /the TERMINALS panel or a hover card is showing/, /A WSL terminal cannot be measured\./, /Off, nothing is measured\.$/]) {
+        assert.match(row.description, words);
+      }
+    }
+    assert.equal(SETTINGS_DEFAULTS.terminalShowResources, false, 'off by default (OQ1)');
+    // The window hands the row its value.
+    const src = readFileSync(new URL('../../src/components/common/SettingsWindow.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.match(src, /const terminalShowResources = useSettingsStore\(\(s\) => s\.terminalShowResources\);/);
+    assert.match(src, /const values = \{[^}]*\n    terminalShowResources,\n/);
+  });
+});

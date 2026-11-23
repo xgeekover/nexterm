@@ -28,8 +28,9 @@ import { cn } from '../../lib/utils.js';
  * dead along with every other animation, so the Settings toggle and the OS
  * preference both cover it without this component knowing about either.
  *
- * `aria-hidden` because it is decoration: the state is already in the tab's
- * own `title`, which is what a screen reader reads (see `activityLabel`).
+ * `aria-hidden` because it is decoration: the state is already said in words
+ * where the dot is drawn (see `activityLabel`) — on a tab chip in a hidden
+ * span after its name, elsewhere in the `title` of what carries the dot.
  */
 export function ActivityDot({ tab, state: given, className }) {
   const state = given ?? tabActivity(tab);

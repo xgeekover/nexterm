@@ -1501,6 +1501,20 @@ class BrowserMockBridge {
         if (!session) throw new Error(`PTY session not found: ${sessionId}`);
         return { same_user: session.foregroundSameUser === undefined ? true : session.foregroundSameUser };
       }
+      // CPU and memory of each terminal's process tree
+      // (src-tauri/src/pty/resources.rs). The mock's shells are no processes,
+      // so there is nothing to measure: every one is left out, as the
+      // backend leaves out a terminal it cannot measure.
+      case 'pty_resource_usage': {
+        const sessionIds = args?.session_ids;
+        if (sessionIds === undefined) {
+          throw mockInvalidArgs(command, 'session_ids', `command ${command} missing required key session_ids`);
+        }
+        if (!Array.isArray(sessionIds) || !sessionIds.every((id) => typeof id === 'string')) {
+          throw mockInvalidArgs(command, 'session_ids', 'invalid type: expected a sequence of strings');
+        }
+        return [];
+      }
 
       // 4. pty_kill
       case 'pty_kill': {

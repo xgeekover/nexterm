@@ -64,8 +64,8 @@ export function LockMark({ tabId, className }) {
  * closed the password terminal or opened another one (review). It ends
  * where the activity dot begins (8 px in) and sits above it, so the two
  * never overlap; and it stays inside the row of chips, which scrolls and
- * clips what is drawn beyond it. Its words are the chip's: in its tooltip
- * (the chip's title says them) and read from its content.
+ * clips what is drawn beyond it. Its words are the chip's: on its tooltip
+ * (the hover card's flags say them) and read from its content.
  */
 export function LockBadge({ tabId }) {
   if (!useLocked(tabId)) return null;
@@ -122,8 +122,9 @@ export function ReadOnlyMark({ tabId, className }) {
  * the lock does — a 10 px badge on the chip's bottom-left corner, right
  * under the lock's top-left one, so the two sit side by side on the chip's
  * left edge and never cover each other, the activity dot (8 px in) or the ✕.
- * The pointer goes straight through it. Its words in `aria-label` and
- * `title`; the chip's own tooltip says them too.
+ * The pointer goes straight through it. Its words in `aria-label`, and on
+ * the chip's hover card (bundle 4, B12), whose flags say them: the card is
+ * the chip's one tooltip, so no `title` here.
  */
 export function ReadOnlyBadge({ tabId }) {
   if (!useReadOnly(tabId)) return null;
@@ -131,7 +132,6 @@ export function ReadOnlyBadge({ tabId }) {
     <span
       role="img"
       aria-label={READ_ONLY_LABEL}
-      title={READ_ONLY_LABEL}
       data-read-only-mark={tabId}
       className={cn(
         'pointer-events-none absolute -bottom-[2px] -left-[2px] z-[1] flex items-center justify-center',
@@ -162,9 +162,11 @@ const controlledWords = (mark) => `Controlled by ${mark.byTitle}${mark.cmd ? ` (
  * activity dot, so the two badges never cover each other and it reads as
  * this chip's. On the top-right corner it sat over the empty slot an
  * inactive chip keeps for its ✕, and read as the "+" button's. A press on it
- * is a press on the chip. Its tooltip and its words name the caller as it
- * was named when it happened. Nothing moves, so reduced motion has nothing
- * to stop.
+ * is a press on the chip. Its words name the caller as it was named when it
+ * happened: in its `aria-label`, and on the chip's hover card (bundle 4,
+ * B12), which is the chip's one tooltip — no `title` here, as the pointer
+ * reaches the badge without leaving the chip and a native tooltip would
+ * open beside the card. Nothing moves, so reduced motion has nothing to stop.
  */
 export function ControlledBadge({ tabId }) {
   const mark = useControlled(tabId);
@@ -174,7 +176,6 @@ export function ControlledBadge({ tabId }) {
     <span
       role="img"
       aria-label={words}
-      title={words}
       data-controlled-mark={tabId}
       data-controlled-by={mark.by ?? ''}
       className={cn(

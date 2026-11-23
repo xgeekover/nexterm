@@ -1,6 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::models::PtySessionInfo;
+use crate::pty::resources::ResourceUsage;
 use crate::AppState;
 
 /// The webview chooses the shell — a name `resolve_shell` looks up, or a path
@@ -131,6 +132,22 @@ pub struct ForegroundOwner {
 #[tauri::command(rename_all = "snake_case")]
 pub fn pty_foreground_owner(state: State<AppState>, session_id: String) -> Result<ForegroundOwner, String> {
     Ok(ForegroundOwner { same_user: state.pty_manager.foreground_owner(&session_id)? })
+}
+
+/// The CPU and memory of each terminal asked about — its shell and every
+/// process descended from it (src/pty/resources.rs): `{ session_id,
+/// cpu_percent, memory_bytes, processes, partial }` each, `cpu_percent` null
+/// on a terminal's first call and 100 for one core. A terminal that is not
+/// there is left out, and so is every id past the first 1024 or longer than
+/// 128 bytes (`resources::MAX_ASKED`, `MAX_ID_BYTES`). Numbers and a count
+/// only: no process names, arguments or paths. The page's, not the control
+/// API's.
+///
+/// Off the IPC thread, as listing the processes reads one file a process on
+/// Linux and asks the kernel once or twice a process elsewhere.
+#[tauri::command(rename_all = "snake_case", async)]
+pub fn pty_resource_usage(state: State<AppState>, session_ids: Vec<String>) -> Result<Vec<ResourceUsage>, String> {
+    state.pty_manager.resource_usage(&session_ids)
 }
 
 #[tauri::command(rename_all = "snake_case")]

@@ -8,9 +8,13 @@
 //! turns those into U+FFFD; JSON output escapes the ones serde_json leaves
 //! raw (DEL, C1, bidi, line separators) as \uXXXX, which stays valid JSON.
 
+use std::time::Duration;
+
 use serde_json::Value;
 
 use crate::args::Command;
+use crate::exit;
+use crate::wait::{Finish, Outcome};
 
 /// Bidi embedding, override and isolate controls, and the marks.
 fn is_bidi_control(c: char) -> bool {
@@ -50,7 +54,11 @@ fn screen_line(s: &str) -> String {
 
 /// `--json`: the result as NexTerm sent it, on one line.
 pub fn json(result: &Value) -> String {
-    let raw = result.to_string();
+    json_line(&result.to_string())
+}
+
+/// Compact JSON text, made safe for a terminal, with its LF.
+fn json_line(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + 1);
     for c in raw.chars() {
         // serde_json escapes C0 itself; these it leaves as they are. They can
@@ -261,6 +269,50 @@ fn new_tab(result: &Value) -> String {
     }
 }
 
+/// A wait's length for people: `40s`, `2m 5s`, `10m`, `1h 2m` (whole
+/// seconds; under one is `0s`).
+pub fn duration(d: Duration) -> String {
+    let total = d.as_secs();
+    let (h, m, s) = (total / 3600, total / 60 % 60, total % 60);
+    match (h, m, s) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, 0, _) => format!("{h}h"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
+
+/// `wait`: how it ended, in one line.
+pub fn wait_line(target: &str, f: &Finish) -> String {
+    let target = one_line(target);
+    let after = duration(f.waited);
+    let first = if f.code == exit::ENDED { ", before it was idle" } else { "" };
+    let line = match f.outcome {
+        Outcome::Idle => format!("{target} is idle after {after}"),
+        Outcome::Exited => format!("{target} exited after {after}{first}"),
+        Outcome::Closed => format!("{target} was closed after {after}{first}"),
+        Outcome::Blocked => format!("{target} is blocked after {after}: {}", f.reason.unwrap_or("waiting for input")),
+        Outcome::TimedOut => match f.status.as_deref() {
+            None => format!("{target} timed out after {after} (NexTerm did not answer)"),
+            Some("none") => format!("{target} timed out after {after} (still open)"),
+            Some(s) => format!("{target} timed out after {after} (still {})", one_line(s)),
+        },
+    };
+    format!("{line}\n")
+}
+
+/// `wait --json`: `{target, outcome, status, waited_ms}`, in that order.
+pub fn wait_json(target: &str, f: &Finish) -> String {
+    let status = f.status.as_deref().map_or(Value::Null, Value::from);
+    json_line(&format!(
+        "{{\"target\":{},\"outcome\":{},\"status\":{status},\"waited_ms\":{}}}",
+        Value::from(target),
+        Value::from(f.outcome.name()),
+        f.waited.as_millis()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +439,40 @@ mod tests {
         assert_eq!(new_tab(&json!({"id": "tab-term-9"})), "tab-term-9\n");
         assert_eq!(new_tab(&json!({"tabId": "tab-term-9"})), "tab-term-9\n");
         assert_eq!(new_tab(&json!({"other": 1})), "{\"other\":1}\n");
+    }
+
+    #[test]
+    fn durations_for_people() {
+        let d = |secs: u64| duration(Duration::from_secs(secs));
+        assert_eq!(duration(Duration::from_millis(999)), "0s");
+        assert_eq!(d(0), "0s");
+        assert_eq!(d(40), "40s");
+        assert_eq!(d(60), "1m");
+        assert_eq!(d(125), "2m 5s");
+        assert_eq!(d(600), "10m");
+        assert_eq!(d(3600), "1h");
+        assert_eq!(d(3720), "1h 2m");
+        assert_eq!(d(3725), "1h 2m");
+        assert_eq!(d(86_400), "24h");
+        assert_eq!(duration(Duration::from_millis(125_999)), "2m 5s");
+    }
+
+    #[test]
+    fn wait_output_is_ascii_safe_json_and_text() {
+        let f = Finish {
+            outcome: Outcome::TimedOut,
+            code: exit::TIMED_OUT,
+            status: Some(format!("x{}y{}", ch(0x202e), ch(0x9b))),
+            waited: Duration::from_millis(1500),
+            reason: None,
+        };
+        let line = wait_json(&format!("tab{}", ch(0x2028)), &f);
+        assert!(line.is_ascii(), "{line:?}");
+        let back: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(back["waited_ms"], json!(1500));
+        assert_eq!(back["outcome"], json!("timed_out"));
+        let text = wait_line("tab-term-7", &f);
+        assert!(!text.contains(ch(0x202e)) && !text.contains(ch(0x9b)), "{text:?}");
     }
 
     #[test]

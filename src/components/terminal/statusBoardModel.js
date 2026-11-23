@@ -318,18 +318,20 @@ export const BRANCH_MIN_PX = 10;
 /**
  * Whether an agent's name, `agentPx` wide, fits on a second line `innerPx`
  * wide whose items are spaced `gapPx` apart, beside a state `statusPx` wide
- * (0 for none), a branch shrunk to its icon (`hasBranch`), and a note given
- * its `NOTE_SHARE` (`hasNote`).
+ * (0 for none), a branch shrunk to its icon (`hasBranch`), a note given its
+ * `NOTE_SHARE` (`hasNote`), and the CPU and memory figure `usagePx` wide (0
+ * for none; bundle 4, B8), which never gives way either.
  *
  * The name is drawn whole or not at all — cut down it was "Ope…", or a
  * sliver of 0 px with a gap after it — and goes, when it does not fit, into
  * the line's tooltip and accessible name. The state is never what gives way,
  * and the note keeps its share before the name is drawn.
  */
-export function agentFits({ innerPx, gapPx = 0, agentPx, statusPx = 0, hasBranch = false, hasNote = false }) {
+export function agentFits({ innerPx, gapPx = 0, agentPx, statusPx = 0, hasBranch = false, hasNote = false, usagePx = 0 }) {
   if (!(innerPx > 0) || !(agentPx >= 0)) return false;
   let need = agentPx;
   if (statusPx > 0) need += gapPx + statusPx;
+  if (usagePx > 0) need += gapPx + usagePx;
   if (hasBranch) need += gapPx + BRANCH_MIN_PX;
   if (hasNote) need += gapPx + innerPx * NOTE_SHARE;
   return need <= innerPx;

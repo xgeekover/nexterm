@@ -93,10 +93,11 @@ const { useAgentHistoryStore } = await import('../../src/stores/agentHistoryStor
 const { useAgentHistoryPromptStore } = await import('../../src/stores/agentHistoryPromptStore.js');
 const { useTabSwitcherStore } = await import('../../src/stores/tabSwitcherStore.js');
 const { useToastStore, setToastTimers, resetToasts, TOAST_MS } = await import('../../src/stores/toastStore.js');
+const { useResourceUsageStore } = await import('../../src/stores/resourceUsageStore.js');
 const { default: App } = await import('../../src/App.jsx');
 const TERMINAL_THEMES_MODULE = await import('../../src/lib/terminalThemes.js');
 
-const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore, useTabSwitcherStore, useToastStore];
+const STORES = [useTerminalStore, useEditorStore, useSettingsStore, useGitStore, usePathDropStore, useBranchStore, useProjectCommandsStore, useSystemStore, useControlLogStore, useAgentHistoryStore, useAgentHistoryPromptStore, useTabSwitcherStore, useToastStore, useResourceUsageStore];
 
 /**
  * Every store as the app created it, taken before any case touches it.
@@ -1703,6 +1704,16 @@ function attentionRings(html) {
 const chipMarkup = (html, attr, id) =>
   new RegExp(`<div\\b[^>]*\\s${attr}="${id}"[^>]*>[\\s\\S]*?</div>`).exec(html)?.[0] ?? null;
 const tabChip = (html, id) => chipMarkup(html, 'data-tab-chip', id);
+
+// The tab chip's tooltip is its hover card (bundle 4, B12): drawn on hover or
+// keyboard focus only, so never in the app's markup here (no effects, no
+// pointer). Its body is drawn on its own, from the same arranged stores.
+const { TabHoverCardContent } = await import('../../src/components/terminal/TabHoverCard.jsx');
+/** The hover card terminal `tabId` would show now, as markup (id "card-test"). */
+function hoverCardOf(tabId) {
+  for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+  return renderToString(React.createElement(TabHoverCardContent, { tabId, id: 'card-test' }));
+}
 const groupChip = (html, id) => chipMarkup(html, 'data-group-chip', id);
 
 /** The TERMINALS side bar's row whose name is `name` — a terminal's title or a group's name. */
@@ -1761,8 +1772,12 @@ scenario(
     // over the whole pane it cut the first column of every row in half.
     expectThat((paneBody(html, 'pane-a') ?? '').includes('data-attention-ring="unread"'), 'the ring is not drawn in the pane body');
     expectThat(/\binset-px\b/.test(rings[0].tag) && /\bring-2\b/.test(rings[0].tag), `the ring is not 2px, one in: ${rings[0].tag}`);
-    const title = visibleText(/\stitle="([^"]*)"/.exec(tabChip(html, 't-a') ?? '')?.[1] ?? '');
-    expectThat(title.endsWith('1 unread notification'), `the tab's tooltip does not say it is waiting: ${JSON.stringify(title)}`);
+    // The chip's tooltip — its hover card now — says it is waiting, and the
+    // chip carries no native one beside it.
+    const chipTag = /^<[^>]*>/.exec(tabChip(html, 't-a') ?? '')?.[0] ?? '';
+    expectThat(chipTag && !/\stitle="/.test(chipTag), `the tab chip still has a native tooltip: ${chipTag}`);
+    const card = visibleText(hoverCardOf('t-a'));
+    expectThat(card.includes('Waiting') && card.includes('1 unread notification'), `the tab's tooltip does not say it is waiting: ${JSON.stringify(card)}`);
   }
 );
 
@@ -3749,8 +3764,10 @@ scenario(
     for (const word of ['absolute', 'pointer-events-none', '-top-[2px]', '-left-[2px]', 'w-[10px]', 'h-[10px]', 'text-vsc-warn']) {
       expectThat(cls.includes(word), `the chip's lock is not "${word}" — it must take no room, and no pointer: ${lock.tag}`);
     }
-    const title = visibleText(attrOf(openingTag(chip), 'title') ?? '');
-    expectThat(title.includes(LOCK_WORDS), `the chip's tooltip does not say it: ${JSON.stringify(title)}`);
+    // The chip's tooltip is its hover card (bundle 4, B12), with no native title.
+    expectThat(attrOf(openingTag(chip), 'title') === null, `the chip still has a native tooltip: ${openingTag(chip)}`);
+    const card = visibleText(hoverCardOf('t1'));
+    expectThat(card.includes(LOCK_WORDS), `the chip's tooltip does not say it: ${JSON.stringify(card)}`);
     expectThat(!lockIn(tabChip(html, 't2')), 'a lock on a terminal that is not asking');
     const row = terminalRow(html, 't1');
     const rowTitle = visibleText(attrOf(openingTag(row), 'title') ?? '');
@@ -4308,7 +4325,14 @@ scenario(
     const badge = tagWith(chip, 'data-controlled-mark');
     expectThat(badge, `no mark on the chip: ${chip}`);
     expectThat(attrOf(badge, 'aria-label') === 'Controlled by agent (send)' && attrOf(badge, 'role') === 'img', `the mark does not say who: ${badge}`);
-    expectThat(attrOf(badge, 'title') === 'Controlled by agent (send)', 'no tooltip naming the caller');
+    // Its words for the eye are on the chip's hover card (bundle 4, B12), the
+    // chip's one tooltip: the badge takes the pointer without it leaving the
+    // chip, so a native title would open beside the card.
+    expectThat(attrOf(badge, 'title') === null, `the mark has a native tooltip beside the chip's hover card: ${badge}`);
+    expectThat(visibleText(hoverCardOf('t2')).includes('Controlled by agent (send)'), `the chip's hover card does not name the caller: ${JSON.stringify(visibleText(hoverCardOf('t2')))}`);
+    // In a <bdi>: the caller's title may be right-to-left.
+    expectThat(/<bdi>Controlled by agent \(send\)<\/bdi>/.test(hoverCardOf('t2')), `the caller's name is not isolated from the text around it: ${hoverCardOf('t2')}`);
+    expectThat(!visibleText(hoverCardOf('t1')).includes('Controlled by'), "the caller's card says it was controlled");
     const cls = classOf(badge).split(/\s+/);
     // Over the top edge just right of the lock's corner, above the activity dot.
     for (const word of ['absolute', '-top-[2px]', 'left-[9px]', 'w-[10px]', 'h-[10px]']) {
@@ -4359,6 +4383,37 @@ scenario(
     expectText(html, 'No program has asked NexTerm for anything yet.');
     useControlLogStore.setState({ open: false });
     expectThat(!/data-control-log-dialog/.test(renderArranged()), 'drawn while closed');
+  }
+);
+
+scenario(
+  'RN-246',
+  'Show Control Log: a program polling list is one row "list × N" at the last call\'s time, and the heading still counts every call (bundle 4, OQ2)',
+  () => {
+    reset();
+    useControlLogStore.setState({ entries: [], open: true });
+    const record = useControlLogStore.getState().record;
+    record({ at: new Date(2026, 10, 7, 9, 5, 1).getTime(), caller: 't1', callerTitle: 'agent', cmd: 'send', target: 't2', targetTitle: 'build', size: 12, result: 'ok' });
+    for (let s = 2; s <= 5; s += 1) record({ at: new Date(2026, 10, 7, 9, 5, s).getTime(), caller: 't1', callerTitle: 'agent', cmd: 'list', result: 'ok' });
+    record({ at: new Date(2026, 10, 7, 9, 5, 6).getTime(), caller: 't1', callerTitle: 'agent', cmd: 'send', target: 't2', targetTitle: 'build', size: 12, result: 'ok' });
+  },
+  (html) => {
+    const box = /<div\b[^>]*\sdata-control-log-dialog=""[\s\S]*$/.exec(html)?.[0] ?? '';
+    expectThat(box, 'the dialog is not open');
+    expectText(box, '6 calls');
+    expectThat(/data-control-log-count="6"/.test(box), 'the heading does not count the calls');
+    const rowTags = [...box.matchAll(/<tr\b[^>]*data-control-log-row="[^"]*"[^>]*>[\s\S]*?<\/tr>/g)].map((m) => m[0]);
+    const rows = rowTags.map((tag) => visibleText(tag).replace(/\s+/g, ' ').trim());
+    expectThat(rows.length === 3, `${rows.length} rows: ${JSON.stringify(rows)}`);
+    expectThat(rows[1].startsWith('09:05:05') && rows[1].includes('list × 4') && rows[1].includes('ok'), `the merged row: ${rows[1]}`);
+    expectThat(/data-control-log-calls="4"/.test(rowTags[1]), `the merged row's calls: ${rowTags[1]}`);
+    expectThat(/title="4 calls in a row; the time is the last one&#x27;s"/.test(rowTags[1]) || /title="4 calls in a row; the time is the last one's"/.test(rowTags[1]), `the merged row's hint: ${rowTags[1]}`);
+    // The sends either side are a row each, with no count.
+    for (const i of [0, 2]) {
+      expectThat(rows[i].includes('send') && !rows[i].includes('×'), `a send row: ${rows[i]}`);
+      expectThat(/data-control-log-calls="1"/.test(rowTags[i]) && !/calls in a row/.test(rowTags[i]), `a send row's calls: ${rowTags[i]}`);
+    }
+    expectThat(/class="[^"]*text-vsc-ok[^"]*"[^>]*>ok</.test(rowTags[1]) || /data-control-log-result="ok"[^>]*class="[^"]*text-vsc-ok/.test(rowTags[1]), `the merged row is not coloured ok: ${rowTags[1]}`);
   }
 );
 
@@ -5485,8 +5540,11 @@ scenario(
       const chip = tabChip(html, id);
       expectThat(chip, `no chip for ${id}`);
       expectThat(nameIn(chip) === want, `the chip of ${id} says ${JSON.stringify(nameIn(chip))}, not ${JSON.stringify(want)}`);
-      const tip = attrOf(openingTag(chip), 'title') ?? '';
-      expectThat(tip.startsWith(`${want} — `), `the chip's tooltip of ${id} does not start with its label: ${JSON.stringify(tip)}`);
+      // The chip's tooltip is its hover card (bundle 4, B12): no native
+      // title, and the card's first row is the label.
+      expectThat(attrOf(openingTag(chip), 'title') === null, `the chip of ${id} still has a native tooltip: ${openingTag(chip)}`);
+      const tip = visibleText(/<div data-card-row="title"[^>]*>[\s\S]*?<\/div>/.exec(hoverCardOf(id))?.[0] ?? '').trim();
+      expectThat(tip === want, `the chip's tooltip of ${id} does not start with its label: ${JSON.stringify(tip)}`);
       expectThat(attrOf(chip.match(/<button\b[^>]*aria-label="Close [^"]*"[^>]*>/)?.[0], 'aria-label') === `Close ${want}`, `the ✕ of ${id} does not name ${want}`);
       const row = terminalRow(html, id);
       expectThat(row, `no TERMINALS row for ${id}`);
@@ -6353,7 +6411,9 @@ scenario(
     const chip = tabChip(html, 't1');
     const badge = readOnlyMarkIn(chip);
     expectThat(badge, 'no read-only badge on the chip');
-    expectThat(badge.role === 'img' && badge.label === words && badge.title === words, `the badge does not say it: ${badge.tag}`);
+    // Its words in aria-label, and on the chip's hover card — the chip's one
+    // tooltip (bundle 4, B12) — so no native title beside the card.
+    expectThat(badge.role === 'img' && badge.label === words && badge.title === null, `the badge does not say it, or has a native tooltip: ${badge.tag}`);
     expectThat(iconOf(badge.after) === 'keyboard-off' && /\swidth="8"/.test(badge.after), 'the badge is not an 8 px KeyboardOff');
     const cls = classOf(badge.tag).split(/\s+/);
     for (const word of ['absolute', 'pointer-events-none', '-bottom-[2px]', '-left-[2px]', 'w-[10px]', 'h-[10px]']) {
@@ -6363,8 +6423,10 @@ scenario(
     const lock = lockIn(chip);
     expectThat(lock && iconOf(chip.slice(chip.indexOf(lock.tag))) === 'lock', 'setup: the lock is on the chip too');
     expectThat(chip.indexOf(lock.tag) < chip.indexOf(badge.tag), 'the badge is not right after the lock');
-    const chipTitle = visibleText(attrOf(openingTag(chip), 'title') ?? '');
-    expectThat(chipTitle.includes(words), `the chip's tooltip does not say it: ${JSON.stringify(chipTitle)}`);
+    // The chip's tooltip is its hover card (bundle 4, B12), with no native title.
+    expectThat(attrOf(openingTag(chip), 'title') === null, `the chip still has a native tooltip: ${openingTag(chip)}`);
+    const chipCard = visibleText(hoverCardOf('t1'));
+    expectThat(chipCard.includes(words), `the chip's tooltip does not say it: ${JSON.stringify(chipCard)}`);
     expectThat(!readOnlyMarkIn(tabChip(html, 't2')), 'a read-only badge on a writable terminal');
 
     const row = terminalRow(html, 't1');
@@ -6403,6 +6465,281 @@ scenario(
     arrangeReadOnly({});
     const none = renderArranged();
     expectThat(!/data-read-only-mark=|data-read-only-strip=/.test(none), 'a read-only mark or strip with nothing read-only');
+  }
+);
+
+// ---- The tab hover card (Orca bundle 4, B12) ---------------------------------
+//
+// The chip's one tooltip: no native title on a terminal chip, nothing pointing
+// at a card while none is shown, and the card itself a tooltip on the floating
+// surface that takes no pointer and holds nothing to press.
+
+/** The `data-card-row` keys of a card's markup, in order. */
+const cardRowsOf = (markup) => [...(markup ?? '').matchAll(/\sdata-card-row="([^"]+)"/g)].map((m) => m[1]);
+
+function arrangeHoverCard(extra = {}) {
+  reset();
+  const now = Date.now();
+  useTerminalStore.setState({
+    tabs: [
+      tab('t1', {
+        title: 'agent work',
+        cwd: '/Users/someone/Projects/clients/acme/very-long-repository-name/packages/web-app',
+        shell: '/bin/zsh',
+        agent: { kind: 'claude', sessionId: 'c-1' },
+        agentTyped: { sessionId: 'sess-t1' },
+      }),
+      tab('t2'),
+    ],
+    activeTabId: 't1',
+    groups: baseGroups(['t1', 't2']),
+    agentActivity: { t1: { state: 'working', since: now - 3 * 60 * 1000 - 10_000 } },
+    readOnly: { t1: true },
+    notifications: [programNote('n1', { tabId: 't1', tabTitle: 'agent work', title: 'Claude Code', body: 'Tests passed', read: true })],
+    ...extra,
+  });
+  useSystemStore.setState({ os: 'macos' });
+}
+
+scenario(
+  'RN-242',
+  "a terminal chip has no native title and no aria-describedby while no card is shown; its hover card is a tooltip on the floating surface, taking no pointer, with nothing to press: title, agent and state with how long, folder shortened in the middle, shell, flags, the last notification and the hint, in that order",
+  () => arrangeHoverCard(),
+  (html) => {
+    const chips = [...html.matchAll(/<div\b[^>]*\sdata-tab-chip="[^"]*"[^>]*>/g)].map((m) => m[0]);
+    expectThat(chips.length === 2, `setup: ${chips.length} terminal chips drawn, not 2`);
+    for (const chip of chips) {
+      expectThat(!/\stitle="/.test(chip), `a terminal chip still has a native tooltip: ${chip}`);
+      expectThat(!/\saria-describedby="/.test(chip), `a chip names a card that is not shown: ${chip}`);
+    }
+    // Nor its ✕, which the pointer reaches without leaving the chip: its words are its aria-label.
+    const closeButtons = [...html.matchAll(/<button\b[^>]*\saria-label="Close (agent work|t2)"[^>]*>/g)].map((m) => m[0]);
+    expectThat(closeButtons.length === 2, `setup: ${closeButtons.length} chips draw their \u{2715}, not 2`);
+    for (const button of closeButtons) expectThat(!/\stitle="/.test(button), `a chip's \u{2715} has a native tooltip beside the card: ${button}`);
+    expectThat(!/drag along the tabs to reorder/.test(html), 'the old hint is still drawn');
+    // Nor anything else inside a chip — its unread count, its lock, its
+    // read-only and controlled badges all on: the hover card is its one tooltip.
+    arrangeHoverCard({
+      readOnly: { t1: true, t2: true },
+      controlled: {
+        t1: { by: 't2', byTitle: 't2', cmd: 'send', at: Date.now(), n: 1 },
+        t2: { by: 't1', byTitle: 'agent work', cmd: 'focus', at: Date.now(), n: 1 },
+      },
+      notifications: [
+        programNote('n1', { tabId: 't1', tabTitle: 'agent work', title: 'Claude Code', body: 'Tests passed', read: false }),
+        programNote('n2', { tabId: 't2', tabTitle: 't2', title: 'Build', body: 'done', read: false }),
+      ],
+    });
+    lockSessions(['t1', 't2']);
+    try {
+      const marked = renderArranged();
+      for (const id of ['t1', 't2']) {
+        const chip = tabChip(marked, id);
+        expectThat(chip, `setup: no chip ${id}`);
+        for (const attr of ['data-unread-count', 'data-lock-mark', 'data-read-only-mark', 'data-controlled-mark']) {
+          expectThat(tagWith(chip, attr), `setup: chip ${id} draws no ${attr}: ${chip}`);
+        }
+        const inside = chip.slice(openingTag(chip).length);
+        const titled = [...inside.matchAll(/<[a-z]+\b[^>]*\stitle="[^"]*"[^>]*>/g)].map((m) => m[0]);
+        expectThat(titled.length === 0, `something inside chip ${id} has a native tooltip beside the card: ${titled.join(' ')}`);
+        // Its card's flags say them, each isolated from the text around it (<bdi>), as the title is.
+        const flags = /<div\b[^>]*\sdata-card-row="flags"[^>]*>([\s\S]*?)<\/div>/.exec(hoverCardOf(id))?.[1] ?? '';
+        const items = [...flags.matchAll(/<span>([\s\S]*?)<\/span>/g)].map((m) => m[1]);
+        expectThat(items.length === 4, `setup: chip ${id}'s card has ${items.length} flags, not 4: ${flags}`);
+        for (const item of items) expectThat(/^<bdi>[^<]+<\/bdi>$/.test(item), `a flag of chip ${id}'s card is not in a <bdi>: ${item}`);
+      }
+    } finally {
+      lockSessions([]);
+      arrangeHoverCard();
+    }
+    const card = hoverCardOf('t1');
+    const tag = openingTag(card);
+    expectThat(/\srole="tooltip"/.test(tag) && /\sid="card-test"/.test(tag) && /\sdata-hover-card="t1"/.test(tag), `the card is not a tooltip with its id: ${tag}`);
+    const cls = classOf(tag).split(/\s+/);
+    for (const word of ['fixed', 'pointer-events-none', 'rounded-popover', 'bg-vsc-widget', 'border-vsc-widget-border', 'shadow-widget', 'animate-overlay-in', 'max-w-[320px]']) {
+      expectThat(cls.includes(word), `the card is not "${word}": ${tag}`);
+    }
+    expectThat(!/<(button|input|a|select|textarea)\b|\stabindex=/.test(card), `the card holds something to press or focus: ${card}`);
+    const rows = cardRowsOf(card);
+    expectThat(JSON.stringify(rows) === '["title","status","folder","shell","flags","note","hint"]', `the card's rows: ${JSON.stringify(rows)}`);
+    const text = visibleText(card);
+    for (const words of [
+      'agent work',
+      'Claude Code \u{00B7} Working for 3 minutes',
+      '/Users/someone/Project\u{2026}-repository-name/packages/web-app', // its middle out, its end kept
+      'zsh',
+      RO_MODULE.READ_ONLY_LABEL,
+      'Tests passed',
+      'Drag to reorder or move \u{00B7} Double-click to rename',
+    ]) {
+      expectThat(text.includes(words), `the card does not say ${JSON.stringify(words)}: ${JSON.stringify(text)}`);
+    }
+    expectThat(!text.includes('very-long-repository-name/packages'), 'the folder is not shortened');
+    // The status glyph is for the eye; its words are what is read out.
+    expectThat(/<span aria-hidden="true"[^>]*>\u{25CC}<\/span>/u.test(card), `the working glyph is not drawn, hidden from screen readers: ${card}`);
+    // A plain shell: no state row, no flags, no note.
+    const plain = cardRowsOf(hoverCardOf('t2'));
+    expectThat(JSON.stringify(plain) === '["title","folder","shell","hint"]', `a plain shell's rows: ${JSON.stringify(plain)}`);
+    expectThat(hoverCardOf('gone') === '', 'a card for a terminal that is not there');
+  }
+);
+
+scenario(
+  'RN-243',
+  "a hostile title, folder and notification draw in the hover card without ESC, BEL, bidirectional or zero-width characters; under either reduced-motion switch the card does not fade",
+  () =>
+    arrangeHoverCard({
+      tabs: [
+        tab('t1', {
+          title: 'ok\u001b]0;evil\u0007 \u202Egnp.exe\u200B\uFEFF\u2066x\u2069',
+          cwd: '/tmp/\u202Eevil\u200B/\u001b[31mred\u0007',
+        }),
+      ],
+      groups: baseGroups(['t1']),
+      notifications: [programNote('n1', { tabId: 't1', title: 'Build\u202E', body: 'done\u200B\u0007' })],
+    }),
+  () => {
+    const card = hoverCardOf('t1');
+    const text = visibleText(card);
+    expectThat(!/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/u.test(card), `the card's markup carries a hidden character: ${JSON.stringify(card)}`);
+    expectThat(text.includes('ok]0;evil gnp.exex') && text.includes('/tmp/evil/[31mred') && text.includes('Build \u{2014} done'), `the card's text: ${JSON.stringify(text)}`);
+    const css = readSource('src/styles/index.css');
+    const media = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce) {\n  *, *::before'));
+    expectThat(/\[data-hover-card\] \{\s*animation: none !important;\s*\}/.test(media.slice(0, media.indexOf('\n}\n'))), 'the OS switch does not stop the card fading');
+    expectThat(/:root\.reduce-motion \[data-hover-card\] \{\s*animation: none !important;\s*\}/.test(css), 'Reduce Motion does not stop the card fading');
+  }
+);
+
+// ---- Show CPU and Memory (Orca bundle 4, B8-F4) ----------------------------
+//
+// The figure on a TERMINALS row's second line and the usage row of a hover
+// card, drawn from the usage store as the sampler leaves it. The sampler
+// itself, and who listens to what, are tests/adversarial/resource_usage.test.js.
+
+const USAGE_MIB = 1024 * 1024;
+/** The colour tokens that say a state (STYLEGUIDE.md): never on a figure. */
+const STATE_COLOUR = /\btext-vsc-(error|warn|info|attention|success|accent)\b/;
+
+/** Four terminals in one pane, `u1` active: a sample for the first three, a partial one and a first one among them. */
+function arrangeUsage({ on = true, settings = {}, os = 'macos', tabs = null } = {}) {
+  reset();
+  const list = tabs ?? [tab('u1'), tab('u2'), tab('u3'), tab('u4')];
+  useTerminalStore.setState({ tabs: list, activeTabId: list[0].id, groups: baseGroups(list.map((t) => t.id)) });
+  useSettingsStore.setState({ terminalShowResources: on, ...settings });
+  useSystemStore.setState({ os });
+  useResourceUsageStore.setState({
+    byTab: {
+      u1: { sessionId: 'sess-u1', cpuPercent: 12.4, memoryBytes: 340 * USAGE_MIB, processes: 3, partial: false },
+      u2: { sessionId: 'sess-u2', cpuPercent: 140, memoryBytes: 1.2 * 1024 * USAGE_MIB, processes: 5, partial: true },
+      u3: { sessionId: 'sess-u3', cpuPercent: null, memoryBytes: 20 * USAGE_MIB, processes: 1, partial: false },
+    },
+    sampledAt: Date.now(),
+  });
+}
+
+/** A row's CPU and memory figure: `{ tag, kind, shown, words, title }`, or null when it has none. */
+function usageIn(row) {
+  const tag = tagWith(row, 'data-resource-usage');
+  if (!tag) return null;
+  const after = row.slice(row.indexOf(tag) + tag.length);
+  const m = /^<span aria-hidden="true">([^<]*)<\/span><span class="sr-only">([^<]*)<\/span><\/span>/.exec(after);
+  return { tag, kind: attrOf(tag, 'data-resource-usage'), shown: m && visibleText(m[1]), words: m && visibleText(m[2]), title: attrOf(tag, 'title') };
+}
+
+scenario(
+  'RN-244',
+  "TERMINALS, Show CPU and Memory on: the second line ends with 'CPU% · memory', dimmed and never coloured, its words ('of one core') its tooltip and what is read out; measuring, partial, a WSL terminal's 'not measurable'; no sample, an exited WSL shell or the setting off: nothing at all; the row's height unchanged (B8-F4)",
+  () => arrangeUsage(),
+  (html) => {
+    const row = (markup, id) => {
+      const found = terminalRow(markup, id);
+      expectThat(found, `no row ${id}`);
+      return found;
+    };
+    const expectUsage = (id, shown, words, quiet) => {
+      const u = usageIn(row(html, id));
+      expectThat(u && u.kind === 'figures' && u.shown === shown, `${id}'s figure: ${JSON.stringify(u)}`);
+      expectThat(u.words === words && u.title === words, `${id}'s words: ${JSON.stringify(u)}`);
+      const cls = classOf(u.tag).split(/\s+/);
+      expectThat(cls.includes(quiet) && cls.includes('shrink-0') && cls.includes('tabular-nums'), `${id}'s figure is not drawn dimmed and whole: ${u.tag}`);
+      expectThat(!STATE_COLOUR.test(u.tag), `${id}'s figure is coloured: ${u.tag}`);
+      const line = row(html, id);
+      expectThat(line.indexOf('data-status-line=') !== -1 && line.indexOf('data-status-line=') < line.indexOf('data-resource-usage='), `${id}'s figure is not on its second line`);
+    };
+    expectUsage('u1', '12% \u{00B7} 340 MB', 'CPU 12% of one core, memory 340 MB, in 3 processes.', 'text-vsc-fg');
+    expectUsage('u2', '140% \u{00B7} 1.2 GB \u{00B7} partial', 'CPU 140% of one core, memory 1.2 GB, in 5 processes. Some of its processes could not be read, so the figures leave them out.', 'text-vsc-muted');
+    expectUsage('u3', 'measuring \u{00B7} 20 MB', 'CPU still being measured, memory 20 MB, in 1 process.', 'text-vsc-muted');
+    expectThat(usageIn(row(html, 'u4')) === null, `a figure with no sample: ${row(html, 'u4')}`);
+    expectThat(!/measuring|MB/.test(visibleText(tagWith(row(html, 'u4'), 'data-status-line') ?? '')), 'u4 shows a placeholder');
+    const heightOn = classOf(openingTag(row(html, 'u2')));
+    const lineOn = classOf(tagWith(row(html, 'u2'), 'data-status-line'));
+    expectThat(lineOn.split(/\s+/).includes('h-[16px]'), `the second line is not of fixed height: ${lineOn}`);
+
+    // Off: nothing, with the very same figures in the store.
+    arrangeUsage({ on: false });
+    const off = renderArranged();
+    expectThat(!/data-resource-usage=|data-card-row="usage"/.test(off), 'a figure is drawn with Show CPU and Memory off');
+    for (const id of ['u1', 'u2', 'u3', 'u4']) {
+      expectThat(!/\bMB\b|\bGB\b|measuring|measurable|partial|of one core/.test(visibleText(row(off, id))), `${id} shows CPU or memory text with the setting off`);
+    }
+    expectThat(classOf(openingTag(row(off, 'u2'))) === heightOn, `the row's height changes with the setting: ${heightOn} / ${classOf(openingTag(row(off, 'u2')))}`);
+    expectThat(classOf(tagWith(row(off, 'u2'), 'data-status-line')) === lineOn, 'the second line changes with the setting');
+
+    // With every other second-line item off, the figure is the second line.
+    const alone = { terminalsPanelBranch: false, terminalsPanelAgent: false, terminalsPanelLastNote: false };
+    arrangeUsage({ settings: alone });
+    const only = renderArranged();
+    expectThat(usageIn(row(only, 'u1'))?.shown === '12% \u{00B7} 340 MB', `the figure alone on the second line: ${row(only, 'u1')}`);
+    expectThat(classOf(openingTag(row(only, 'u1'))) === classOf(openingTag(row(html, 'u1'))), "the figure's own second line is not the usual two-line row");
+    arrangeUsage({ on: false, settings: alone });
+    const oneLine = renderArranged();
+    expectThat(!/data-status-line=|data-resource-usage=/.test(row(oneLine, 'u1')), 'every second-line item off and the setting off: not one line again');
+
+    // A WSL terminal says it cannot be measured; once its shell has exited, nothing.
+    arrangeUsage({
+      os: 'windows',
+      tabs: [tab('u1', { shell: 'C:\\Windows\\System32\\wsl.exe' }), tab('u4', { shell: 'wsl.exe', exited: { code: 0 } }), tab('u2', { shell: 'C:\\Windows\\System32\\cmd.exe' })],
+    });
+    const win = renderArranged();
+    const w = usageIn(row(win, 'u1'));
+    expectThat(w?.kind === 'not-measurable' && w.shown === 'not measurable' && /WSL/.test(w.words) && w.title === w.words, `the WSL row: ${JSON.stringify(w)}`);
+    expectThat(usageIn(row(win, 'u4')) === null, 'an exited WSL shell shows a label');
+    expectThat(usageIn(row(win, 'u2'))?.shown === '140% \u{00B7} 1.2 GB \u{00B7} partial', 'a cmd terminal on Windows shows no figures');
+  }
+);
+
+scenario(
+  'RN-245',
+  "the hover card with Show CPU and Memory on: a usage row between the shell and the flags, 'Usage 12% · 340 MB' to the eye and its words read out, never coloured; partial and WSL; no row with no sample or with the setting off (B8-F4)",
+  () => {
+    arrangeHoverCard();
+    useSettingsStore.setState({ terminalShowResources: true });
+    useResourceUsageStore.setState({ byTab: { t1: { sessionId: 'sess-t1', cpuPercent: 12, memoryBytes: 340 * USAGE_MIB, processes: 3, partial: false } } });
+  },
+  () => {
+    const card = hoverCardOf('t1');
+    expectThat(JSON.stringify(cardRowsOf(card)) === '["title","status","folder","shell","usage","flags","note","hint"]', `the card's rows: ${JSON.stringify(cardRowsOf(card))}`);
+    const usage = /<div data-card-row="usage"[^>]*>[\s\S]*?<\/div>/.exec(card)?.[0] ?? '';
+    expectThat(
+      /<span class="text-vsc-muted" aria-hidden="true">Usage(?:<!-- -->)? <\/span><span aria-hidden="true" class="tabular-nums">12% \u{00B7} 340 MB<\/span><span class="sr-only">CPU 12% of one core, memory 340 MB, in 3 processes\.<\/span>/u.test(usage),
+      `the usage row: ${usage}`
+    );
+    expectThat(!STATE_COLOUR.test(usage), `the usage row is coloured: ${usage}`);
+    expectThat(JSON.stringify(cardRowsOf(hoverCardOf('t2'))) === '["title","folder","shell","hint"]', 'a terminal with no sample has a usage row');
+
+    useResourceUsageStore.setState({ byTab: { t1: { sessionId: 'sess-t1', cpuPercent: 3, memoryBytes: 2 * 1024 * USAGE_MIB, processes: 9, partial: true } } });
+    expectThat(visibleText(hoverCardOf('t1')).includes('3% \u{00B7} 2.0 GB \u{00B7} partial'), 'the partial figure is not marked');
+
+    useSettingsStore.setState({ terminalShowResources: false });
+    const off = hoverCardOf('t1');
+    expectThat(JSON.stringify(cardRowsOf(off)) === '["title","status","folder","shell","flags","note","hint"]', `the card's rows with the setting off: ${JSON.stringify(cardRowsOf(off))}`);
+    expectThat(!/Usage|\bGB\b|\bMB\b|partial|measuring|of one core/.test(visibleText(off)), 'the card says CPU or memory with the setting off');
+
+    arrangeHoverCard({ tabs: [tab('t1', { shell: 'C:\\Windows\\System32\\wsl.exe' })], groups: baseGroups(['t1']), readOnly: {}, notifications: [] });
+    useSystemStore.setState({ os: 'windows' });
+    useSettingsStore.setState({ terminalShowResources: true });
+    const wsl = hoverCardOf('t1');
+    expectThat(/<div data-card-row="usage" data-usage-wsl="">/.test(wsl) && visibleText(wsl).includes('not measurable'), `the WSL card: ${wsl}`);
   }
 );
 

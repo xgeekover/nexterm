@@ -662,6 +662,10 @@ code, kbd, pre, .font-mono {
     transition-property: none !important;
     transition-delay: 0s !important;
   }
+  /* A tab's hover card (TabHoverCard.jsx) shows at once, with no fade. */
+  [data-hover-card] {
+    animation: none !important;
+  }
 }
 
 /* Workbench "Reduced motion" setting — same neutralization as the OS media
@@ -679,4 +683,7 @@ code, kbd, pre, .font-mono {
 :root.reduce-motion [data-separator] {
   transition-property: none !important;
   transition-delay: 0s !important;
+}
+:root.reduce-motion [data-hover-card] {
+  animation: none !important;
 }

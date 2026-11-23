@@ -223,6 +223,10 @@ import './read_only.test.js';
 import './last_command_output.test.js';
 // Send to Agent (bundle 4, A4): the @ reference, the agent terminal it goes to, the paste and every refusal.
 import './send_to_agent.test.js';
+// The tab hover card (Orca bundle 4, B12): its rows, its cleaning, and when it shows (fake timers), Escape and aria-describedby.
+import './tab_hover_card.test.js';
+// Show CPU and Memory (bundle 4, B8, page side): the formatting, the store, and when the sampler asks (fake timers, a mocked invoke); RU-99 tears down.
+import './resource_usage.test.js';
 
 async function run() {
   console.log('====================================================');

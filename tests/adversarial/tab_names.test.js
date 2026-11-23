@@ -379,7 +379,14 @@ describe("A terminal's label: the user's name, else a program's title, else its 
     const split = source('src/components/terminal/TerminalSplitContainer.jsx');
     assert.match(split, /import \{ displayTitle \} from '\.\.\/\.\.\/lib\/tabTitle\.js';/);
     assert.match(split, /tab\.exited && 'line-through opacity-60'\n\s*\)\}\n\s*>\n\s*\{displayTitle\(tab\)\}\n\s*<\/span>/, 'the chip draws displayTitle');
-    assert.match(split, /\? `\$\{displayTitle\(tab\)\} — \$\{status\}`\n\s*: `\$\{displayTitle\(tab\)\} — drag along the tabs/, "the chip's tooltip names it so");
+    // The chip's tooltip is its hover card now (bundle 4, B12): no native
+    // title on the chip, and the card's title row is displayTitle.
+    const chipProps = split.slice(split.indexOf('data-tab-chip={tab.id}'), split.indexOf("'relative group flex items-center px-2 h-[22px]"));
+    assert.ok(chipProps.includes('onPointerDown') && !/\btitle=/.test(chipProps), 'the chip has no native title');
+    assert.match(split, /data-tab-chip=\{tab\.id\}[\s\S]{0,600}\{\.\.\.hoverCard\.chipProps\(tab\.id\)\}/, 'the chip carries its hover card');
+    const card = source('src/lib/tabHoverCard.js');
+    assert.match(card, /import \{ displayTitle \} from '\.\/tabTitle\.js';/);
+    assert.match(card, /const title = cleanCardText\(displayTitle\(tab\), CARD_TITLE_MAX\);/, "the chip's tooltip names it so");
     assert.match(split, /aria-label=\{`Close \$\{displayTitle\(tab\)\}`\}/, 'and its ✕');
     assert.match(split, /<StripHandle[\s\S]{0,120}title=\{displayTitle\(boundTab\)\}/, 'the hidden-strip handle is handed displayTitle');
     assert.match(split, /tabId: tab\.id,\n\s*title: displayTitle\(tab\),/, 'a dragged chip carries it');

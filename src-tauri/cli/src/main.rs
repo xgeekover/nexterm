@@ -15,13 +15,14 @@ mod output;
 mod protocol;
 mod transport;
 mod usage;
+mod wait;
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 
-use args::Parsed;
+use args::{Command, Parsed};
 use protocol::Answer;
 use transport::Link;
 
@@ -42,6 +43,13 @@ pub mod exit {
     /// or pipe), it is busy (`rate_limited`), or it did not answer in time:
     /// worth trying again later.
     pub const NOT_RESPONDING: u8 = 5;
+    /// `wait`: the time given with --timeout ran out first.
+    pub const TIMED_OUT: u8 = 6;
+    /// `wait`: the terminal is waiting for input while its agent is not
+    /// idle, which only a person can answer.
+    pub const BLOCKED: u8 = 7;
+    /// `wait --for idle`: the terminal exited or was closed before it was idle.
+    pub const ENDED: u8 = 8;
 }
 
 /// What the program reads from its environment, gathered once so `run` can
@@ -136,6 +144,13 @@ pub fn run(
         Ok(a) => a,
         Err(f) => return fail(err, &f),
     };
+
+    // Not a request of its own: it polls `list` until the target is ready.
+    if let Command::Wait { target, until, timeout } = &command {
+        let spec = wait::Spec { target, until: *until, timeout: *timeout };
+        let end = wait::wait(&spec, token, &address, link, &wait::RealClock::starting_now());
+        return wait::report(&spec, end, json, out, err);
+    }
 
     // Standard input is read before connecting, so a slow writer never holds
     // a connection open against NexTerm's per-line timeout.
@@ -355,7 +370,8 @@ mod tests {
             assert_eq!(
                 o.err,
                 "nexterm-cli: unknown guide topic 'frob'\n\
-                 Topics: notify, set-status, set-title, set-progress, new-split, read-screen\n\
+                 Topics: notify, set-status, set-title, set-progress, new-split, read-screen,\n        \
+                 wait\n\
                  Run 'nexterm-cli guide' for the index.\n"
             );
             let o = run_with(&["guide", "list"], &env, "", &link);
@@ -513,6 +529,37 @@ mod tests {
         assert_eq!(o.code, 4);
         assert!(!o.err.contains('\u{1b}') && !o.err.contains('\u{7}'), "{:?}", o.err);
         assert_eq!(o.err.matches('\n').count(), 1, "one line: {:?}", o.err);
+    }
+
+    #[test]
+    fn wait_sends_list_never_wait_and_checks_its_usage_first() {
+        // Usage first, outside NexTerm too: nothing sent.
+        let link = FakeLink::answering(OK_NULL);
+        let none = Env { control: None, token: None };
+        for args in [&["wait"][..], &["wait", "self"], &["wait", "x", "--for", "busy"], &["wait", "x", "--timeout", "25h"]] {
+            let o = run_with(args, &none, "", &link);
+            assert_eq!(o.code, 2, "{args:?}");
+            assert!(o.err.contains("Run 'nexterm-cli help wait' for more."), "{args:?}: {}", o.err);
+            assert!(o.out.is_empty());
+        }
+        let o = run_with(&["wait", "tab-term-2"], &none, "", &link);
+        assert_eq!(o.code, 3);
+        assert!(link.sent.borrow().is_empty());
+        // Inside: an ordinary list, as one request, with the token.
+        let link = FakeLink::answering(r#"{"v":1,"id":1,"ok":false,"error":{"code":"disabled","message":"control is off"}}"#);
+        let o = run_with(&["wait", "tab-term-2"], &inside(), "", &link);
+        assert_eq!((o.code, o.err.as_str(), o.out.as_str()), (4, "nexterm-cli: control is off [disabled]\n", ""));
+        assert_eq!(link.request(), serde_json::json!({"v": 1, "id": 1, "token": TOKEN, "cmd": "list", "args": {}}));
+        let list = r#"{"v":1,"id":1,"ok":true,"result":[{"id":"tab-term-1","status":"working","self":true,"child":false}]}"#;
+        let link = FakeLink::answering(list);
+        let o = run_with(&["--json", "wait", "child:tab-term-2", "--for", "exit"], &inside(), "", &link);
+        assert_eq!((o.code, o.err.as_str(), o.out.as_str()), (4, "nexterm-cli: no terminal tab-term-2 (see 'nexterm-cli list')\n", ""));
+        assert_eq!(link.request()["cmd"], "list");
+        // A transport failure is its usual code: NexTerm quit is 5.
+        let link = FakeLink::failing(FailureKind::Unreachable, "NexTerm is not running");
+        let o = run_with(&["wait", "tab-term-2"], &inside(), "", &link);
+        assert_eq!((o.code, o.err.as_str()), (5, "nexterm-cli: NexTerm is not running\n"));
+        assert_eq!(link.request()["cmd"], "list");
     }
 
     #[test]
