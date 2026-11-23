@@ -44,6 +44,7 @@ import { useSystemStore } from '../../src/stores/systemStore.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { withoutPasteMarkers } from '../../src/lib/pasteWarning.js';
+import { isReadOnly } from '../../src/lib/readOnly.js';
 
 // The glue imports the xterm registry, and TreeRow is JSX: the render suite's
 // loader stands in for `@xterm/*` and parses JSX, as tab_reorder_ui does.
@@ -874,6 +875,29 @@ describe('Bound to the live app', () => {
     });
   });
 
+  test('TF-49: a read-only terminal (A3) takes no drop — not highlighted, refused as read-only, its pane not made active, and it says why', async () => {
+    await withTerminals(async ({ firstPane, secondPane }) => {
+      const tabId = shownTab(secondPane);
+      T.setState((s) => ({ readOnly: { ...s.readOnly, [tabId]: true } }));
+      const noted = [];
+      const note = T.getState().noteReadOnlyInput;
+      T.setState({ noteReadOnlyInput: (id) => noted.push(id) });
+      try {
+        T.getState().setActivePane(firstPane);
+        const plan = glue.planPathsIntoPane(secondPane, ['/workspace/x']);
+        assert.equal(plan.ok, false);
+        assert.equal(plan.reason, 'read-only');
+        const outcome = glue.insertPathsIntoPane(secondPane, ['/workspace/x']);
+        assert.equal(outcome.inserted, false);
+        assert.equal(outcome.reason, 'read-only');
+        assert.equal(T.getState().getActivePaneId(), firstPane, 'nothing done to the layout');
+        assert.deepEqual(noted, [tabId]);
+      } finally {
+        T.setState((s) => ({ noteReadOnlyInput: note, readOnly: {} }));
+      }
+    });
+  });
+
   test('TF-42: a terminal being closed takes nothing — the store says so while its shell is killed', async () => {
     await withTerminals(async ({ secondPane }) => {
       const tabId = shownTab(secondPane);
@@ -1067,20 +1091,33 @@ describe('The Explorer row, as it is wired', () => {
 
 describe("The registry's paste", () => {
   /** `pasteIntoTerminal`, cut from terminalRegistry.js and run against `instances`, with what it imports. */
-  function pasteWith(instances) {
+  function pasteWith(instances, { readOnly = {}, noted = [] } = {}) {
     const registry = source('src/components/terminal/terminalRegistry.js');
     const start = registry.indexOf('export function pasteIntoTerminal(');
     assert.ok(start > 0, 'the registry has pasteIntoTerminal');
     // To the closing brace at the start of a line, whichever line ending.
     const length = registry.slice(start).search(/\r?\n\}\r?\n/);
     assert.ok(length > 0, 'and it ends');
+    // `isReadOnly` and the store since bundle 4 (A3): nothing is pasted into a read-only terminal.
+    const store = { getState: () => ({ readOnly, noteReadOnlyInput: (id) => noted.push(id) }) };
     const fn = new Function(
       'instances',
       'withoutPasteMarkers',
+      'isReadOnly',
+      'useTerminalStore',
       `${registry.slice(start + 'export '.length, start + length)}\n}\nreturn pasteIntoTerminal;`
     );
-    return fn(instances, withoutPasteMarkers);
+    return fn(instances, withoutPasteMarkers, isReadOnly, store);
   }
+
+  test('TF-63: a read-only terminal (A3) takes no drop: nothing pasted, no focus taken, and it says why', () => {
+    const live = terminal();
+    const noted = [];
+    const paste = pasteWith(new Map([['t1', { term: live.term, disposed: false }]]), { readOnly: { t1: true }, noted });
+    assert.equal(paste('t1', '/a'), false);
+    assert.deepEqual(live.seen, []);
+    assert.deepEqual(noted, ['t1']);
+  });
 
   const terminal = () => {
     const seen = [];

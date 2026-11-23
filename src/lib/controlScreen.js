@@ -105,14 +105,7 @@ export function readScreen(term, { lines = 0, mask = true, maxBytes = READ_MAX_B
     hidden = maskLines(logical, { cols: term.cols, ...above }).reduce((sum, n) => sum + n, 0);
   }
 
-  const texts = logical.map(plainText);
-  let first = 0;
-  let bytes = texts.reduce((sum, t) => sum + utf8Length(t) + 1, 0);
-  while (first < texts.length && bytes > maxBytes) {
-    bytes -= utf8Length(texts[first]) + 1;
-    first += 1;
-  }
-  const kept = first > 0 ? texts.slice(first) : texts;
+  const { kept, truncated } = newestWithin(logical.map(plainText), maxBytes);
   return {
     lines: kept,
     alternate,
@@ -120,8 +113,37 @@ export function readScreen(term, { lines = 0, mask = true, maxBytes = READ_MAX_B
     rows: term.rows,
     masked: mask !== false,
     hidden,
-    truncated: first > 0,
+    truncated,
   };
+}
+
+/** The newest of `texts` (one line each) within `maxBytes`, the oldest dropped first. */
+function newestWithin(texts, maxBytes) {
+  let first = 0;
+  let bytes = texts.reduce((sum, t) => sum + utf8Length(t) + 1, 0);
+  while (first < texts.length && bytes > maxBytes) {
+    bytes -= utf8Length(texts[first]) + 1;
+    first += 1;
+  }
+  return { kept: first > 0 ? texts.slice(first) : texts, truncated: first > 0 };
+}
+
+/**
+ * Rows `fromRow` up to `toRow` of `term`'s normal buffer, and row `toRow`'s
+ * cells left of `toCol` when that is above 0 (readLogicalLines' end), as
+ * readScreen reads a window: logical lines, wrapped ones joined, blank ones
+ * at both ends left out, masked as read-screen masks (maskLines across what
+ * the rows above leave it in the middle of, stateAbove), and the newest
+ * within `maxBytes`, oldest dropped first. `{ lines, hidden, truncated }`.
+ * Copy Last Command Output's read (bundle 4, A2; lastCommandOutput.js).
+ */
+export function readRows(term, { fromRow = 0, toRow, toCol = 0, maxBytes = READ_MAX_BYTES } = {}) {
+  const buffer = term.buffer.normal;
+  const start = Math.max(0, fromRow);
+  const logical = readLogicalLines(term, start, buffer, { toRow, toCol });
+  const hidden = maskLines(logical, { cols: term.cols, ...stateAbove(buffer, start) }).reduce((sum, n) => sum + n, 0);
+  const { kept, truncated } = newestWithin(logical.map(plainText), maxBytes);
+  return { lines: kept, hidden, truncated };
 }
 
 /**

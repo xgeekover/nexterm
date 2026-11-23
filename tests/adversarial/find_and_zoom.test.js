@@ -288,7 +288,8 @@ describe('Clear Terminal', () => {
     // what was cleared is not restored at the next start (stage 6). The
     // prompt marks go with the clear, and the cursor's prompt keeps its own
     // (prompt_marks.test.js, PRM-08).
-    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*(?:\/\/[^\n]*\n\s*)*const promptMarked = entry\.promptMarks\?\.cursorOnNewestMark\(\) \?\? false;\s*entry\.term\.clear\(\);\s*entry\.promptMarks\?\.afterClear\(promptMarked\);\s*noteCleared\(entry\);\s*\}\);/);
+    // Bundle 4, A2: the clear also drops Copy Last Command Output's markers (`entry.lastOutput?.cleared()`), after the marks and before the save.
+    assert.match(registry, /export function clearTerminal\(tabId\) \{\s*(?:\/\/[^\n]*\n\s*)*return afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*(?:\/\/[^\n]*\n\s*)*const promptMarked = entry\.promptMarks\?\.cursorOnNewestMark\(\) \?\? false;\s*entry\.term\.clear\(\);\s*entry\.promptMarks\?\.afterClear\(promptMarked\);\s*(?:\/\/[^\n]*\n\s*)*entry\.lastOutput\?\.cleared\(\);\s*noteCleared\(entry\);\s*\}\);/);
     assert.match(registry, /function afterOutputSoFar\(entry, fn\) \{\s*if \(!entry \|\| entry\.disposed\) return false;/);
     assert.match(read('../../src-tauri/src/menu.rs'), /terminal_safe\("clear-terminal", "Clear Terminal", "CmdOrCtrl\+L"\)/);
     assert.match(read('../../src/components/command/CommandPalette.jsx'), /case 'clear_terminal':\s*clearTerminal\(\);/);

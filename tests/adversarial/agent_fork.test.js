@@ -26,6 +26,8 @@ import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
 import { CLAUDE_LOOKUP_TIMEOUT_MS, __setClaudeLookupTimeoutMs } from '../../src/lib/claudeConversations.js';
 import { isSessionIdFor, startCommand } from '../../src/lib/agents.js';
 import { forkTargetOfTab } from '../../src/lib/paletteItems.js';
+import { isReadOnly, readOnlyAgentNotice, withReadOnly } from '../../src/lib/readOnly.js';
+import { useToastStore } from '../../src/stores/toastStore.js';
 
 const T = terminalStore.useTerminalStore;
 const H = useAgentHistoryStore;
@@ -462,6 +464,35 @@ describe('Fork Conversation: forkConversation in a new terminal (A1, F6)', () =>
         assert.deepEqual(calls.writes, [], 'not into the password prompt');
         assert.deepEqual(notes, [{ tabId: tab.id, message: FORK_HIDDEN_NOTE }], 'the terminal says why');
         assert.equal(tab.agent ?? null, null, 'no record');
+        assert.equal(T.getState().agentHistoryNotice, null);
+      } finally {
+        terminalStore.__setAgentPromptWaitMs(previousWait);
+      }
+    });
+  });
+
+  test('FK-10: read-only turned on in the new terminal while the source is looked up — checked right before the write: no pty_write, the read-only note, no record (review B-R5)', async () => {
+    await fresh(async () => {
+      const previousWait = terminalStore.__setAgentPromptWaitMs(300);
+      try {
+        const known = new Set(T.getState().tabs.map((t) => t.id));
+        const toastsBefore = useToastStore.getState().toasts.length;
+        const answer = (command) => {
+          if (command === 'claude_conversations') {
+            const opened = T.getState().tabs.find((t) => !known.has(t.id));
+            T.setState((s) => ({ readOnly: withReadOnly(s.readOnly, opened.id, true) }));
+          }
+          return undefined;
+        };
+        const { result, tab, calls } = await forkNew({ sessionId: SRC, cwd: '/workspace/src' }, { answer });
+        assert.deepEqual(calls.lookups, [[SRC]], 'premise: the source asked about once, the shell ready');
+        assert.ok(isReadOnly(T.getState(), tab.id), 'premise: the new terminal is read-only now');
+        assert.deepEqual(result, { outcome: 'opened', tabId: tab.id, typed: false, notice: null });
+        assert.deepEqual(calls.writes, [], 'nothing typed into the read-only terminal');
+        assert.deepEqual(notes, [{ tabId: tab.id, message: readOnlyAgentNotice('Claude Code') }], 'the terminal says why');
+        assert.match(notes[0].message, /^Claude Code not started — this terminal is read-only, and NexTerm types nothing into it\./);
+        assert.equal(tab.agent ?? null, null, 'no record');
+        assert.equal(useToastStore.getState().toasts.length, toastsBefore, 'refused before writeRaw, which would toast');
         assert.equal(T.getState().agentHistoryNotice, null);
       } finally {
         terminalStore.__setAgentPromptWaitMs(previousWait);

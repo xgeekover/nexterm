@@ -97,7 +97,7 @@ describe('Prompt marks: where a prompt is (F1)', () => {
     assert.equal(tracker.lines[1], 3, 'on the row the next command is typed on');
   });
 
-  test('PRM-02: PowerShell, zsh and a two-line prompt that comes in the D\'s read (the mark is on its second line)', async () => {
+  test('PRM-02: PowerShell, zsh and a two-line prompt that comes in the D\'s read (the mark is on its first line)', async () => {
     const ps = makeTerm();
     const psMarks = trackPromptMarks(ps);
     await prompt(ps, psMarks, 'PS C:\\work> ');
@@ -110,12 +110,20 @@ describe('Prompt marks: where a prompt is (F1)', () => {
     await prompt(zsh, zshMarks, 'ls\r\nREADME.md  src\r\nuser@host % ');
     assertPrompts(zsh, zshMarks, ['user@host % ls', 'user@host %']);
 
+    // Bundle 4 (A2): the backend used to send a read's output and then its
+    // D, so a two-line prompt in the D's read was marked on its second line
+    // (this test pinned that). It now sends the D where it was, in front of
+    // the prompt, before the prompt text of that same read: the first line.
     const two = makeTerm();
     const twoMarks = trackPromptMarks(two);
-    await prompt(two, twoMarks, '~/work on main\r\n❯ ');
-    await prompt(two, twoMarks, 'git status\r\nnothing to commit\r\n~/work on main\r\n❯ ');
-    assertPrompts(two, twoMarks, ['❯ git status', '❯'], 'the input row, the second line of the prompt');
-    assert.equal(lineText(two, twoMarks.lines[1] - 1), '~/work on main');
+    const inOneRead = async (before, promptText) => {
+      await prompt(two, twoMarks, before);
+      await write(two, promptText);
+    };
+    await inOneRead('', '~/work on main\r\n❯ ');
+    await inOneRead('git status\r\nnothing to commit\r\n', '~/work on main\r\n❯ ');
+    assertPrompts(two, twoMarks, ['~/work on main', '~/work on main'], 'the first line of the prompt');
+    assert.equal(lineText(two, twoMarks.lines[1] + 1), '❯');
   });
 
   test('PRM-03: a D on the row of the newest mark (a repaint) adds no second mark', async () => {
@@ -138,8 +146,9 @@ describe('Prompt marks: where a prompt is (F1)', () => {
   test('PRM-26: zsh and bash, a prompt that comes in a read after its D: the mark is on the row the prompt starts on', async () => {
     // zsh's precmd and bash's PROMPT_COMMAND print the D with a printf of
     // their own (shell_integration.rs), and ZLE or readline draws the prompt
-    // afterwards. The backend sends a read's output, then its D: when the
-    // prompt text is in a later read, the D is marked before it is there.
+    // afterwards. The backend sends the D where it was in the output (A2,
+    // manager.rs), so it is marked before the prompt text is there, in a
+    // later read or in the same one (PRM-02).
     const split = async (term, tracker, before, promptText) => {
       const mark = await prompt(term, tracker, before);
       await write(term, promptText);
@@ -605,8 +614,7 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
 
   test('PRM-28: the click and the keys use both kinds, merged by line; the keys are claimed through one registry function', () => {
     assert.match(registry, /const promptMarkClicks = installPromptMarkClicks\(term, \(\) => allMarks\(instances\.get\(tabId\)\)\);/);
-    // Shell prompts, Claude Code's and OpenCode mini's messages (opencode_mini_marks.test.js).
-    assert.match(body('function allMarks('), /return mergeMarks\(entry\.promptMarks, entry\.messageMarks, entry\.miniMarks\);/);
+    assert.match(body('function allMarks('), /return mergeMarks\(entry\.promptMarks, entry\.messageMarks\);/);
     assert.match(body('export function jumpToPrompt('), /const line = promptJumpLine\(entry\.term\.buffer\.active, allMarks\(entry\), direction\);/);
     assert.match(body('export function terminalClaimsMarkKeys('), /return terminalShowsNormalBuffer\(tabId\);/);
     const hook = read('../../src/hooks/useKeybindings.js');
@@ -616,17 +624,17 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
     assert.match(read('../../src/lib/keybindings.js'), /function promptKeysClaimed\(ctx\) \{\s*return Boolean\(ctx\?\.isInTerminal\) && Boolean\(ctx\?\.terminalClaimsMarkKeys\?\.\(\)\);/);
     // The message marks' own listener comes before the view's, and both go with the terminal.
     const create = registry.slice(registry.indexOf('export function getOrCreateTerminal('));
-    assert.ok(create.indexOf('const messageInput = term.onData(') < create.indexOf('const dataDisposable = onData ? term.onData(onData) : null;'));
+    // Both through the read-only gate since bundle 4 (A3), the order unchanged.
+    assert.ok(create.indexOf('const messageInput = term.onData(') < create.indexOf('const dataDisposable = onData ? term.onData(inputGate.forward(onData)) : null;'));
     const dispose = body('export function disposeTerminal(');
-    for (const part of ['entry.messageInput?.dispose();', 'entry.messageParsed?.dispose();', 'entry.messageScans?.dispose();', 'entry.messageMarks?.dispose();', 'entry.miniMarks?.dispose();']) {
+    for (const part of ['entry.messageInput?.dispose();', 'entry.messageParsed?.dispose();', 'entry.messageScans?.dispose();', 'entry.messageMarks?.dispose();']) {
       assert.ok(dispose.includes(part) && dispose.indexOf(part) < dispose.indexOf('entry.term.dispose();'), part);
     }
     // Terminal: Clear takes the message marks through the prompt marks' hook; clearTerminal keeps its shape.
-    assert.match(registry, /onClear: \(\) => clearMessageMarks\(instances\.get\(tabId\)\),/);
-    assert.match(body('function clearMessageMarks('), /entry\?\.messageMarks\?\.afterClear\(\);\s*entry\?\.miniMarks\?\.afterClear\(\);/);
+    assert.match(registry, /onClear: \(\) => instances\.get\(tabId\)\?\.messageMarks\?\.afterClear\(\),/);
     assert.doesNotMatch(body('export function clearTerminal('), /messageMarks/);
     // NexTerm's own start and resume lines set the floor (setAgentLaunchObserver).
-    assert.match(registry, /setAgentLaunchObserver\(\(tabId\) => \{\s*afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => \{\s*entry\.messageMarks\?\.noteShellSubmit\(\);\s*entry\.miniMarks\?\.noteShellSubmit\(\);/);
+    assert.match(registry, /setAgentLaunchObserver\(\(tabId\) => \{\s*afterOutputSoFar\(instances\.get\(tabId\), \(entry\) => entry\.messageMarks\?\.noteShellSubmit\(\)\);/);
     const store = read('../../src/stores/terminalStore.js');
     assert.equal((store.match(/noteAgentLaunch\(targetId\);\n\s*await get\(\)\.writeRaw\(targetId, /g) ?? []).length, 2, 'startAgent and resumeAgent tell it right before they type');
   });
@@ -680,21 +688,16 @@ describe('Prompt marks and the messages sent to Claude Code, together (F11, F12,
     assert.doesNotMatch(registry, /onWriteParsed\([^\n]*\.poke\(\)/);
     assert.match(body('function writeOutput('), /^function writeOutput\(entry, data, read = null\) \{\s*const \{ tabId, term \} = entry;\s*\/\/[^\n]*\n\s*entry\.messageScans\?\.wrote\(\);/);
     const scanner = body('function messageScanner(');
-    // Claude Code's tracker while Claude Code runs, OpenCode mini's while OpenCode does (opencode_mini_marks.test.js OMM-20 to OMM-22).
-    assert.match(scanner, /const kind = marksAgentIn\(entry\.tabId\);\s*const runs = kind === 'claude';/);
-    assert.match(scanner, /return kind !== null && entry\.term\.buffer\.active\.type === 'normal';/);
+    // Claude Code only: OpenCode's full TUI is on the alternate screen, which has no marks.
+    assert.match(scanner, /const runs = claudeRunsIn\(entry\.tabId\);/);
+    assert.match(scanner, /return runs && entry\.term\.buffer\.active\.type === 'normal';/);
     assert.match(scanner, /if \(!runs && entry\.claudeRan\) entry\.messageMarks\?\.stop\(\);/);
-    assert.match(scanner, /scan: \(\) => afterOutputSoFar\(entry, \(e\) => tracker\(e\)\?\.scan\(\)\),/);
-    // 'opencode' to the mini tracker, 'claude' to Claude Code's, no agent to no scan (OMM-31).
-    assert.match(scanner, /const tracker = \(e\) => \{\s*const kind = marksAgentIn\(e\.tabId\);\s*if \(kind === 'opencode'\) return e\.miniMarks;\s*if \(kind === 'claude'\) return e\.messageMarks;\s*return null;\s*\};/);
+    assert.match(scanner, /scan: \(\) => afterOutputSoFar\(entry, \(e\) => e\.messageMarks\?\.scan\(\)\),/);
     assert.match(body('function claudeRunsIn('), /return Boolean\(tab\) && tab\.agent\?\.kind === 'claude' && agentRuns\(tab\);/);
-    assert.match(body('function marksAgentIn('), /if \(claudeRunsIn\(tabId\)\) return 'claude';\s*if \(opencodeRunsIn\(tabId\)\) return 'opencode';\s*return null;/);
     // Input through agentMessageMarks.js `noteTerminalInput` (AMM-25: reports and escape keys are not typing, U-03); a submit to Claude Code pokes a scan.
     const input = body('function noteMessageInput(');
-    assert.match(input, /const kind = noteTerminalInput\(both, data, \{ submits: submitsLine, agentRuns: \(\) => \(running = marksAgentIn\(tabId\)\) !== null \}\);\s*if \(kind === 'submit'\) entry\.messageScans\?\.poke\(\);/);
-    // Only the fan-out to the two trackers: the submit to the running agent's, the floor and typing to both.
-    assert.match(input, /noteSubmit: \(\) => \(running === 'opencode' \? entry\.miniMarks\?\.noteSubmit\(\) : marks\.noteSubmit\(\)\),/);
-    assert.equal((input.match(/noteTyped|noteSubmit|noteShellSubmit/g) ?? []).length, 9, 'no other use of the tracker hooks');
+    assert.match(input, /const kind = noteTerminalInput\(marks, data, \{ submits: submitsLine, agentRuns: \(\) => claudeRunsIn\(tabId\) \}\);\s*if \(kind === 'submit'\) entry\.messageScans\?\.poke\(\);/);
+    assert.doesNotMatch(input, /noteTyped|noteSubmit|noteShellSubmit/);
   });
 });
 
@@ -737,7 +740,11 @@ describe('The scrollbar at rest, and the documents of the agent task (F13, F15)'
     assert.match(section, /\*Claude Code on\s+the Normal Screen\*/);
     assert.match(section, /Fullscreen\s+Claude Code has no marks/);
     assert.match(section, /The\s+thin scrollbar and its box are always visible on a terminal's normal screen/);
-    assert.match(section, /\*\*OpenCode's messages on the scrollbar\.\*\*/);
+    // OpenCode's full TUI: the alternate screen, no marks, the lines typed, the retired setting ignored.
+    assert.match(section, /\*\*OpenCode on the alternate screen\.\*\* OpenCode's full TUI draws on the\s+alternate screen, which has no scrollback, so while it is up the scrollbar is\s+hidden and OpenCode's messages get no marks/);
+    assert.match(section, /New\s+OpenCode Terminal types `opencode`, and Resume types `opencode -s <id>` or\s+`opencode --continue`\./);
+    assert.match(section, /Versions 0\.32\.0 to 0\.35\.x could start OpenCode/);
+    assert.match(section, /that mode and its setting are gone, and a value of the\s+setting saved by one of those versions is ignored\./);
     assert.match(section, /The input box at the\s+bottom never has one/);
     const settings = readme.slice(readme.indexOf('### Settings and themes'));
     assert.match(settings.slice(0, 1200), /\*Claude Code on the Normal Screen\*/);
@@ -756,14 +763,23 @@ describe('The scrollbar at rest, and the documents of the agent task (F13, F15)'
 });
 
 describe('Prompt marks: the documents (F13)', () => {
-  test('PRM-25: the README says what is marked, the keys and the setting; V48 lists H1 to H12', () => {
+  test('PRM-25: the README says what is marked, the keys and the setting; V48 lists H1 to H13', () => {
     const readme = read('../../README.md');
     const terminal = readme.slice(readme.indexOf('### Working in a terminal'));
     const marks = terminal.slice(0, terminal.indexOf('\n### ', 5));
     assert.match(marks, /\*\*Prompt marks on the scrollbar\.\*\*/);
-    // Which row per shell (PRM-02, PRM-26), and whose keys the chords are.
-    assert.match(marks, /In cmd and PowerShell the signal is part of the prompt\s+string, so the mark is on the row you type on/);
-    assert.match(marks, /zsh and bash print the signal just before they draw the prompt: when\s+the prompt text arrives after it,[\s\S]*?the mark is on the row the prompt\s+starts on/);
+    // Which row (PRM-02, PRM-26), and whose keys the chords are. Bundle 4
+    // (A2): the backend now sends the D where it was in the output, not
+    // after its read's output, so the row no longer depends on the shell or
+    // on how the prompt was read: these pinned the old per-shell wording.
+    assert.match(marks, /The signal comes in front of the\s+prompt \(in cmd and PowerShell it starts the prompt string; zsh and bash print\s+it just before they draw the prompt\)/);
+    // Review B-R1: the row is the prompt's first only where the output
+    // reaches NexTerm in the order the shell wrote it; through ConPTY that
+    // is unverified, and the README says so (V48 H13) instead of "in every
+    // shell".
+    assert.match(marks, /NexTerm places it exactly where it\s+came in the output, so where the output reaches NexTerm in the order the\s+shell wrote it, the mark is on the row the prompt starts on: the first line\s+of a two-line prompt/);
+    assert.match(marks, /On Windows that order is ConPTY's[\s\S]*?has not been verified \(WINDOWS_VERIFICATION\.md V48, H13\)/);
+    assert.doesNotMatch(marks, /in every\s+shell: the first line/);
     assert.match(marks, /On a terminal's normal screen these keys belong to NexTerm, also where there\s+are no marks \(fish, ssh, WSL\)/);
     assert.doesNotMatch(marks, /marked on its\s+second line/);
     const keys = readme.slice(readme.indexOf('### Keyboard shortcuts'));
@@ -775,7 +791,9 @@ describe('Prompt marks: the documents (F13)', () => {
     const v48 = read('../../WINDOWS_VERIFICATION.md');
     const section = v48.slice(v48.indexOf('### V48 — prompt marks on the scrollbar'));
     assert.ok(section.length > 30, 'no V48');
-    for (let i = 1; i <= 12; i += 1) assert.match(section.slice(0, section.indexOf('\n## ')), new RegExp(`\\*\\*H${i} `), `V48 has no H${i}`);
+    // H13 (review B-R1): the two-line prompt through ConPTY, checked by hand.
+    for (let i = 1; i <= 13; i += 1) assert.match(section.slice(0, section.indexOf('\n## ')), new RegExp(`\\*\\*H${i} `), `V48 has no H${i}`);
+    assert.match(section.slice(0, section.indexOf('\n## ')), /\*\*H13 a two-line prompt through ConPTY\.\*\*[\s\S]*?a two-line PowerShell\s+prompt gets its mark on its first line/);
     assert.match(section.slice(0, section.indexOf('\n## ')), /On macOS with zsh:[\s\S]*?a two-line prompt, with\s+starship or powerlevel10k/);
   });
 });

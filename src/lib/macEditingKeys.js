@@ -25,9 +25,9 @@
  *     full-screen TUI — the key is left to xterm exactly as before: there
  *     Ctrl+A or Ctrl+U is a command of that program's, not "start of line".
  *   - Not once the program has turned modifyOtherKeys on (its level above 0,
- *     src/lib/modifyOtherKeys.js): such a program reads its keys itself.
- *     xterm.js 6.0 does not implement the kitty keyboard protocol and NexTerm
- *     does not track it, so there is no flag of that protocol to yield to.
+ *     src/lib/modifyOtherKeys.js) or pushed a kitty keyboard flag (the active
+ *     screen's flags above 0, src/lib/kittyKeyboard.js): such a program reads
+ *     its keys itself, and gets ⌘ ones as xterm sends them, as before.
  *   - While a password prompt is up (`typingHidden`, src/lib/secretInput.js)
  *     only ⌘Backspace is sent. Ctrl+U is the tty's own kill-line in
  *     canonical mode and erases what was typed of the secret; Ctrl+A, Ctrl+E
@@ -63,12 +63,13 @@ const SECRET_SAFE_KEY = 'Backspace';
  * @param {boolean} context.enabled              `terminalMacEditingKeys`
  * @param {boolean} context.alternate            the terminal shows its alternate screen
  * @param {number}  context.modifyOtherKeysLevel the level the program asked for, 0 when none
+ * @param {number}  context.kittyFlags           the active screen's kitty keyboard flags, 0 when none
  * @param {boolean} context.secret               a password prompt is up (`typingHidden`)
  * @returns {string|null}
  */
 export function macEditingKeySequence(
   event,
-  { mac = false, enabled = true, alternate = false, modifyOtherKeysLevel = 0, secret = false } = {}
+  { mac = false, enabled = true, alternate = false, modifyOtherKeysLevel = 0, kittyFlags = 0, secret = false } = {}
 ) {
   if (!mac || enabled !== true) return null;
   if (!event || event.type !== 'keydown') return null;
@@ -76,6 +77,7 @@ export function macEditingKeySequence(
   if (event.isComposing || event.keyCode === 229) return null;
   if (alternate) return null;
   if ((modifyOtherKeysLevel ?? 0) !== 0) return null;
+  if ((kittyFlags ?? 0) !== 0) return null;
   const key = Object.hasOwn(MAC_EDITING_KEY_SEQUENCES, event.key) ? event.key : KEY_BY_CODE[event.keyCode];
   if (!key) return null;
   if (secret && key !== SECRET_SAFE_KEY) return null;

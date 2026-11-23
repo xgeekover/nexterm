@@ -31,8 +31,9 @@ NEXTERM_CONTROL and NEXTERM_CONTROL_TOKEN. Check its exit status:
   1  failed: NexTerm said why, on stderr
   2  wrong usage, nothing was done: see nexterm-cli help <command>
   3  not inside a NexTerm terminal: skip the call, nothing is wrong
-  4  refused: not allowed (see nexterm-cli guide read-screen), or there
-     is no such terminal. Do not retry; tell the user if it matters.
+  4  refused: not allowed (see nexterm-cli guide read-screen), there is
+     no such terminal, or send found it read-only. Do not retry; tell the
+     user if it matters.
   5  NexTerm is busy, not running, or its control is turned off: try
      again later, or skip the call
 
@@ -178,8 +179,11 @@ Secrets such as *_TOKEN=... are masked in what read-screen prints; only
 --no-mask, with the third switch on, leaves them. Exit 4 means the switch
 it needs is off or there is no such terminal: ask the user rather than
 retry. A tab never shown since NexTerm started has no screen yet. send
-never types into a password prompt. The user sees each call: the terminal
-flashes and is marked, and the palette's Show Control Log lists it.
+never types into a password prompt, nor into a terminal the user made
+read-only: that is refused with exit 4, whatever the switches say, until
+they turn read-only off there (read-screen still reads it). The user sees
+each call: the terminal flashes and is marked, and the palette's Show
+Control Log lists it.
 
 Exact flags: nexterm-cli help read-screen, nexterm-cli help send
 "
@@ -354,6 +358,21 @@ mod tests {
         let split = text(Some("new-split")).unwrap();
         assert!(split.contains("A command is typing: it needs the switch \"Let programs\ntype into and read terminals\""), "{split}");
         assert!(body.contains("nexterm-cli help send"), "{body}");
+    }
+
+    #[test]
+    fn read_screen_says_send_to_a_read_only_terminal_is_refused_as_the_readme_does() {
+        // Bundle 4, A3: a read-only terminal takes nothing from send (the
+        // app's controlDispatcher.js refuses it with code `refused`, exit 4).
+        let body = text(Some("read-screen")).unwrap();
+        assert!(body.contains("nor into a terminal the user made\nread-only: that is refused with exit 4"), "{body}");
+        assert!(body.contains("(read-screen still reads it)"), "{body}");
+        assert!(INDEX.contains("or send found it read-only"), "{INDEX}");
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+        let control = control_section(&readme).replace('\n', " ");
+        assert!(control.contains("`send` to a read-only terminal"), "README: the exit codes");
+        assert!(control.contains("it is refused with exit 4 (\"that terminal is read-only\")"), "README: send");
+        assert!(control.contains("`read-screen` still reads it"), "README: read-screen");
     }
 
     #[test]

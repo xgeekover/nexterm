@@ -61,7 +61,6 @@ import {
   serializeAgent,
   startCommand,
 } from '../lib/agents.js';
-import { opencodeLaunchLine } from '../lib/opencodeLaunch.js';
 import { historyKeyOfTab, historyRecord, historyTitle } from '../lib/agentHistory.js';
 import {
   AGENT_IDLE_SETTLE_MS,
@@ -85,6 +84,24 @@ import {
   swapChoices,
 } from '../components/terminal/splitLayout.js';
 import { typingHidden, withoutSecret } from '../lib/secretInput.js';
+import {
+  isReadOnly,
+  readOnlyAgentNotice,
+  readOnlyCommandNotice,
+  readOnlyInputRefused,
+  readOnlyKeyAction,
+  readOnlyNoticeDue,
+  withReadOnly,
+  READ_ONLY_NEVER_SHOWN,
+  READ_ONLY_REASON,
+  READ_ONLY_RESUME_NOTICE,
+  READ_ONLY_UNAVAILABLE,
+} from '../lib/readOnly.js';
+import { useToastStore } from './toastStore.js';
+import { agentLabel as agentLabelOf } from '../lib/terminalStatus.js';
+import { contextTerminalAfterOutput, contextTerminalOf } from '../lib/copyContext.js';
+import { secretPromptOnScreen } from '../lib/controlScreen.js';
+import { notSentText, referencePaste, refusalReason, sentText } from '../lib/agentReference.js';
 import { cleanStatusText } from '../lib/controlScope.js';
 import { LOST_LINE } from '../lib/suggestionLayer.js';
 import { isNetworkPath } from '../lib/terminalLinks.js';
@@ -1751,12 +1768,38 @@ const awaitingShell = new Set();
 const typingOwnLine = new Set();
 
 /**
+ * Each shown terminal's read-only input gate (src/lib/readOnly.js
+ * `installInputGate`), by tab id, put here by the registry as it makes the
+ * terminal (`attachInputGate`). Asked as read-only is turned on: a terminal
+ * with no gate (never shown) or one whose xterm gave no user-input signal
+ * stays writable (fail closed).
+ */
+const inputGates = new Map();
+
+/**
+ * For the registry (and the suites): `gate` is `tabId`'s input gate from now
+ * on. Returns a function that takes it back again — only while it is still
+ * the one held, so a newer gate is never dropped by an older terminal going.
+ */
+export function attachInputGate(tabId, gate) {
+  if (!tabId) return () => {};
+  inputGates.set(tabId, gate);
+  return () => {
+    if (inputGates.get(tabId) === gate) inputGates.delete(tabId);
+  };
+}
+
+/** When each terminal last said it dropped the user's input (`noteReadOnlyInput`). */
+const readOnlyNoticeAt = new Map();
+
+/**
  * What xterm sends on its own, in reply to a program or to report focus and
  * the mouse — never keys at a prompt: focus in and out, the cursor's
  * position, device attributes, DECRPM, DCS answers (XTVERSION — Claude Code
  * asks for it — and DECRQSS), OSC answers (colours), SGR and X10 mouse
- * reports. Keys that only move (arrows, Home) are not among them: at a
- * prompt they recall history and edit the line.
+ * reports, and the kitty keyboard query's answer, `CSI ? <flags> u`
+ * (kittyKeyboard.js; review A-R3). Keys that only move (arrows, Home) are
+ * not among them: at a prompt they recall history and edit the line.
  */
 const TERMINAL_REPLIES = new RegExp(
   [
@@ -1764,6 +1807,7 @@ const TERMINAL_REPLIES = new RegExp(
     /\x1b\[\??\d+;\d+R/.source,
     /\x1b\[[?>=][\d;]*c/.source,
     /\x1b\[\??[\d;]*\$y/.source,
+    /\x1b\[\?\d*u/.source,
     /\x1bP[^\x1b]*\x1b\\/.source,
     /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/.source,
     /\x1b\[<\d+;\d+;\d+[Mm]/.source,
@@ -2183,6 +2227,11 @@ function runsCmd(tab) {
   return shellOfTab(tab).kind === 'cmd';
 }
 
+/** Whether terminal `tabId`'s shell is cmd (`runsCmd`): Copy Last Command Output is off there (src/lib/lastCommandOutput.js). */
+export function tabRunsCmd(tabId) {
+  return runsCmd(useTerminalStore.getState().tabs.find((t) => t.id === tabId));
+}
+
 /**
  * Why `line` cannot be typed as a project command, or null — the same
  * characters the file's commands and their values are refused for
@@ -2382,6 +2431,13 @@ const STATUS_TONES = new Set(['info', 'warn', 'error']);
  * answered in (spec D3), once the password check has had its second.
  */
 export const PROGRAM_TYPING_WAIT_MS = 1500;
+
+/**
+ * How long Send to Agent (`typeAgentReference`) waits for the backend to say
+ * who runs the target's foreground program before refusing — as long as
+ * `nexterm-cli send` waits (controlDispatcher.js's FOREGROUND_ASK_MS).
+ */
+const AGENT_FOREGROUND_ASK_MS = 500;
 
 /**
  * tab id -> its bell's rate limit (`createRateLimiter`, the program
@@ -3019,11 +3075,20 @@ export const useTerminalStore = create((set, get, api) => {
    *     that program's input — and the terminal says why (`busy`);
    *   - whatever else the caller asks last (`check`, a refusal in words or
    *     null): nothing when it refuses, and the terminal says so;
+   *   - a read-only terminal (src/lib/readOnly.js), before the wait and
+   *     right before the write: nothing, and the terminal says why
+   *     (`readOnly`);
    *   - else `writeRaw`, exactly what pressing the keys would send.
    *
    * Resolves with whether it was typed.
    */
-  const typeWhenSafe = async (tabId, data, { hidden, busy, check = null }) => {
+  const typeWhenSafe = async (tabId, data, { hidden, busy, readOnly, check = null }) => {
+    const refusedReadOnly = () => {
+      if (!isReadOnly(get(), tabId)) return false;
+      notifyTerminal(tabId, readOnly);
+      return true;
+    };
+    if (refusedReadOnly()) return false;
     const readiness = await untilTypingSafe(tabId);
     if (readiness === 'gone') return false;
     if (readiness === 'hidden') {
@@ -3039,6 +3104,7 @@ export const useTerminalStore = create((set, get, api) => {
       notifyTerminal(tabId, refused);
       return false;
     }
+    if (refusedReadOnly()) return false;
     // NexTerm's own line, not the user's typeahead: typed into a shell that
     // has not said where its first prompt is yet (an rc slower than the
     // wait), it must not make that prompt's line unknown
@@ -3100,6 +3166,10 @@ export const useTerminalStore = create((set, get, api) => {
    */
   const followTyping = (tab, data) => {
     followPrompt(tab, data);
+    // A write that is only xterm's replies (`TERMINAL_REPLIES`: a DA, a
+    // focus report, the kitty query's answer) is no key: the line being
+    // typed is followed on as if it had not come (review A-R3).
+    if (!withoutReplies(data)) return;
     const { line, submitted } = followCommandLine(typedLines.get(tab.id), data, {
       running: Boolean(tab.running),
     });
@@ -3406,6 +3476,18 @@ export const useTerminalStore = create((set, get, api) => {
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, agent, agentResumeOffered: true, agentTyped: null } : t)),
     }));
+  };
+
+  /**
+   * A resume refused because `tabId` is read-only (src/lib/readOnly.js): the
+   * offer comes back, as it was taken, and the terminal says why. Returns
+   * whether it was refused.
+   */
+  const resumeRefusedReadOnly = (tabId, agent) => {
+    if (!isReadOnly(get(), tabId)) return false;
+    giveOfferBack(tabId, agent);
+    if (!notifyTerminal(tabId, READ_ONLY_RESUME_NOTICE)) console.warn(`[TerminalStore] ${READ_ONLY_RESUME_NOTICE}`);
+    return true;
   };
 
   /**
@@ -4408,6 +4490,78 @@ export const useTerminalStore = create((set, get, api) => {
     // restart — and with the terminal (`pruneAttention`).
     secretInput: {},
 
+    // ---- Which terminals are read-only (bundle 4, A3) ----------------------
+    //
+    // tab id -> true while the user's input and every programmatic write but
+    // the terminal's own replies are kept from its program (src/lib/readOnly.js).
+    // Its own map, as `secretInput` is: the badge, the strip and the menus
+    // subscribe to one terminal's boolean. Never saved (`buildPersistedPayload`
+    // names what is), and gone with the terminal (`pruneAttention`).
+    readOnly: {},
+
+    /**
+     * Turn `tabId`'s read-only on or off. Off always goes. On goes only for a
+     * terminal that has been shown and whose xterm says which input is the
+     * user's (`attachInputGate`): otherwise an error toast says why, and the
+     * terminal stays writable — fail closed. Returns whether the terminal is
+     * now as asked.
+     */
+    setReadOnly: (tabId, on) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) return false;
+      if (!on) {
+        set((state) => {
+          const readOnly = withReadOnly(state.readOnly, tabId, false);
+          return readOnly === state.readOnly ? state : { readOnly };
+        });
+        readOnlyNoticeAt.delete(tabId);
+        return true;
+      }
+      if (isReadOnly(get(), tabId)) return true;
+      const gate = inputGates.get(tabId);
+      if (!gate || gate.available !== true) {
+        useToastStore.getState().show({ kind: 'error', text: gate ? READ_ONLY_UNAVAILABLE : READ_ONLY_NEVER_SHOWN });
+        return false;
+      }
+      set((state) => ({ readOnly: withReadOnly(state.readOnly, tabId, true) }));
+      return true;
+    },
+
+    /** Read-only on for `tabId` (the active terminal by default) if it is off, off if it is on. Returns the new state. */
+    toggleReadOnly: (tabId) => {
+      const targetId = tabId || get().activeTabId;
+      if (!targetId) return false;
+      const on = !isReadOnly(get(), targetId);
+      const done = get().setReadOnly(targetId, on);
+      return done ? on : !on;
+    },
+
+    /**
+     * What TerminalView does with `event` over `tabId`'s terminal: null while
+     * it is not read-only (the key goes as it always went), else
+     * `readOnlyKeyAction`'s 'xterm', 'ignore' or 'cancel' — and a cancelled
+     * keydown is said (`noteReadOnlyInput`).
+     */
+    readOnlyKey: (tabId, event, { mac = false } = {}) => {
+      if (!isReadOnly(get(), tabId)) return null;
+      const action = readOnlyKeyAction(event, { mac });
+      if (action === 'cancel' && event?.type === 'keydown') get().noteReadOnlyInput(tabId);
+      return action;
+    },
+
+    /**
+     * Input to read-only `tabId` was dropped: say so in an error toast, at
+     * most once every READ_ONLY_NOTICE_MS per terminal, naming how to turn
+     * read-only off. Returns whether it was said.
+     */
+    noteReadOnlyInput: (tabId, now = Date.now()) => {
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab || !readOnlyNoticeDue(readOnlyNoticeAt.get(tabId), now)) return false;
+      readOnlyNoticeAt.set(tabId, now);
+      useToastStore.getState().show({ kind: 'error', text: readOnlyInputRefused(displayTitle(tab)) });
+      return true;
+    },
+
     /**
      * A progress report from `tabId`'s terminal (`parseProgress`'s shape).
      *
@@ -4630,7 +4784,9 @@ export const useTerminalStore = create((set, get, api) => {
      * is hidden and then `commit()`: false when the caller has stopped
      * waiting (the request's deadline, or its answer already given), and
      * otherwise the request is committed to this write. Never carried out
-     * late.
+     * late. `data` may be a function, called right after `check()` and
+     * before `commit()`, for keys made as the terminal's modes are at that
+     * moment (Send to Agent's paste; review A-R2).
      * Resolves with `{ status }`, `status` one of:
      *
      *   'typed'    written
@@ -4641,12 +4797,16 @@ export const useTerminalStore = create((set, get, api) => {
      *   'gone'     the terminal has closed
      *   'refused'  `ask` or `check` refused (`reason` says why)
      *   'late'     `commit()` said it is too late: nothing written
+     *   'read-only' the terminal is read-only (src/lib/readOnly.js): nothing
+     *              written — asked first, before any wait, and again right
+     *              before the write
      */
     typeForProgram: async (tabId, data, { waitMs = PROGRAM_TYPING_WAIT_MS, ask = null, check = null, commit = null } = {}) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       if (!tab) return { status: 'gone' };
+      if (isReadOnly(get(), tabId)) return { status: 'read-only' };
       if (tab.exited) return { status: 'exited' };
-      if (typeof data !== 'string' || data === '') return { status: 'typed' };
+      if (typeof data !== 'function' && (typeof data !== 'string' || data === '')) return { status: 'typed' };
       let timer = null;
       const readiness = await Promise.race([
         untilTypingSafe(tabId),
@@ -4664,11 +4824,112 @@ export const useTerminalStore = create((set, get, api) => {
       if (!now) return { status: 'gone' };
       if (now.exited || now.sessionId !== tab.sessionId) return { status: 'exited' };
       if (typingHidden(get(), tabId)) return { status: 'hidden' };
+      if (isReadOnly(get(), tabId)) return { status: 'read-only' };
       const refused = check ? check() : null;
       if (refused) return { status: 'refused', reason: refused };
+      // Keys made only now, as the terminal's modes are (review A-R2). A
+      // function that makes none has typed nothing: refused, never 'typed'.
+      if (typeof data === 'function') {
+        data = data();
+        if (typeof data !== 'string' || data === '') return { status: 'refused', reason: 'there was nothing to type' };
+      }
       if (commit && !commit()) return { status: 'late' };
       await get().writeRaw(tabId, data);
       return { status: 'typed' };
+    },
+
+    /**
+     * Send to Agent (bundle 4, A4; src/lib/agentReference.js): type `text`,
+     * an `@` reference, into `tabId` — a terminal running Claude Code or
+     * OpenCode — as a paste, never followed by Enter.
+     *
+     * Refused, with nothing written and an error toast saying why, for a
+     * terminal that is read-only, has exited, runs no agent any more, or has
+     * never been shown (`terminalOf` gives no xterm: nothing could see a
+     * password prompt there); then through `typeForProgram`, as `nexterm-cli
+     * send` is: typing hidden, a shell not ready, someone else's program in
+     * the foreground (`pty_foreground_owner`, fail closed), a password
+     * prompt on screen (`secretPromptOnScreen`) — read last, right before
+     * the write, on a screen that has parsed every byte the terminal was
+     * given before it, held output first (`afterOutput`: the registry's
+     * `terminalAfterOutput`, as send reads it; review A-R1). At that last
+     * check the agent is asked about again, and the paste is made then:
+     * bracketed only when the terminal's program has bracketed paste on at
+     * that moment (review A-R2). Typed, the terminal is shown and a confirm
+     * toast says what went where. Resolves with `{ status, reason?, data? }`.
+     */
+    typeAgentReference: async (tabId, text, { terminalOf = contextTerminalOf, afterOutput = contextTerminalAfterOutput, waitMs = PROGRAM_TYPING_WAIT_MS } = {}) => {
+      const toast = (kind, words) => useToastStore.getState().show({ kind, text: words });
+      const refuse = (status, reason = null) => {
+        const why = refusalReason(status, reason);
+        toast('error', notSentText(why));
+        return { status, reason: why };
+      };
+      const tab = get().tabs.find((t) => t.id === tabId);
+      if (!tab) return refuse('gone');
+      if (isReadOnly(get(), tabId)) return refuse('read-only');
+      if (tab.exited) return refuse('exited');
+      if (!agentRuns(tab)) return refuse('no-agent');
+      const term = terminalOf(tabId);
+      if (!term) return refuse('never-shown');
+      // A reference that cannot be typed at all is refused before any wait —
+      // an empty one too, which would type nothing (or an empty paste) and
+      // still say it was sent; the paste typed is made at the last check, below.
+      if (text === '') return refuse('refused', 'there is no reference to type');
+      const early = referencePaste(text, { bracketedPaste: term.modes?.bracketedPasteMode === true });
+      if (early.error) return refuse('refused', early.error);
+      // What the last check found, for the toast: a status of its own.
+      let refusedAs = null;
+      let screen = null;
+      let typed = null;
+      const outcome = await get().typeForProgram(tabId, () => typed, {
+        waitMs,
+        ask: async () => {
+          let timer = null;
+          const owner = await Promise.race([
+            Promise.resolve(invoke('pty_foreground_owner', { session_id: tab.sessionId })).then(
+              (value) => ({ answered: true, value }),
+              () => ({ answered: false })
+            ),
+            new Promise((resolve) => {
+              timer = setTimeout(() => resolve({ answered: false }), AGENT_FOREGROUND_ASK_MS);
+            }),
+          ]);
+          clearTimeout(timer);
+          if (!owner.answered) return 'could not check what runs in that terminal; try again';
+          if (owner.value?.same_user === false) {
+            return 'something running as another user (sudo, su) is in the foreground of that terminal';
+          }
+          // The last wait before the write: the screen the check reads has
+          // parsed all the output that reached this terminal before it —
+          // a `Password:` held by pacing or in xterm's write queue included.
+          screen = await afterOutput(tabId, term);
+          if (!screen) {
+            refusedAs = 'never-shown';
+            return refusedAs;
+          }
+          return null;
+        },
+        // Nothing awaited from here to the write.
+        check: () => {
+          const now = get().tabs.find((t) => t.id === tabId);
+          if (now && !agentRuns(now)) {
+            refusedAs = 'no-agent';
+            return refusedAs;
+          }
+          if (secretPromptOnScreen(screen)) return 'that terminal shows a password prompt';
+          const paste = referencePaste(text, { bracketedPaste: screen.modes?.bracketedPasteMode === true });
+          if (paste.error) return paste.error;
+          typed = paste.data;
+          return null;
+        },
+      });
+      if (outcome?.status === 'refused' && refusedAs) return refuse(refusedAs);
+      if (outcome?.status !== 'typed') return refuse(outcome?.status ?? 'gone', outcome?.reason ?? null);
+      const now = get().tabs.find((t) => t.id === tabId) ?? tab;
+      get().switchTab(tabId);
+      toast('confirm', sentText(text, `${agentLabelOf(now) || 'the agent'} in “${displayTitle(now)}”`));
+      return { status: 'typed', data: typed };
     },
 
 
@@ -7082,29 +7343,7 @@ export const useTerminalStore = create((set, get, api) => {
         return null;
       }
 
-      // OpenCode V1 in mini mode when the setting and its version say so
-      // (opencodeLaunch.js): asked now and awaited once the prompt is there,
-      // so the wait for the prompt hides the probe (at most its timeout).
-      // Claude Code's line is not awaited.
-      const launching = kind === 'opencode' ? opencodeLaunchLine(kind, started.command) : null;
-      let answered = false;
-      launching?.then(() => {
-        answered = true;
-      });
-      const shell = get().tabs.find((t) => t.id === targetId)?.sessionId;
-      let readiness = await untilTypingSafe(targetId);
-      let command = started.command;
-      if (launching && readiness !== 'gone' && readiness !== 'hidden') {
-        const checkedAfter = answered;
-        command = await launching;
-        // A probe that answered after the check: the terminal is checked
-        // again, as the first time, before anything is typed — a password
-        // prompt may have come up meanwhile, or the shell gone.
-        if (!checkedAfter) {
-          const now = get().tabs.find((t) => t.id === targetId);
-          readiness = !now || now.sessionId !== shell || now.exited ? 'gone' : await untilTypingSafe(targetId);
-        }
-      }
+      const readiness = await untilTypingSafe(targetId);
       if (readiness === 'gone') return null;
       if (readiness === 'hidden') {
         // Not typed into a password prompt, and said where it would have been.
@@ -7113,9 +7352,15 @@ export const useTerminalStore = create((set, get, api) => {
         if (!notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
         return null;
       }
+      if (isReadOnly(get(), targetId)) {
+        // Nothing typed into a read-only terminal, and said where it would have been.
+        const note = readOnlyAgentNotice(agentLabel(kind));
+        if (!notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
+        return null;
+      }
       recordAgent(targetId, started.agent, readiness === 'ready');
       noteAgentLaunch(targetId);
-      await get().writeRaw(targetId, `${command}\r`);
+      await get().writeRaw(targetId, `${started.command}\r`);
       return started.agent;
     },
 
@@ -7204,30 +7449,8 @@ export const useTerminalStore = create((set, get, api) => {
         return false;
       }
       takeOffer(targetId, agent, { continued });
-      // The opencode line in mini mode when the setting and its version say
-      // so (opencodeLaunch.js): asked now, awaited once the prompt is there.
-      const launching = agent?.kind === 'opencode' ? opencodeLaunchLine('opencode', command) : null;
-      let answered = false;
-      launching?.then(() => {
-        answered = true;
-      });
-      const shell = get().tabs.find((t) => t.id === targetId)?.sessionId;
 
-      let readiness = await untilTypingSafe(targetId);
-      let launched = command;
-      if (launching && readiness !== 'gone' && readiness !== 'hidden') {
-        const checkedAfter = answered;
-        launched = await launching;
-        // A probe that answered after the check: the terminal is checked
-        // again, as the first time, before anything is typed — a password
-        // prompt may have come up meanwhile, or the shell gone — and nothing
-        // is typed once it holds another agent (typed by hand, say).
-        if (!checkedAfter) {
-          const now = get().tabs.find((t) => t.id === targetId);
-          readiness = !now || now.sessionId !== shell || now.exited ? 'gone' : await untilTypingSafe(targetId);
-          if (get().tabs.find((t) => t.id === targetId)?.agent !== agent) return false;
-        }
-      }
+      const readiness = await untilTypingSafe(targetId);
       if (readiness === 'gone') return false;
       if (readiness === 'hidden') {
         // Not typed into a password prompt: the offer comes back, as it was
@@ -7237,14 +7460,17 @@ export const useTerminalStore = create((set, get, api) => {
         if (!notifyTerminal(targetId, why)) console.warn(`[TerminalStore] ${why}`);
         return false;
       }
+      // Nor into a read-only terminal, before the lookup and right before the write.
+      if (resumeRefusedReadOnly(targetId, agent)) return false;
       const typed = await unlessNeverSaved(targetId, agent, command);
       if (!typed) return false;
+      if (resumeRefusedReadOnly(targetId, agent)) return false;
       const fresh = typed.agent !== agent;
       if (fresh && !notifyTerminal(targetId, NEVER_SAVED_NOTE)) console.warn(`[TerminalStore] ${NEVER_SAVED_NOTE}`);
       if (note && !notifyTerminal(targetId, note)) console.warn(`[TerminalStore] ${note}`);
       recordAgent(targetId, typed.agent, readiness === 'ready');
       noteAgentLaunch(targetId);
-      await get().writeRaw(targetId, `${typed.command === command ? launched : typed.command}\r`);
+      await get().writeRaw(targetId, `${typed.command}\r`);
       if (fresh) {
         conversationReplaced({
           tabId: targetId,
@@ -7511,6 +7737,11 @@ export const useTerminalStore = create((set, get, api) => {
           if (!notifyTerminal(tab.id, FORK_BUSY_NOTE)) console.warn(`[TerminalStore] ${FORK_BUSY_NOTE}`);
           return untyped;
         }
+        if (isReadOnly(get(), tab.id)) {
+          const note = readOnlyAgentNotice('Claude Code');
+          if (!notifyTerminal(tab.id, note)) console.warn(`[TerminalStore] ${note}`);
+          return untyped;
+        }
         const fresh = saved === false;
         const typed = fresh ? startCommand('claude') : fork;
         if (fresh && !notifyTerminal(tab.id, FORK_NEVER_SAVED_NOTE)) console.warn(`[TerminalStore] ${FORK_NEVER_SAVED_NOTE}`);
@@ -7656,6 +7887,7 @@ export const useTerminalStore = create((set, get, api) => {
       return typeWhenSafe(tabId, `${line}\r`, {
         hidden: `startup command not typed — this terminal is asking for a password, and typing is hidden: ${line}`,
         busy: `startup command not typed — something is already running here: ${line}`,
+        readOnly: readOnlyCommandNotice('startup command', line),
       });
     },
 
@@ -7682,6 +7914,7 @@ export const useTerminalStore = create((set, get, api) => {
       return typeWhenSafe(tabId, enter ? `${line}\r` : line, {
         hidden: `project command not typed — this terminal is asking for a password, and typing is hidden: ${line}`,
         busy: `project command not typed — something is already running here: ${line}`,
+        readOnly: readOnlyCommandNotice('project command', line),
         // Asked last, right before the write: text typed at the prompt
         // meanwhile — in a new split while its shell started, too — and
         // whatever the caller asks (the folder's commands still trusted).
@@ -7714,6 +7947,7 @@ export const useTerminalStore = create((set, get, api) => {
       const tab = get().tabs.find((t) => t.id === tabId);
       if (!tab) return GONE_REASON;
       if (tab.exited) return EXITED_REASON;
+      if (isReadOnly(get(), tabId)) return READ_ONLY_REASON;
       if (tab.running) return BUSY_REASON;
       if (!fresh && endsOf(tab.sessionId) === 0) return UNTOLD_REASON;
       if (awaitingShell.has(tabId)) return PENDING_REASON;
@@ -7838,10 +8072,21 @@ export const useTerminalStore = create((set, get, api) => {
     },
 
     // Raw keystrokes for a running command (Ctrl-C, answers to prompts, arrows).
-    writeRaw: async (tabId, data) => {
+    //
+    // `automatic` marks what the terminal itself answered its program (DA,
+    // a cursor position report, a focus report: src/lib/readOnly.js's
+    // AUTOMATIC, from the registry's forwarder). It changes nothing but this:
+    // into a read-only terminal only such a reply goes, and every other write
+    // — a key, a paste, a line NexTerm or a program types — is refused here,
+    // whoever made it, with a toast at most once every 3 s.
+    writeRaw: async (tabId, data, { automatic = false } = {}) => {
       const targetId = tabId || get().activeTabId;
       const tab = get().tabs.find((t) => t.id === targetId);
       if (!tab || !data) return;
+      if (!automatic && isReadOnly(get(), targetId)) {
+        get().noteReadOnlyInput(targetId);
+        return;
+      }
       // A terminal whose shell has exited has nowhere to send keys. Enter
       // starts a new shell in its place (src/lib/shellExit.js); anything else
       // is dropped quietly — every key used to come back as one more
@@ -8232,7 +8477,11 @@ function pruneAttention(state) {
   const controlled = keepLive(state.controlled, live);
   // Whether its Claude Code works or waits: gone with the terminal.
   const agentActivity = keepLive(state.agentActivity, live);
+  // Read-only, and when it last said so: gone with the terminal.
+  const readOnly = keepLive(state.readOnly, live);
+  for (const id of readOnlyNoticeAt.keys()) if (!live.has(id)) readOnlyNoticeAt.delete(id);
   if (
+    readOnly === state.readOnly &&
     notifications === state.notifications &&
     progress === state.progress &&
     attentionFlash === state.attentionFlash &&
@@ -8243,7 +8492,7 @@ function pruneAttention(state) {
   ) {
     return;
   }
-  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled, agentActivity });
+  useTerminalStore.setState({ notifications, progress, attentionFlash, secretInput, reportedStatus, controlled, agentActivity, readOnly });
 }
 
 // Attention upkeep, on every change to the store:

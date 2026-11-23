@@ -48,6 +48,26 @@ A new surface takes one of these tiers; it does not get a fifth.
   failed command) in `--vsc-error` when the last one failed, and the unread
   pill's count for notifications. In forced colours the dot is painted in
   Highlight and the cross in CanvasText, so the two still differ by shape.
+- A read-only terminal (`src/lib/readOnly.js`) is marked by a keyboard with a
+  stroke through it (lucide `KeyboardOff`), never the padlock, which means a
+  password prompt: the two can be on at once and must not be confused. On a
+  tab chip it is a 10px round badge (an 8px mark on the panel surface with
+  a `--vsc-border` ring) on the chip's bottom-left corner, right under the
+  lock's top-left one, taking no room and no pointer; on the TERMINALS row
+  it sits in line right after the lock. It is drawn in `--vsc-fg-bright`
+  on the panel surface, not in a state colour (nothing failed, nothing
+  waits), so forced colours repaint it with the text; its words are in its
+  `aria-label` and `title` and in the chip's and the row's tooltip. The
+  handle of a hidden tab strip does not carry it: the strip in the pane
+  (below) says it whether the tab strip shows or not.
+- An in-pane notice is a row of its own ABOVE the terminal, never laid over
+  it: over it, it hides the top rows, and in a full-screen program those
+  never scroll into view. The terminal refits to the rest. The resume offer
+  and the read-only strip are the pattern: the strip is 24px high, on
+  `--vsc-panel-bg` with a `--vsc-border` line under it, the `KeyboardOff`
+  mark, the words "Read-only: what you type does not reach this terminal",
+  and a secondary Turn Off button (`rounded-control`). It is there only while
+  the terminal is read-only, and Turn Off hands the keyboard back to it.
 - The ANSI tokens (`--vsc-ansi-red` and the rest) are the terminal's palette,
   not the UI's.
 - The terminal find colours (`--vsc-find-match`, `--vsc-find-match-other`)
@@ -242,6 +262,18 @@ says it in a toast, over the bottom right corner above the status bar
   it"). Copy Path is off, with its reason, for a terminal that has no
   directory yet. The other copy actions (Copy Relative Path, a terminal's or
   an editor's selection, the rest) are later work.
+- Bundle 4 uses the same toasts. Copy Last Command Output says "Copied N
+  lines of the output of "<command>" (secrets masked)", the command masked
+  and shortened, and says when its start or its oldest lines are missing;
+  it is off with its reason in the menus and in the Command Palette, which
+  lists it whenever the terminal has been shown, and a reason found only
+  when it is picked is a "Not copied: " error. Send to Agent confirms
+  "Typed <the reference> into <agent> in "<terminal>" — Enter not pressed"
+  and refuses with an error that starts "Not sent: "; Monaco's menu cannot
+  grey an entry out with a reason, so the editor's entries are always
+  offered and refuse that way. Input a read-only terminal drops is an
+  error that starts "Not typed: " and names how to turn read-only off, at
+  most once every 3 s.
 - Anything that needs a decision, or says more than a line, is a notice or a
   dialog, not a toast.
 

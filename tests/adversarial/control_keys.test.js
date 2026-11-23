@@ -10,6 +10,8 @@
 import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import { MAX_KEYS, MAX_TEXT_BYTES, encodeKey, encodeKeys, encodeText } from '../../src/lib/controlKeys.js';
 import { encodeModifiedEnter } from '../../src/lib/modifyOtherKeys.js';
+import { kittyKeySequence } from '../../src/lib/kittyKeyboard.js';
+import { readFileSync } from 'node:fs';
 
 const ESC = '\x1b';
 const data = (r) => {
@@ -135,6 +137,89 @@ describe('Control API: keys', () => {
     assert.equal(encodeKeys(['Up']).endsWithEscape, false);
     assert.equal(encodeText('[201~', { afterEscape: true }).error?.code, 'refused', 'text after an Escape key');
     assert.equal(data(encodeText('[201~', { afterEscape: false })), '[201~', 'and fine on its own');
+  });
+
+  // Bundle 4, A1: a program that pushed the kitty keyboard protocol's flag
+  // gets the keys as its keyboard sends them (src/lib/kittyKeyboard.js).
+  test('CK-10: at kitty flags 1 — Enter CR, Shift+Enter ESC [13;2u, Escape ESC [27u, Ctrl+C ESC [99;5u — the keyboard\'s own table, ahead of modifyOtherKeys', () => {
+    const kitty = { kittyFlags: 1 };
+    const table = [
+      ['Enter', '\r'],
+      ['Tab', '\t'],
+      ['Backspace', '\x7f'],
+      ['Shift+Enter', `${ESC}[13;2u`],
+      ['Ctrl+Enter', `${ESC}[13;5u`],
+      ['Alt+Enter', `${ESC}[13;3u`],
+      ['Ctrl+Shift+Enter', `${ESC}[13;6u`],
+      ['Escape', `${ESC}[27u`],
+      ['Esc', `${ESC}[27u`],
+      ['Alt+Escape', `${ESC}[27;3u`],
+      ['Ctrl+C', `${ESC}[99;5u`],
+      ['ctrl+c', `${ESC}[99;5u`],
+      ['Ctrl+Shift+C', `${ESC}[99;6u`],
+      ['Alt+x', `${ESC}[120;3u`],
+      ['Alt+X', `${ESC}[120;4u`],
+      ['Ctrl+Alt+a', `${ESC}[97;7u`],
+      ['Shift+Tab', `${ESC}[9;2u`],
+      ['Ctrl+Backspace', `${ESC}[127;5u`],
+      ['Ctrl+Space', `${ESC}[32;5u`],
+      ['Ctrl+[', `${ESC}[91;5u`],
+      // Left as without the flag: text, the cursor and function keys, what the table does not cover.
+      ['a', 'a'],
+      ['Shift+a', 'A'],
+      ['Up', `${ESC}[A`],
+      ['Ctrl+Up', `${ESC}[1;5A`],
+      ['F5', `${ESC}[15~`],
+      ['Alt+?', `${ESC}?`],
+      ['Ctrl+?', '\x7f'],
+    ];
+    for (const [name, bytes] of table) assert.equal(data(encodeKey(name, kitty)), bytes, name);
+    // kitty wins over modifyOtherKeys for the keys of its table.
+    assert.equal(data(encodeKey('Shift+Enter', { kittyFlags: 1, modifyOtherKeys: 2 })), `${ESC}[13;2u`);
+    // The same bytes the keyboard sends for the same chord.
+    for (const [name, event] of [
+      ['Shift+Enter', { key: 'Enter', code: 'Enter', keyCode: 13, shiftKey: true }],
+      ['Escape', { key: 'Escape', code: 'Escape', keyCode: 27 }],
+      ['Ctrl+C', { key: 'c', code: 'KeyC', keyCode: 67, ctrlKey: true }],
+      ['Shift+Tab', { key: 'Tab', code: 'Tab', keyCode: 9, shiftKey: true }],
+    ]) {
+      assert.equal(data(encodeKey(name, kitty)), kittyKeySequence({ type: 'keydown', ...event }, 1), `${name}: as the keyboard sends it`);
+    }
+    // Still refused: what the table and the legacy keys both leave out.
+    for (const name of ['Ctrl+F5', 'Shift+PageUp', 'Ctrl+한', 'Ctrl++', 'Hyper+x']) {
+      assert.equal(encodeKey(name, kitty).error?.code, 'bad_request', name);
+    }
+    // No bare ESC to join with the next key: Escape is a whole sequence now.
+    const escape = encodeKeys(['Escape', '['], kitty);
+    assert.equal(data(escape), `${ESC}[27u[`);
+    assert.equal(escape.endsWithEscape, false);
+    assert.equal(data(encodeKeys(['Alt+['], kitty)), `${ESC}[91;3u`, 'a whole sequence, not ESC [');
+  });
+
+  test('CK-11: at kitty flags 0 (or none, or flags NexTerm does not apply) every key is what it was', () => {
+    const names = [
+      'Enter', 'Tab', 'Backspace', 'Escape', 'Space', 'Shift+Enter', 'Ctrl+Enter', 'Alt+Enter', 'Shift+Tab',
+      'Ctrl+C', 'Ctrl+[', 'Alt+x', 'Alt+X', 'Alt+Backspace', 'Alt+Escape', 'Shift+a', 'Up', 'Ctrl+Up', 'F5', '한',
+    ];
+    for (const flags of [0, undefined, 2, 8]) {
+      for (const level of [0, 1, 2]) {
+        for (const name of names) {
+          assert.deepEqual(encodeKey(name, { kittyFlags: flags, modifyOtherKeys: level }), encodeKey(name, { modifyOtherKeys: level }), `${name} at kitty ${String(flags)}, level ${level}`);
+        }
+      }
+    }
+    assert.equal(data(encodeKey('Ctrl+C', { kittyFlags: 0 })), '\x03');
+    assert.equal(data(encodeKey('Escape', { kittyFlags: 0 })), ESC);
+    assert.equal(encodeKeys(['Escape'], { kittyFlags: 0 }).endsWithEscape, true);
+    assert.equal(encodeKey('Ctrl+Backspace', { kittyFlags: 0 }).error?.code, 'bad_request');
+  });
+
+  test('CK-12: send reads kittyFlags from the target (terminalModes), 0 where nothing says otherwise', () => {
+    const registry = readFileSync(new URL('../../src/components/terminal/terminalRegistry.js', import.meta.url), 'utf8');
+    const modes = registry.slice(registry.indexOf('export function terminalModes('));
+    assert.match(modes.slice(0, modes.indexOf('\n}\n')), /kittyFlags: entry\.kittyKeyboard\?\.flags \?\? 0,/);
+    const dispatcher = readFileSync(new URL('../../src/lib/controlDispatcher.js', import.meta.url), 'utf8');
+    assert.match(dispatcher, /const modes = \{ applicationCursorKeys: false, bracketedPaste: false, modifyOtherKeys: 0, kittyFlags: 0, \.\.\.\(modesOf\(aimed\.tabId\) \?\? \{\}\) \};/);
   });
 });
 

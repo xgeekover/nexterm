@@ -134,10 +134,13 @@ function isBlank(cell) {
  * the empty cell xterm leaves in the last column when a wide character did
  * not fit there and went to the next row (`gapBeforeWide`). Otherwise the
  * row's trailing blanks are left out.
+ *
+ * `limit`: only the cells left of that column (Copy Last Command Output's
+ * last row, the output in front of the prompt on it; lastCommandOutput.js).
  */
-function appendRow(runs, line, cell, continues, gapBeforeWide) {
+function appendRow(runs, line, cell, continues, gapBeforeWide, limit = Infinity) {
   // Returns the cells the row uses (after trimming), for `endCells`.
-  let end = line.length;
+  let end = Math.min(line.length, limit);
   if (continues) {
     if (gapBeforeWide && end > 0) {
       const last = line.getCell(end - 1, cell);
@@ -178,12 +181,19 @@ function appendRow(runs, line, cell, continues, gapBeforeWide) {
  * read-screen` (stage 7, src/lib/controlScreen.js) reads the alternate
  * screen too when a full-screen program is on it, since that is what the
  * user sees. Saving never does — the alternate screen is not history.
+ *
+ * `toRow` ends the read (bundle 4, A2: one command's output): the rows above
+ * it, and row `toRow` itself only when `toCol` is above 0, then just its
+ * cells left of `toCol`. The last row read is a line's end, whatever wraps
+ * on after it. Left out, the read goes to the end of the buffer, as before.
  */
-export function readLogicalLines(term, fromRow = 0, buffer = term.buffer.normal) {
+export function readLogicalLines(term, fromRow = 0, buffer = term.buffer.normal, { toRow = Infinity, toCol = 0 } = {}) {
   const cell = buffer.getNullCell();
   const lines = [];
   let current = null;
-  const total = buffer.length;
+  const ended = Number.isInteger(toRow);
+  const partial = ended && Number.isInteger(toCol) && toCol > 0;
+  const total = ended ? Math.min(buffer.length, partial ? toRow + 1 : toRow) : buffer.length;
   for (let y = Math.max(0, fromRow); y < total; y++) {
     const line = buffer.getLine(y);
     if (!line) continue;
@@ -201,7 +211,7 @@ export function readLogicalLines(term, fromRow = 0, buffer = term.buffer.normal)
       const first = next.getCell(0, buffer.getNullCell());
       gapBeforeWide = Boolean(first && first.getWidth() === 2);
     }
-    current.endCells = appendRow(current.runs, line, cell, continues, gapBeforeWide);
+    current.endCells = appendRow(current.runs, line, cell, continues, gapBeforeWide, partial && y === toRow ? toCol : Infinity);
   }
   const whole = lines.filter((l) => !l.fragment);
   const empty = (l) => l.runs.every((r) => r.text.trim() === '');

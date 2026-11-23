@@ -1151,7 +1151,8 @@ describe('Terminal progress: wired', () => {
     const start = src.indexOf('setTerminalOutputBarrier((tabId, fn) => {');
     const end = src.indexOf('\n});\n', start) + 4;
     assert.ok(start > 0 && end > start, 'the registry installs it as it loads');
-    assert.match(src, /import \{ setTerminalOutputBarrier, useTerminalStore \} from '\.\.\/\.\.\/stores\/terminalStore\.js';/);
+    // Bundle 4, A2: the registry also imports tabRunsCmd (Copy Last Command Output greys out for cmd).
+    assert.match(src, /import \{ setTerminalOutputBarrier, tabRunsCmd, useTerminalStore \} from '\.\.\/\.\.\/stores\/terminalStore\.js';/);
     let barrier = null;
     const writes = [];
     const instances = new Map([

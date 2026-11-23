@@ -5,6 +5,9 @@
  * are inside is what Warp's sticky header fixes. The signal it needs already
  * arrives: OSC 133 "C" says a command's output begins here, so a mark of
  * `{ marker, command }` at that moment is enough to answer the question later.
+ * The backend delivers the C exactly where it was in the output (manager.rs,
+ * osc.rs `into_ordered`), so the mark is on the exact row the output starts
+ * on, not below what came in the same read.
  *
  * The row is held by an xterm marker (`term.registerMarker`), not a number. A
  * number is the buffer row at the time, and the buffer moves under it: once it

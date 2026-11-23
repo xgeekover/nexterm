@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter};
 
-use super::osc::{Marker, OscFilter};
+use super::osc::{Marker, OscFilter, Piece};
 use super::flow_gate::FlowGate;
 use super::output_batch::{self, Batcher, Outgoing};
 use super::shell_integration;
@@ -159,8 +159,10 @@ fn emit_marker(app: &AppHandle, session_id: &str, marker: Marker) {
 /// (flow_gate.rs); on Windows, hold the opening cursor query and answer it
 /// (startup_query.rs); tell the password watch output came (`read_seen`);
 /// strip OSC 133/7 into markers, holding a split escape or UTF-8 character
-/// (osc.rs); queue the output, then that read's markers after it. At the end
-/// of the stream, what was held back as a possible query is output like any
+/// (osc.rs); queue the read in stream order — the output before each
+/// marker, the marker, the output after it (A2) — so a prompt mark, the
+/// sticky header and the OSC 133 D kitty reset land on the exact row the
+/// marker was printed at, not where the read ended. At the end of the stream, what was held back as a possible query is output like any
 /// other, and a character cut in half is sent as it is rather than held for
 /// ever.
 ///
@@ -228,14 +230,17 @@ fn pump_output(
                 }
                 // One flag per chunk; the watch does the rest.
                 read_seen();
-                let filtered = filter.feed(chunk);
-                if !filtered.output.is_empty() {
-                    queue(filtered.output);
-                }
-                // After the output they came with, in the same queue:
-                // the sender keeps them in order (output_batch.rs).
-                for marker in filtered.markers {
-                    let _ = outgoing.send(Outgoing::Marker(marker));
+                // Cut at each marker, in one queue: the sender keeps them
+                // in order and sends held output before a marker
+                // (output_batch.rs). The output pieces join to exactly the
+                // bytes the read forwarded before, each counted as queued.
+                for piece in filter.feed(chunk).into_ordered() {
+                    match piece {
+                        Piece::Output(text) => queue(text),
+                        Piece::Marker(marker) => {
+                            let _ = outgoing.send(Outgoing::Marker(marker));
+                        }
+                    }
                 }
             }
             Err(_) => break,
@@ -2768,10 +2773,41 @@ mod output_path_tests {
         assert_eq!(markers.len(), expected_markers.len(), "every marker, once");
         for (i, ((got, at), (want, due))) in markers.iter().zip(&expected_markers).enumerate() {
             assert_eq!(got, want, "marker {i} out of order");
-            // Never ahead of the output it came after, and no later than the
-            // read it arrived in (a read and what the filter held before it).
-            assert!(*at >= *due, "marker {i} ({got:?}) overtook output: at {at}, after {due}");
-            assert!(*at <= *due + 2 * 4096 + 16, "marker {i} ({got:?}) held back: at {at}, after {due}");
+            // Exactly after the output it came after (A2). This used to
+            // allow up to the end of the read it arrived in, because a
+            // read's markers were queued after all of its output; they are
+            // now queued where they were in the stream.
+            assert_eq!(*at, *due, "marker {i} ({got:?}) not where it was printed");
         }
+    }
+
+    /// AC12: one read holding a command's start, its output, its end and the
+    /// next prompt reaches the sender in that order, the bytes as before.
+    #[test]
+    fn one_read_reaches_the_sender_in_stream_order() {
+        let flow = FlowGate::new(1 << 20, 1 << 19, Duration::from_secs(30));
+        let (outgoing, queued) = mpsc::channel::<Outgoing>();
+        let read = b"\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07user@host % ".to_vec();
+        let mut source = std::io::Cursor::new(read);
+        assert_eq!(pump_output(&mut source, &flow, &mut None, || {}, &outgoing), 0);
+        drop(outgoing);
+        let got: Vec<String> = queued
+            .iter()
+            .map(|item| match item {
+                Outgoing::Output(text) => format!("Output({text:?})"),
+                Outgoing::Marker(marker) => format!("Marker({marker:?})"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "Marker(CommandExecuted)".to_string(),
+                format!("Output({:?})", "hi\r\n"),
+                "Marker(CommandFinished(Some(0)))".to_string(),
+                format!("Output({:?})", "user@host % "),
+            ]
+        );
+        // Counted against flow control as before: the forwarded bytes, once.
+        assert_eq!(flow.unread(), "hi\r\nuser@host % ".len() as u64);
     }
 }

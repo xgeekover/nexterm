@@ -83,17 +83,6 @@ export const SETTINGS_DEFAULTS = {
    */
   terminalClaudeNormalScreen: true,
   /**
-   * Start and resume OpenCode V1 as `opencode --mini --no-replay` (with `-s
-   * <id>` or `--continue` on resume) when `opencode --version` says 1.17.10
-   * or newer (src/lib/opencodeLaunch.js), so its conversation is printed on
-   * the normal screen: it scrolls with the scrollbar and every message sent
-   * gets a mark. The trade: not the full-screen TUI's own layout and mouse.
-   * Any other OpenCode, and this off, get plain `opencode` as before; typing
-   * `opencode` yourself always gives the full TUI. Read when NexTerm types
-   * the line, so a change applies to the next start or resume.
-   */
-  terminalOpencodeMini: true,
-  /**
    * Copy a selection to the clipboard the moment the mouse makes it — a drag,
    * a double- or triple-click. Warp's default, and the reason a selection can
    * be pasted elsewhere without a second key. Only mouse selections: a find
@@ -115,7 +104,8 @@ export const SETTINGS_DEFAULTS = {
    * line, ⌘Backspace deletes to its start and ⌘Forward-Delete to its end, sent
    * as Ctrl+A, Ctrl+E, Ctrl+U and Ctrl+K. On the normal screen only — a
    * full-screen program keeps the keys as xterm sends them — and not once the
-   * program has turned modifyOtherKeys on. While a password prompt is up only
+   * program has turned modifyOtherKeys on or pushed a kitty keyboard flag.
+   * While a password prompt is up only
    * ⌘Backspace is sent. Off: every one of them is xterm's, as before. The
    * Settings row is shown on macOS only. See src/lib/macEditingKeys.js.
    */
@@ -130,6 +120,18 @@ export const SETTINGS_DEFAULTS = {
    * row is shown on macOS only. See src/lib/optionAsMeta.js.
    */
   terminalOptionAsMeta: false,
+  /**
+   * Bundle 4, A1: the kitty keyboard protocol, its first flag
+   * ("disambiguate") only. A program that pushes it gets Shift+Enter,
+   * Ctrl+Enter, Esc and Ctrl/Alt chords as keys of their own (`CSI 13;2u`,
+   * `CSI 27u`, `CSI 99;5u`), and `CSI ? u` is answered with the flags NexTerm
+   * applies. Plain Enter, Tab and Backspace are unchanged, as is every key
+   * for a program that does not ask. On by default; read at each sequence
+   * and each key, so off takes effect at once: the query goes unanswered and
+   * any flags held are dropped, which is how NexTerm was before. See
+   * src/lib/kittyKeyboard.js.
+   */
+  terminalKittyKeyboard: true,
   /**
    * Bundle 2, A8: whether a program in a terminal may put text on the
    * clipboard with OSC 52 (tmux, vim, a shell over ssh). Off by default:

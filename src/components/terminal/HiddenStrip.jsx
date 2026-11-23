@@ -1,10 +1,11 @@
 import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Cable, Lock } from 'lucide-react';
+import { Cable, KeyboardOff, Lock } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminalStore.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { unreadLabel } from '../../lib/attention.js';
 import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
+import { READ_ONLY_LABEL, isReadOnly } from '../../lib/readOnly.js';
 import { displayTitle } from '../../lib/tabTitle.js';
 import { ProgressBar, UnreadPill, progressWords } from './AttentionIndicators.jsx';
 import { cn } from '../../lib/utils.js';
@@ -83,6 +84,65 @@ export function LockBadge({ tabId }) {
   );
 }
 
+/** Whether `tabId`'s terminal is read-only (src/lib/readOnly.js): one boolean, nothing else to redraw for. */
+const useReadOnly = (tabId) => useTerminalStore((s) => isReadOnly(s, tabId));
+
+/**
+ * The read-only mark (bundle 4, A3): the user's keys, pastes and drops do
+ * not reach this terminal's program. A keyboard with a stroke through it
+ * (lucide `KeyboardOff`), not the padlock: a password prompt hides what is
+ * typed, read-only keeps it from the program, and the two can be on at once.
+ * In `--vsc-fg-bright`, not a state colour — nothing failed and nothing
+ * waits; the shape says it, so forced colours (Windows High Contrast) repaint
+ * it with the text and it survives as a shape. Its words in `aria-label` and
+ * `title`; nothing at all while the terminal is writable. Nothing moves, so
+ * reduced motion has nothing to stop.
+ *
+ * In line, where it is drawn — the TERMINALS side bar's row, right after the
+ * lock — whose only target is the whole row, so nothing clickable moves when
+ * it comes.
+ */
+export function ReadOnlyMark({ tabId, className }) {
+  if (!useReadOnly(tabId)) return null;
+  return (
+    <span
+      role="img"
+      aria-label={READ_ONLY_LABEL}
+      title={READ_ONLY_LABEL}
+      data-read-only-mark={tabId}
+      className={cn('shrink-0 inline-flex items-center justify-center w-[12px] h-[14px] text-vsc-fg-bright', className)}
+    >
+      <KeyboardOff size={11} strokeWidth={2.25} aria-hidden="true" />
+    </span>
+  );
+}
+
+/**
+ * The read-only mark on a TAB CHIP: the same mark, taking no room at all, as
+ * the lock does — a 10 px badge on the chip's bottom-left corner, right
+ * under the lock's top-left one, so the two sit side by side on the chip's
+ * left edge and never cover each other, the activity dot (8 px in) or the ✕.
+ * The pointer goes straight through it. Its words in `aria-label` and
+ * `title`; the chip's own tooltip says them too.
+ */
+export function ReadOnlyBadge({ tabId }) {
+  if (!useReadOnly(tabId)) return null;
+  return (
+    <span
+      role="img"
+      aria-label={READ_ONLY_LABEL}
+      title={READ_ONLY_LABEL}
+      data-read-only-mark={tabId}
+      className={cn(
+        'pointer-events-none absolute -bottom-[2px] -left-[2px] z-[1] flex items-center justify-center',
+        'w-[10px] h-[10px] rounded-full bg-vsc-panel text-vsc-fg-bright ring-1 ring-vsc-border'
+      )}
+    >
+      <KeyboardOff size={8} strokeWidth={2.5} aria-hidden="true" />
+    </span>
+  );
+}
+
 /**
  * Whether, and by whom, `tabId`'s terminal was just controlled by a program
  * in another terminal (stage 7, spec D6): its entry of the store's
@@ -151,7 +211,8 @@ export function ControlledMark({ tabId, className }) {
 
 /**
  * What a terminal's row in the TERMINALS side bar says besides its title:
- * whether its typing is hidden (`LockMark`), whether another terminal's
+ * whether its typing is hidden (`LockMark`), whether it is read-only
+ * (`ReadOnlyMark`), whether another terminal's
  * program just controlled it (`ControlledMark`), then its unread count. A
  * fragment, no wrapper: with nothing to say it draws exactly what the pill
  * alone drew, on a line of fixed height.
@@ -160,6 +221,7 @@ export function TabMarks({ tabId, unread, className }) {
   return (
     <>
       <LockMark tabId={tabId} className={className} />
+      <ReadOnlyMark tabId={tabId} className={className} />
       <ControlledMark tabId={tabId} className={className} />
       <UnreadPill count={unread} className={className} />
     </>

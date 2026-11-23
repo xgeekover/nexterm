@@ -126,6 +126,9 @@ export function suggestStartupCommand(tab) {
   return '';
 }
 
+/** Ctrl+C under the kitty keyboard protocol's flag 1 (kittyKeyboard.js `kittySequence`). */
+const KITTY_CTRL_C = '\x1b[99;5u';
+
 /**
  * Follow what is written to a terminal, to know the command line it submits.
  *
@@ -143,10 +146,17 @@ export function suggestStartupCommand(tab) {
  * app types — an agent, a startup command — or a paste the shell is not
  * bracketing, and its text is what runs. While a program has the keyboard
  * (`running`), nothing typed is a command line.
+ *
+ * Ctrl+C as the kitty keyboard protocol sends it (`CSI 99;5u`, once a
+ * program — fish 4 at its own prompt, say — pushed flag 1; kittyKeyboard.js)
+ * is the ^C it always was: the shell abandons the line (review A-R3). Every
+ * other key that protocol changes was already one the line cannot follow
+ * through — Esc, Alt or Ctrl with a key, a modified Enter, Tab or Backspace.
  */
 export function followCommandLine(line, data, { running = false } = {}) {
   const current = line && typeof line.buffer === 'string' ? line : NEW_LINE;
   if (typeof data !== 'string' || data === '') return { line: current, submitted: undefined };
+  if (data === KITTY_CTRL_C) data = '\x03';
   if (running) return { line: trackInput(current, data, { running }).line, submitted: undefined };
 
   if (data.length > 1 && submitsLine(data) && !/[\x00-\x1f\x7f]/.test(data.slice(0, -1))) {

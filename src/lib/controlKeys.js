@@ -10,6 +10,13 @@
  * - modifyOtherKeys (src/lib/modifyOtherKeys.js): OpenCode turns it on and
  *   reads Shift+Enter as `CSI 27;2;13~` (a new line in its prompt) — at level
  *   0 that would be garbage, so it is a plain CR there, as a keyboard sends.
+ * - The kitty keyboard protocol's first flag (src/lib/kittyKeyboard.js), on
+ *   the target's active screen: a program that pushed it gets Shift+Enter,
+ *   Escape, Ctrl+C, Alt+x, Shift+Tab and Ctrl+Backspace by the keyboard's
+ *   own table (`CSI 13;2u`, `CSI 27u`, `CSI 99;5u`…), which wins over
+ *   modifyOtherKeys; plain Enter, Tab and Backspace, and every key the table
+ *   does not cover, are sent as without it. With no flag pushed, nothing
+ *   changes.
  * - Bracketed paste (`CSI ? 2004 h`): a shell or an editor that asked for it
  *   takes a multi-line text as one paste. One that did not runs each line as
  *   it arrives, so a multi-line text is refused there unless the caller says
@@ -21,6 +28,7 @@
  * differently from what runs are refused, as stage 5 refuses them in a
  * project command. The zero-width joiner of an emoji is not one of them.
  */
+import { kittySequence } from './kittyKeyboard.js';
 
 /** The most keys one call may send. */
 export const MAX_KEYS = 64;
@@ -87,6 +95,30 @@ const CURSOR = new Map([
 /** xterm's modifier parameter: 1 plus Shift 1, Alt 2, Ctrl 4. */
 const modifierParam = ({ shift, alt, ctrl }) => 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
 
+/** The kitty table's names for the named keys it covers (kittyKeyboard.js `kittySequence`). */
+const KITTY_NAMED = new Map([
+  ['enter', 'Enter'],
+  ['tab', 'Tab'],
+  ['backspace', 'Backspace'],
+  ['escape', 'Escape'],
+  ['space', ' '],
+]);
+
+/**
+ * What `key` with `mods` sends under the kitty keyboard flags `flags`, or null
+ * where the bytes are the same as without them. One character is the key as
+ * named, a capital letter being Shift and that letter — as `Alt+A` sends
+ * `ESC A` today — except with Ctrl, where `Ctrl+C` and `Ctrl+c` have always
+ * been the same key.
+ */
+function kittyKey(key, lower, mods, flags) {
+  if (!flags) return null;
+  if (KITTY_NAMED.has(lower)) return kittySequence({ key: KITTY_NAMED.get(lower), ...mods }, flags);
+  if ([...key].length !== 1) return null;
+  if (/^[A-Z]$/.test(key)) return kittySequence({ ...mods, key: key.toLowerCase(), shift: mods.shift || !mods.ctrl }, flags);
+  return kittySequence({ key, ...mods }, flags);
+}
+
 /** What a name looks like in an error message: short, printable. */
 function shown(name) {
   const text = String(name).replace(/[\u{0}-\u{1f}\u{7f}-\u{9f}]/gu, '?');
@@ -116,6 +148,11 @@ export function encodeKey(name, modes = {}) {
   if (!key) return bad(`not a key: "${shown(name)}"`);
   const lower = ALIASES.get(key.toLowerCase()) ?? key.toLowerCase();
   const anyMod = mods.shift || mods.alt || mods.ctrl;
+
+  // A program that pushed the kitty keyboard protocol's flag reads these as
+  // its keyboard sends them; anything the table leaves alone goes as below.
+  const kitty = kittyKey(key, lower, mods, modes.kittyFlags);
+  if (kitty) return { data: kitty };
 
   if (lower === 'enter' && anyMod) {
     // As modifyOtherKeys.js's encodeModifiedEnter does for the keyboard: only

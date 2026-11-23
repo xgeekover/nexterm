@@ -28,6 +28,7 @@ import * as terminalStore from '../../src/stores/terminalStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { SCHEMA_VERSION } from '../../src/lib/persistence.js';
 import { useSystemStore } from '../../src/stores/systemStore.js';
+import { SETTINGS_KEY, useSettingsStore } from '../../src/stores/settingsStore.js';
 
 const T = terminalStore.useTerminalStore;
 const { PERSIST_KEY } = terminalStore;
@@ -1449,6 +1450,112 @@ describe('Claude Code resumes as it always did', () => {
       });
       assert.deepEqual(lookups, []);
     });
+  });
+});
+
+// Versions 0.32.0 to 0.35.x asked the backend which OpenCode was installed
+// and could add flags to the lines below, behind a setting. Both are gone:
+// NexTerm types what startCommand / resumeCommand / the lookup give, as
+// v0.31.0 did. The retired names are built from parts, so the sweep for them
+// in src/ and tests/ stays empty.
+const RETIRED_CHECK = ['opencode', 'version'].join('_');
+const RETIRED_SETTING = ['terminal', 'Opencode', 'Mini'].join('');
+
+/** Every command `fn` sends to the backend, in order, its terminal writes included. */
+async function invokedDuring(fn) {
+  const original = mockBridge.invoke;
+  const seen = [];
+  mockBridge.invoke = function (command, ...rest) {
+    seen.push(command);
+    return original.call(this, command, ...rest);
+  };
+  try {
+    await fn();
+  } finally {
+    mockBridge.invoke = original;
+  }
+  return seen;
+}
+
+/**
+ * `fn` with the retired setting turned on as v0.32.0 to v0.35.x saved it: in
+ * the saved settings and, as if something still loaded it, in the live store.
+ */
+async function withRetiredSetting(on, fn) {
+  if (!on) return fn();
+  const before = globalThis.localStorage.getItem(SETTINGS_KEY);
+  globalThis.localStorage.setItem(SETTINGS_KEY, JSON.stringify({ version: 2, data: { [RETIRED_SETTING]: true } }));
+  useSettingsStore.setState({ [RETIRED_SETTING]: true });
+  try {
+    return await fn();
+  } finally {
+    useSettingsStore.setState((state) => {
+      const { [RETIRED_SETTING]: _retired, ...rest } = state;
+      return rest;
+    }, true);
+    if (before == null) globalThis.localStorage.removeItem(SETTINGS_KEY);
+    else globalThis.localStorage.setItem(SETTINGS_KEY, before);
+  }
+}
+
+describe('OpenCode is typed as v0.31.0 typed it, with no version check', () => {
+  test('OR-45: New OpenCode Terminal types `opencode`, an exact resume `opencode -s <id>`, the lone fallback `opencode --continue` \u{2014} no version check asked for, the retired setting saved on or not', async () => {
+    const warn = console.warn;
+    console.warn = () => {}; // the fallback says why it continues; OR-26 holds that
+    try {
+      for (const retired of [false, true]) {
+        const when = retired ? 'with the retired setting saved on' : 'with no setting saved';
+        await isolated(async () => {
+          const [fresh] = await restoredTerminals(workspaceRunning(null));
+          let seen = [];
+          const start = await typedInto(() =>
+            withRetiredSetting(retired, async () => {
+              seen = await invokedDuring(async () => {
+                const agent = await T.getState().startAgent(fresh, 'opencode');
+                assert.equal(agent?.kind, 'opencode', when);
+              });
+            })
+          );
+          assert.deepEqual(start.typed, { [fresh]: ['opencode\r'] }, `start, ${when}`);
+          assert.ok(seen.includes('pty_write'), `the spy saw the write, ${when}`);
+          assert.equal(seen.includes(RETIRED_CHECK), false, `start asked for a version, ${when}`);
+        });
+
+        await isolated(async () => {
+          const [exact] = await restoredTerminals(workspaceRunning({ kind: 'opencode', sessionId: SES_A, startedAt: 1, title: 'First' }));
+          let seen = [];
+          const resume = await typedInto(() =>
+            withRetiredSetting(retired, async () => {
+              seen = await invokedDuring(async () => {
+                assert.equal(await T.getState().resumeAgent(exact), true, when);
+              });
+            })
+          );
+          assert.deepEqual(resume.typed, { [exact]: [`opencode -s ${SES_A}\r`] }, `exact resume, ${when}`);
+          assert.equal(seen.includes(RETIRED_CHECK), false, `the resume asked for a version, ${when}`);
+        });
+
+        await isolated(async () => {
+          const [only] = await restoredTerminals(workspaceOf([ocRecord(1, 'Alpha')]));
+          let seen = [];
+          const lone = await typedInto(
+            () =>
+              withRetiredSetting(retired, async () => {
+                seen = await invokedDuring(async () => {
+                  assert.equal(await T.getState().resumeAgent(only), true, when);
+                });
+              }),
+            { answer: () => Promise.reject(new Error('opencode was not found on PATH')) }
+          );
+          assert.deepEqual(lone.typed, { [only]: ['opencode --continue\r'] }, `alone in reach, ${when}`);
+          assert.ok(seen.includes('agent_sessions'), `the spy saw the lookup, ${when}`);
+          assert.equal(seen.includes(RETIRED_CHECK), false, `the fallback asked for a version, ${when}`);
+        });
+      }
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(RETIRED_SETTING in useSettingsStore.getState(), false, 'the retired setting was left behind');
   });
 });
 

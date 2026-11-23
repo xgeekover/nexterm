@@ -59,6 +59,7 @@ import { agentRuns, terminalStatus } from './terminalStatus.js';
 import { unreadCountByTab } from './attention.js';
 import { utf8Length } from './scrollbackSnapshot.js';
 import { displayTitle, nexTermTitle } from './tabTitle.js';
+import { isReadOnly, READ_ONLY_SEND_REFUSED } from './readOnly.js';
 import { useTerminalStore } from '../stores/terminalStore.js';
 import { useSettingsStore } from '../stores/settingsStore.js';
 import { useSystemStore } from '../stores/systemStore.js';
@@ -523,6 +524,9 @@ export function createControlDispatcher({
       const tab = store.getState().tabs.find((t) => t.id === aimed.tabId);
       if (!tab) return fail(NOT_FOUND, `no terminal ${aimed.tabId}`);
       if (tab.exited) return fail(REFUSED, 'the shell in that terminal has exited');
+      // A read-only terminal takes nothing typed (bundle 4, A3): refused
+      // before anything is encoded — and `typeForProgram` asks again.
+      if (isReadOnly(store.getState(), aimed.tabId)) return fail(REFUSED, READ_ONLY_SEND_REFUSED);
       // Encoded for the TARGET's modes, as its program set them — read once
       // its xterm has caught up with its output.
       const term = await readTerminal(aimed.tabId);
@@ -530,7 +534,7 @@ export function createControlDispatcher({
       // so nothing could see a password prompt there — and on Windows the
       // screen is the only way to (re-verification F3). Shown once, it can.
       if (!term) return fail(NOT_RENDERED, 'that terminal has not been shown yet, so what it is asking for cannot be checked — open that terminal once first');
-      const modes = { applicationCursorKeys: false, bracketedPaste: false, modifyOtherKeys: 0, ...(modesOf(aimed.tabId) ?? {}) };
+      const modes = { applicationCursorKeys: false, bracketedPaste: false, modifyOtherKeys: 0, kittyFlags: 0, ...(modesOf(aimed.tabId) ?? {}) };
       let data = '';
       // Whether the last thing sent here ended in a bare ESC a moment ago:
       // this send must not finish the sequence it began (`ESCAPE_JOIN_MS`).
@@ -590,6 +594,8 @@ export function createControlDispatcher({
           return fail(REFUSED, 'the shell in that terminal has exited');
         case 'refused':
           return fail(REFUSED, outcome.reason);
+        case 'read-only':
+          return fail(REFUSED, READ_ONLY_SEND_REFUSED);
         case 'late':
           return LATE;
         default:

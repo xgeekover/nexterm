@@ -141,7 +141,9 @@ export function TerminalView({ tabId, active = false }) {
 
     const entry = getOrCreateTerminal(tabId, {
       sessionId,
-      onData: (data) => writeRaw(tabId, data),
+      // `options` is the read-only gate's mark on the terminal's own replies
+      // (AUTOMATIC, src/lib/readOnly.js); the user's keys come without it.
+      onData: (data, options) => writeRaw(tabId, data, options),
     });
     termRef.current = entry.term;
     lineRef.current = NEW_LINE;
@@ -305,7 +307,12 @@ export function TerminalView({ tabId, active = false }) {
       if (rank) updateSuggestions();
       else setSuggestState(EMPTY_SUGGEST_STATE);
     };
-    const suggestDataDisposable = entry.term.onData(bufferHandler);
+    // Never a chunk a read-only terminal dropped (`entry.inputGate`): what the
+    // program never got is not on its line.
+    const suggestDataDisposable = entry.term.onData((data) => {
+      if (entry.inputGate?.blocks(data)) return;
+      bufferHandler(data);
+    });
 
     // ---- Korean syllable being composed (macOS) ---------------------------
 
@@ -390,15 +397,43 @@ export function TerminalView({ tabId, active = false }) {
       return true;
     };
 
+    // Shift+Enter, Ctrl+Enter, Esc, Ctrl+C and the other keys of the kitty
+    // keyboard protocol's first flag, `CSI 13;2u`, `CSI 13;5u`, `CSI 27u`,
+    // `CSI 99;5u`, once the program on the active screen has pushed that
+    // flag (`CSI > 1 u`). Plain Enter, Tab and Backspace stay xterm's, and so
+    // does every key while a password prompt is up (src/lib/kittyKeyboard.js,
+    // which reads ⌥ as Meta and the Korean syllable at the key). Sent and
+    // cancelled as `sendLegacyAltArrow` sends and cancels a key. Should
+    // anything here throw, the key is xterm's.
+    const sendKittyKey = (event) => {
+      try {
+        const sequence = entry.kittyKeyboard?.sequenceFor(event, {
+          secret: typingHidden(useTerminalStore.getState(), tabId),
+        });
+        if (!sequence) return false;
+        event.preventDefault();
+        event.stopPropagation();
+        entry.term.input(sequence, true);
+        return true;
+      } catch (err) {
+        console.warn('[Terminal] could not send a kitty keyboard key:', err);
+        return false;
+      }
+    };
+
     // Shift+Enter and Ctrl+Enter as xterm's modifyOtherKeys sends them,
     // `CSI 27;2;13~` and `CSI 27;5;13~`, once the program has turned it on
     // (`CSI > 4 ; 1 m`). OpenCode does, and inserts a newline for them where
-    // the `\r` xterm.js sends for both submits. Where nothing asked, Claude
-    // Code included, Enter stays xterm's (src/lib/modifyOtherKeys.js). Sent
-    // and cancelled as `sendLegacyAltArrow` sends and cancels a key; cancelling
-    // the keydown also stops its keypress, which xterm would send as a second
-    // `\r`. Should anything here throw, the key is xterm's.
+    // the `\r` xterm.js sends for both submits. Where nothing asked, Enter
+    // stays xterm's (src/lib/modifyOtherKeys.js). The kitty keyboard
+    // protocol is asked first (`sendKittyKey`): a program that pushed its
+    // flag asked for the more specific of the two, and may well have turned
+    // modifyOtherKeys on as well; with no kitty flag, Enter goes exactly as it
+    // did. Sent and cancelled as `sendLegacyAltArrow` sends and cancels a key;
+    // cancelling the keydown also stops its keypress, which xterm would send
+    // as a second `\r`. Should anything here throw, the key is xterm's.
     const sendModifiedEnter = (event) => {
+      if (sendKittyKey(event)) return true;
       try {
         const sequence = entry.modifyOtherKeys?.sequenceFor(event);
         if (!sequence) return false;
@@ -415,15 +450,17 @@ export function TerminalView({ tabId, active = false }) {
     // ⌘← / ⌘→ / ⌘Backspace / ⌘Forward-Delete on macOS: Ctrl+A, Ctrl+E,
     // Ctrl+U and Ctrl+K, the line editor's start, end and kills
     // (src/lib/macEditingKeys.js). Read at the key, not captured: the
-    // setting, the screen, the program's modifyOtherKeys level and a password
-    // prompt all change while the terminal lives. Sent and cancelled as
-    // `sendLegacyAltArrow` sends and cancels a key.
+    // setting, the screen, the program's modifyOtherKeys level and kitty
+    // keyboard flags and a password prompt all change while the terminal
+    // lives. Sent and cancelled as `sendLegacyAltArrow` sends and cancels a
+    // key.
     const sendMacEditingKey = (event) => {
       const sequence = macEditingKeySequence(event, {
         mac: isMac,
         enabled: useSettingsStore.getState().terminalMacEditingKeys,
         alternate: isAlternate(),
         modifyOtherKeysLevel: entry.modifyOtherKeys?.level ?? 0,
+        kittyFlags: entry.kittyKeyboard?.flags ?? 0,
         secret: typingHidden(useTerminalStore.getState(), tabId),
       });
       if (!sequence) return false;
@@ -435,15 +472,17 @@ export function TerminalView({ tabId, active = false }) {
 
     // A key this view sends itself instead of leaving it to xterm, once the
     // clipboard and the suggestion layer have let it go on. No key is two of
-    // these: ⌥ without ⌘, ⌘ without ⌥, and Enter, which no ⌘ rule maps.
+    // these: ⌥ without ⌘, ⌘ without ⌥, and a kitty key or Enter, which no ⌘
+    // rule maps and neither encoder takes with ⌘ held.
     const sendKeyItself = (event) => sendLegacyAltArrow(event) || sendMacEditingKey(event) || sendModifiedEnter(event);
 
     // Intercepts specific keys ourselves (→ to accept, ↑/↓ to move the popup
     // selection, Esc to dismiss) — and only while something is actually drawn,
     // at a shell prompt. Tab is the shell's, always. Everything else, including
     // arrows when the popup is closed, falls through to xterm untouched — bar
-    // ⌥ and an arrow, sent as xterm 5.5 sent them, and Shift/Ctrl+Enter to a
-    // program that asked for modifyOtherKeys.
+    // ⌥ and an arrow, sent as xterm 5.5 sent them, the kitty keyboard
+    // protocol's keys to a program that pushed its flag, and Shift/Ctrl+Enter
+    // to a program that asked for modifyOtherKeys.
     const handleKeyEvent = (event) => {
       // Alt+F4 is the window's: back to the webview untouched, so it closes
       // the window as it does from anywhere else (V29).
@@ -453,6 +492,21 @@ export function TerminalView({ tabId, active = false }) {
       // cancel the key, and WebView2 has no Edit menu to fall back on.
       const clipboard = handleClipboardKey(entry.term, event, { findOpen: isFindOpen() });
       if (clipboard !== undefined) return clipboard;
+      // A read-only terminal (src/lib/readOnly.js): no key reaches its
+      // program — the gate in the registry drops whatever xterm would send
+      // anyway; this keeps the key from xterm, so the selection stays and
+      // Tab keeps the focus, and says why once every 3 s. Scrolling, ⌘A and
+      // a composition go on; the app's shortcuts ran before this.
+      const readOnlyKey = useTerminalStore.getState().readOnlyKey?.(tabId, event, { mac: isMac }) ?? null;
+      if (readOnlyKey) {
+        if (readOnlyKey === 'xterm') return true;
+        if (readOnlyKey === 'cancel') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.type === 'keydown') setSuggestState(EMPTY_SUGGEST_STATE);
+        }
+        return false;
+      }
       const decision = suggestionKeyAction(suggestStateRef.current, event, {
         running: isRunning(),
         alternate: isAlternate(),
@@ -512,9 +566,10 @@ export function TerminalView({ tabId, active = false }) {
       if (payload?.session_id !== sessionId) return;
       // The mark goes on the row the output starts on: once xterm has read
       // everything before it, held output included (terminalRegistry.js's
-      // pacing) — a write is parsed later than it is made. (The backend sends
-      // a read's markers after that read's output, so when C and the first of
-      // the output share one read, the mark lands below that much of it.)
+      // pacing) — a write is parsed later than it is made. The backend sends
+      // the C exactly where it was in the stream, ahead of the output after
+      // it even in the same read (manager.rs), so the mark lands on the exact
+      // row the output starts on.
       // The command is the one submitted now; a "D" may clear the ref before
       // then.
       const command = lastSubmittedRef.current;

@@ -6310,6 +6310,102 @@ check('RN-239', 'toasts: an always-mounted hidden polite status region (the one 
   }
 });
 
+// ---- a read-only terminal (bundle 4, A3; src/lib/readOnly.js) ----------------
+//
+// A badge on the chip's bottom-left corner (under the lock's corner) and an
+// in-line mark on the TERMINALS row, a keyboard with a stroke through it,
+// with its words; a strip of its own above the terminal with Turn Off. Only
+// while the terminal is read-only: the state is the store's `readOnly` map,
+// set here directly (what turns it on is read_only.test.js's).
+
+const RO_MODULE = await import('../../src/lib/readOnly.js');
+
+/** The read-only mark in some markup, as `{ tag, label, title, role, after }`, or null. */
+function readOnlyMarkIn(markup) {
+  const tag = /<span\b[^>]*\sdata-read-only-mark="[^"]*"[^>]*>/.exec(markup ?? '')?.[0];
+  if (!tag) return null;
+  const after = markup.slice(markup.indexOf(tag));
+  return { tag, label: attrOf(tag, 'aria-label'), title: attrOf(tag, 'title'), role: attrOf(tag, 'role'), after };
+}
+
+/** The read-only strip in some markup, from its opening tag to its button's end, or null. */
+const readOnlyStripIn = (markup) => /<div\b[^>]*\sdata-read-only-strip="[^"]*"[^>]*>[\s\S]*?<\/button><\/div>/.exec(markup ?? '')?.[0] ?? null;
+
+function arrangeReadOnly(readOnly) {
+  reset();
+  useTerminalStore.setState({
+    tabs: [tab('t1'), tab('t2')],
+    activeTabId: 't1',
+    groups: baseGroups(['t1', 't2']),
+    readOnly,
+  });
+}
+
+scenario(
+  'RN-240',
+  "a read-only terminal: a KeyboardOff badge under the lock's corner of its chip, taking no room, an in-line mark on its side bar row, both with their words; a strip above the terminal with Turn Off",
+  () => {
+    arrangeReadOnly({ t1: true });
+    lockSessions(['t1']);
+  },
+  (html) => {
+    const words = RO_MODULE.READ_ONLY_LABEL;
+    const chip = tabChip(html, 't1');
+    const badge = readOnlyMarkIn(chip);
+    expectThat(badge, 'no read-only badge on the chip');
+    expectThat(badge.role === 'img' && badge.label === words && badge.title === words, `the badge does not say it: ${badge.tag}`);
+    expectThat(iconOf(badge.after) === 'keyboard-off' && /\swidth="8"/.test(badge.after), 'the badge is not an 8 px KeyboardOff');
+    const cls = classOf(badge.tag).split(/\s+/);
+    for (const word of ['absolute', 'pointer-events-none', '-bottom-[2px]', '-left-[2px]', 'w-[10px]', 'h-[10px]']) {
+      expectThat(cls.includes(word), `the chip's read-only badge is not "${word}" — it must take no room, and no pointer: ${badge.tag}`);
+    }
+    // Beside the lock, a different shape: both on the chip, neither the other.
+    const lock = lockIn(chip);
+    expectThat(lock && iconOf(chip.slice(chip.indexOf(lock.tag))) === 'lock', 'setup: the lock is on the chip too');
+    expectThat(chip.indexOf(lock.tag) < chip.indexOf(badge.tag), 'the badge is not right after the lock');
+    const chipTitle = visibleText(attrOf(openingTag(chip), 'title') ?? '');
+    expectThat(chipTitle.includes(words), `the chip's tooltip does not say it: ${JSON.stringify(chipTitle)}`);
+    expectThat(!readOnlyMarkIn(tabChip(html, 't2')), 'a read-only badge on a writable terminal');
+
+    const row = terminalRow(html, 't1');
+    const mark = readOnlyMarkIn(row);
+    expectThat(mark?.label === words && mark.title === words && mark.role === 'img', 'no read-only mark, with its words, on the side bar row');
+    expectThat(iconOf(mark.after) === 'keyboard-off', 'the row mark is not KeyboardOff');
+    expectThat(row.indexOf(lockIn(row).tag) < row.indexOf(mark.tag), "the row's mark is not right after the lock");
+    expectThat(visibleText(attrOf(openingTag(row), 'title') ?? '').includes(words), "the side bar row's tooltip does not say it");
+    expectThat(!readOnlyMarkIn(terminalRow(html, 't2')), "a read-only mark on the writable terminal's row");
+
+    const pane = paneMarkup(html, 'pane-1');
+    const strip = readOnlyStripIn(pane);
+    expectThat(strip, 'no read-only strip in the pane showing the read-only terminal');
+    expectThat(attrOf(openingTag(strip), 'data-read-only-strip') === 't1' && attrOf(openingTag(strip), 'role') === 'status', `the strip is not t1's status: ${openingTag(strip)}`);
+    expectThat(visibleText(strip).includes(RO_MODULE.READ_ONLY_STRIP_TEXT), `the strip does not say it: ${JSON.stringify(visibleText(strip))}`);
+    const buttons = buttonsIn(strip);
+    expectThat(buttons.length === 1 && buttons[0].text === RO_MODULE.READ_ONLY_TURN_OFF && !buttons[0].disabled, `no Turn Off button: ${JSON.stringify(buttons)}`);
+    expectThat(buttons[0].title === RO_MODULE.READ_ONLY_TURN_OFF_HINT, 'Turn Off says nothing of what it does');
+    // A row of its own, never laid over the terminal: thin, in the flow
+    // (not absolute), and ahead of the box the terminal is drawn in.
+    const stripCls = classOf(openingTag(strip)).split(/\s+/);
+    expectThat(stripCls.includes('shrink-0') && stripCls.includes('h-[24px]') && !stripCls.includes('absolute'), `the strip is not a thin row of its own: ${openingTag(strip)}`);
+    expectThat(pane.indexOf(strip) < pane.indexOf('class="relative flex-1 min-h-0"'), 'the strip is not above the terminal');
+    expectThat(iconOf(strip) === 'keyboard-off', "the strip does not carry the badge's shape");
+  }
+);
+
+scenario(
+  'RN-241',
+  'no terminal read-only: no badge, no row mark and no strip anywhere — and the other terminal of a pane, when it is the one read-only, puts no strip over the one shown',
+  () => arrangeReadOnly({ t2: true }),
+  (html) => {
+    expectThat(!readOnlyMarkIn(tabChip(html, 't1')) && !readOnlyMarkIn(terminalRow(html, 't1')), 'a read-only mark on a writable terminal');
+    expectThat(readOnlyMarkIn(tabChip(html, 't2')) && readOnlyMarkIn(terminalRow(html, 't2')), "the hidden read-only terminal's chip and row are not marked");
+    expectThat(!readOnlyStripIn(paneMarkup(html, 'pane-1')), 'a read-only strip over a writable terminal');
+    arrangeReadOnly({});
+    const none = renderArranged();
+    expectThat(!/data-read-only-mark=|data-read-only-strip=/.test(none), 'a read-only mark or strip with nothing read-only');
+  }
+);
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

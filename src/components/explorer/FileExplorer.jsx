@@ -35,7 +35,9 @@ import { PATH_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { openInExternalEditor, revealInFileManager } from '../../lib/ipc.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { buildOpenActionItems } from './explorerOpenActions.js';
+import { buildOpenActionItems, sendToAgentItem } from './explorerOpenActions.js';
+import { explorerSendProblem, sendPathToAgent } from '../../lib/sendToAgent.js';
+import { SEND_TO_AGENT_LABEL } from '../../lib/agentReference.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
 import { useExplorerPathDrag } from '../../hooks/useExplorerPathDrag.js';
 
@@ -244,6 +246,10 @@ export function FileExplorer() {
         setError: setExplorerError,
       })
     );
+    // Send to Agent (bundle 4, A4): the row's file or folder as an @ reference,
+    // typed into the terminal running Claude Code or OpenCode.
+    const sendItem = sendToAgentItem(target, { label: SEND_TO_AGENT_LABEL, problemOf: explorerSendProblem, send: sendPathToAgent });
+    if (sendItem) items.push(sendItem);
 
     pushSeparator();
     items.push({

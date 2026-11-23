@@ -462,7 +462,9 @@ describe('Multi-line paste: the question on screen', () => {
     assert.ok(start > 0 && end > start, 'getOrCreateTerminal installs it');
     let installed = null;
     const asked = [];
-    const run = new Function('installPasteWarning', 'term', 'container', 'tabId', 'useSettingsStore', 'usePastePromptStore', registry.slice(start, end));
+    // `refusePaste` since bundle 4 (A3): a read-only terminal's paste is refused, never asked about.
+    const refusePaste = () => false;
+    const run = new Function('installPasteWarning', 'term', 'container', 'tabId', 'useSettingsStore', 'usePastePromptStore', 'refusePaste', registry.slice(start, end));
     const settings = { getState: () => ({ terminalMultiLinePasteWarning: 'always' }) };
     run(
       (t, c, options) => {
@@ -472,11 +474,13 @@ describe('Multi-line paste: the question on screen', () => {
       'the-container',
       'tab-term-9',
       settings,
-      { getState: () => ({ ask: (...args) => asked.push(args) }) }
+      { getState: () => ({ ask: (...args) => asked.push(args) }) },
+      refusePaste
     );
     assert.equal(installed.t, 'the-term');
     assert.equal(installed.c, 'the-container');
     assert.equal(installed.options.settings, settings);
+    assert.equal(installed.options.refuse, refusePaste, "the read-only refusal, the right-click's own");
     installed.options.ask({ lines: 4, bracketed: false });
     assert.deepEqual(asked, [['tab-term-9', { lines: 4, bracketed: false }]]);
 

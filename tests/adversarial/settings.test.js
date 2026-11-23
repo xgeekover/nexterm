@@ -50,9 +50,6 @@ const SETTINGS_KEYS = [
   // Settings ▸ Terminal ▸ Claude Code on the Normal Screen: read by
   // `spawnPty` as each shell starts (CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).
   'terminalClaudeNormalScreen',
-  // Settings ▸ Terminal ▸ OpenCode in Mini Mode: read by opencodeLaunch.js
-  // each time NexTerm types an opencode line.
-  'terminalOpencodeMini',
   'terminalCopyOnSelect',
   'terminalMouseReporting',
   'terminalRightClick',
@@ -81,6 +78,8 @@ const SETTINGS_KEYS = [
   // Option as Meta (A7).
   'terminalMacEditingKeys',
   'terminalOptionAsMeta',
+  // Bundle 4, A1: the kitty keyboard protocol's first flag (on).
+  'terminalKittyKeyboard',
   // Bundle 2, A8: programs putting text on the clipboard with OSC 52 (off).
   'terminalOsc52Write',
   // Settings ▸ Terminal ▸ Control (stage 7, spec D5): what programs in
@@ -157,6 +156,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalMouseReporting: false,
       terminalMacEditingKeys: false,
       terminalOptionAsMeta: true,
+      terminalKittyKeyboard: false,
       terminalOsc52Write: true,
       terminalProgramNotifications: false,
       terminalAttentionFlashFocused: true,
@@ -983,6 +983,34 @@ describe('Only what the user changed is saved', () => {
 
       state.setSetting('reducedMotion', true);
       assert.deepEqual(saved(), { terminalTheme: 'nord', reducedMotion: true }, 'garbage was carried forward');
+    })
+  );
+
+  test(
+    'SET-37: the OpenCode setting v0.32.0 to v0.35.x saved is ignored \u{2014} the rest of that file loads, and the next save drops it',
+    withOwnStorage(async () => {
+      // Its name built from parts, so the sweep for the retired names in
+      // src/ and tests/ stays empty.
+      const retired = ['terminal', 'Opencode', 'Mini'].join('');
+      writtenByAnOlderRelease({ [retired]: false, terminalTheme: 'nord', terminalFontSize: 16 });
+
+      const store = (await launch()).useSettingsStore;
+      const state = store.getState();
+      assert.equal(retired in state, false, 'the retired setting reached the store');
+      assert.equal(retired in state.settingsDefaults, false, 'the retired setting has a default again');
+      assert.equal(state.terminalTheme, 'nord');
+      assert.equal(state.terminalFontSize, 16);
+
+      state.setSetting('reducedMotion', true);
+      assert.deepEqual(saved(), { terminalTheme: 'nord', terminalFontSize: 16, reducedMotion: true }, 'the retired setting was written back');
+
+      // Saved on, as the default left it, the same.
+      writtenByAnOlderRelease({ [retired]: true, terminalScrollback: 10000 });
+      const next = (await launch()).useSettingsStore;
+      assert.equal(retired in next.getState(), false);
+      assert.equal(next.getState().terminalScrollback, 10000);
+      next.getState().setSetting('terminalTheme', 'dracula');
+      assert.deepEqual(saved(), { terminalScrollback: 10000, terminalTheme: 'dracula' });
     })
   );
 

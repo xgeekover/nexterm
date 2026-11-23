@@ -23,7 +23,8 @@ import '@xterm/xterm/css/xterm.css';
 import { listen, pathKinds, writeClipboardText } from '../../lib/ipc.js';
 import { useSettingsStore } from '../../stores/settingsStore.js';
 import { notifyTerminal, setTerminalNoticeSink } from '../../lib/terminalNotice.js';
-import { setContextTerminalSource } from '../../lib/copyContext.js';
+import { setContextAfterOutputSource, setContextTerminalSource } from '../../lib/copyContext.js';
+import { listenForCommands, setLastOutputSource, trackLastCommandOutput } from '../../lib/lastCommandOutput.js';
 import {
   APP_THEME_TOKENS,
   getTerminalThemeEntry,
@@ -52,9 +53,11 @@ import {
   webglInternals,
 } from '../../lib/webglLifecycle.js';
 import { useSystemStore } from '../../stores/systemStore.js';
-import { setTerminalOutputBarrier, useTerminalStore } from '../../stores/terminalStore.js';
-// NexTerm's own agent start and resume lines, for the message marks' floor.
-import { setAgentLaunchObserver } from '../../stores/terminalStore.js';
+import { setTerminalOutputBarrier, tabRunsCmd, useTerminalStore } from '../../stores/terminalStore.js';
+// NexTerm's own agent start and resume lines, for the message marks' floor;
+// and the read-only input gate, handed to the store.
+import { attachInputGate, setAgentLaunchObserver } from '../../stores/terminalStore.js';
+import { installInputGate, isReadOnly } from '../../lib/readOnly.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { linksAtRow, resolveLinkPath } from '../../lib/terminalLinks.js';
 import { createKindLookup } from '../../lib/outputPaths.js';
@@ -65,16 +68,16 @@ import { shellPathOf } from '../../lib/terminalFileDrop.js';
 import { trackCommandMarks } from '../../lib/stickyCommand.js';
 import { listenForPrompts, mergeMarks, promptJumpLine, trackPromptMarks } from '../../lib/promptMarks.js';
 import { createScanScheduler, noteTerminalInput, trackAgentMessageMarks } from '../../lib/agentMessageMarks.js';
-import { trackOpencodeMiniMarks } from '../../lib/opencodeMiniMarks.js';
 import { agentRuns } from '../../lib/terminalStatus.js';
 import { submitsLine } from '../../lib/tabActivity.js';
 import { hyperlinkTitle, openExternal } from '../../lib/openExternal.js';
-import { installHangulInlineIme } from '../../lib/hangulInlineIme.js';
+import { hangulImeFor, installHangulInlineIme } from '../../lib/hangulInlineIme.js';
 import { installTerminalClipboard } from '../../lib/terminalClipboard.js';
 import { installTerminalRightClick } from '../../lib/terminalRightClick.js';
 import { installPasteWarning, withoutPasteMarkers } from '../../lib/pasteWarning.js';
 import { usePastePromptStore } from '../../stores/pastePromptStore.js';
 import { installModifyOtherKeys } from '../../lib/modifyOtherKeys.js';
+import { installKittyKeyboard } from '../../lib/kittyKeyboard.js';
 import { installFocusReports } from '../../lib/focusReport.js';
 import { attachOutput, createHistoryMark, forgetOutput, startPtyOutputBus } from '../../lib/ptyOutputBus.js';
 import { createOutputPacer } from '../../lib/outputPacing.js';
@@ -682,7 +685,6 @@ function ensureSettingsSubscriptionStarted() {
       for (const entry of instances.values()) {
         entry.promptMarks?.setVisible(promptMarksShown(state));
         entry.messageMarks?.setVisible(promptMarksShown(state));
-        entry.miniMarks?.setVisible(promptMarksShown(state));
       }
     }
     // Restore Scrollback turned back on: what every terminal shows now is
@@ -910,6 +912,12 @@ function bindSession(entry, sessionId) {
     // or Enter started a new one after it exited): nothing it left waiting
     // will ever be written anywhere.
     forgetOutput(entry.sessionId);
+    // Nor are the kitty keyboard flags its programs pushed the new shell's:
+    // emptied now, for a key pressed before xterm catches up, and again once
+    // xterm has read what the old shell printed — a push still waiting to be
+    // parsed would bring them back. The new shell's output is attached after
+    // this write, so nothing of it is parsed before. See kittyKeyboard.js.
+    resetKittyKeyboard(entry);
     // Nor is what its programs left on the screen any business of the new
     // one. Written before the new shell's output is attached, so before any
     // of it — and after a restore still being written, so its text goes up
@@ -1209,9 +1217,10 @@ export function terminalAfterOutput(tabId, waitMs = 500) {
 
 /**
  * The modes a key or a paste sent to `tabId` must follow (stage 7, `send`;
- * src/lib/controlKeys.js): DECCKM, bracketed paste, and modifyOtherKeys'
- * level, as its program last set them. Null for a terminal with no xterm —
- * nothing has read its output to know.
+ * src/lib/controlKeys.js): DECCKM, bracketed paste, modifyOtherKeys' level
+ * and the active screen's kitty keyboard flags, as its program last set
+ * them. Null for a terminal with no xterm — nothing has read its output to
+ * know.
  */
 export function terminalModes(tabId) {
   const entry = instances.get(tabId);
@@ -1221,6 +1230,7 @@ export function terminalModes(tabId) {
     applicationCursorKeys: modes.applicationCursorKeysMode === true,
     bracketedPaste: modes.bracketedPasteMode === true,
     modifyOtherKeys: entry.modifyOtherKeys?.level ?? 0,
+    kittyFlags: entry.kittyKeyboard?.flags ?? 0,
   };
 }
 
@@ -1283,6 +1293,19 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // A program's OSC 8 hyperlinks open as the terminal's other links do.
     linkHandler: hyperlinkHandler(container),
   });
+  // The read-only gate (bundle 4, A3): told by xterm which `onData` chunk is
+  // the user's, before any other listener hears it — so this comes before
+  // every addon and listener below. While the terminal is read-only it drops
+  // the user's chunks (keys, IME text, pastes, mouse reports) for every
+  // listener that asks (`unlessBlocked`, `forward`) and lets the terminal's
+  // own replies through. With read-only off it drops nothing. Without
+  // xterm's user-input signal it is not `available`, and read-only cannot be
+  // turned on here (`setReadOnly`). See readOnly.js.
+  const inputGate = installInputGate(term, {
+    readOnly: () => isReadOnly(useTerminalStore.getState(), tabId),
+    onBlocked: () => useTerminalStore.getState().noteReadOnlyInput?.(tabId),
+  });
+  const detachInputGate = attachInputGate(tabId, inputGate);
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   // Emoji — VS16, ZWJ and skin-tone sequences included — are two cells wide
@@ -1296,6 +1319,19 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // It follows the program's output from the first byte; TerminalView sends
   // the keys. See modifyOtherKeys.js.
   const modifyOtherKeys = installModifyOtherKeys(term);
+  // The kitty keyboard protocol, its first flag only: `CSI ? u` answered with
+  // what NexTerm applies, and Shift+Enter, Esc and Ctrl+letter as keys of
+  // their own to a program that pushed the flag. Followed from the first
+  // byte; while Settings > Terminal > Kitty Keyboard Protocol is off (read at
+  // each sequence and key) nothing is answered or tracked. ⌥ as Meta and the
+  // Korean syllable being composed are read at the key. TerminalView sends
+  // the keys; the guards below (`bindSession`, `ensureKittyKeyboardResets`)
+  // empty its stacks. See kittyKeyboard.js.
+  const kittyKeyboard = installKittyKeyboard(term, {
+    enabled: () => useSettingsStore.getState().terminalKittyKeyboard !== false,
+    mac: isMac,
+    imePending: () => hangulImeFor(term)?.pending ?? '',
+  });
   // What xterm last told the program about focus (`CSI I` / `CSI O`), so a
   // terminal taken off screen without a blur can still be reported as gone —
   // WebKit sends none. TerminalView asks; see focusReport.js.
@@ -1422,8 +1458,15 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // Last of the container's capture listeners, so the IME, mouse reporting and
   // copy on select still hear the press it stops. The find bar's highlighted
   // match is not a selection to copy. Disposed with the terminal.
+  // A read-only terminal's paste is refused before the clipboard is read.
+  const refusePaste = () => {
+    if (!isReadOnly(useTerminalStore.getState(), tabId)) return false;
+    useTerminalStore.getState().noteReadOnlyInput?.(tabId);
+    return true;
+  };
   installTerminalRightClick(term, container, {
     settings: useSettingsStore,
+    refuse: refusePaste,
     isFindOpen: () => {
       const find = useTerminalStore.getState().find;
       return Boolean(find?.open && find?.tabId === tabId);
@@ -1441,6 +1484,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // the terminal.
   installPasteWarning(term, container, {
     settings: useSettingsStore,
+    // A read-only terminal's paste: refused, never asked about (readOnly.js).
+    refuse: refusePaste,
     ask: (question) => usePastePromptStore.getState().ask(tabId, question),
     withdraw: () => usePastePromptStore.getState().withdraw(tabId),
   });
@@ -1449,7 +1494,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // ---- Messages sent to Claude Code, on the scrollbar — src/lib/agentMessageMarks.js ----
   // Ahead of the view's own listener (`onData`), so the Enter that starts
   // Claude Code is still a shell's: the store has not heard of it yet.
-  const messageInput = term.onData((data) => noteMessageInput(tabId, data));
+  // Never a chunk a read-only terminal dropped (`inputGate`).
+  const messageInput = term.onData(inputGate.unlessBlocked((data) => noteMessageInput(tabId, data)));
   // After a parsed write with the shell's output in it (`writeOutput`): a
   // scan, soon, while Claude Code runs on the normal screen (`messageScans`),
   // and nothing at all otherwise — not for a scan's own empty write.
@@ -1458,7 +1504,10 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   // The alternate screen hides the scrollbar (index.css), as it always did.
   const bufferChange = term.buffer.onBufferChange?.((buffer) => showAlternateScreen(term, buffer?.type === 'alternate'));
 
-  const dataDisposable = onData ? term.onData(onData) : null;
+  // The view's forwarder to the PTY, through the read-only gate: a dropped
+  // chunk goes nowhere, and the terminal's own replies go marked as such
+  // (`AUTOMATIC`), which only a read-only terminal's `writeRaw` looks at.
+  const dataDisposable = onData ? term.onData(inputGate.forward(onData)) : null;
 
   // Feed this tab's PTY output straight into its xterm for the whole life of
   // the instance — independent of whichever component currently has it
@@ -1468,6 +1517,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
   ensureSettingsSubscriptionStarted();
   ensureFocusSubscriptionStarted();
   ensurePromptMarksListening();
+  ensureKittyKeyboardResets();
+  ensureLastCommandOutputListening();
   ensureForcedColoursWatched();
 
   entry = {
@@ -1483,8 +1534,16 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // Asked for what a key sends by TerminalView's key handler; null when the
     // terminal has no parser (a test double).
     modifyOtherKeys,
+    // The same for the kitty keyboard protocol, which wins where its flags
+    // are on; emptied by the guards in `bindSession` and
+    // `ensureKittyKeyboardResets`. Null for a test double.
+    kittyKeyboard,
     // Sends the focus-out a hidden terminal never got (`reportFocusOut`).
     focusReports,
+    // The read-only gate, asked by TerminalView's suggestion tracker too;
+    // disposed, and taken back from the store, with the terminal.
+    inputGate,
+    detachInputGate,
     bellDisposable,
     // Kept output being read — see `createHistoryMark`.
     history,
@@ -1520,6 +1579,10 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
     // marks each command as it starts and asks what to show. Disposed with
     // the terminal. See stickyCommand.js.
     commandMarks: trackCommandMarks(term),
+    // Copy Last Command Output's blocks (bundle 4, A2), fed by the one
+    // app-level listener (`ensureLastCommandOutputListening`), so a terminal
+    // in no pane still gets them. See lastCommandOutput.js.
+    lastOutput: trackLastCommandOutput(term),
     // Where each prompt is, on the scrollbar: marked on every OSC 133 D of
     // its session by the one app-level listener (`ensurePromptMarksListening`),
     // whether or not a pane shows this terminal. Disposed with it. See
@@ -1530,8 +1593,7 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
       color: promptMarkColour(),
       // Terminal: Clear (`clearTerminal`) takes every message mark as well;
       // Claude Code's rows start below the cursor from then on.
-      // OpenCode mini's as well.
-      onClear: () => clearMessageMarks(instances.get(tabId)),
+      onClear: () => instances.get(tabId)?.messageMarks?.afterClear(),
     }),
     promptMarkClicks,
     // Where each message sent to Claude Code is, on the same ruler, in its
@@ -1544,17 +1606,8 @@ export function getOrCreateTerminal(tabId, { sessionId, onData } = {}) {
       visible: promptMarksShown(settingsState),
       color: messageMarkColour(),
     }),
-    // The same for the messages sent to OpenCode in mini mode, by its own
-    // rules (src/lib/opencodeMiniMarks.js), with a limit of its own; fed and
-    // scanned only while OpenCode runs there (`marksAgentIn`).
-    miniMarks: trackOpencodeMiniMarks(term, {
-      decorate: promptMarkDecorator(term),
-      visible: promptMarksShown(settingsState),
-      color: messageMarkColour(),
-    }),
     messageScans: null,
     claudeRan: false,
-    opencodeRan: false,
     messageInput,
     messageParsed,
     bufferChange,
@@ -1835,7 +1888,6 @@ function refreshPromptMarkColour() {
   for (const entry of instances.values()) {
     entry.promptMarks?.setColor(colour);
     entry.messageMarks?.setColor(messageColour);
-    entry.miniMarks?.setColor(messageColour);
   }
 }
 
@@ -1931,35 +1983,91 @@ function ensurePromptMarksListening() {
 }
 ensurePromptMarksListening();
 
-/** Every kind of mark of `entry`'s terminal as one — shell prompts, Claude Code's and OpenCode mini's messages — for the click and the keys (promptMarks.js `mergeMarks`). */
-function allMarks(entry) {
-  if (!entry || entry.disposed) return null;
-  return mergeMarks(entry.promptMarks, entry.messageMarks, entry.miniMarks);
+/** Both kitty keyboard stacks of `entry` emptied now and once xterm has read what it was given so far. */
+function resetKittyKeyboard(entry) {
+  const keys = entry?.kittyKeyboard;
+  if (!keys) return;
+  keys.reset();
+  try {
+    entry.term.write('', () => {
+      // Inside xterm's write loop: a throw here would stop it for good.
+      try {
+        keys.reset();
+      } catch (err) {
+        console.warn('[Terminal] could not reset the kitty keyboard flags:', err);
+      }
+    });
+  } catch (err) {
+    console.warn('[Terminal] could not reset the kitty keyboard flags:', err);
+  }
 }
 
-/** Terminal: Clear (the prompt marks' onClear): every message mark goes, of both agents. */
-function clearMessageMarks(entry) {
-  entry?.messageMarks?.afterClear();
-  entry?.miniMarks?.afterClear();
+/**
+ * The kitty keyboard protocol's guard at the prompt, for every terminal: each
+ * `pty-command-done` (OSC 133 D) of a terminal's session empties both of its
+ * stacks once xterm has read what the shell printed before it
+ * (`afterOutputSoFar`, as the prompt marks are placed). A program that pushed
+ * flags and died without popping them — Claude Code runs on the normal
+ * screen, where leaving the alternate one is no guard — leaves the shell
+ * receiving `CSI 99;5u` for Ctrl+C and `CSI 27u` for Esc until then. A
+ * listener of its own beside `ensurePromptMarksListening`, started when this
+ * module loads and again, idempotently, as each terminal is made. See
+ * kittyKeyboard.js.
+ */
+let kittyResetListening = null;
+function ensureKittyKeyboardResets() {
+  if (kittyResetListening) return;
+  // One listener (`listenForPrompts`): when it fails, none was made, so
+  // there is nothing to take back before the guard is reset (review A-R4).
+  kittyResetListening = listenForPrompts({
+    listen,
+    entries: () => instances.values(),
+    mark: (entry) => afterOutputSoFar(entry, (e) => e.kittyKeyboard?.reset()),
+  }).catch((err) => {
+    kittyResetListening = null;
+    console.warn('[Terminal] could not listen for prompts to reset the kitty keyboard flags:', err);
+  });
+}
+ensureKittyKeyboardResets();
+
+/**
+ * Copy Last Command Output's listener, for every terminal (bundle 4, A2;
+ * lastCommandOutput.js): each `pty-command-started` (OSC 133 C) opens a block
+ * and each `pty-command-done` (OSC 133 D) closes it, once xterm has read what
+ * the shell printed before it (`afterOutputSoFar`), so the marker is on the
+ * exact row — the backend sends both where they were in the output. The
+ * command is the tab's `commandLine` as the C arrives (null when unknown).
+ * Started when this module loads and again, idempotently, as each terminal
+ * is made.
+ */
+let lastOutputListening = null;
+function ensureLastCommandOutputListening() {
+  if (lastOutputListening) return;
+  lastOutputListening = listenForCommands({
+    listen,
+    entries: () => instances.entries(),
+    started: (tabId, entry) => {
+      const command = useTerminalStore.getState().tabs.find((t) => t.id === tabId)?.commandLine ?? null;
+      afterOutputSoFar(entry, (e) => e.lastOutput?.started(command));
+    },
+    finished: (_tabId, entry, exitCode) => afterOutputSoFar(entry, (e) => e.lastOutput?.finished(exitCode)),
+  }).catch((err) => {
+    lastOutputListening = null;
+    console.warn('[Terminal] could not listen for commands to copy their output:', err);
+  });
+}
+ensureLastCommandOutputListening();
+
+/** Both kinds of marks of `entry`'s terminal as one, for the click and the keys (promptMarks.js `mergeMarks`). */
+function allMarks(entry) {
+  if (!entry || entry.disposed) return null;
+  return mergeMarks(entry.promptMarks, entry.messageMarks);
 }
 
 /** Whether NexTerm believes Claude Code runs in `tabId`'s terminal (`agentRuns`, the agent record agentDone goes by). */
 function claudeRunsIn(tabId) {
   const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
   return Boolean(tab) && tab.agent?.kind === 'claude' && agentRuns(tab);
-}
-
-/** Whether NexTerm believes OpenCode runs in `tabId`'s terminal; its mini marks apply on the normal screen only. */
-function opencodeRunsIn(tabId) {
-  const tab = useTerminalStore.getState().tabs.find((t) => t.id === tabId);
-  return Boolean(tab) && tab.agent?.kind === 'opencode' && agentRuns(tab);
-}
-
-/** Whose message marks `tabId`'s terminal keeps now: 'claude', 'opencode', or null for neither. */
-function marksAgentIn(tabId) {
-  if (claudeRunsIn(tabId)) return 'claude';
-  if (opencodeRunsIn(tabId)) return 'opencode';
-  return null;
 }
 
 /**
@@ -1975,21 +2083,7 @@ function noteMessageInput(tabId, data) {
   const marks = entry?.messageMarks;
   if (!marks || entry.disposed) return;
   try {
-    // Typing is noted by both trackers (a flag each); an Enter goes to the
-    // running agent's tracker, or is the floor of both at a shell.
-    let running = null;
-    const both = {
-      noteTyped: () => {
-        marks.noteTyped();
-        entry.miniMarks?.noteTyped();
-      },
-      noteSubmit: () => (running === 'opencode' ? entry.miniMarks?.noteSubmit() : marks.noteSubmit()),
-      noteShellSubmit: () => {
-        marks.noteShellSubmit();
-        entry.miniMarks?.noteShellSubmit();
-      },
-    };
-    const kind = noteTerminalInput(both, data, { submits: submitsLine, agentRuns: () => (running = marksAgentIn(tabId)) !== null });
+    const kind = noteTerminalInput(marks, data, { submits: submitsLine, agentRuns: () => claudeRunsIn(tabId) });
     if (kind === 'submit') entry.messageScans?.poke();
   } catch (err) {
     console.warn('[Terminal] could not note a sent message:', err);
@@ -2007,25 +2101,14 @@ function noteMessageInput(tabId, data) {
 function messageScanner(entry) {
   const wanted = () => {
     if (entry.disposed) return false;
-    const kind = marksAgentIn(entry.tabId);
-    const runs = kind === 'claude';
+    const runs = claudeRunsIn(entry.tabId);
     if (!runs && entry.claudeRan) entry.messageMarks?.stop();
     entry.claudeRan = runs;
-    if (kind !== 'opencode' && entry.opencodeRan) entry.miniMarks?.stop();
-    entry.opencodeRan = kind === 'opencode';
-    return kind !== null && entry.term.buffer.active.type === 'normal';
-  };
-  // Only the running agent's tracker is scanned, and none when no agent
-  // runs any more (it may end between `wanted` and the scan).
-  const tracker = (e) => {
-    const kind = marksAgentIn(e.tabId);
-    if (kind === 'opencode') return e.miniMarks;
-    if (kind === 'claude') return e.messageMarks;
-    return null;
+    return runs && entry.term.buffer.active.type === 'normal';
   };
   return createScanScheduler({
     wanted,
-    scan: () => afterOutputSoFar(entry, (e) => tracker(e)?.scan()),
+    scan: () => afterOutputSoFar(entry, (e) => e.messageMarks?.scan()),
   });
 }
 
@@ -2085,15 +2168,25 @@ setTerminalNoticeSink(writeNotice);
 // pacing is not in it — and a terminal never shown has no xterm to read.
 setContextTerminalSource(existingTerminal);
 
+// Send to Agent's password-prompt check (src/stores/terminalStore.js
+// `typeAgentReference`) reads a terminal's screen once it has read every byte
+// it was given, held output first, as `nexterm-cli send` reads it (review
+// A-R1): a `Password:` still held by pacing is on the screen it checks.
+setContextAfterOutputSource((tabId) => terminalAfterOutput(tabId));
+
+// Copy Last Command Output (src/lib/lastCommandOutput.js) reads a terminal's
+// blocks from here, the same way: at once, inside the click or Enter.
+setLastOutputSource((tabId) => {
+  const entry = instances.get(tabId);
+  return entry && !entry.disposed ? { tracker: entry.lastOutput ?? null, isCmd: tabRunsCmd(tabId) } : null;
+});
+
 // NexTerm types an agent's start or resume line itself (`startAgent`,
 // `resumeAgent`), so no Enter of the user's comes through `noteMessageInput`
 // for it: the floor of the message marks goes to the row it is typed at once
 // xterm has read everything before it (the prompt), ahead of the line's echo.
 setAgentLaunchObserver((tabId) => {
-  afterOutputSoFar(instances.get(tabId), (entry) => {
-    entry.messageMarks?.noteShellSubmit();
-    entry.miniMarks?.noteShellSubmit();
-  });
+  afterOutputSoFar(instances.get(tabId), (entry) => entry.messageMarks?.noteShellSubmit());
 });
 
 // What the store waits for before taking a progress bar down at a command's
@@ -2178,6 +2271,10 @@ export function clearTerminal(tabId) {
     const promptMarked = entry.promptMarks?.cursorOnNewestMark() ?? false;
     entry.term.clear();
     entry.promptMarks?.afterClear(promptMarked);
+    // Copy Last Command Output: what was cleared is not copied any more
+    // (xterm's clear() leaves markers on the rows it blanked). See
+    // lastCommandOutput.js `cleared`.
+    entry.lastOutput?.cleared();
     noteCleared(entry);
   });
 }
@@ -2217,6 +2314,11 @@ function noteCleared(entry) {
 export function pasteIntoTerminal(tabId, text) {
   const entry = instances.get(tabId);
   if (!entry || entry.disposed || typeof text !== 'string' || text === '') return false;
+  // Nothing goes into a read-only terminal; it says so (at most every 3 s).
+  if (isReadOnly(useTerminalStore.getState(), tabId)) {
+    useTerminalStore.getState().noteReadOnlyInput?.(tabId);
+    return false;
+  }
   const clean = withoutPasteMarkers(text);
   if (!clean) return false;
   entry.term.paste(clean);
@@ -2251,11 +2353,14 @@ export function disposeTerminal(tabId) {
   entry.renderDisposable?.dispose();
   entry.stopPtyListener();
   entry.dataDisposable?.dispose();
+  entry.inputGate?.dispose();
+  entry.detachInputGate?.();
   entry.bellDisposable?.dispose();
   entry.linkProvider?.dispose();
   entry.revealLinks?.dispose();
   entry.searchAddon?.dispose();
   entry.commandMarks.dispose();
+  entry.lastOutput?.dispose();
   entry.promptMarkClicks?.();
   entry.promptMarks.dispose();
   entry.messageInput?.dispose();
@@ -2263,7 +2368,6 @@ export function disposeTerminal(tabId) {
   entry.bufferChange?.dispose?.();
   entry.messageScans?.dispose();
   entry.messageMarks?.dispose();
-  entry.miniMarks?.dispose();
   // Its file is the store's to delete, with the tab (`forgetScrollback`).
   entry.scrollbackWatch?.dispose();
   entry.term.dispose();

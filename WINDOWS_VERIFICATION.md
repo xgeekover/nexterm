@@ -1390,12 +1390,22 @@ Windows with cmd first:
   (the column count in the status bar or `mode con` stays the same).
 - **H12 four terminals flooding** (the V43 scenario) with marks on: no freeze,
   typing still answers, and the marks are on their prompts afterwards.
+- **H13 a two-line prompt through ConPTY.** Put a two-line prompt in pwsh's
+  `$PROFILE` (`function prompt { "PS $PWD`n> " }`, or oh-my-posh with a
+  two-line theme; the shell integration wraps the prompt the profile left),
+  open a new pwsh tab and press Enter a few times: a two-line PowerShell
+  prompt gets its mark on its first line, the `PS` line, and a click on it
+  puts that line on the top row. Then cmd, with `setx PROMPT "$P$_$G"` and a
+  new cmd tab (remove the variable afterwards, in Environment Variables). A
+  mark on the second line means ConPTY moved the signal behind the prompt
+  text: write down which shell and which line, as the README says this is
+  unverified on Windows.
 
 On macOS with zsh: H1, H2 and H9 with `⌘⇧↑` / `⌘⇧↓`; a two-line prompt, with
 starship or powerlevel10k: write down which line of it each mark is on, over a
-few prompts (the first line, or the empty line above it, when the prompt is
-drawn after the signal; the line you type on when both come together;
-prompt_marks.test.js PRM-26); and that the box shows at rest in WKWebView,
+few prompts (the first line, or the empty line above it, whether the prompt
+is drawn after the signal or comes with it; prompt_marks.test.js PRM-02,
+PRM-26); and that the box shows at rest in WKWebView,
 brighter on hover.
 
 ### V49 — Claude Code's messages on the scrollbar, and the scrollbar at rest
@@ -1441,9 +1451,8 @@ a NexTerm build. On a release build with real Claude Code, Windows first
 - **C11 WSL.** `wsl`, then `claude` there: the variable arrives (`echo
   $CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`) and the scrollback works; no marks
   are expected.
-- **C12 OpenCode**: see V50 (mini mode). With *OpenCode in Mini Mode* off
-  it is as in v0.30.0: the keys reach it, and the scrollbar is hidden while
-  it is up.
+- **C12 OpenCode** as in v0.31.0, its full TUI (see V50): the keys reach
+  it, the scrollbar is hidden while it is up, and its messages get no marks.
 - **C13 High Contrast and motion.** The box is visible at rest with its
   outline, and the two kinds of marks can be told apart; with reduced motion
   nothing fades.
@@ -1455,58 +1464,30 @@ a NexTerm build. On a release build with real Claude Code, Windows first
 
 On macOS: C1 to C6 with `⌘⇧↑` / `⌘⇧↓`, and the box at rest in WKWebView.
 
-### V50 — OpenCode in mini mode, and its messages on the scrollbar
+### V50 — OpenCode in its full TUI again
 
-The rules were built from opencode-ai 1.18.34 (V1) recorded in a pty
-(tests/adversarial/fixtures/opencode_mini/, replayed in
-opencode_mini_marks.test.js); no real OpenCode ran in a NexTerm build. On a
-release build with real OpenCode V1, Windows first, then macOS:
+Versions 0.32.0 to 0.35.x could start OpenCode V1 in a mini mode. That mode,
+its setting and the version check behind it are gone, and NexTerm types the
+lines v0.31.0 typed. No real OpenCode ran in a NexTerm build for this change.
+On a release build with real OpenCode, Windows first, then macOS:
 
-- **O1 the start.** New OpenCode Terminal types `opencode --mini --no-replay`;
-  mini starts on the normal screen, and the wheel and the slider scroll the
-  conversation.
-- **O2 the marks.** A short message, a Korean message long enough to wrap,
-  and a paste each get a mark on their `›` echo. The composer and the footer
-  never do, a click puts the message on the top row, and `Ctrl+Shift+↑` /
-  `Ctrl+Shift+↓` step through the messages and the shell prompts.
-- **O3 while it works.** A message sent while OpenCode works is marked when
-  its echo appears.
-- **O4 an empty line.** A message with an empty line in it (`Shift+Enter`
-  twice): write down whether it is marked.
-- **O5 resize.** Pane narrower and wider, and the window maximised: the marks
-  stay on their echoes; write down anything mini erases, and whether the
-  session survives (Windows issue #51167).
-- **O6 exit.** `/exit`: the marks stay, the session block shows, the next
-  prompt is marked, and a second run is marked too.
-- **O7 restart.** Quit NexTerm while mini runs, then Restore and Resume:
-  write down what is typed. No two terminals share a conversation, and a
-  session resumed with `-s` stays exact.
-- **O8 the setting off.** *OpenCode in Mini Mode* off: plain `opencode`, the
-  full TUI as in v0.31.0, and the keys reach OpenCode.
-- **O9 by hand.** `opencode` typed by hand gives the full TUI. `opencode
-  --mini` typed by hand is marked; resize it and write down what happens with
-  replay on.
-- **O10 notifications.** A turn that finishes, and a permission request,
-  while the window is unfocused: write down whether a toast shows, in mini
-  and in the full TUI (the v0.28.1 report).
-- **O11 themes.** Another OpenCode theme (a light one): the echoes are still
-  marked; write down their colour.
-- **O12 `-s` resume.** Write down whether mini prints earlier messages; none
-  of them gets a mark. Then Resume again, type a message and press Enter
-  right away, before mini has drawn: write down any mark on the history
-  (none is expected; that message itself may get none).
-- **O13 other versions.** If possible, an OpenCode older than 1.17.10, or V2:
-  NexTerm types plain `opencode`.
-  - **O13a upgraded mid-run.** Start OpenCode once, then upgrade or replace
-    opencode while NexTerm runs (to V2, if possible) and start it again: the
-    answer is kept for the run, so NexTerm still types the flags it chose
-    first. Write down what that opencode does; after a NexTerm restart, or
-    with the setting off, it gets plain `opencode`.
-  - **O13b a folder-pinned version.** In a folder where nvm, mise, asdf or
-    volta (or a PowerShell alias) gives another opencode than the login
-    PATH: write down `opencode --version` there and what NexTerm types.
+- **O1 the start.** New OpenCode Terminal types `opencode`: the full TUI
+  opens on the alternate screen, the scrollbar is hidden while it is up, and
+  the keys and `Shift+Enter` reach OpenCode.
+- **O2 resume.** Resume types `opencode -s <id>`, or `opencode --continue`
+  when the conversation's id is not known and it is the only OpenCode
+  terminal in reach. With two OpenCode terminals in one folder, Quit NexTerm,
+  then Restore and Resume both: they never come back in one conversation.
+- **O3 the title.** The side-bar title is `OC | …`. Start a new
+  conversation, quit NexTerm, Restore: its Resume types `opencode -s <id>`
+  and opens exactly that conversation.
+- **O4 notifications.** A turn that finishes, and a permission request,
+  while the window is unfocused: each shows a toast (the v0.28.1 report).
+- **O5 a settings file from v0.35.0.** Start this build with a settings file
+  that v0.35.0 saved with its mini mode setting turned off: it loads, the row
+  is gone from Settings ▸ Terminal, and the other settings are kept.
 
-On macOS: O1 to O3, O6, O8 and O10 with `⌘⇧↑` / `⌘⇧↓`.
+On macOS: O1 to O5.
 
 ### V51 — open files belong to terminal groups (editor placement, part B)
 
@@ -2122,6 +2103,131 @@ a file `a & b.txt` and a folder `sub dir`.
    Editor* on `a & b.txt`: `%TEMP%\v67-editor-ran.txt` appears, so the editor
    ran, and `%TEMP%\v67-planted-ran.txt` does not. Delete `v67probe.bat` and
    clear the setting afterwards.
+
+### V68 — the kitty keyboard protocol through ConPTY (bundle 4, A1; README H4)
+
+Covered under Node by tests/adversarial/kitty_keyboard.test.js (KK-*: the
+stacks, the reply naming flag 1 alone, the resets, the keys, the Korean
+input source, ⌥ and the password prompt) and control_keys.test.js (CK-10 to
+CK-12: `nexterm-cli send --keys` under the flags), against `@xterm/headless`
+and stand-in key events. Nothing there runs a real console program, so
+whether Windows' own ConPTY carries `CSI ? u`, NexTerm's reply and the
+`CSI u` keys between NexTerm and a program is not known; it is checked only
+here, and until it is, the README says so. Claude Code's documentation names
+Windows Terminal 1.25 or later as working; Windows Terminal ships a ConPTY of
+its own, newer than the one in Windows, so that says nothing about
+NexTerm's. Write down the Windows build: ConPTY is part of it. On a release
+build:
+
+1. **V68-1:** In Git Bash, run each line and write down what it prints:
+   `printf '\e[?u'; read -t 1 -rs r; printf '%q\n' "$r"` (NexTerm's answer
+   with nothing turned on, `$'\E[?0u'`), then
+   `printf '\e[>1u\e[?u'; read -t 1 -rs r; printf '%q\n' "$r"; printf '\e[<u'`
+   (with flag 1 pushed, `$'\E[?1u'`), then
+   `printf '\e[>1u'; read -t 5 -rs r; printf '\e[<u'; printf '%q\n' "$r"`
+   and press `Shift+Enter` within the 5 seconds (`$'\E[13;2u'`). An empty
+   line, or other bytes, is a finding: write down exactly what came.
+2. **V68-2 (H1 on Windows):** Start Claude Code 2.1.269 or later with *New
+   Claude Code Terminal* in a PowerShell terminal. Type `one`, press
+   `Shift+Enter`, type `two`: the input box holds two lines and nothing is
+   sent. `Enter` sends both lines as one message.
+3. **V68-3:** While Claude Code answers, `Esc` interrupts it. With the input
+   box empty, `Ctrl+C` does what Claude Code does with it (it says to press
+   it again to exit, and a second one exits).
+4. **V68-4:** V68-2 and V68-3 again in cmd and in Git Bash.
+5. **V68-5 (H3 on Windows):** With Claude Code running, end it from Task
+   Manager (End task on its process). At the prompt that follows, run
+   `Start-Sleep 30` in PowerShell (`ping -n 30 127.0.0.1` in cmd) and press
+   `Ctrl+C`: it stops at once, and the prompt shows no `[99;5u`.
+6. **V68-6 (H2 and H5 on Windows):** In OpenCode, `Shift+Enter` is still a
+   newline and `Enter` still sends. With the Microsoft Korean IME, type
+   `한글 입력` into Claude Code: it arrives whole, with no stray letters.
+7. **V68-7:** Turn off Settings ▸ Terminal ▸ *Kitty Keyboard Protocol* and
+   run V68-1's first line again: nothing comes back (an empty line). Start
+   Claude Code again and write down what `Shift+Enter` does now.
+
+### V69 — a read-only terminal (bundle 4, A3)
+
+Covered under Node by tests/adversarial/read_only.test.js (RO-*: the gate on
+xterm's user-input signal, the replies that pass, the refusals of `send`,
+startup and project commands and agents, failing closed),
+control_dispatcher.test.js (CD-60), terminal_file_drop.test.js (TF-49,
+TF-63) and the render suite (RN-240, RN-241: the badge, the mark and the
+strip). None of them runs WebView2, ConPTY or the Windows IME. On a release
+build, in a PowerShell terminal:
+
+1. **V69-1:** Right-click its tab → *Turn On Read-Only*. The chip shows the
+   keyboard-with-a-stroke badge, its TERMINALS row the same mark, and the
+   pane a strip above the terminal with **Turn Off**; the terminal's top row
+   is still visible.
+2. **V69-2:** Type `dir`, press `Enter`, paste with `Ctrl+V` and with a
+   right-click, drop a file from File Explorer onto the pane, and type Korean
+   with the IME: nothing reaches the prompt, and one error toast says the
+   terminal is read-only, however fast you type. Select some output
+   and press `Ctrl+C`: it is copied. `Shift+PageUp` scrolls.
+3. **V69-3:** In another terminal, with Settings ▸ Terminal ▸ *Control* ▸
+   *Let programs type into and read terminals* and *Let programs control
+   other terminals* on, run `nexterm-cli send --to <the read-only one> "dir"`
+   (its id from `nexterm-cli list`) and `echo $LASTEXITCODE`: 4, the message
+   says it is read-only, and nothing is typed there. `nexterm-cli read-screen
+   --of <it>` still prints its screen.
+4. **V69-4:** Start Claude Code in a terminal, give it work and turn
+   read-only on while it works: it goes on working and drawing. Click
+   **Turn Off**: typing reaches it again.
+5. **V69-5:** Turn read-only on in two terminals and restart NexTerm: every
+   terminal comes back writable, with no badge and no strip.
+
+### V70 — Copy Last Command Output (bundle 4, A2)
+
+Covered under Node by tests/adversarial/last_command_output.test.js (LCO-*:
+the range between OSC 133 C and D, masking, the reasons, the toasts) against
+`@xterm/headless`, where C arrives when it is sent. On Windows it has not:
+the v0.6.1 row of [Why this exists](#why-this-exists) records ConPTY holding
+PowerShell's OSC 133 "C" until the next frame, so that it arrived with the
+command's "D". If it still does, the copy starts too late and misses output,
+which is what V70-1 checks. On a release build:
+
+1. **V70-1:** In PowerShell, run `1..5 | % { "line $_" }`, then right-click
+   the tab → *Copy Last Command Output (Secrets Masked)* and paste into
+   Notepad: exactly `line 1` to `line 5`, nothing else. The toast names the
+   command. Do the same for `Get-ChildItem C:\Windows | Select-Object -First 3`.
+2. **V70-2:** In Git Bash, run `echo key sk-AAAABBBBCCCCDDDDEEEEFFFF1234 here`
+   and copy from the TERMINALS row's menu: `key sk-[hidden] here`.
+3. **V70-3:** In cmd, the item is greyed out, its tooltip saying cmd does not
+   say where a command's output starts; in the palette its row is greyed
+   out too, saying the same, and Enter on it does nothing.
+4. **V70-4:** In PowerShell run `Start-Sleep 20`; while it runs the item is
+   greyed out ("A command is running"). After it ends, run `dir`, choose
+   *Clear Terminal* and copy: the toast says the output is no longer in the
+   scrollback.
+
+### V71 — Send to Agent with Windows paths (bundle 4, A4; README H6)
+
+Covered under Node by tests/adversarial/send_to_agent.test.js (STA-*: the
+reference, a `C:\` path, the target, the paste and every refusal).
+No suite runs Claude Code, so whether it reads a pasted reference — the
+file, and the lines named in words after it — is not known on any platform;
+here it is checked with Windows paths. Write down Claude Code's version. On a
+release build, with a folder open that has `src\a.js` of at least 20 lines:
+
+1. **V71-1:** Start Claude Code with *New Claude Code Terminal* in
+   PowerShell. In the editor select lines 3 to 5 of `a.js`, right-click →
+   *Send Selection to Agent*. Claude Code's input box holds
+   `@C:\…\src\a.js (lines 3-5) ` with the full path, nothing is sent, and a
+   toast says Enter was not pressed.
+2. **V71-2 (H6 on Windows):** Type `what do these lines do?` and press
+   `Enter`. Write down whether Claude Code shows it read `a.js` and whether
+   its answer is about lines 3 to 5. This is a finding either way, never a
+   PASS unless both are seen.
+3. **V71-3:** In the Explorer, right-click the `src` folder → *Send to
+   Agent*: `@C:\…\src ` is typed. Rename a file to `my file.js` and try it:
+   the item is greyed out, saying the path holds a space.
+4. **V71-4:** Change `a.js` without saving and right-click in it → *Send File
+   to Agent*: an error toast says to save the file first, and nothing is
+   typed. Turn the Claude Code terminal read-only and send again: an error
+   toast says it is read-only.
+5. **V71-5:** V71-1 and V71-2 again with Claude Code started in Git Bash: the
+   path is still typed as `C:\…`; write down whether Claude Code reads it.
 
 ## What the first run found
 

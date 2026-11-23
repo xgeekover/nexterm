@@ -50,6 +50,9 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         // The prompt marks on the scrollbar, one prompt at a time.
         'Terminal: Go to Previous Prompt',
         'Terminal: Go to Next Prompt',
+        // Bundle 4, A3 (src/lib/readOnly.js): keep the active terminal's
+        // keys, pastes and drops from its program, or let them through.
+        'Terminal: Toggle Read-Only',
         'Go to Latest Unread Notification',
         'Mark All Notifications Read',
         // Editor placement C2 (FC11): a file split out of its pane, as Move
@@ -71,9 +74,18 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         // with secrets masked.
         'Fork Conversation',
         'Copy Last 200 Lines (Secrets Masked)',
+        // Bundle 4, A2 (src/lib/lastCommandOutput.js): what the active
+        // terminal's last command printed, masked. Listed beside Copy Context;
+        // this harness passes no `copyContext`, so both are listed.
+        'Copy Last Command Output (Secrets Masked)',
+        // Bundle 4, A4 (src/lib/agentReference.js): an @ reference typed into
+        // the agent terminal. Always listed — greyed out with the reason when
+        // it cannot send (`sendToAgent`, which this harness does not pass).
+        'Send Selection to Agent',
+        'Send File to Agent',
         'Clear Agent Session History…',
       ],
-      'The palette offers exactly the twenty-two commands the app implements'
+      'The palette offers exactly the twenty-six commands the app implements'
     );
   });
 

@@ -27,9 +27,15 @@
 import { activeKindOf, activePaneOf, useTerminalStore } from '../stores/terminalStore.js';
 import { useEditorStore } from '../stores/editorStore.js';
 import { EDITOR_KIND, leafKind } from '../components/terminal/splitLayout.js';
-import { focusActivePane } from './workspaceFocus.js';
+import { focusActivePane, focusTerminal } from './workspaceFocus.js';
 import { paneTabs, tabTarget } from './tabNavigation.js';
-import { useTabSwitcherStore } from '../stores/tabSwitcherStore.js';
+import { recentTerminalTabs, useTabSwitcherStore } from '../stores/tabSwitcherStore.js';
+import { sendFileToAgent, sendSelectionToAgent, wireSendToAgent } from './sendToAgent.js';
+
+// Send to Agent (src/lib/sendToAgent.js): its pick lists the agent terminals
+// the most recently focused first, in the Ctrl+Tab switcher's order, and the
+// terminal typed into takes the keyboard.
+wireSendToAgent({ recent: recentTerminalTabs, focus: focusTerminal });
 
 function activeGroup() {
   const { groups, activeGroupId } = useTerminalStore.getState();
@@ -266,5 +272,11 @@ export function workbenchContext({ isInMonacoEditor = false, editorPaneId = null
     togglePaneZoom: () => toggleZoomActive(),
     openFind: () => findActive(opts),
     equalizeSplits: () => useTerminalStore.getState().equalizeSplits?.(),
+    // The active terminal's read-only, on or off (src/lib/readOnly.js).
+    toggleReadOnly: () => useTerminalStore.getState().toggleReadOnly?.(),
+    // Send to Agent (bundle 4, A4): the selection, or the file, of the
+    // editor focused last (src/lib/sendToAgent.js).
+    sendSelectionToAgent: () => sendSelectionToAgent(),
+    sendFileToAgent: () => sendFileToAgent(),
   };
 }

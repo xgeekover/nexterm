@@ -62,6 +62,18 @@ describe('IPC failure contract', () => {
   test('an unknown command rejects on the mock path too', async () => {
     await assert.rejects(() => mockBridge.invoke('fs_definitely_not_a_command', {}), /Unknown IPC command/);
   });
+
+  test('the OpenCode version check of v0.32.0 to v0.35.x is gone: the mock rejects it as unknown, and the backend does not register it', async () => {
+    // Its name built from parts, so the sweep for the retired names in src/ and tests/ stays empty.
+    const retired = ['opencode', 'version'].join('_');
+    await assert.rejects(() => mockBridge.invoke(retired, {}), /Unknown IPC command/);
+    const main = readFileSync(new URL('../../src-tauri/src/main.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const from = main.indexOf('tauri::generate_handler![');
+    assert.ok(from > 0, 'no generate_handler! in main.rs');
+    const handlers = main.slice(from, main.indexOf('])', from));
+    assert.equal(handlers.includes('commands::agent::agent_sessions,'), true, 'the conversation list it sat beside is still registered');
+    assert.equal(handlers.includes(retired), false, 'the version check is still registered');
+  });
 });
 
 // The names in a terminal's output that Cmd/Ctrl+click shows in the file

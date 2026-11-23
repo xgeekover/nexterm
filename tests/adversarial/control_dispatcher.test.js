@@ -35,6 +35,7 @@ import {
 } from '../../src/lib/controlDispatcher.js';
 import { readScreen, READ_MAX_BYTES, secretPromptOnScreen } from '../../src/lib/controlScreen.js';
 import { installProgramNotifications } from '../../src/lib/programNotifications.js';
+import { installInputGate } from '../../src/lib/readOnly.js';
 
 const { Terminal } = headless;
 const S = terminalStore.useTerminalStore;
@@ -932,6 +933,39 @@ describe('Control requests: send', () => {
       assert.deepEqual(typed, []);
       assert.ok(tabById(b).exited, 'still exited: an Enter from a program starts no new shell');
       assert.equal(S.getState().reportedStatus[a], undefined);
+    });
+  });
+
+  test('CD-60: send to a read-only terminal (bundle 4, A3) is refused — code refused, which the CLI exits 4 for — and nothing is typed; turned off, it goes', async () => {
+    await inStore(async () => {
+      const [a, b] = await threeTerminals();
+      allowTyping();
+      allowOthers();
+      const target = shownTerminal();
+      const detach = terminalStore.attachInputGate(b, installInputGate(target.term));
+      const { ask } = harness({ shown: new Map([[b, target]]) });
+      try {
+        assert.equal(S.getState().setReadOnly(b, true), true);
+        const typed = await writes(async () => {
+          const text = await ask(a, 'send', { target: b, text: 'rm -rf build' }, { typeAndRead: true, other: true });
+          assert.equal(errorCode(text), 'refused');
+          assert.match(text.error.message, /read-only/);
+          assert.match(text.error.message, /nothing was typed/);
+          const keys = await ask(a, 'send', { target: b, keys: ['Enter'] }, { typeAndRead: true, other: true });
+          assert.equal(errorCode(keys), 'refused');
+          assert.match(keys.error.message, /read-only/);
+        });
+        assert.deepEqual(typed, []);
+        S.getState().setReadOnly(b, false);
+        const after = await writes(async () => {
+          assert.equal((await ask(a, 'send', { target: b, text: 'ls' }, { typeAndRead: true, other: true })).ok, true);
+        });
+        assert.deepEqual(after, [[sessionOf(b), 'ls']]);
+        // typeForProgram's own status maps the same way (a race with the early check).
+        assert.match(readFileSync(new URL('../../src/lib/controlDispatcher.js', import.meta.url), 'utf8'), /case 'read-only':\s*return fail\(REFUSED, READ_ONLY_SEND_REFUSED\);/);
+      } finally {
+        detach();
+      }
     });
   });
 
