@@ -11,12 +11,17 @@
  * mock (src/lib/ipc.js), which records what it was asked and starts nothing.
  * A source check pins that FileExplorer's menu builds them with the real
  * ones, after Copy Relative Path.
+ *
+ * Open Preview (Orca bundle 5, F-B3-8, AC-B3-10: EXO-07, EXO-91): the menu's
+ * item for a `.md` or `.markdown` file only (`openPreviewItem`), after
+ * Open; a click or Enter on the row still opens the text.
  */
 import { readFileSync } from 'node:fs';
 import { describe, test, beforeEach, assert } from '../e2e/harness/testFramework.js';
 import {
   buildOpenActionItems,
   externalEditorCommandOf,
+  openPreviewItem,
   revealLabel,
   revealPathFor,
   terminalFailedText,
@@ -299,6 +304,50 @@ describe('Explorer: Reveal, Open Terminal Here and Open in External Editor (A12-
     assert.match(call, /externalEditorCommand: useSettingsStore\.getState\(\)\.externalEditorCommand,/);
     assert.match(call, /\bopenInExternalEditor,/);
     assert.match(EXPLORER_SOURCE, /import \{ openInExternalEditor, revealInFileManager \} from '\.\.\/\.\.\/lib\/ipc\.js';/);
+  });
+
+  test('EXO-07: Open Preview is offered for a .md or .markdown file in any case, and for nothing else; it opens that file\u{2019}s preview and never rejects', async () => {
+    const asked = [];
+    const openPreview = async (path) => {
+      asked.push(path);
+      return { id: 'p' };
+    };
+    const fileRow = (name) => ({ type: 'file', path: `/w/proj/docs/${name}`, isDir: false, name });
+    for (const name of ['README.md', 'guide.markdown', 'NOTES.MD', 'Change.Markdown', 'a.b.md']) {
+      const offered = openPreviewItem(fileRow(name), { openPreview });
+      assert.equal(offered?.label, 'Open Preview', `${name}: not offered`);
+      assert.equal(offered.key, 'open-preview');
+      assert.ok(!offered.disabled, `${name}: greyed out`);
+      assert.equal(await offered.onSelect(), undefined);
+    }
+    assert.deepEqual(asked, ['README.md', 'guide.markdown', 'NOTES.MD', 'Change.Markdown', 'a.b.md'].map((n) => `/w/proj/docs/${n}`));
+
+    asked.length = 0;
+    for (const name of ['notes.txt', 'page.mdx', 'md', '.md', 'README.md.bak', 'logo.png', 'notes.rmd.txt']) {
+      assert.equal(openPreviewItem(fileRow(name), { openPreview }), null, `${name}: offered`);
+    }
+    // A folder named like one, the empty area, nothing.
+    assert.equal(openPreviewItem({ type: 'folder', path: '/w/proj/site.md', isDir: true, name: 'site.md' }, { openPreview }), null, 'a folder');
+    assert.equal(openPreviewItem({ type: 'file', path: '/w/proj/odd.md', isDir: true, name: 'odd.md' }, { openPreview }), null, 'a row that is a folder');
+    assert.equal(openPreviewItem(EMPTY, { openPreview }), null, 'the empty area');
+    assert.equal(openPreviewItem(null, { openPreview }), null);
+    assert.deepEqual(asked, [], 'something was opened');
+
+    // A file that will not read: the store says why; the item does not reject.
+    const refused = openPreviewItem(fileRow('gone.md'), { openPreview: async () => Promise.reject(new Error('File not found')) });
+    assert.equal(await refused.onSelect(), undefined);
+  });
+
+  test('EXO-91: FileExplorer puts Open Preview right after Open, through the store\u{2019}s openMarkdownPreview; the row itself still opens the text', () => {
+    const open = EXPLORER_SOURCE.indexOf("key: 'open',");
+    const preview = EXPLORER_SOURCE.indexOf('openPreviewItem(target, {');
+    const cut = EXPLORER_SOURCE.indexOf("key: 'cut'");
+    assert.ok(open > 0 && preview > open && cut > preview, 'between Open and Cut');
+    const call = EXPLORER_SOURCE.slice(preview, cut);
+    assert.match(call, /openPreview: \(path\) => useEditorStore\.getState\(\)\.openMarkdownPreview\(path\),/);
+    assert.match(call, /if \(preview\) items\.push\(preview\);/);
+    // Only the menu item previews: no click, Enter or double-click of a row does.
+    assert.equal(EXPLORER_SOURCE.match(/openMarkdownPreview/g)?.length, 1, 'openMarkdownPreview is reached from somewhere else in the Explorer');
   });
 
   test('EXO-99: teardown — nothing left for the next suite', () => {

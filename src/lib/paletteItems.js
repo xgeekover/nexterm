@@ -188,6 +188,17 @@ export function paletteCommands(bindings = DEFAULT_RESOLVED) {
       title: 'Move Editor to New Pane Down',
       subtitle: 'Split the open file out of its pane into a new pane below',
     },
+    // Open Markdown Preview (Orca bundle 5, F-B3-8): listed only while the
+    // active editor tab is a Markdown file's text tab (`buildPaletteGroups`'
+    // `markdownPreview`). No chord of its own (the human's decision), so no
+    // hint.
+    {
+      type: 'command',
+      id: 'cmd-open-markdown-preview',
+      command: 'open_markdown_preview',
+      title: 'Open Markdown Preview',
+      subtitle: 'Show the Markdown file in the editor rendered, in a tab to the right of it',
+    },
     {
       type: 'command',
       id: 'cmd-save-all',
@@ -540,6 +551,10 @@ export function forkTargetOfTab(tab, os = null) {
  * been shown, null while there is none or it never was — then it is not
  * listed. Undefined lists it as it is, with the default 200.
  *
+ * `markdownPreview` is the Markdown file Open Markdown Preview would show
+ * (workbenchCommands.js `markdownPreviewTarget`), or null — then it is not
+ * listed. Undefined lists it as it is.
+ *
  * `lastOutput` is why Copy Last Command Output cannot copy now
  * (lastCommandOutput.js `lastOutputUnavailableOfTab` of the active
  * terminal), or null: with a reason it is greyed out with it, as Send to
@@ -564,6 +579,7 @@ export function buildPaletteGroups({
   copyContext = undefined,
   sendToAgent = undefined,
   lastOutput = undefined,
+  markdownPreview = undefined,
   agentTargets = [],
   agentText = null,
   limit = FILE_RESULT_LIMIT,
@@ -714,7 +730,9 @@ export function buildPaletteGroups({
       // Copy Context only while the active terminal has a screen to copy.
       (cmd.command !== 'copy_terminal_context' || copyContext === undefined || Boolean(copyContext)) &&
       // Copy Last Command Output too: no screen, no output to copy.
-      (cmd.command !== 'copy_last_command_output' || copyContext === undefined || Boolean(copyContext))
+      (cmd.command !== 'copy_last_command_output' || copyContext === undefined || Boolean(copyContext)) &&
+      // Open Markdown Preview only while the editor shows a Markdown file's text.
+      (cmd.command !== 'open_markdown_preview' || markdownPreview === undefined || Boolean(markdownPreview))
   ).map((cmd) =>
     // Its title names the N it copies.
     cmd.command === 'copy_terminal_context' && copyContext ? { ...cmd, title: copyContextLabel(copyContext.lines) } : cmd

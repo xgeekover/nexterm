@@ -167,14 +167,20 @@ function makeSender(socket, defaultTimeoutMs = 15000) {
  * and the second then cannot start (found in review: both reported a
  * browser that was there as missing).
  *
+ * `serve`, when given, serves the page instead of the scratch Vite server:
+ * `serve(port)` starts a server of its own on 127.0.0.1:`port` and resolves
+ * to the function that stops it (preview_headless.test.js serves the built
+ * app in dist/, with and without the production CSP as a response header).
+ *
  * `pageErrors()` lists every exception the page threw and nobody caught —
  * an event listener's included — since the harness attached
  * (`Runtime.exceptionThrown`). A suite that asserts it is empty fails on an
  * error the page swallowed into the console: one such error — a timer
  * called the way a browser refuses — passed every case in Node.
  */
-export async function openHarness(fixture, { prefix, readyExpression, session = null }) {
+export async function openHarness(fixture, { prefix, readyExpression, session = null, serve = null }) {
   let viteChild = null;
+  let stopServer = null;
   let scratchDir = null;
   let sessionName = null;
   let ws = null;
@@ -200,6 +206,11 @@ export async function openHarness(fixture, { prefix, readyExpression, session = 
     } catch {
       // best-effort
     }
+    try {
+      stopServer?.();
+    } catch {
+      // best-effort
+    }
     if (scratchDir) {
       try {
         rmSync(scratchDir, { recursive: true, force: true });
@@ -214,12 +225,17 @@ export async function openHarness(fixture, { prefix, readyExpression, session = 
     scratchDir = mkdtempSync(path.join(tmpdir(), `nexterm-${prefix}-`));
     const port = await getFreePort();
     const url = `http://127.0.0.1:${port}/${fixture}`;
-    const configPath = writeScratchConfig(scratchDir, port);
-    viteChild = spawn(path.join(REPO_ROOT, 'node_modules', '.bin', 'vite'), ['--config', configPath], {
-      cwd: REPO_ROOT,
-      stdio: 'ignore',
-    });
-    await Promise.race([waitForServer(url), waitForProcessExit(viteChild)]);
+    if (serve) {
+      stopServer = await serve(port);
+      await waitForServer(url);
+    } else {
+      const configPath = writeScratchConfig(scratchDir, port);
+      viteChild = spawn(path.join(REPO_ROOT, 'node_modules', '.bin', 'vite'), ['--config', configPath], {
+        cwd: REPO_ROOT,
+        stdio: 'ignore',
+      });
+      await Promise.race([waitForServer(url), waitForProcessExit(viteChild)]);
+    }
 
     // From here on a failure means "the browser could not start", not "the
     // code under test is broken".

@@ -111,6 +111,11 @@ pub fn build(command: &Command, stdin: &mut dyn Read) -> Result<Request, UsageEr
             put("target", json!(target));
             "focus"
         }
+        // No such command on the wire (B2-F2): wait.rs sends `list` and
+        // judges the rows here. `run` never brings it this far.
+        Command::Wait { .. } => {
+            return Err(UsageError::of("wait", "wait is not a request NexTerm takes; it polls list"));
+        }
     };
     Ok(Request { cmd, args: Value::Object(args) })
 }
@@ -332,6 +337,19 @@ mod tests {
             let (cmd, args) = args_of(command);
             assert_eq!((cmd.as_str(), &args), (want_cmd, &want_args), "{label}");
         }
+    }
+
+    #[test]
+    fn wait_is_never_sent_on_the_wire() {
+        use crate::args::Until;
+        for until in [Until::Idle, Until::Exit] {
+            let wait = Command::Wait { target: "tab-term-2".into(), until, timeout: None };
+            let e = build(&wait, &mut std::io::empty()).unwrap_err();
+            assert_eq!(e.command, Some("wait"));
+            assert!(e.message.contains("polls list"), "{}", e.message);
+        }
+        // What it sends instead: an ordinary list.
+        assert_eq!(args_of(Command::List), ("list".to_owned(), json!({})));
     }
 
     #[test]

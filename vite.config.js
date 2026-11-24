@@ -1,5 +1,8 @@
+import { createRequire } from 'node:module';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+
+const require = createRequire(import.meta.url);
 
 // The dev server answers this machine only — the app's webview reaches it as
 // http://localhost:1420 (tauri.conf.json). `host: true` had it listening on
@@ -12,6 +15,22 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  resolve: {
+    // micromark decodes `&amp;` and friends through
+    // decode-named-character-reference. Vite picks the package's "browser"
+    // build, index.dom.js, which calls document.createElement as it loads;
+    // the Markdown preview's Web Worker has no document, so the worker died
+    // before its first parse. The package's own "worker" and "default"
+    // exports name the DOM-free index.js, which is what Node resolves here.
+    // Only the worker bundles the package.
+    // tests/adversarial/markdown_render_worker.test.js MW-50.
+    alias: [
+      {
+        find: /^decode-named-character-reference$/,
+        replacement: require.resolve('decode-named-character-reference')
+      }
+    ]
+  },
   build: {
     // ES2021 syntax kept as written. Vite's default target includes
     // es2020, so esbuild (0.25) lowered xterm's `let r; (…)(r ||= {})` in

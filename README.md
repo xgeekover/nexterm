@@ -237,6 +237,139 @@ menu, or the command palette) splits the file out beside its pane. Moving a file
 keeps its text, undo history and caret; moving a terminal keeps its program and
 scrollback.
 
+#### Image and Markdown previews
+
+**Open an image.** A `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` or `.svg` file
+opens in an image tab instead of the text editor, wherever it is opened from:
+the Explorer, Go to File, a terminal link or a search result. An SVG opened at
+a line, and a new one made with *New File*, open as text instead (see *An
+SVG's source*, below). The file is judged by its first bytes, not its name,
+so a text file called `logo.png` is
+refused, saying why. An SVG is only ever drawn as a picture, an `<img>` made
+from the file's bytes, never as part of the page, so its scripts, event
+handlers and links do nothing and it loads nothing from the network. The
+limits are 20 MB per file and 32,768 pixels per side, with 32 Mi pixels
+(33,554,432) in all. A GIF is measured by its first frame as well as by its
+canvas, since a browser grows the canvas to fit that frame. Anything larger
+is refused before it is decoded, with the size or the dimensions and the
+limit in the message. An image tab is
+never modified, never saved and closes without asking. Its picture is
+reloaded when the file changes on disk; if the file is deleted, the last
+picture stays, with *Deleted on disk* under it.
+
+**An SVG's source.** An SVG is text as well as a picture. Its image tab has
+an *Open as Text* button, which opens the file in the text editor, or shows
+its text tab if it is already open. The picture and the text are two tabs of
+one file: the text opens in another tab, and the picture stays open. An open
+that names a line opens the text at that line: a search result in an SVG, or
+a terminal link such as `icons/logo.svg:12` or `icons/logo.svg:12:5`. A new
+`.svg` made with *New File* is empty, with no picture yet, so it opens in the
+text editor; every other new file opens as it would from the Explorer. The
+text tab is an ordinary text tab: it can be edited and saved, is sent by
+*Send to Agent*, and comes
+back after a restart. PNG, JPEG, GIF and WebP files have no *Open as Text*,
+and a line asked for on one of them is ignored: the picture opens.
+
+**Zoom.** An image starts at *Fit*: as large as the pane allows, never
+enlarged past its own size. The toolbar above it has *Fit*, *100%*, and
+*Zoom Out* and *Zoom In*, which step from 10% to 800%. The mouse wheel and
+trackpad scroll the image and never zoom it. The status line under the image
+gives its size, for example `1920 × 1080 · 2.4 MB`. An SVG has no pixel
+size, so its line reads `SVG · 3.1 KB`.
+
+**Preview a Markdown file.** A `.md` or `.markdown` file still opens as text.
+The preview is a tab of its own, opened in a split to the right of the
+source tab, and both stay open side by side. There are three ways to open it:
+
+- the eye button (*Open Preview*) at the right of the breadcrumb row of a
+  Markdown text tab;
+- *Open Markdown Preview* in the command palette, listed only while a
+  Markdown text tab is the one Save would save;
+- *Open Preview* in the Explorer's right-click menu on a `.md` or `.markdown`
+  file. A click on the file in the Explorer still opens its text.
+
+There is no default shortcut. *Open Markdown Preview* is not in Settings ▸
+Keyboard Shortcuts yet either, so no key can be set for it. Opening it again
+shows the preview that is already open.
+
+**What it draws.** GitHub-flavoured Markdown: headings, paragraphs, emphasis,
+strikethrough, inline code, fenced code (plain monospace, no highlighting),
+lists and task lists (the boxes cannot be ticked), quotes, tables, rules,
+footnotes, links and images. Raw HTML in the file is never turned into
+elements. It is shown as the literal text it is, dimmed, so you can see it is
+there. A document nested deeper than the preview allows is flattened past
+that depth rather than drawn.
+
+**Links.**
+
+- `http` and `https` links ask first, in NexTerm's own confirmation (*Open
+  External Link?*), which shows the address that will be opened. Its scheme
+  and host are always shown whole; only a long path is cut, with `…`. Only
+  *Open* hands it to your browser; *Cancel* and `Esc` do nothing.
+- `#anchor` links scroll the preview to that heading or footnote.
+- A relative link to a file inside the open folder opens that file in
+  NexTerm without asking. A Markdown file opens as text.
+- Everything else is plain text with no link: `javascript:`, `data:`,
+  `vbscript:`, `file:`, `mailto:`, `//host`, paths that lead out of the
+  open folder, and `http` or `https` addresses whose host is longer than
+  the 253 characters a DNS name can have.
+
+No click in a preview can take the window away from the app.
+
+**Images in Markdown.** A relative image inside the open folder is read
+from disk and drawn inline, at most 50 images and 50 MB of them per
+document. Each image also has the image-tab limits above. Remote images
+(`http`, `https`) are **never fetched**. They, and images given as an
+absolute path, `file:` or `data:`, or a path out of the folder, are drawn as
+a dimmed box with their alt text and address. When an image changes on
+disk, only that image is read again; the others stay on screen. When a
+folder above images changes (for example it is renamed in a terminal), their
+sizes are checked again, and only an image that is gone or changed size is
+read again.
+
+**Live update.** While the file's text tab is open, the preview follows what
+you type, unsaved edits included, 300 ms after you stop. With no text tab
+open it follows the file on disk, 300 ms after a change, and within a second
+however often the file changes; a change in a folder above the file only has
+its size checked, and reads it again if the size changed or the file is gone.
+If you close the text tab without saving, the preview goes back to the file
+as saved.
+
+**Limits.** A file over 2 MB is not previewed: *Too large to preview (X; the
+limit is 2 MB)*, with *Open as Text*. Markdown is parsed in the background,
+never in the window's own thread, and a document that takes longer than 5 s
+to parse is stopped and shows *Too complex to preview*, with *Open as Text*.
+So does a document that would draw more than 100,000 elements, since the
+window draws what the parse gives.
+A preview with nothing to show yet after 1 s says *Rendering preview…*.
+
+**Not kept.** Preview tabs are never modified or saved, Send to Agent does
+not see them, and they are not restored after a restart. The files they show
+are.
+
+These checks still need a person, and none has been made yet:
+
+- **H14** — on macOS, Windows and Linux, a PNG, a JPEG, an animated GIF, a
+  WebP and an SVG open from the Explorer; a transparent PNG reads well on the
+  dark theme; *Fit*, *100%* and the zoom buttons work (AC-B4-H1;
+  [WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V75).
+- **H15** — a hostile SVG (`<script>alert(1)</script>`, `onload=`, an
+  `<image href>` to a local listener) shows no dialog and makes no request,
+  in WKWebView, WebView2 and WebKitGTK (AC-B4-H2). Chromium, the engine
+  WebView2 is built on, is checked by
+  `tests/adversarial/preview_headless.test.js`.
+- **H16** — a tiny PNG declaring 20000 × 20000 is refused with the
+  dimensions message, and a 25 MB photo with the size message; NexTerm's
+  memory stays stable after opening and closing ten large images (AC-B4-H3).
+- **H17** — this README previews legibly on the dark theme on all three
+  platforms, its relative images load, an `https` link opens the system
+  browser after *Open*, and the window never leaves the app (AC-B3-H1).
+- **H18** — a hostile `.md` (raw HTML, `javascript:` links,
+  `<img src=http://127.0.0.1:PORT>`, `../../` image paths, a link out of the
+  folder; on Windows also backslash paths and a junction, V75) shows no
+  dialog, makes no request to the listener, and no click leaves the app
+  (AC-B3-H2).
+
 #### Restoring the layout
 
 **Open files belong to a terminal group.** A file opens in the terminal group
@@ -420,6 +553,31 @@ or right-click it in the TERMINALS panel → *Move to Group*.
 
 **Rename.** Double-click a terminal tab, or right-click it → *Rename*. Groups
 rename the same way, from their chip or from the TERMINALS panel.
+
+**Hover a tab for the whole story.** Rest the pointer on a terminal tab for
+600 ms, or move the keyboard onto it, and a card opens below it: the full
+name (the tab cuts long ones), what it is doing with the same glyph, agent
+and words as its TERMINALS row (*Claude Code · Working for 3 minutes*,
+*Exited (code 1)*), its folder with the middle cut out of a long one, its
+shell, with *Show CPU and Memory* on what its programs use (*Usage 12% ·
+340 MB*, see [CPU and memory of each terminal](#cpu-and-memory-of-each-terminal)),
+whether typing is hidden, it is read-only, a program in another terminal
+just controlled it (*Controlled by Terminal 2 (send)*) or it has unread
+notifications, its last notification, dimmed, and how to use the tab — drag
+to reorder or move, double-click to rename. It goes 100 ms after the pointer
+leaves, switches at once when you move to the next tab, and `Escape` closes
+it with the keyboard staying on the tab. It never opens during a drag, a
+rename or an open menu, nor after you press the tab, and it takes no clicks:
+a click where it is lands on the terminal under it. It shows nothing of the
+terminal's screen and not the command running in it, and someone else's text
+in it (a title a program set, a folder, a notification) is shown without
+control, bidirectional or invisible characters. With reduced motion it
+appears without fading in. If it grows while open (its CPU and memory
+arriving, a notification), it is placed again, so it never covers the tab
+or runs off the window. It goes when the tab strip it was opened on moves,
+as when closing a pane's other terminal hides the strip. The tab has no
+other tooltip, nor do its ✕, its unread count and its badges; a screen reader
+reads its name and state, and the card's words while it is open.
 
 **When a shell exits.** A terminal whose shell has ended says so once —
 `[process exited with code …]`, with Windows' crash and Ctrl+C codes also in
@@ -1038,6 +1196,9 @@ what it is doing right now:
   is detached.
 - **The last notification**, dimmed once read. Hover it for the whole text
   and how long ago it came.
+- **What its programs use**, with *Show CPU and Memory* on (off by default):
+  *12% · 340 MB* at the end of the line, dimmed like the rest of it. See
+  [CPU and memory of each terminal](#cpu-and-memory-of-each-terminal).
 
 Each group's row counts its terminals that are waiting, running and failed,
 and a group chip says the same when you hover it. A working Claude Code counts
@@ -1070,8 +1231,85 @@ re-sort; moving the pointer off the rows or switching to another app lets it
 catch up at once.
 
 Settings ▸ Terminal has *Show Folder*, *Show Git Branch*, *Show Agent and
-Status* and *Show Last Notification*. With the last three off, rows are one
-line again.
+Status*, *Show Last Notification* and *Show CPU and Memory*. With the last
+four off, rows are one line again. *Show CPU and Memory* is off by default;
+on, it measures each terminal's programs every 5 seconds (and once more
+1 second after the first answer), only while the window is not minimised
+and the TERMINALS panel or a tab's hover card is showing.
+
+#### CPU and memory of each terminal
+
+Turn on Settings ▸ Terminal ▸ *Show CPU and Memory* and each terminal's row
+in the TERMINALS panel ends its second line with what the terminal's
+programs use, *12% · 340 MB*, and a tab's hover card has the same on a
+*Usage* line. It is the shell and every process started under it, counted
+together: a build, a dev server and an agent running in one terminal are
+one figure.
+
+- **CPU** is a percent of **one core**: *100%* is one core kept busy, so a
+  program using two cores shows *200%*. It is the CPU time the terminal's
+  processes used between two samples over the time between them, the same
+  on every platform. Hover the figure and it says so in words (*CPU 12% of
+  one core, memory 340 MB, in 3 processes.*); that is also what a screen
+  reader reads.
+- **Memory** is the resident memory of each process added up: memory two of
+  them share is counted once for each, so the figure can be more than
+  Activity Monitor or Task Manager shows for the same programs. Shown in
+  MB under 1 GB and in GB with one decimal from it, where 1 MB is
+  1024 × 1024 bytes, as those two count.
+- **The first sample** of a terminal says *measuring* for its CPU (*measuring
+  · 340 MB*): a percent needs two samples, so NexTerm takes the second one
+  1 second later and the figure follows. The same each time sampling starts
+  again after a pause: a tab's hover card opened with the TERMINALS panel
+  hidden shows its CPU about 1.6 seconds after the pointer came onto the
+  tab (0.6 s for the card, 1 s for the second sample). Until a start's
+  first sample comes, no figure shows — never one from before the pause.
+- ***partial*** after the figures means a process of the terminal could not
+  be read — one run as another user (`sudo`) or a protected one — and the
+  figures leave it out.
+- **A WSL terminal** shows *not measurable*: its Linux programs run inside
+  WSL, where Windows, and so NexTerm, cannot see them.
+
+How each platform measures it, with no program run for it: on **Linux**
+from `/proc` (CPU time and `rss`); on **macOS** with the system's process
+calls (`proc_pidinfo`: CPU time and resident size); on **Windows** from a
+process snapshot, `GetProcessTimes` and the working set. All the processes
+are looked at once per sample, however many terminals there are, and only
+numbers come back: never a process's name, its arguments or its path.
+
+It costs a little, so it is off by default, and while it is on it samples
+only while something shows the figures: the window is not minimised or
+hidden, and the TERMINALS panel or a tab's hover card is on screen. Each
+time that starts, it samples at once, once more 1 second after that answer,
+then every 5 seconds; when it stops, every figure is forgotten. Turned off,
+nothing is measured and every figure is forgotten.
+
+What it does not count:
+
+- processes that left the terminal's tree: a server that daemonises itself
+  (forks into the background and leaves its parent), a `nohup` program
+  still running after the shell that started it has ended, and the
+  containers `docker` starts, which run under Docker's own service and not
+  under the terminal;
+- a process that started and ended between two samples, which is never seen;
+- anything in a WSL terminal (above).
+
+The figures are not available to `nexterm-cli`: `list` does not include
+them.
+
+These checks still need a person, and none has been made yet:
+
+- **H8** — on macOS, a terminal running `yes > /dev/null` shows about *100%*
+  within one or two samples, and a node dev server's memory is close to what
+  Activity Monitor shows for it (AC-B8-H1).
+- **H9** — on Windows, cmd and PowerShell terminals running a busy loop show
+  about *100%* and memory close to Task Manager's; a WSL terminal shows *not
+  measurable* (AC-B8-H2;
+  [WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V73).
+- **H10** — on Linux, the figures are plausible against `top` (AC-B8-H3).
+- **H11** — with 20 terminals open, NexTerm's own CPU with *Show CPU and
+  Memory* on and off differs by less than 1% of a core over 60 seconds
+  (AC-B8-H4).
 
 #### Many terminals printing at once
 
@@ -1658,6 +1896,7 @@ nexterm-cli set-progress --clear
 nexterm-cli list                                # the terminals in this window
 nexterm-cli new-split --down -- npm run dev     # a split of this terminal (its folder and shell)
 nexterm-cli focus child:tab-term-7              # point the user at a terminal
+nexterm-cli wait child:tab-term-7               # until that terminal is idle (or blocked, or gone)
 ```
 
 A Claude Code hook that says when it is done, in `.claude/settings.json`:
@@ -1739,16 +1978,20 @@ answer for scripts. It exits 0 when done, 2 for wrong usage (found by the
 tool or by NexTerm — nothing was done), 3 outside a NexTerm terminal, 4 when
 refused (not allowed, no such terminal, `send` to a read-only terminal), 5
 when NexTerm is busy (a rate limit), not running, not answering, or has its
-control turned off — try again later.
+control turned off — try again later. `wait` adds three of its own: 6 when
+it timed out, 7 when the terminal is blocked on a person, and 8 when the
+terminal exited or was closed before it was idle (see *Waiting for another
+terminal* below).
 
 `nexterm-cli guide` is a short guide for agents and scripts: which command
 to use when (`notify` when the user is needed, `set-status` and
 `set-progress` while the agent works, `set-title` once per task,
 `new-split` for a server, `read-screen` and `send` with the switches they
-need below), with examples and what each exit code means for the caller.
+need below, `wait` for work handed to a split), with examples and what each
+exit code means for the caller.
 `nexterm-cli guide <topic>` prints one of `notify`, `set-status`,
-`set-title`, `set-progress`, `new-split` and `read-screen`; another word
-exits 2 and lists them. Like `help`, it comes from the tool itself: it
+`set-title`, `set-progress`, `new-split`, `read-screen` and `wait`; another
+word exits 2 and lists them. Like `help`, it comes from the tool itself: it
 needs no NexTerm and no `NEXTERM_CONTROL`, sends nothing and writes no
 file, so it works in any console, and you can tell an agent to run it
 instead of pasting the flags into its instructions. It is plain ASCII
@@ -1764,7 +2007,10 @@ text, the same in cmd and PowerShell.
 - `list` gives each terminal's `status`, the state its TERMINALS row shows:
   `exited`, `waiting`, `error`, `progress`, `working`, `idle`, `running`,
   `failed` or `none`. A Claude Code terminal reports `working` or `idle`
-  once its title says which, where it used to report `running`.
+  once its title says which, where it used to report `running`. Each row
+  also has `activity`: Claude Code's own `working` or `idle`, which stays
+  readable while the row says `waiting`, and null for any other terminal.
+  `wait` reads both.
 - `set-title` names the caller's own terminal: its tab, its TERMINALS row,
   the handle of a hidden tab strip and its `title` in `list`. A name you gave
   the tab yourself (Rename) always wins — the program's title shows only on a
@@ -1792,6 +2038,79 @@ text, the same in cmd and PowerShell.
 - From WSL the tool is `nexterm-cli.exe`, and `--cwd` takes a Windows path.
   In Git Bash, a text starting with `/` (an agent's `/help`) is rewritten into
   a Windows path by MSYS; prefix the command with `MSYS_NO_PATHCONV=1`.
+
+**Waiting for another terminal.** `nexterm-cli wait TARGET` returns when
+another terminal is done, so a script or an agent can hand work to a split
+and go on when it ends. TARGET is a tab id from `list`, or `child:<id>` for
+a split the caller opened; it is required, and `self` is wrong usage (exit
+2). It asks for `list` once a second, each time on a new connection, and
+never reads a screen, so like `list` it needs only the first switch below.
+
+- **`--for idle`** (the default) exits 0 once the terminal has stayed
+  settled — `idle`, `failed`, `none`, or `waiting` while Claude Code's
+  `activity` is `idle` (a finished turn) — for 1 second after it was seen
+  busy (`working`, `running`, `progress` or `error`), or for 3.5 seconds if
+  it was never seen busy. It exits 7, *blocked*, when the terminal is
+  `waiting` (an unread notification) while its agent is not idle: a question
+  or a permission prompt that only a person can answer. It exits 8 when the
+  terminal exited or was closed first.
+- **`--for exit`** exits 0 once the terminal's shell has exited or the
+  terminal was closed.
+- **`--timeout`** gives up with exit 6: `90` (seconds), `30s`, `5m` or `1h`,
+  at most `24h`, `0` for no limit; 10 minutes by default. `Ctrl+C` stops it.
+- **Output.** One line: `tab-term-7 is idle after 2m 5s` on stdout for 0;
+  for 6, 7 and 8 a line on stderr that starts with `nexterm-cli: `. With
+  `--json`, one object on stdout for 0, 6, 7 and 8 —
+  `{"target", "outcome", "status", "waited_ms"}`, the outcome being `idle`,
+  `exited`, `closed`, `blocked` or `timed_out` — and nothing on stderr.
+- **When it cannot wait.** A busy NexTerm (rate-limited, not answering) is
+  asked again, up to 5 seconds apart. NexTerm not running, or its control
+  turned off, is exit 5. A refusal (`unauthorized`, `disabled`, `forbidden`,
+  `not_found` or `refused`) is exit 4, and so is a target missing from the
+  first answer: no such terminal, or a `child:` the caller did not open.
+
+A script that starts Claude Code in a split below and waits for its turn to
+end (typing the command needs the second switch below):
+
+```sh
+id=$(nexterm-cli new-split --down -- 'claude "fix the failing test"')
+nexterm-cli wait "child:$id" --timeout 30m
+case $? in
+  0) echo "Claude Code is done" ;;
+  7) nexterm-cli notify "Claude Code" "Needs you in $id" ;;
+  6) echo "Still busy after 30 minutes" ;;
+  8) echo "It ended before its turn did" ;;
+esac
+```
+
+What it cannot see:
+
+- **Blocked is only what NexTerm hears**: an unread notification, and
+  Claude Code's working or idle title. A permission prompt is exit 7 only
+  when a notification reached NexTerm — Claude Code's notifications set to
+  Kitty (OSC 99), or a `PermissionRequest` hook like the one above — while
+  the title does not say idle. With neither, wait reads the prompt as idle
+  (exit 0) if Claude Code's title shows idle there, or as busy until the
+  timeout (exit 6) if it shows working. For another agent (OpenCode) or a
+  plain shell, which report no activity, any unread notification counts as
+  blocked.
+- **A split that has just opened** shows nothing going on until the shell
+  reports that its command started (or Claude Code's title says working),
+  so wait started right after `new-split` calls it idle if that takes more
+  than 3.5 seconds.
+- **`list` gives at most 200 terminals**, so a target past the 200th looks
+  absent: exit 4 at first, or *closed* later.
+
+These checks still need a person, and none has been made yet:
+
+- **H12** — Claude Code in a child split: `nexterm-cli wait child:<id>`
+  exits 0 after a turn ends; with Claude Code's notifications set to Kitty
+  (OSC 99), or the `PermissionRequest` hook, a permission prompt makes it
+  exit 7; and what it does with neither, written down (AC-B2-H1;
+  [WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V74).
+- **H13** — on Windows, `wait` works from cmd, from PowerShell and from WSL
+  through `nexterm-cli.exe`; `Ctrl+C` stops it; a short `--timeout` exits 6
+  (AC-B2-H2; [WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V74).
 
 **Typing and reading** are off until you turn them on:
 
@@ -1844,8 +2163,11 @@ there; `read-screen` still reads it.
   naming the caller for ten seconds (on the tab, or on the strip's handle
   when the tab strip is hidden); the
   palette's *Show Control Log* lists the last 500 calls (what, who, which
-  terminal, how much — never the text typed or the screen read). Calls are
-  rate-limited.
+  terminal, how much — never the text typed or the screen read). The same
+  `list` asked again and again by one terminal, with the same answer, is one
+  row with a count (*list × 12*, at the last call's time) and one of the 500;
+  a call that types, reads, focuses or opens a split is always a row of its
+  own. Calls are rate-limited.
 - **Off.** Turning the first setting off closes the socket or pipe and voids
   every token; terminals started while it was off have none until restarted.
 

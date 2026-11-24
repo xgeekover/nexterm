@@ -92,6 +92,8 @@ const SETTINGS_KEYS = [
   'terminalsPanelAgent',
   'terminalsPanelLastNote',
   'terminalsPanelSortAttention',
+  // Bundle 4, B8: Show CPU and Memory (off).
+  'terminalShowResources',
   'editorFontSize',
   'editorTabSize',
   'editorWordWrap',
@@ -162,6 +164,7 @@ describe('Settings store: setSetting / resetSettings contract', () => {
       terminalAttentionFlashFocused: true,
       terminalBellAttention: false,
       terminalProgress: false,
+      terminalShowResources: true,
       // The one default that depends on the platform: the probe is whichever
       // value this platform does not start with.
       terminalRightClick: S.getState().settingsDefaults.terminalRightClick === 'copyPaste' ? 'default' : 'copyPaste',

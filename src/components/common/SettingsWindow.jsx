@@ -590,6 +590,17 @@ export function buildItems(monoPlaceholder, detectedShells, homeDir, keepAwake =
         'Lists the groups in the TERMINALS side bar, and the terminals in each pane, most urgent first: waiting for you, then failed, then running, then idle, then exited, keeping your order among equals. Only the side bar changes — tabs and group chips keep your order, and turning this off shows it again; menu items that act on your order, such as Close Terminals to the Right, are unavailable while it is on. While you aim, the list holds still: while the pointer is over a terminal or group row, from a press until its click and a double-click after, while a menu from the list is open, and while a row is being renamed. Moving off the rows, or leaving the window, lets it catch up; until it has, a dot on the sort button says a newer order is waiting.',
       control: 'checkbox',
     },
+    // ---- Show CPU and Memory (bundle 4, B8): src/lib/resourceUsage.js ----
+    {
+      id: 'terminalShowResources',
+      section: 'terminal',
+      key: 'terminalShowResources',
+      settingKey: 'terminal.integrated.showCpuAndMemory',
+      title: 'Show CPU and Memory',
+      description:
+        "Shows how much CPU and memory each terminal's programs use — its shell and everything started from it — in the TERMINALS side bar and in a tab's hover card. 100% is one core. Measured every 5 seconds, and once more 1 second after the first measurement, only while the window is not minimised and the TERMINALS panel or a hover card is showing. A WSL terminal cannot be measured. Off, nothing is measured.",
+      control: 'checkbox',
+    },
     {
       id: 'terminalSuggestions',
       section: 'terminal',
@@ -1011,6 +1022,7 @@ export function SettingsWindow() {
   const terminalsPanelAgent = useSettingsStore((s) => s.terminalsPanelAgent);
   const terminalsPanelLastNote = useSettingsStore((s) => s.terminalsPanelLastNote);
   const terminalsPanelSortAttention = useSettingsStore((s) => s.terminalsPanelSortAttention);
+  const terminalShowResources = useSettingsStore((s) => s.terminalShowResources);
   const terminalDefaultCwd = useSettingsStore((s) => s.terminalDefaultCwd);
   const terminalDefaultCwdPath = useSettingsStore((s) => s.terminalDefaultCwdPath);
   const terminalSplitCwd = useSettingsStore((s) => s.terminalSplitCwd);
@@ -1065,6 +1077,7 @@ export function SettingsWindow() {
     terminalsPanelAgent,
     terminalsPanelLastNote,
     terminalsPanelSortAttention,
+    terminalShowResources,
     terminalDefaultCwd,
     terminalDefaultCwdPath,
     terminalSplitCwd,

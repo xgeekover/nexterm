@@ -35,7 +35,7 @@ import { PATH_COPIED, copyAndConfirm } from '../../lib/copyFeedback.js';
 import { focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
 import { openInExternalEditor, revealInFileManager } from '../../lib/ipc.js';
 import { useTerminalStore } from '../../stores/terminalStore.js';
-import { buildOpenActionItems, sendToAgentItem } from './explorerOpenActions.js';
+import { buildOpenActionItems, openPreviewItem, sendToAgentItem } from './explorerOpenActions.js';
 import { explorerSendProblem, sendPathToAgent } from '../../lib/sendToAgent.js';
 import { SEND_TO_AGENT_LABEL } from '../../lib/agentReference.js';
 import { useGitStore, fileStatusIn } from '../../stores/gitStore.js';
@@ -177,6 +177,11 @@ export function FileExplorer() {
         label: 'Open',
         onSelect: () => openFile(target.path),
       });
+      // A Markdown file's rendered view, beside its text (F-B3-8).
+      const preview = openPreviewItem(target, {
+        openPreview: (path) => useEditorStore.getState().openMarkdownPreview(path),
+      });
+      if (preview) items.push(preview);
     }
 
     pushSeparator();

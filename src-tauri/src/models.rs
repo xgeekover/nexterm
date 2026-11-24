@@ -98,6 +98,23 @@ pub struct FileNode {
     pub is_symlink: bool,
 }
 
+/// An image for an image tab (`fs_read_image`, src/fs/preview.rs): its bytes
+/// as standard base64, for a `data:` URI, and what they are.
+///
+/// `mime` is decided by the bytes, never by the file's name. `width` and
+/// `height` are what the header declares, nothing being decoded; both are
+/// null for an SVG, which has no pixel size of its own, and are sent as null
+/// rather than left out, so the webview reads one shape.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImagePreview {
+    pub mime: String,
+    pub data: String,
+    /// The file's length, before base64.
+    pub bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FsChangePayload {
     pub path: String,
@@ -197,5 +214,27 @@ mod tests {
 
         let read_back: FileNode = serde_json::from_str(&plain).unwrap();
         assert!(!read_back.is_symlink, "absent reads as not a link");
+    }
+
+    /// The shape the image tab and the browser stand-in (src/lib/ipc.js)
+    /// read: these five names, and a null size for an SVG rather than none.
+    #[test]
+    fn an_image_preview_has_one_shape_with_or_without_a_size() {
+        let png = ImagePreview {
+            mime: "image/png".to_string(),
+            data: "iVBORw==".to_string(),
+            bytes: 4,
+            width: Some(1920),
+            height: Some(1080),
+        };
+        let json: serde_json::Value = serde_json::to_value(&png).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"mime": "image/png", "data": "iVBORw==", "bytes": 4, "width": 1920, "height": 1080})
+        );
+
+        let svg = ImagePreview { mime: "image/svg+xml".to_string(), width: None, height: None, ..png };
+        let json = serde_json::to_string(&svg).unwrap();
+        assert!(json.contains("\"width\":null") && json.contains("\"height\":null"), "{json}");
     }
 }

@@ -179,6 +179,10 @@ const listedTitle = (tab) => (tab ? displayTitle(tab) : '');
  */
 const loggedTitle = (tab) => (tab ? nexTermTitle(tab) : '');
 
+/** What `list` says Claude Code in a terminal is doing, as the store last saw it: 'working', 'idle', or null — never anything else. */
+const LISTED_ACTIVITY = new Set(['working', 'idle']);
+const listedActivity = (record) => (LISTED_ACTIVITY.has(record?.state) ? record.state : null);
+
 /** A path in an error message: the caller's own text, but short and on one line. */
 const shown = (path) => {
   const one = String(path).replace(/[\u{0}-\u{1f}\u{7f}-\u{9f}]/gu, '?');
@@ -442,6 +446,8 @@ export function createControlDispatcher({
             progress: state.progress?.[id] ?? null,
             activity: state.agentActivity?.[id] ?? null,
           }).state,
+          // Claude Code's own 'working' or 'idle' (agentActivity), or null.
+          activity: listedActivity(state.agentActivity?.[id]),
           self: id === caller.id,
           child: kids.has(id),
         };

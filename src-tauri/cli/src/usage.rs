@@ -28,6 +28,8 @@ Commands:
       Print what a terminal shows.
   focus [TARGET]
       Switch the window to a terminal.
+  wait TARGET [--for idle|exit] [--timeout DURATION]
+      Wait until another terminal is idle, or has exited.
   guide [topic]
       Which command to use when: a short guide for agents and scripts.
   help [command]
@@ -53,6 +55,9 @@ Exit status:
      not this user's
   5  NexTerm is not running, busy, not responding, or its control is
      turned off (Settings > Terminal > Control); try again later
+  6  wait: timed out
+  7  wait: blocked, the terminal is waiting for input
+  8  wait: the terminal exited or was closed before it was idle
 ";
 
 /// `(usage lines, description)` of each command.
@@ -183,6 +188,34 @@ is not pulled in front of other apps; it asks for attention instead.
   TARGET  self (default), a tab id, or child:<id>
 ",
         ),
+        "wait" => (
+            "nexterm-cli wait TARGET [--for idle|exit] [--timeout DURATION]",
+            "\
+Waits until another terminal is idle, or with --for exit until its shell
+has exited or it was closed. It asks NexTerm for the list once a second
+and never reads the screen, so it needs only control turned on.
+
+  TARGET              a tab id from 'list', or child:<id> for a terminal
+                      this one opened with new-split (not self)
+  --for idle          (default) done once the terminal has stayed settled
+                      (idle, failed, nothing going on, or waiting while its
+                      agent is idle) for 1s after it was busy, or for 3.5s
+                      if it was not seen busy
+  --for exit          done once its shell has exited or it was closed
+  --timeout DURATION  give up after 90 (seconds), 30s, 5m or 1h; at most
+                      24h, 0 for no limit (default: 10m)
+
+Blocked: the terminal is waiting for input while its agent is not idle,
+such as a question or a permission prompt only a person can answer.
+
+Prints one line, such as: tab-term-7 is idle after 2m 5s. With --json,
+one object: target, outcome (idle, exited, closed, blocked, timed_out),
+status and waited_ms.
+
+Exit status: 0 done, 6 timed out, 7 blocked, 8 exited or closed before it
+was idle (--for idle); 2, 3, 4 and 5 as for every command.
+",
+        ),
         _ => unreachable!("help for an unknown command"),
     }
 }
@@ -228,7 +261,8 @@ mod tests {
         let guide = OVERVIEW.find("\n  guide [topic]\n      Which command to use when").expect("guide in the overview");
         let help = OVERVIEW.find("\n  help [command]\n").unwrap();
         let focus = OVERVIEW.find("\n  focus [TARGET]\n").unwrap();
-        assert!(focus < guide && guide < help, "{OVERVIEW}");
+        let wait = OVERVIEW.find("\n  wait TARGET [--for idle|exit] [--timeout DURATION]\n").expect("wait in the overview");
+        assert!(focus < wait && wait < guide && guide < help, "{OVERVIEW}");
     }
 
     #[test]
@@ -245,17 +279,48 @@ mod tests {
 
     #[test]
     fn the_overview_lists_the_exit_codes() {
-        for code in ["  0  ", "  1  ", "  2  ", "  3  ", "  4  ", "  5  "] {
+        for code in ["  0  ", "  1  ", "  2  ", "  3  ", "  4  ", "  5  ", "  6  ", "  7  ", "  8  "] {
             assert!(OVERVIEW.contains(code), "{code}");
         }
+        let codes: Vec<&str> = OVERVIEW[OVERVIEW.find("Exit status:\n").unwrap()..]
+            .lines()
+            .filter_map(|l| l.strip_prefix("  ").and_then(|l| l.split("  ").next()))
+            .filter(|code| !code.is_empty())
+            .collect();
+        assert_eq!(codes, ["0", "1", "2", "3", "4", "5", "6", "7", "8"], "in order, each once");
+        assert!(OVERVIEW.contains("  6  wait: timed out\n"));
+        assert!(OVERVIEW.contains("  7  wait: blocked, the terminal is waiting for input\n"));
+        assert!(OVERVIEW.contains("  8  wait: the terminal exited or was closed before it was idle\n"));
         // Turned off is 5, not 4: turning the API off closes the socket or
         // pipe, so nothing answers at all.
         let four = &OVERVIEW[OVERVIEW.find("  4  ").unwrap()..OVERVIEW.find("  5  ").unwrap()];
-        let five = &OVERVIEW[OVERVIEW.find("  5  ").unwrap()..];
+        let five = &OVERVIEW[OVERVIEW.find("  5  ").unwrap()..OVERVIEW.find("  6  ").unwrap()];
         assert!(!four.contains("Settings") && !four.contains("off"), "{four}");
         assert!(five.contains("turned off (Settings > Terminal > Control)"), "{five}");
         assert!(five.contains("busy"), "{five}");
         assert!(OVERVIEW.contains("  2  wrong usage, found here or by NexTerm; nothing was done"));
+    }
+
+    #[test]
+    fn wait_help_names_the_target_the_options_and_the_exit_codes() {
+        let h = help(Some("wait"));
+        assert!(h.starts_with("Usage: nexterm-cli wait TARGET [--for idle|exit] [--timeout DURATION]\n"), "{h}");
+        assert!(h.contains("a tab id from 'list', or child:<id>"), "{h}");
+        assert!(h.contains("(not self)"), "{h}");
+        assert!(h.contains("--for idle          (default)"), "{h}");
+        assert!(h.contains("for 1s after it was busy, or for 3.5s"), "{h}");
+        assert!(h.contains("--for exit"), "{h}");
+        assert!(h.contains("90 (seconds), 30s, 5m or 1h; at most\n                      24h, 0 for no limit (default: 10m)"), "{h}");
+        assert!(h.contains("Blocked: the terminal is waiting for input while its agent is not idle"), "{h}");
+        assert!(h.contains("Exit status: 0 done, 6 timed out, 7 blocked, 8 exited or closed before it\nwas idle"), "{h}");
+        assert!(h.contains("once a second\nand never reads the screen"), "{h}");
+        let e = UsageError::of("wait", "wait needs a TARGET: a tab id from 'list', or child:<id>");
+        assert_eq!(
+            usage_error(&e),
+            "nexterm-cli: wait needs a TARGET: a tab id from 'list', or child:<id>\n\
+             Usage: nexterm-cli wait TARGET [--for idle|exit] [--timeout DURATION]\n\
+             Run 'nexterm-cli help wait' for more.\n"
+        );
     }
 
     #[test]

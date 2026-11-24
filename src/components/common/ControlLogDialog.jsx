@@ -9,11 +9,13 @@ import { cn } from '../../lib/utils.js';
 
 /**
  * Show Control Log (stage 7, spec D6): what programs in terminals asked
- * NexTerm to do through `nexterm-cli`, newest first — the last 500 calls,
+ * NexTerm to do through `nexterm-cli`, newest first — the last 500 entries,
  * kept in memory only (src/stores/controlLogStore.js). Each row is when,
  * which terminal asked, for what, of which terminal, how many bytes it typed
  * or lines it read, and the answer. What was typed and what was read are
- * never kept, so they are not here either.
+ * never kept, so they are not here either. The same `list` asked again and
+ * again is one row, "list × 12" at the last call's time (bundle 4, OQ2);
+ * the heading counts the calls, every one of those twelve among them.
  *
  * Opened from the command palette, which hands over what had the keyboard
  * (src/lib/dialogReturn.js): the dialog takes it as it opens and gives it
@@ -50,16 +52,33 @@ function targetOf(entry) {
   return entry.targetTitle ? `${entry.targetTitle} (${entry.target})` : entry.target;
 }
 
-/** One call. */
+/** How many calls an entry stands for: 1 unless the store merged repeats into it. */
+const callsOf = (entry) => (Number.isInteger(entry?.count) && entry.count > 1 ? entry.count : 1);
+
+/** The command, with how many times it was asked in a row: "list × 12". */
+function commandOf(entry) {
+  const cmd = entry.cmd || '?';
+  const calls = callsOf(entry);
+  return calls > 1 ? `${cmd} × ${calls}` : cmd;
+}
+
+/** One call, or one run of the same `list`. */
 function LogRow({ entry }) {
   const ok = entry.result === 'ok';
+  const calls = callsOf(entry);
   return (
     <tr data-control-log-row={entry.id} className="border-b border-vsc-border last:border-b-0 align-top">
       <td className="py-1 pr-3 whitespace-nowrap tabular-nums text-vsc-muted">{timeOf(entry.at)}</td>
       <td className="py-1 pr-3 max-w-[160px] truncate" title={entry.caller ?? ''}>
         <bdi>{entry.callerTitle || entry.caller || 'unknown'}</bdi>
       </td>
-      <td className="py-1 pr-3 whitespace-nowrap font-mono">{entry.cmd || '?'}</td>
+      <td
+        data-control-log-calls={calls}
+        title={calls > 1 ? `${calls} calls in a row; the time is the last one's` : undefined}
+        className="py-1 pr-3 whitespace-nowrap font-mono"
+      >
+        {commandOf(entry)}
+      </td>
       <td className="py-1 pr-3 max-w-[180px] truncate">
         <bdi>{targetOf(entry)}</bdi>
       </td>
@@ -103,9 +122,9 @@ function LogList() {
   );
 }
 
-/** How many calls are kept, for the heading. */
+/** How many calls are kept, for the heading: every call, a merged row counting all of its. */
 function LogCount() {
-  const count = useControlLogStore((s) => s.entries.length);
+  const count = useControlLogStore((s) => s.entries.reduce((sum, entry) => sum + callsOf(entry), 0));
   return (
     <span data-control-log-count={count} className="text-ui-sm text-vsc-muted tabular-nums">
       {count === 1 ? '1 call' : `${count} calls`}
@@ -213,7 +232,7 @@ function ControlLogBox() {
           </button>
         </div>
         <p id="control-log-about" className="m-0 px-3 pt-2 text-ui-sm text-vsc-muted">
-          {`What programs in terminals asked NexTerm to do through nexterm-cli, newest first. The last ${LOG_LIMIT} calls are kept, in memory only, and go when NexTerm closes. What was typed and what was read are never kept.`}
+          {`What programs in terminals asked NexTerm to do through nexterm-cli, newest first; the same list asked again and again is one row with a count. The last ${LOG_LIMIT} rows are kept, in memory only, and go when NexTerm closes. What was typed and what was read are never kept.`}
         </p>
         <div tabIndex={0} aria-label="Calls" className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
           <LogList />

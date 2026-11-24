@@ -79,14 +79,26 @@ export function modelPath(Uri, filePath) {
 }
 
 /**
- * The model URIs the open tabs name. A file is open while at least one tab
- * names it, in any group: one tab shown in two groups is one entry of the
- * store's tabs, and closing either group leaves it there (`closeEditorPane`
- * closes only the tabs no other group still holds).
+ * Whether `tab` holds its file as text, and so is the kind of tab a model is
+ * for. A preview tab — any tab with a `kind`, an image or a Markdown preview
+ * (`isPreviewTab` in editorStore.js, which this module does not import) —
+ * shows its file without a model: it neither makes one nor keeps one alive.
+ * A text tab on the same file keeps that file's model as it always has.
+ */
+function isTextTab(tab) {
+  return Boolean(tab) && tab.kind == null;
+}
+
+/**
+ * The model URIs the open text tabs name. A file is open while at least one
+ * text tab names it, in any group: one tab shown in two groups is one entry
+ * of the store's tabs, and closing either group leaves it there
+ * (`closeEditorPane` closes only the tabs no other group still holds).
  */
 function openUris(monaco, tabs) {
   const open = new Map(); // URI string -> URI
   for (const tab of tabs) {
+    if (!isTextTab(tab)) continue;
     const uri = uriOf(monaco, tab.filePath);
     open.set(uri.toString(), uri);
   }
@@ -194,9 +206,12 @@ function release(monaco, open) {
  * renew the model of a file opened again, move the model of a tab whose path
  * changed, then dispose the model of every file no tab is open on any more
  * (`release`). Only files a tab named are ever disposed — a model anyone
- * else made is not this module's.
+ * else made is not this module's. Only text tabs count (`isTextTab`): a
+ * preview opened, moved or closed changes no model.
  */
-export function syncEditorModels(monaco, before, after) {
+export function syncEditorModels(monaco, beforeTabs, afterTabs) {
+  const before = beforeTabs.filter(isTextTab);
+  const after = afterTabs.filter(isTextTab);
   if (sameFiles(before, after)) return;
   const wasOpen = openUris(monaco, before);
   const open = openUris(monaco, after);
@@ -304,10 +319,11 @@ export function saveViewState(editor) {
  * too, but only after the library's own effects of the same render, and its
  * `value` effect throws without one: what keeps an editor from being left
  * with none is `release`, which never disposes a model an editor shows.
+ * A preview tab is shown by no editor, and is given no model here.
  */
 export function showFile(editor, tab, language) {
   const monaco = watched?.monaco;
-  if (!monaco || !editor || !tab) return;
+  if (!monaco || !editor || !isTextTab(tab)) return;
   const uri = uriOf(monaco, tab.filePath);
   const current = editor.getModel();
   if (!current || current.uri.toString() !== uri.toString()) {

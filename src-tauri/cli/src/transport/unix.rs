@@ -14,7 +14,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{Address, Failure, NOT_RUNNING};
 
@@ -35,6 +35,14 @@ impl Identity {
 /// queue that way, and the caller's timeout covers it.)
 pub fn connect(address: &Address, me: &Identity, _by: Instant) -> Result<UnixStream, Failure> {
     connect_as(Path::new(address.as_str()), me.uid, me.uid)
+}
+
+/// Each read and write on `stream` gives up after `each` (review A-R6): the
+/// worker thread then ends, and the socket is closed, even when NexTerm
+/// never answers.
+pub fn limit(stream: &UnixStream, each: Duration) -> io::Result<()> {
+    stream.set_read_timeout(Some(each))?;
+    stream.set_write_timeout(Some(each))
 }
 
 /// `owner` must own the folder and the socket, and `peer` must be the uid
@@ -198,14 +206,13 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::transport::{exchange, FailureKind, Timeouts};
-    use std::io::{BufRead, BufReader, Write};
+    use crate::transport::{exchange, FailureKind, Timeouts, IO_MARGIN};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use std::time::Duration;
 
     fn me() -> u32 {
         Identity::current().unwrap().uid
@@ -424,6 +431,33 @@ pub mod tests {
         assert!(f.message.contains("not responding"), "{}", f.message);
         assert!(started.elapsed() < Duration::from_millis(1200), "{:?}", started.elapsed());
         server.join().unwrap();
+    }
+
+    /// Review A-R6: the caller gives up on a silent NexTerm, and the worker
+    /// thread's own read gives up a moment later and closes the connection:
+    /// nothing is left behind for each try. (Without the limit the client
+    /// end stayed open until the server's 10 s ran out.)
+    #[test]
+    fn a_silent_server_sees_the_connection_closed_soon_after_the_timeout() {
+        let dir = TempDir::new();
+        let listener = UnixListener::bind(dir.socket()).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let read_at = Instant::now();
+            reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let after = reader.read(&mut [0u8; 1]).map_err(|e| e.kind());
+            (line, after, read_at.elapsed())
+        });
+        let address = crate::transport::parse_address(dir.socket().as_os_str()).unwrap();
+        let f = exchange(&address, b"{}\n", &Identity { uid: me() }, QUICK).unwrap_err();
+        assert_eq!(f.kind, FailureKind::NotResponding, "{}", f.message);
+        let (line, after, waited) = server.join().unwrap();
+        assert_eq!(line, "{}\n");
+        assert_eq!(after, Ok(0), "the client closed its end");
+        assert!(waited >= QUICK.answer && waited < QUICK.answer + IO_MARGIN + Duration::from_secs(2), "{waited:?}");
     }
 
     #[test]

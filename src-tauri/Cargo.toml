@@ -1,6 +1,6 @@
 [package]
 name = "nexterm"
-version = "0.36.0"
+version = "0.37.0"
 description = "Next-generation Multi-AI Terminal IDE"
 edition = "2021"
 license = "MIT"
@@ -77,6 +77,8 @@ junction = "2"
 # — a DACL for this user alone, and who is at the other end of it.
 # `Win32_System_Diagnostics_ToolHelp`: the processes a terminal's shell
 # started, and whether any is elevated or another user's (src/pty/owner.rs).
+# `Win32_System_ProcessStatus`: the working set of each of them, a terminal's
+# memory (K32GetProcessMemoryInfo, src/pty/resources.rs).
 # `Win32_System_Power`: SetThreadExecutionState, keep-awake (src/power.rs).
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
@@ -89,6 +91,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Pipes",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",

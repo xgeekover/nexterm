@@ -245,9 +245,13 @@ export function useStripOverlay(enabled, { overlayRef, handleRef, held }) {
     // only with the keyboard in the strip or on its handle — then it goes no
     // further. With the keyboard in the terminal it is the program's, and
     // the strip stays. While a menu, a rename or a drag holds the strip,
-    // Escape is theirs.
+    // Escape is theirs. So is it a chip's whose hover card is shown (it names
+    // the card in aria-describedby only then, TabHoverCard.jsx): the first
+    // Escape closes the card, keeping the keyboard on the chip, the next one
+    // the strip.
     const onKey = (e) => {
       if (e.key !== 'Escape' || heldRef.current) return;
+      if (document.activeElement?.closest?.('[data-tab-chip]')?.hasAttribute('aria-describedby')) return;
       const focusInside = inside(document.activeElement);
       if (!overlay.escape(focusInside)) return;
       e.preventDefault();

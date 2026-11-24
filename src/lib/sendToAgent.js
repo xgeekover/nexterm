@@ -129,10 +129,18 @@ export function agentTargetsNow(state = useTerminalStore.getState()) {
   return agentTerminals(state.tabs, recent);
 }
 
-/** The editor tab showing `path`, or — with no path — the active one. */
+/**
+ * The editor tab showing `path` as text, or — with no path — the active one
+ * when it does. Never a preview tab — any tab with a `kind`, an image or a
+ * Markdown preview (`isPreviewTab` in editorStore.js, not imported: the
+ * Explorer's and the palette's suites draw this with a stand-in store): it
+ * has no lines to select and no buffer to check, and a README's preview
+ * listed before its modified text tab let the file go out as if it were
+ * saved. A preview active is no file open in the editor.
+ */
 function editorTabOf(path = null) {
   const { tabs, activeTabId } = useEditorStore.getState();
-  const list = Array.isArray(tabs) ? tabs : [];
+  const list = (Array.isArray(tabs) ? tabs : []).filter((t) => t && t.kind == null);
   if (path) return list.find((t) => t.filePath === path) ?? null;
   return list.find((t) => t.id === activeTabId) ?? null;
 }

@@ -26,6 +26,13 @@
  *   (new) WV-06: the source checks of AC-C2 — no static import of
  *        EditorPanel.jsx or `@monaco-editor/react` in the workbench or the
  *        layout, and `liftSizes` and the projections gone from the UI.
+ *   (bundle 5) WV-06b, AC-G-3: the static import closure of main.jsx, the
+ *        first chunk, holds neither Monaco nor a preview body
+ *        (ImagePreview.jsx, MarkdownPreview.jsx) nor the Markdown library;
+ *        EditorPane loads ImagePreview.jsx through `lazy(() => import(...))`.
+ *        Step P6b: nor the Markdown worker's factory, the worker or the
+ *        pipeline (markdown_render_worker.test.js MW-40 checks that only
+ *        the worker imports the pipeline).
  *
  * The workbench is bundled with esbuild (workbench_bundle.js) and drawn with
  * the app's own stores, arranged here.
@@ -160,4 +167,61 @@ describe('Workbench: the files of the group on screen are drawn in the workbench
     assert.equal(/terminalView/.test(read('components/terminal/TerminalSplitContainer.jsx')), false, 'the terminal projection is still drawn');
     assert.equal(/hasEditorTabs/.test(read('components/layout/PanelLayout.jsx')), false, 'PanelLayout still asks whether the group has files');
   });
+
+  // Orca bundle 5, AC-G-3: the preview bodies are lazy as Monaco is. The
+  // first chunk is what main.jsx reaches through static imports; a dynamic
+  // `import()` starts a chunk of its own and is not followed here.
+  test('WV-06b: the first chunk, read off the sources, holds no Monaco, no preview body and no Markdown library; EditorPane loads ImagePreview.jsx only through lazy(() => import(...))', () => {
+    const closure = firstChunkModules();
+    for (const file of ['main.jsx', 'App.jsx', 'components/editor/EditorPane.jsx', 'components/editor/EditorTabs.jsx', 'stores/editorStore.js', 'lib/imagePreview.js']) {
+      assert.ok(closure.has(file), `setup: ${file} is in the first chunk (${closure.size} modules found)`);
+    }
+    // Step P6b (OQ-B3g): nor the Markdown worker's factory, the worker or the pipeline — the parser runs in the
+    // worker only, and the factory's `?worker` import is followed here as a static one (its query cut off).
+    for (const lazyOnly of ['components/editor/EditorPanel.jsx', 'components/editor/ImagePreview.jsx', 'components/editor/MarkdownPreview.jsx', 'lib/monaco.js', 'lib/markdownWorkerFactory.js', 'lib/markdownWorker.js', 'lib/markdownPipeline.js']) {
+      assert.equal(closure.has(lazyOnly), false, `${lazyOnly} is imported statically into the first chunk`);
+    }
+    for (const file of closure) {
+      const pkg = staticImports(read(file)).find((spec) => FIRST_CHUNK_FORBIDDEN.test(spec));
+      assert.equal(pkg, undefined, `${file}, in the first chunk, imports ${pkg} statically`);
+    }
+    // No module anywhere imports a preview body statically: EditorPane's lazy is the one way in.
+    for (const file of filesUnder('', /\.(jsx?|mjs)$/)) {
+      const spec = staticImports(read(file)).find((s) => /(?:^|\/)(?:ImagePreview|MarkdownPreview)(?:\.jsx)?$/.test(s));
+      assert.equal(spec, undefined, `${file} imports a preview body statically (${spec})`);
+    }
+    assert.match(read('components/editor/EditorPane.jsx'), /lazy\(\(\) => import\('\.\/ImagePreview\.jsx'\)\)/, 'the image body is not loaded lazily');
+  });
 });
+
+/** Packages that must never reach the first chunk: Monaco and the Markdown preview's renderer and its parts. */
+const FIRST_CHUNK_FORBIDDEN = /^(?:@monaco-editor\/react|monaco-editor|react-markdown|remark-gfm|remark-[\w-]+|unified|micromark(?:-[\w-]+)?|mdast-[\w-]+|hast-[\w-]+|rehype-[\w-]+)(?:\/|$)/;
+
+/**
+ * The modules of src/ that main.jsx reaches through static imports and
+ * re-exports, relative to src/: what the entry chunk is built from. Package
+ * imports end the walk (FIRST_CHUNK_FORBIDDEN looks at those), and a
+ * `?query` (Vite's `?worker`) is cut off.
+ */
+function firstChunkModules() {
+  const seen = new Set();
+  const walk = (rel) => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    for (const spec of staticImports(read(rel))) {
+      if (!spec.startsWith('.')) continue;
+      const target = join(SRC, rel, '..', spec.replace(/\?.*$/, ''));
+      const found = [target, `${target}.js`, `${target}.jsx`].find((p) => {
+        try {
+          return statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      });
+      // As a path under src/ with forward slashes, whatever the platform's own.
+      if (found && /\.(jsx?|mjs)$/.test(found)) walk(found.slice(SRC.length).replace(/\\/g, '/'));
+    }
+  };
+  walk('main.jsx');
+  return seen;
+}

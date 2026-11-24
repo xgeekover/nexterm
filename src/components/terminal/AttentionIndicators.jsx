@@ -31,7 +31,11 @@ import { cn } from '../../lib/utils.js';
  * `role="img"` so that its words — "3 unread notifications" — are what a
  * screen reader takes from it, not a bare "3"; the chips and rows it sits in
  * read their names from their content. `label` replaces those words where
- * the count is about something else (the zoom chip's hidden panes).
+ * the count is about something else (the zoom chip's hidden panes). The
+ * words are its `title` too, except with `noTitle`: on a terminal tab chip,
+ * whose hover card (bundle 4, B12) is its one tooltip and says the count —
+ * the pointer reaches the pill without leaving the chip, and a native
+ * tooltip would open beside the card.
  *
  * In line, after the title: a fixed 14px box under the 20px and 22px of the
  * chips, so a count arriving never changes a chip's height, `shrink-0` so a
@@ -43,7 +47,7 @@ import { cn } from '../../lib/utils.js';
  * where that once lost a click on the next tab's ✕ — the store holds a
  * pane's mark-read until the pointer is up (terminalStore.js).
  */
-export function UnreadPill({ count, label: given, className }) {
+export function UnreadPill({ count, label: given, className, noTitle = false }) {
   const text = unreadBadge(count);
   if (!text) return null;
   const label = given ?? unreadLabel(count);
@@ -51,7 +55,7 @@ export function UnreadPill({ count, label: given, className }) {
     <span
       role="img"
       aria-label={label}
-      title={label}
+      title={noTitle ? undefined : label}
       data-unread-count={count}
       className={cn(
         'shrink-0 inline-flex items-center justify-center min-w-[14px] h-[14px] px-[3px] rounded-full whitespace-nowrap',

@@ -29,6 +29,7 @@ import { mockBridge } from './lib/ipc.js';
 import { startPerfMode } from './lib/perf/perfMode.js';
 import { startControl } from './lib/controlBridge.js';
 import { startKeepAwake } from './lib/keepAwake.js';
+import { useResourceSampler } from './hooks/useResourceSampler.js';
 import { useControlLogStore } from './stores/controlLogStore.js';
 import { useAgentHistoryStore } from './stores/agentHistoryStore.js';
 import { ensureTabMruStarted } from './stores/tabSwitcherStore.js';
@@ -104,6 +105,11 @@ export default function App() {
   // by default): the backend told only when a Claude Code terminal starts or
   // stops Working, and told "off" on unmount / HMR. See src/lib/keepAwake.js.
   useEffect(() => startKeepAwake({ store: useTerminalStore, settings: useSettingsStore }), []);
+
+  // Settings ▸ Terminal ▸ Show CPU and Memory (off by default): every 5 s,
+  // only while the window can be seen and the TERMINALS panel or a hover card
+  // is on screen. See src/hooks/useResourceSampler.js.
+  useResourceSampler();
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-vsc-editor text-vsc-fg font-ui">

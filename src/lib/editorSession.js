@@ -169,6 +169,12 @@ function finish(root, tree, marked, activeFile, recent, misses = {}) {
  * spellings that differ only in case are one file — the one used last. Groups
  * left with no tab go, as an emptied group does on screen. `missesOf(tabId)`
  * is how many launches in a row have failed to read a tab's file.
+ *
+ * Only text tabs are saved. A tab with a `kind` — an image or a Markdown
+ * preview (editorStore.js) — is not brought back after a restart (the
+ * human's decision, 2026-11-24), so it is not written: it counts as no tab
+ * at all here, and a README's preview never stands in for its text tab.
+ * What is read back is a list of paths, every one reopened as a text tab.
  */
 export function serializeSession(state, recencyOf = () => 0, { missesOf = () => 0, caseless = false } = {}) {
   // `editorTree` is the editor projection of the workbench (sibling B): the
@@ -176,7 +182,7 @@ export function serializeSession(state, recencyOf = () => 0, { missesOf = () => 
   // one group shows files; `editorPane` is the active group's editor pane.
   const { rootPath, tabs, editorTree, editorPane, activeTabId } = state || {};
   if (typeof rootPath !== 'string' || !rootPath || !editorTree || !Array.isArray(tabs)) return null;
-  const pathOf = new Map(tabs.map((tab) => [tab.id, tab.filePath]));
+  const pathOf = new Map(tabs.filter((tab) => tab && tab.kind == null).map((tab) => [tab.id, tab.filePath]));
 
   // Runs at every keystroke (typing changes `tabs`), so once over each tab.
   const shown = new Set();

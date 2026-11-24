@@ -13,7 +13,12 @@
  *     goes on Escape, a press outside it, or the pointer leaving it;
  *   - Enter or Escape finishing a tab rename is the rename's, and never
  *     reaches the shell as a key;
- *   - a lock appearing on a chip moves nothing under the pointer.
+ *   - a lock appearing on a chip moves nothing under the pointer;
+ *   - a tab's hover card (bundle 4, B12) opens for keyboard focus on a real
+ *     chip, Escape closes it with the keyboard staying there, and the chip
+ *     names it in aria-describedby only while it is shown (HS-16); and it
+ *     goes when the strip it was shown on moves into the hidden strip's
+ *     overlay (HS-17).
  *
  * Skipped, saying so, where there is no browser to drive (CI).
  */
@@ -329,8 +334,24 @@ describe('Split polish and the lock, in a real browser', () => {
     assert.equal(await place(), before, 'a lock appearing moved the chips or their buttons');
     const style = await ev(`getComputedStyle(document.querySelector('[data-tab-chip="${first[0]}"] [data-lock-mark]')).pointerEvents`);
     assert.equal(style, 'none', 'the lock takes the pointer');
-    const title = await ev(`document.querySelector('[data-tab-chip="${first[0]}"]').title`);
-    assert.ok(title.includes('Typing is hidden (password prompt)'), `the chip's tooltip does not say it: ${title}`);
+    // Its words: the lock's own label, and the chip's tooltip — the hover
+    // card (bundle 4, B12), since the chip has no native title any more.
+    assert.equal(await ev(`document.querySelector('[data-tab-chip="${first[0]}"]').hasAttribute('title')`), false, 'the chip still has a native tooltip');
+    const label = await ev(`document.querySelector('[data-tab-chip="${first[0]}"] [data-lock-mark]').getAttribute('aria-label')`);
+    assert.ok(label.includes('Typing is hidden (password prompt)'), `the lock does not say it: ${label}`);
+    const [x, y] = JSON.parse(
+      await ev(`JSON.stringify((() => { const r = document.querySelector('[data-tab-chip="${first[0]}"]').getBoundingClientRect(); return [Math.round(r.left + 12), Math.round(r.top + r.height / 2)]; })())`)
+    );
+    // From off the strip: the pointer may still rest on a chip an earlier
+    // case pressed, and a pressed chip shows no card until it is left.
+    await move(2, 2);
+    await sleep(100);
+    await move(x, y);
+    await sleep(800);
+    const card = await ev(`document.querySelector('[data-hover-card="${first[0]}"]')?.textContent ?? ''`);
+    assert.ok(card.includes('Typing is hidden (password prompt)'), `the chip's hover card does not say it: ${card}`);
+    await move(2, 2);
+    await sleep(200);
     await ev(`window.__nexterm.mockBridge.setEcho(${JSON.stringify(first[1])}, false)`);
   });
 
@@ -548,6 +569,75 @@ describe('Split polish and the lock, in a real browser', () => {
     } finally {
       await harness.send('Emulation.setTouchEmulationEnabled', { enabled: false });
     }
+  });
+
+  test("HS-16: keyboard focus on a real chip opens its hover card after the wait, naming it in aria-describedby; Escape closes it, the keyboard staying on the chip", async () => {
+    if (!harness) skip(NO_BROWSER);
+    const { pane } = panes[0];
+    // At least two terminals, so this pane's strip is in line with two chips.
+    await ev(`(async () => { const T = window.__nexterm.useTerminalStore.getState(); const leaves = (n) => (n.type === 'leaf' ? [n] : n.children.flatMap(leaves));
+      const p = T.groups.flatMap((g) => leaves(g.tree)).find((l) => l.id === ${JSON.stringify(pane)});
+      if (p.tabIds.length < 2) await T.createTab(null, { paneId: ${JSON.stringify(pane)}, groupId: T.getActiveGroup().id }); return true; })()`);
+    await sleep(500);
+    const chips = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-tab-strip="${pane}"] [data-tab-chip]')].filter((c) => !c.closest('[data-strip-overlay]')).map((c) => c.dataset.tabChip))`));
+    assert.ok(chips.length >= 2, `setup: the pane's strip in line with two chips: ${JSON.stringify(chips)}`);
+    // The pointer away from every chip; the keyboard onto the first, then Tab to the next, as a keyboard does.
+    await move(2, 2);
+    await sleep(150);
+    // A terminal an earlier case left the keyboard in may take it back a moment later: settle on the chip first.
+    for (let i = 0; i < 10; i += 1) {
+      await ev(`document.querySelector('[data-tab-chip="${chips[0]}"]').focus()`);
+      await sleep(150);
+      if ((await ev(`document.activeElement?.dataset?.tabChip ?? null`)) === chips[0]) break;
+    }
+    assert.equal(await ev(`document.activeElement?.dataset?.tabChip ?? null`), chips[0], 'setup: the first chip does not keep the keyboard');
+    await key('Tab', 'Tab', 9);
+    await sleep(50);
+    const focused = await ev(`document.activeElement?.dataset?.tabChip ?? null`);
+    assert.equal(focused, chips[1], 'setup: Tab did not land on the next chip');
+    assert.equal(await ev(`document.activeElement.matches(':focus-visible')`), true, "setup: the keyboard's focus is not focus-visible");
+    await sleep(700);
+    const card = await ev(`document.querySelector('[data-hover-card="${focused}"]')?.id ?? null`);
+    assert.ok(card, 'no card for the chip the keyboard is on');
+    assert.equal(await ev(`document.activeElement.getAttribute('aria-describedby')`), card, "the chip does not name its card in aria-describedby");
+    assert.equal(await ev(`document.querySelectorAll('[data-hover-card]').length`), 1, 'one card at a time');
+    await key('Escape', 'Escape', 27);
+    await sleep(150);
+    assert.equal(await ev(`document.querySelector('[data-hover-card]') === null`), true, 'Escape left the card open');
+    assert.equal(await ev(`document.activeElement?.dataset?.tabChip ?? null`), focused, 'Escape took the keyboard off the chip');
+    assert.equal(await ev(`document.activeElement.hasAttribute('aria-describedby')`), false, 'the chip still names a card that is gone');
+    await sleep(800);
+    assert.equal(await ev(`document.querySelector('[data-hover-card]') === null`), true, 'the card came back while the keyboard stayed on the chip');
+  });
+
+  test("HS-17: a card shown on a chip goes when closing the pane's other terminal moves the strip into the hidden strip's overlay", async () => {
+    if (!harness) skip(NO_BROWSER);
+    const { pane } = panes[0];
+    const inLine = async () => JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-tab-strip="${pane}"] [data-tab-chip]')].filter((c) => !c.closest('[data-strip-overlay]')).map((c) => c.dataset.tabChip))`));
+    // Down to two terminals: closing one more hides the strip.
+    for (const extra of (await inLine()).slice(2)) {
+      await ev(`(async () => { await window.__nexterm.useTerminalStore.getState().closeTab(${JSON.stringify(extra)}); return true; })()`);
+    }
+    await sleep(400);
+    const chips = await inLine();
+    assert.equal(chips.length, 2, `setup: two chips in line: ${JSON.stringify(chips)}`);
+    const [other, kept] = chips;
+    await ev(`document.activeElement?.blur?.()`);
+    const [x, y] = JSON.parse(
+      await ev(`JSON.stringify((() => { const r = document.querySelector('[data-tab-chip="${kept}"]').getBoundingClientRect(); return [Math.round(r.left + 12), Math.round(r.top + r.height / 2)]; })())`)
+    );
+    await move(2, 2);
+    await sleep(150);
+    await move(x, y);
+    await sleep(800);
+    assert.equal(await ev(`!!document.querySelector('[data-hover-card="${kept}"]')`), true, 'setup: the card shows for the chip under the pointer');
+    // The other terminal closed from the keyboard's side, the pointer resting: the strip hides.
+    await ev(`(async () => { await window.__nexterm.useTerminalStore.getState().closeTab(${JSON.stringify(other)}); return true; })()`);
+    await sleep(400);
+    assert.equal(await ev(`!!document.querySelector('[data-pane-body="${pane}"]')?.closest('[data-strip-hidden]')`), true, 'setup: the strip did not hide');
+    assert.equal(await ev(`document.querySelector('[data-hover-card]') === null`), true, 'the card stayed where the chip was before the strip moved');
+    await move(2, 2);
+    await sleep(200);
   });
 
   test('HS-99: teardown — the server and the browser session are gone', async () => {

@@ -7,6 +7,8 @@
 import {
   DEFAULT_PROJECT_FILES,
 } from './constants.js';
+// The backend's `size_label`, as the refusals below say a size: one copy, shared with the preview.
+import { sizeLabel } from './sizeLabel.js';
 
 function parseCommandLine(cmdLine) {
   const tokens = [];
@@ -99,6 +101,102 @@ function mockBranchName(name) {
 
 /** The most of `.nexterm/commands.json` that `project_commands_read` reads — the backend's `MAX_BYTES` (src-tauri/src/fs/project_commands.rs). */
 const MOCK_PROJECT_COMMANDS_MAX_BYTES = 256 * 1024;
+
+/**
+ * `fs_read_image`'s limits and the fixed words its refusals start with —
+ * `MAX_IMAGE_BYTES`, `MAX_IMAGE_SIDE`, `MAX_IMAGE_PIXELS`, `NOT_FOUND`,
+ * `NOT_AN_IMAGE` and `TOO_LARGE` in src-tauri/src/fs/preview.rs. Restated so
+ * the mock imports nothing of the app's, and held to the backend's source by
+ * tests/adversarial/image_preview.test.js.
+ */
+const MOCK_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+const MOCK_IMAGE_MAX_SIDE = 32768;
+const MOCK_IMAGE_MAX_PIXELS = 32 * 1024 * 1024;
+const MOCK_IMAGE_NOT_FOUND = 'File not found';
+const MOCK_IMAGE_NOT_AN_IMAGE = 'File is not an image NexTerm can show';
+const MOCK_IMAGE_TOO_LARGE = 'Image is too large to preview';
+/** The formats the backend tells by their bytes; anything else is "no PNG, JPEG, GIF, WebP or SVG". */
+const MOCK_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml']);
+
+/** How many bytes standard base64 `data` holds. */
+function mockBase64Bytes(data) {
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return Math.max(0, (data.length / 4) * 3 - padding);
+}
+
+/** `bytes` (a Uint8Array) as standard base64, in slices so a large file does not overflow the call stack. */
+function mockBase64Of(bytes) {
+  let binary = '';
+  for (let at = 0; at < bytes.length; at += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Whether `text` starts as an SVG, the way the backend tells one
+ * (`starts_as_svg`, src-tauri/src/fs/preview.rs): after one byte-order mark,
+ * XML white space, processing instructions, comments and a doctype, the
+ * first element is `<svg` followed by white space, `>` or `/`. Looked at
+ * within the first 64 Ki characters, as the backend looks within its first
+ * 64 KB.
+ */
+function mockStartsAsSvg(text) {
+  let rest = text.slice(0, 64 * 1024).replace(/^\u{feff}/u, '');
+  for (;;) {
+    rest = rest.replace(/^[ \t\r\n]+/, '');
+    let end = -1;
+    if (rest.startsWith('<?')) {
+      end = rest.indexOf('?>', 2);
+      if (end !== -1) end += 2;
+    } else if (rest.startsWith('<!--')) {
+      end = rest.indexOf('-->', 4);
+      if (end !== -1) end += 3;
+    } else if (rest.slice(0, 9).toUpperCase() === '<!DOCTYPE') {
+      let depth = 0;
+      let quote = null;
+      for (let at = 9; at < rest.length && end === -1; at += 1) {
+        const char = rest[at];
+        if (quote) {
+          if (char === quote) quote = null;
+        } else if (char === '"' || char === "'") quote = char;
+        else if (char === '[') depth += 1;
+        else if (char === ']') depth = Math.max(0, depth - 1);
+        else if (char === '>' && depth === 0) end = at + 1;
+      }
+    } else {
+      return /^<svg[ \t\r\n>/]/.test(rest);
+    }
+    if (end === -1) return false;
+    rest = rest.slice(end);
+  }
+}
+
+/**
+ * The mock's own image files, which `fs_read_image` answers from: by path,
+ * `{ mime, data, width, height }` as the backend would read them — `data`
+ * standard base64, `width` and `height` the header's, absent for an SVG. An
+ * entry may also say `bytes`, its size on disk, which then counts instead of
+ * the size of `data`: a file too large to hold here. Not in the Explorer's
+ * tree, Go to File or the search, so the mock's tree stays what every suite
+ * knows: a suite or a view opens one by its path, and a suite adds its own
+ * to `mockBridge.images`.
+ *
+ * - logo.png: a real 4 × 3 PNG (RGBA), a light column on a dark ground.
+ * - logo.svg: a 64 × 64 prompt glyph.
+ */
+const MOCK_IMAGE_SVG_TEXT = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
+  + '<rect width="64" height="64" rx="12" fill="#1e1e2e"/>'
+  + '<path d="M16 20l12 12-12 12M32 44h16" stroke="#89b4fa" stroke-width="5" fill="none"/></svg>\n';
+const MOCK_IMAGES = {
+  '/workspace/assets/logo.png': {
+    mime: 'image/png',
+    data: 'iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAYAAAC09K7GAAAAF0lEQVR42mOQk9P737nl138QDcIMBAUANcIWVJdRDv4AAAAASUVORK5CYII=',
+    width: 4,
+    height: 3,
+  },
+  '/workspace/assets/logo.svg': { mime: 'image/svg+xml', data: btoa(MOCK_IMAGE_SVG_TEXT) },
+};
 
 /**
  * The saved scrollback's caps, as the backend keeps them: 2 MiB of UTF-8 a
@@ -809,6 +907,9 @@ class BrowserMockBridge {
     this.eventListeners = new Map();
     this.files = new Map(Object.entries(DEFAULT_PROJECT_FILES));
     this.directories = new Set(['/workspace', '/workspace/src', '/workspace/tests']);
+    // The image files `fs_read_image` answers from, besides the SVGs among
+    // `files` — see MOCK_IMAGES.
+    this.images = new Map(Object.entries(MOCK_IMAGES).map(([path, image]) => [path, { ...image }]));
     this.agentLogs = new Map();
     this.systemInfo = {
       os: 'macos',
@@ -1501,6 +1602,20 @@ class BrowserMockBridge {
         if (!session) throw new Error(`PTY session not found: ${sessionId}`);
         return { same_user: session.foregroundSameUser === undefined ? true : session.foregroundSameUser };
       }
+      // CPU and memory of each terminal's process tree
+      // (src-tauri/src/pty/resources.rs). The mock's shells are no processes,
+      // so there is nothing to measure: every one is left out, as the
+      // backend leaves out a terminal it cannot measure.
+      case 'pty_resource_usage': {
+        const sessionIds = args?.session_ids;
+        if (sessionIds === undefined) {
+          throw mockInvalidArgs(command, 'session_ids', `command ${command} missing required key session_ids`);
+        }
+        if (!Array.isArray(sessionIds) || !sessionIds.every((id) => typeof id === 'string')) {
+          throw mockInvalidArgs(command, 'session_ids', 'invalid type: expected a sequence of strings');
+        }
+        return [];
+      }
 
       // 4. pty_kill
       case 'pty_kill': {
@@ -1792,9 +1907,63 @@ class BrowserMockBridge {
       case 'fs_read_file': {
         const { path } = args;
         if (!this.files.has(path)) {
+          // One of the mock's images is there, and is no text — but an SVG,
+          // which is UTF-8 text the backend reads like any other.
+          const image = this.images.get(path);
+          if (image?.mime === 'image/svg+xml') {
+            const binary = atob(image.data);
+            return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+          }
+          if (image) throw new Error(`File is not UTF-8 text: ${path}`);
           throw new Error(`File not found: ${path}`);
         }
         return this.files.get(path);
+      }
+
+      // fs_read_image — an image file for an image tab, in the backend's
+      // shape (src-tauri/src/fs/preview.rs): `{ mime, data, bytes, width,
+      // height }`, `data` standard base64, `width` and `height` null for an
+      // SVG. From the mock's images (`this.images`, MOCK_IMAGES), else from
+      // a text file among `files` that starts as an SVG; refused in the
+      // backend's words and order: nothing there, a folder, over 20 MB
+      // (before anything else is looked at), a text file that is no SVG, a
+      // raster image without a valid size, a size past 32768 px a side or
+      // 32 Mi pixels. Every folder is open here, as for `fs_read_file`: no
+      // confinement refusal is had from the mock.
+      case 'fs_read_image': {
+        const path = mockStringArg(command, args, 'path');
+        const notAnImage = (why) => new Error(`${MOCK_IMAGE_NOT_AN_IMAGE} (${why}): ${path}`);
+        const tooManyBytes = (bytes) => new Error(
+          `${MOCK_IMAGE_TOO_LARGE} (${sizeLabel(bytes)}; the limit is ${MOCK_IMAGE_MAX_BYTES / (1024 * 1024)} MB): ${path}`
+        );
+        if (this.files.has(path)) {
+          const text = String(this.files.get(path) ?? '');
+          const bytes = new TextEncoder().encode(text);
+          if (bytes.length > MOCK_IMAGE_MAX_BYTES) throw tooManyBytes(bytes.length);
+          if (!mockStartsAsSvg(text)) throw notAnImage('it is no PNG, JPEG, GIF, WebP or SVG');
+          return { mime: 'image/svg+xml', data: mockBase64Of(bytes), bytes: bytes.length, width: null, height: null };
+        }
+        const image = this.images.get(path);
+        if (!image) {
+          const folder = this.directories.has(path) || [...this.files.keys(), ...this.images.keys()].some((key) => key.startsWith(`${path}/`));
+          if (folder) throw notAnImage('it is not a file');
+          throw new Error(`${MOCK_IMAGE_NOT_FOUND}: ${path}`);
+        }
+        const data = typeof image.data === 'string' ? image.data : '';
+        const bytes = Number.isSafeInteger(image.bytes) && image.bytes >= 0 ? image.bytes : mockBase64Bytes(data);
+        if (bytes > MOCK_IMAGE_MAX_BYTES) throw tooManyBytes(bytes);
+        if (!MOCK_IMAGE_MIMES.has(image.mime)) throw notAnImage('it is no PNG, JPEG, GIF, WebP or SVG');
+        if (image.mime === 'image/svg+xml') return { mime: image.mime, data, bytes, width: null, height: null };
+        const { width, height } = image;
+        if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+          throw notAnImage('its header is not valid');
+        }
+        if (width > MOCK_IMAGE_MAX_SIDE || height > MOCK_IMAGE_MAX_SIDE || width * height > MOCK_IMAGE_MAX_PIXELS) {
+          throw new Error(
+            `${MOCK_IMAGE_TOO_LARGE} (${width} \u{00d7} ${height}; the limit is ${MOCK_IMAGE_MAX_SIDE} px per side and ${MOCK_IMAGE_MAX_PIXELS / (1024 * 1024)} Mi pixels): ${path}`
+          );
+        }
+        return { mime: image.mime, data, bytes, width, height };
       }
 
       case 'fs_file_size': {

@@ -2229,6 +2229,324 @@ release build, with a folder open that has `src\a.js` of at least 20 lines:
 5. **V71-5:** V71-1 and V71-2 again with Claude Code started in Git Bash: the
    path is still typed as `C:\…`; write down whether Claude Code reads it.
 
+### V72 — the tab hover card (bundle 4, B12; AC-B12-H1)
+
+Covered under Node by tests/adversarial/tab_hover_card.test.js (HC-*: the
+rows, the cleaning of control, bidirectional and zero-width characters, the
+600 ms wait and the 100 ms grace on fake timers, the switch between chips,
+Escape and `aria-describedby`; mounted, HC-60..62: the card going when its
+chip element is replaced, closed chips let go, the card placed again when it
+grows) and the render suite (RN-242, RN-243, RN-185: no native title on a
+terminal chip, its ✕ or its *controlled* badge, the card a tooltip that takes
+no pointer, no fade under reduced motion), and in headless Chromium by
+split_lock_headless.test.js (HS-16: keyboard focus on a real chip, Escape,
+`aria-describedby`; HS-17: the card going when the strip hides). None of
+them draws WebView2 or moves a real pointer on Windows. On a release build, with two terminals in one pane, one of them a
+PowerShell terminal in a deep folder:
+
+1. **V72-1:** Rest the pointer on a terminal tab. After about half a second a
+   card opens just below the tab, in the dark theme, on the same surface as
+   a menu: the full name, the folder with its middle cut out, *Shell
+   PowerShell* (or *cmd*, *Git Bash*, *WSL*), and the dimmed line *Drag to
+   reorder or move · Double-click to rename*. No Windows tooltip opens beside
+   it, now or later, also with the pointer resting on the tab's ✕.
+2. **V72-2:** Move straight to the next tab: the card switches at once. Move
+   down into the terminal: it goes within a moment, and a click on the
+   terminal's first row, even where the card was, lands in the terminal (the
+   cursor or a selection starts there).
+3. **V72-3:** Press on a tab, drag it a little and drop it back: no card
+   during the drag nor right after it. Double-click to rename and right-click
+   for the menu: no card over either.
+4. **V72-4:** Tab into the strip with the keyboard until a tab has the focus
+   ring: the card opens after the same wait; `Escape` closes it and the focus
+   ring stays on the tab. With Narrator on, the tab is read with its name and
+   then the card's words.
+   With Settings ▸ Terminal ▸ *Hide Single Tab Strip* on, rest the pointer on
+   one of a pane's two tabs until its card shows, then close the other
+   terminal with its keyboard shortcut: the strip hides and the card goes
+   with it, nothing left over the terminal.
+5. **V72-5:** Run `Start-Sleep 30` and hover the tab: the card says
+   *Running*. Turn the terminal read-only: the card lists the read-only words.
+   Start Claude Code, give it work, and hover after a minute or more: *Claude
+   Code · Working for N minutes*.
+6. **V72-6:** Turn Windows' animations off (Windows 11: Settings ▸
+   Accessibility ▸ Visual effects ▸ *Animation effects*; Windows 10: Ease of
+   Access ▸ Display ▸ *Show animations in Windows*), or turn on Settings ▸
+   Workbench ▸ *Reduce Motion* in NexTerm: the card appears without fading
+   in.
+
+The same six checks on macOS and Linux are the rest of AC-B12-H1; write down
+which platforms were looked at.
+
+### V73 — CPU and memory of each terminal (bundle 4, B8; AC-B8-H1..H4, README H8–H11)
+
+Covered by `cargo test` in src-tauri/src/pty/resources.rs (the CPU percent
+from two samples, 100 being one core; a pid reused with a new start not
+counted as a delta; one process listing per call however many terminals are
+asked about; partial answers; and, on macOS and Linux only, a real child in
+its shell's tree with memory and a busy `yes` reading about one core), by
+tests/adversarial/resource_usage.test.js (RU-*: the formatting, sampling
+every 5 s, with one more sample 1 s after the first answer of each start,
+only while the setting is on, the window can be seen and the TERMINALS
+panel or a hover card is on screen, no figure kept across a stop, and the
+row and the card mounted — RU-44: the card's CPU 1.6 s after the pointer
+came onto the tab with the panel hidden, on fake timers) and tab_hover_card.test.js (HC-12, HC-13), and by the render suite
+(RN-244, RN-245: the row and the card, on and off). On Windows nothing reads
+a real process: the Toolhelp snapshot, `GetProcessTimes` and the working
+set are only ever called here. On a release build, with Settings ▸ Terminal
+▸ *Show CPU and Memory* turned on and the TERMINALS panel showing:
+
+1. **V73-1 (AC-B8-H2, cmd):** In a cmd terminal run a busy loop,
+   `for /l %i in (0,0,1) do @rem`. Within one or two samples (5 to 10 s) its
+   row ends with about *100%* — one core, not 100 divided by the number of
+   cores — and the memory beside it is close to Task Manager's *Memory*
+   column (Details tab: *Working set*) for `cmd.exe`. Press `Ctrl+C`: back
+   to about *0%* within two samples.
+2. **V73-2 (AC-B8-H2, PowerShell):** In a PowerShell terminal run
+   `while ($true) {}`: about *100%* again, and memory close to Task Manager's
+   for `powershell.exe` (or `pwsh.exe`). `Ctrl+C`, then run the loop in a
+   child instead, `powershell -NoProfile -c "while (1) {}"`: about *100%*
+   again, though the shell itself waits — the child is counted in its
+   shell's tree — and the memory is now the two processes added up.
+3. **V73-3 (AC-B8-H2, WSL):** Open a WSL terminal and run `yes > /dev/null`
+   in it: its row says *not measurable*, and hovering it says why. Nothing
+   in WSL is measured, so nothing else changes.
+4. **V73-4:** Hover a busy terminal's tab: the hover card has a *Usage* line
+   between *Shell* and the flags with the same figure as the row, and it
+   follows the row while the card stays open. Hide the TERMINALS panel and
+   hover the tab again: the *Usage* line reads *measuring* at first and has
+   a CPU figure about 1.6 s after the pointer came onto the tab, never a
+   figure from the earlier hover. Hover the row's figure: it
+   says *CPU N% of one core, memory N MB, in N processes.* With Narrator on,
+   the row is read with those words.
+5. **V73-5:** Watch a terminal you just opened, or one after the window was
+   minimised and brought back: its CPU says *measuring* first, then a
+   figure about 1 s later.
+6. **V73-6:** Turn *Show CPU and Memory* off: every figure goes at once, from
+   the rows and from the card, and the rows keep their height.
+7. **V73-7 (AC-B8-H4):** Open 20 terminals in one window, idle at a prompt.
+   In Task Manager, note NexTerm's own CPU (`NexTerm.exe` and its
+   `msedgewebview2.exe` processes together) over 60 s with the setting on
+   and the TERMINALS panel showing, then over 60 s with it off. The two
+   differ by less than 1% of one core (Task Manager shows a share of all
+   cores: multiply by the number of logical processors).
+
+AC-B8-H1 is the same on macOS: `yes > /dev/null` shows about *100%* within
+one or two samples, and a node dev server's memory (`npx vite`, say) is
+close to Activity Monitor's *Memory* column for its processes added up.
+AC-B8-H3 is the same on Linux, against `top` (`%CPU` per process, `RES`).
+AC-B8-H4 on macOS with Activity Monitor's *% CPU* for NexTerm. Write down
+which platforms were looked at, and the figures seen beside the system's.
+
+### V74 — nexterm-cli wait (bundle 4, B2; AC-B2-H1, AC-B2-H2, README H12–H13)
+
+Covered by `cargo test` in src-tauri/cli: wait.rs (each poll's judgement —
+settled, busy, blocked, exited, closed — with the 1 s settle and the 3.5 s
+grace, the timeout, the backoff for a busy NexTerm, the checks on the first
+answer, and the output, all on a fake clock and a fake connection), args.rs
+(TARGET, `--for`, `--timeout`), usage.rs and guide.rs (the help, the guide,
+exit codes 6–8, ASCII within 80 columns) and tests/cli.rs (the built binary
+prints both outside NexTerm); `activity` in `list` by
+tests/adversarial/control_dispatcher.test.js (CD-61) and
+agent_activity.test.js (AA-51). No suite runs wait against a real NexTerm,
+or with the real clock past a first poll; none runs Claude Code, and none
+reaches Windows' named pipe from cmd, PowerShell or WSL. The exit code is `%ERRORLEVEL%` in
+cmd, `$LASTEXITCODE` in PowerShell and `$?` in WSL. On a release build,
+with Settings ▸ Terminal ▸ *Control* ▸ *Let programs type into and read
+terminals* on (V74-5 types a command into a split), in a PowerShell
+terminal A:
+
+1. **V74-1 (AC-B2-H2, PowerShell):** Open a split B with
+   `$id = nexterm-cli new-split --down` and leave B at its prompt.
+   - `nexterm-cli wait "child:$id" --for exit --timeout 5s; $LASTEXITCODE`:
+     after about 5 s, `nexterm-cli: child:tab-term-N timed out after 5s
+     (still open)` and `6`.
+   - `nexterm-cli wait "child:$id"; $LASTEXITCODE`: after about 4 s,
+     `child:tab-term-N is idle after 4s` (or 5s) and `0`.
+   - Run `Start-Sleep 20` in B, then the same `wait` in A: it returns about
+     a second after the sleep ends, with `0`. If it returns within a few
+     seconds instead, B's row never showed *Running*: write that down.
+   - `nexterm-cli --json wait "child:$id" --for exit --timeout 5s;
+     $LASTEXITCODE`: one line,
+     `{"target":"child:tab-term-N","outcome":"timed_out","status":"none","waited_ms":5…}`,
+     nothing else, and `6`.
+   - `nexterm-cli wait "child:$id" --for exit --timeout 0`, then `Ctrl+C`
+     after a few seconds: the prompt comes back at once. Write down
+     `$LASTEXITCODE`, and that no `nexterm-cli.exe` is left in Task Manager.
+   - `nexterm-cli wait self; $LASTEXITCODE`: wait's usage and `2`.
+2. **V74-2 (AC-B2-H2, cmd):** In a cmd terminal, `nexterm-cli new-split
+   --down` prints the new id. `nexterm-cli wait child:<that id> --for exit
+   --timeout 5s` then `echo %ERRORLEVEL%`: the timed-out line after about
+   5 s, and `6`. Start it again with `--timeout 0` and press `Ctrl+C`: the
+   prompt comes back at once, and no `nexterm-cli.exe` is left.
+3. **V74-3 (AC-B2-H2, WSL):** In a WSL terminal,
+   `id=$(nexterm-cli.exe new-split --down)`, then
+   `nexterm-cli.exe wait "child:$id" --for exit --timeout 5s; echo $?`: the
+   timed-out line and `6`. If the id carries a carriage return (the wait
+   says there is no such terminal), write that down. `Ctrl+C` stops a
+   `--timeout 0` wait at once, and no `nexterm-cli.exe` is left on the
+   Windows side.
+4. **V74-4 (`--for exit`, closed or exited):** In A,
+   `nexterm-cli wait "child:$id" --for exit --timeout 2m; $LASTEXITCODE`,
+   then type `exit` in B: A prints `child:tab-term-N exited after Ns` or
+   `… was closed after Ns`, and `0`. Open a new split, run `Start-Sleep 60`
+   in it, start `nexterm-cli wait "child:<its id>"` in A and close the
+   split with its tab's close button: `nexterm-cli: … was closed after Ns,
+   before it was idle` and `8`.
+5. **V74-5 (AC-B2-H1, idle):** `$id = nexterm-cli new-split --down --
+   claude` starts Claude Code in a split. Write down its version. Type a
+   short task there that needs no permission ("say hello"), press `Enter`,
+   and at once run `nexterm-cli wait "child:$id" --timeout 10m;
+   $LASTEXITCODE` in A (started before the task, it would return as soon as
+   Claude Code showed idle). When the turn ends, A prints
+   `child:tab-term-N is idle after …` and `0`; write down how long after
+   the turn's end that was.
+6. **V74-6 (AC-B2-H1, blocked with Kitty notifications):** In that Claude
+   Code, set its notifications to Kitty (OSC 99) in `/config`; write down
+   the exact setting. Give it a task that asks for a permission ("create a
+   file named wait-check.txt"), then start the same `wait` in A. When the
+   permission prompt shows, A should print `nexterm-cli: … is blocked after
+   …: waiting for input` and `7`. Write down what B's TERMINALS row and
+   Claude Code's title showed during the prompt.
+7. **V74-7 (AC-B2-H1, blocked with the hook):** Notifications back to their
+   default, and the README's `PermissionRequest` hook in
+   `.claude\settings.json` instead: V74-6 again, expecting `7`.
+8. **V74-8 (AC-B2-H1, neither):** Default notifications and no hook: V74-6
+   again, with `--timeout 2m`. Write down what wait did at the permission
+   prompt — `0` (Claude Code's title said idle), `6` (it said working until
+   the timeout) or `7` — and the title glyph. Either is a finding, not a
+   failure; the README's *What it cannot see* says why.
+
+V74-4 to V74-8 in zsh or bash on macOS and Linux (`$?` for the exit code)
+are the rest of AC-B2-H1; write down which platforms were looked at, and
+Claude Code's version on each.
+
+### V75 — image and Markdown previews (bundle 5, B4 and B3; AC-B4-H1..H3, AC-B3-H1..H2, README H14–H18)
+
+Covered by `cargo test` in src-tauri: fs::preview (each format by its
+signature, the 20 MB, 32,768 px and 32 Mi pixel limits, a cut-short or
+invalid header, an SVG after a BOM or prolog, a FIFO) and the command tests
+on real folders (a link inside the folder pointing out, `../x.png`, no
+folder open), on Windows only in CI. Covered by the JS suites against the
+browser mock: image_preview, editor_preview_tabs, markdown_preview,
+markdown_render_worker, markdown_preview_mounted, markdown_preview_live,
+and the render suite. tests/adversarial/preview_headless.test.js draws the
+built app in headless Chromium, with and without the production CSP: a
+hostile SVG and a hostile Markdown document make no request to a counting
+listener, and no click navigates. It also shows that the built Markdown
+worker loads from the page's origin under the CSP, and is stopped after 5 s.
+Chromium is the engine WebView2 is built on, but not WebView2. No suite runs
+WebView2, its `http://tauri.localhost` origin, the CSP as Tauri rewrites it,
+the real `fs_read_image` on NTFS, backslash paths, a junction or the system
+browser. Do these checks on a release build.
+
+Before you start, make a folder `C:\v75` and open it in NexTerm, with:
+- `assets\` holding a PNG, a JPEG, an animated GIF, a WebP and an SVG, a
+  transparent PNG, a 25 MB photo, a `notes.md`, and `huge.png`, a tiny PNG whose header
+  declares 20000 × 20000. Any image editor can make the first ones; for
+  `huge.png`, change the IHDR width and height bytes of a small PNG (fix
+  the CRC or not; it is refused on the header).
+- `hostile.svg`, from the README's H15. Start a listener in a PowerShell
+  terminal that counts what reaches it:
+  `python -m http.server 8975 --bind 127.0.0.1`. Write each request line
+  it prints down.
+- outside the folder, `C:\outside\secret.md` and `C:\outside\secret.png`,
+  and a junction `C:\v75\docs-link` made with
+  `mklink /J C:\v75\docs-link C:\outside`.
+
+1. **V75-1 (AC-B4-H1, formats):** Open each image in `assets\` from the
+   Explorer. Each opens in an image tab, fitted, never enlarged; the status
+   line reads `W × H · size` (`SVG · size` for the SVG). The GIF animates,
+   and the transparent PNG shows the checkerboard and reads well on the dark
+   theme. *100%*, *Zoom Out* and *Zoom In* step between 10% and 800%, and
+   *Fit* comes back. The wheel and the touchpad scroll and never zoom.
+   Write down the WebView2 version.
+2. **V75-2 (AC-B4-H2, hostile SVG):** Open `hostile.svg`. It is drawn as a
+   picture; no dialog opens; the listener prints nothing. Click and
+   double-click the picture: still nothing. Open it again from the command
+   palette's file search: the same.
+3. **V75-3 (AC-B4-H3, limits and memory):** `huge.png` shows *Image is too
+   large to preview (20000 × 20000; the limit is 32768 px per side and 32
+   Mi pixels)*, and the 25 MB photo *Image is too large to preview (… MB;
+   the limit is 20 MB)* with its size; neither draws a picture. Write down
+   NexTerm's memory in Task Manager, open and close ten large images one
+   after another, and write it down again: it should come back to near
+   where it was.
+4. **V75-4 (AC-B3-H1, README):** Copy NexTerm's README.md and its `docs\`
+   folder into `C:\v75`, and open its preview from the breadcrumb's eye
+   button. It is legible on the dark theme, its relative image
+   (`docs\nexterm-demo.gif`) loads, and tables, code and task lists look
+   right. Click an `https` link: *Open External Link?* shows the address;
+   *Cancel* does nothing; *Open* opens the system browser, and the NexTerm
+   window stays where it was.
+5. **V75-5 (AC-B3-H2, hostile Markdown, backslash paths, the junction):**
+   Make `C:\v75\hostile.md` from the README's H18 list, with the listener's
+   port, and add:
+   - `![back](assets\logo.png)` and `[back link](assets\notes.md)`, written
+     with backslashes (they should load and open, as with `/`);
+   - `![junction](docs-link\secret.png)` and
+     `[junction link](docs-link\secret.md)` (both lead out through the
+     junction: a placeholder, and a link that opens nothing or is refused,
+     saying why);
+   - `[outside](..\outside\secret.md)` and `![outside](../outside/secret.png)`
+     (inert text and a placeholder);
+   - `![remote](http://127.0.0.1:8975/remote.png)` (a placeholder with the
+     address).
+   Open its preview. No dialog opens, and the listener prints nothing.
+   Click every link: only the `http(s)` ones ask, and Cancel each; nothing
+   else leaves the app or opens a file outside `C:\v75`. Write down what
+   each junction line did.
+6. **V75-6 (OQ-B3g, the worker on WebView2):** README.md's preview in V75-4
+   is the worker loading: if it says *The preview could not be drawn* or
+   stays at *Rendering preview…*, write down the words. Then make
+   `C:\v75\complex.md` holding `[a](` repeated 300,000 times (in
+   PowerShell: `Set-Content C:\v75\complex.md ('[a](' * 300000)`) and open
+   its preview: after about 5 s it shows *Too complex to preview* with
+   *Open as Text*, and the window answers clicks and typing in a terminal
+   the whole time. Replace the file's text with `# fine` from outside
+   NexTerm: the preview draws it.
+7. **V75-7 (live update):** Open `hostile.md`'s text tab beside its
+   preview and type a line: the preview shows it about 300 ms after you
+   stop, before you save. Close the text tab without saving: the preview
+   goes back to the saved file.
+8. **V75-8 (the Explorer entry):** Right-click `hostile.md` in the Explorer:
+   *Open Preview* is there, right after *Open*, and opens the preview;
+   a plain click on the file opens its text. Right-click an image or a
+   `.txt` file: there is no *Open Preview*. The palette's *Open Markdown
+   Preview* is listed only while a Markdown text tab is the active one.
+   Restart NexTerm: the text tabs come back, the previews do not.
+9. **V75-9 (OQ-B4d, an SVG's source; reviewer B R1):** Open the SVG in
+   `assets\` from the Explorer: its picture opens, with *Open as Text* at
+   the right of the toolbar. Click it: the SVG's text opens in a tab of its
+   own, and the picture stays open. Click *Open as Text* again: the same
+   text tab comes forward, with no second one. Edit and save it: the picture
+   follows. The PNG, JPEG, GIF and WebP have no *Open as Text*. In a
+   PowerShell terminal run `echo assets\logo.svg:3` (the SVG's name) and
+   click the link: the text tab opens at line 3. Search for a word in the
+   SVG and click the hit: the text at that line. Then open `notes.md`'s
+   preview, and in a terminal run `ren assets assets-old`: within a second
+   the preview says *Deleted on disk*. Run `ren assets-old assets`: it shows
+   the file again. Make `assets\new.svg` with the Explorer's *New File*: it
+   opens empty in the text editor, not as a refused picture.
+10. **V75-10 (later frames; reviewer A2 R2):** Only an image's first frame is
+    measured. Make two files from small ones with a hex editor: a two-frame
+    GIF with a 16 × 16 canvas whose **second** image descriptor says
+    20000 × 20000, and an animated WebP with a 16 × 16 VP8X canvas whose
+    second `ANMF` frame says 16384 × 16384. Open each from the Explorer and
+    in a Markdown preview (`![gif](gif2.gif) ![webp](anim.webp)`): each is
+    drawn within its canvas, or not at all, and the window answers clicks
+    and typing the whole time. Write down the memory of NexTerm's webview
+    process (Task Manager here) before and while each is shown: a jump of
+    gigabytes is a failure. Do the same on macOS (WKWebView, Activity
+    Monitor) and Linux (WebKitGTK, `top`), whenever a build for them is
+    checked: they decode with other libraries than WebView2.
+11. **V75-11 (a busy folder; reviewer B2 F1):** Open the SVG's picture and
+    `notes.md`'s preview, and in a PowerShell terminal run
+    `while ($true) { Add-Content assets\log.txt x; Start-Sleep -m 100 }`.
+    Edit the SVG from outside NexTerm and save it: the picture follows
+    within about a second, the loop still running. Stop the loop with
+    `Ctrl+C`.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

@@ -87,15 +87,16 @@ import { NO_DIRECTORY_REASON, NO_DIRECTORY_YET, PATH_COPIED, copyAndConfirm } fr
 import { copyContextItem } from '../../lib/copyContext.js';
 import { lastCommandOutputItem } from '../../lib/lastCommandOutput.js';
 import { contextTerminalOf } from '../../lib/copyContext.js';
-import { READ_ONLY_LABEL, readOnlyItem } from '../../lib/readOnly.js';
+import { readOnlyItem } from '../../lib/readOnly.js';
 import { usePathDropStore } from '../../stores/pathDropStore.js';
 import { pathDropLabel } from '../../lib/terminalFileDrop.js';
 import { ControlledBadge, LockBadge, ReadOnlyBadge, StripHandle, StripOverlay } from './HiddenStrip.jsx';
 import { ReadOnlyStrip } from './ReadOnlyStrip.jsx';
 import { headerCloseGestures, stripShown, useRefocusAfterMenu, useStripOverlay } from './stripReveal.js';
-import { TYPING_HIDDEN_LABEL } from '../../lib/secretInput.js';
 import { displayTitle } from '../../lib/tabTitle.js';
 import { useEdgeFade } from '../../hooks/useEdgeFade.js';
+import { useTabHoverCard } from './TabHoverCard.jsx';
+import { hoverCardBlocked } from '../../lib/tabHoverCard.js';
 
 // ---------------------------------------------------------------------------
 // The two-level model this renders (see terminalStore.js's header):
@@ -905,6 +906,9 @@ function TerminalPane({
   const held = stripHidden && (holds.dragging || holds.menuOpen || holds.renaming);
   const stripOverlay = useStripOverlay(stripHidden, { overlayRef, handleRef, held });
   const overlayShown = stripHidden && stripShown({ open: stripOverlay.open, ...holds });
+  // The chips' hover card (bundle 4, B12, TabHoverCard.jsx): their one
+  // tooltip, never shown while a drag, a menu or a rename is in the way.
+  const hoverCard = useTabHoverCard({ blocked: hoverCardBlocked(holds), tabIds: node.tabIds });
   // What closes a terminal or this pane from its header — none of the
   // one-click ways in the opened strip of a hidden one (stripReveal.js).
   const closeGestures = headerCloseGestures({ stripHidden, canClose });
@@ -920,12 +924,9 @@ function TerminalPane({
   // A menu of this pane closed with the keyboard left on the page: back to
   // the terminal (stripReveal.js).
   useRefocusAfterMenu(holds.menuOpen, paneRef);
-  // Which of this pane's terminals is asking for a password, for the words
-  // on their chips (the badge draws itself): booleans, compared one by one.
-  const lockedByTab = useTerminalStore(useShallow((s) => node.tabIds.map((id) => Boolean(s.secretInput?.[id]))));
-  const lockedOf = (tabId) => lockedByTab[node.tabIds.indexOf(tabId)] ?? false;
-  // Which of them are read-only (src/lib/readOnly.js), for the same words and
-  // the chip menu's Turn On / Turn Off Read-Only.
+  // Which of this pane's terminals are read-only (src/lib/readOnly.js), for
+  // the chip menu's Turn On / Turn Off Read-Only. (The chips' badges and
+  // hover card read it, and a password prompt, for themselves.)
   const readOnlyByTab = useTerminalStore(useShallow((s) => node.tabIds.map((id) => Boolean(s.readOnly?.[id]))));
   const readOnlyOf = (tabId) => readOnlyByTab[node.tabIds.indexOf(tabId)] ?? false;
 
@@ -1015,17 +1016,9 @@ function TerminalPane({
           // A file being dragged never dims a terminal, whatever its id.
           const isBeingDragged = drag?.active && drag.tabId === tab.id && drag.tabKind !== EDITOR_KIND;
           const unread = unreadOf(tab.id);
-          // What the dot says, then what the pill says — one sentence for
-          // both, so hovering answers "why is that one red" and "what does
-          // it want" alike. With neither, how to use the chip.
-          const status = [
-            activityLabel(tab),
-            lockedOf(tab.id) ? TYPING_HIDDEN_LABEL : '',
-            readOnlyOf(tab.id) ? READ_ONLY_LABEL : '',
-            unread > 0 ? unreadLabel(unread) : '',
-          ]
-            .filter(Boolean)
-            .join(', ');
+          // What the dot says, in words: the dot is drawn for the eye only,
+          // and the badges and the pill say their own (aria-label).
+          const activity = activityLabel(tab);
 
           if (renamingTabId === tab.id) {
             return (
@@ -1070,15 +1063,15 @@ function TerminalPane({
               aria-selected={isActive}
               aria-grabbed={isBeingDragged}
               data-tab-chip={tab.id}
-              // The activity is said in words as well as drawn as a dot —
-              // a colour is not something a screen reader can read out, and
-              // "why is that one red" should be answerable by hovering.
-              title={
-                status
-                  ? `${displayTitle(tab)} — ${status}`
-                  : `${displayTitle(tab)} — drag along the tabs to reorder it, onto a terminal to move or split it, onto a group chip to move it there, double-click to rename`
-              }
+              // No `title`: the hover card is the chip's one tooltip — its
+              // full name, what it is doing, its folder and shell, its flags,
+              // its last notification and how to use the chip (bundle 4,
+              // B12). It names the card in `aria-describedby` while shown.
+              {...hoverCard.chipProps(tab.id)}
               onPointerDown={(e) => {
+                // A press puts the card away, and it stays away until the
+                // pointer leaves: a drag, a click or a menu is coming.
+                hoverCard.press(tab.id);
                 if (e.button !== 0) return;
                 beginDrag(tab, e);
               }}
@@ -1112,6 +1105,15 @@ function TerminalPane({
                 setChipMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
               }}
               onKeyDown={(e) => {
+                // Escape closes the card, keeping the keyboard here, and
+                // goes no further; with no card it does what it did before.
+                // (A hidden strip's overlay, which takes Escape first, leaves
+                // it to the card: stripReveal.js.)
+                if (e.key === 'Escape' && hoverCard.escape()) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  return;
+                }
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   bindPaneToTab(paneId, tab.id, groupId);
@@ -1142,13 +1144,15 @@ function TerminalPane({
               >
                 {displayTitle(tab)}
               </span>
+              {activity && <span className="sr-only">, {activity}</span>}
               {/* In line, after the title and before the ✕: over the corner
                   it covered the ✕ and sat beside the next tab's title,
                   reading as that one's. It never comes or goes between a
                   press and its release — the store holds a pane's
                   mark-read until the pointer is up — so the ✕ cannot move
-                  out from under a click. */}
-              <UnreadPill count={unread} className="ml-1.5" />
+                  out from under a click. No `title`: the chip's hover
+                  card is its one tooltip, and says the count. */}
+              <UnreadPill count={unread} className="ml-1.5" noTitle />
               {/* Over the chip's own top-left corner, taking no room: a lock
                   coming must not move the ✕ or the "+" under a pointer. */}
               <LockBadge tabId={tab.id} />
@@ -1184,7 +1188,9 @@ function TerminalPane({
                     closeTab(tab.id);
                   }}
                   onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                  title="Close Terminal"
+                  // No `title`: the chip's hover card is its one tooltip,
+                  // and the pointer reaches this button without leaving the
+                  // chip, so a native one would open beside the card.
                   aria-label={`Close ${displayTitle(tab)}`}
                   className={cn(
                     'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover hover:text-vsc-error',
@@ -1286,6 +1292,8 @@ function TerminalPane({
       ) : (
         strip
       )}
+      {/* In a portal on the page's body, below its chip, wherever the strip is. */}
+      {hoverCard.card}
 
       <ContextMenu
         open={Boolean(chipMenu)}

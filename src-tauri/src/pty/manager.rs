@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter};
 use super::osc::{Marker, OscFilter, Piece};
 use super::flow_gate::FlowGate;
 use super::output_batch::{self, Batcher, Outgoing};
+use super::resources::{self, ResourceUsage, Sampler};
 use super::shell_integration;
 use super::startup_query::StartupCursorQuery;
 use crate::models::PtyCommandDonePayload;
@@ -44,6 +45,12 @@ pub struct PtySession {
     /// `None` once the session is killed; dropping the sender ends the thread.
     pub input: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     pub child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// The shell's process id, as `child` gave it when it was spawned: it
+    /// never changes, and is read without `child`'s lock, which the reader
+    /// thread holds while it waits for the shell to exit — for as long as a
+    /// shell that closed its terminal but runs on lives (review A-R3).
+    /// `None` when there was none to give.
+    pub pid: Option<u32>,
     /// How far behind the page is with this session's output, and the hold
     /// on its reader when it is too far (flow_gate.rs).
     pub flow: Arc<FlowGate>,
@@ -461,6 +468,9 @@ pub struct PtyManager {
     /// forgets it as its session ends (src/control/). `None` in the tests
     /// that need no API.
     control: Option<Arc<Control>>,
+    /// Each terminal's CPU and memory, and its last call to measure CPU
+    /// against (resources.rs, `resource_usage`).
+    resources: Mutex<Sampler>,
 }
 
 /// A token issued for a shell that has not started yet: taken back unless
@@ -498,7 +508,15 @@ impl PtyManager {
             counter: AtomicU64::new(1),
             away: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             control: None,
+            resources: Mutex::new(Sampler::new(Box::new(resources::System::new()))),
         }
+    }
+
+    /// The processes listed by `list` instead of the system (tests).
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_process_list(self, list: Box<dyn resources::Enumerate>) -> Self {
+        *self.resources.lock() = Sampler::new(list);
+        self
     }
 
     /// Every shell given a token of `control`'s.
@@ -676,6 +694,7 @@ impl PtyManager {
             created_at,
             master: Mutex::new(Some(pair.master)),
             input: Mutex::new(Some(input_tx)),
+            pid: child.process_id(),
             child: Mutex::new(child),
             flow: Arc::new(crate::perf::flow_gate().with_away(self.away.clone(), super::flow_gate::AWAY_HIGH_WATER)),
         });
@@ -920,9 +939,32 @@ impl PtyManager {
         }
         #[cfg(windows)]
         {
-            let shell = session.child.lock().process_id();
-            Ok(shell.and_then(super::owner::descendants_run_as_us))
+            // The pid kept at spawn: not behind the reader's lock on the child.
+            Ok(session.pid.and_then(super::owner::descendants_run_as_us))
         }
+    }
+
+    /// The CPU and memory of each terminal in `session_ids` — its shell and
+    /// everything descended from it — from one listing of the processes
+    /// however many are asked about (resources.rs). CPU is `None` on a
+    /// terminal's first call; a terminal not there, or whose shell has no
+    /// pid, is left out; one gone is forgotten. At most
+    /// `resources::MAX_ASKED` ids are looked at, none longer than
+    /// `resources::MAX_ID_BYTES`: the rest is ignored. An error only when the
+    /// processes cannot be listed. What `pty_resource_usage` answers.
+    pub fn resource_usage(&self, session_ids: &[String]) -> Result<Vec<ResourceUsage>, String> {
+        let asked = resources::bounded(session_ids);
+        let wanted: HashSet<&str> = asked.iter().map(String::as_str).collect();
+        // Every session there is and the asked ones' shell pids, under the
+        // sessions lock alone — each pid kept at spawn, so no child lock is
+        // waited for — and the processes listed after it is let go.
+        let shells: HashMap<String, Option<u32>> = self
+            .sessions
+            .lock()
+            .iter()
+            .map(|(id, session)| (id.clone(), if wanted.contains(id.as_str()) { session.pid } else { None }))
+            .collect();
+        self.resources.lock().sample(&asked, &shells, std::time::Instant::now())
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -1230,6 +1272,7 @@ mod tests {
                     // As in production: `kill` drops this, which is what ends
                     // the writer thread.
                     input: Mutex::new(Some(input_tx)),
+                    pid: child.process_id(),
                     child: Mutex::new(child),
                     flow: Arc::new(FlowGate::default()),
                 }),
@@ -1319,6 +1362,7 @@ mod tests {
             created_at: Utc::now(),
             master: Mutex::new(Some(pair.master)),
             input: Mutex::new(Some(input_tx)),
+            pid: child.process_id(),
             child: Mutex::new(child),
             flow: Arc::new(FlowGate::default()),
         });
@@ -1772,6 +1816,7 @@ mod canonical_limit_tests {
                     created_at: Utc::now(),
                     master: Mutex::new(Some(pair.master)),
                     input: Mutex::new(Some(tx)),
+                    pid: child.process_id(),
                     child: Mutex::new(child),
                     flow: Arc::new(FlowGate::default()),
                 }),
@@ -1810,6 +1855,7 @@ mod canonical_limit_tests {
                 created_at: Utc::now(),
                 master: Mutex::new(Some(pair.master)),
                 input: Mutex::new(Some(tx)),
+                pid: child.process_id(),
                 child: Mutex::new(child),
                 flow: Arc::new(FlowGate::default()),
             }),
@@ -1855,6 +1901,140 @@ mod canonical_limit_tests {
             let _ = mgr.kill("su");
         } else {
             eprintln!("no set-uid su here; skipping that half");
+        }
+    }
+
+    /// `resource_usage` lists the processes once a call however many
+    /// terminals are asked about (AC-B8-3), leaves an unknown one out, and
+    /// measures a real one: a `cat` in a real pty, with memory, its CPU
+    /// figure from the second call on.
+    #[test]
+    fn resource_usage_lists_the_processes_once_a_call() {
+        use super::resources::{Enumerate, Process, Reading, Seen};
+        use std::sync::atomic::AtomicUsize;
+
+        /// Every root asked for, a process of a page of memory; counted.
+        struct Counting(Arc<AtomicUsize>);
+        impl Enumerate for Counting {
+            fn processes(&mut self, roots: &[u32]) -> Option<Vec<Process>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let read = Seen::Read(Reading { start: 1, cpu_ns: 0, resident_bytes: 4096 });
+                Some(roots.iter().map(|&pid| Process { pid, parent: 1, seen: read }).collect())
+            }
+        }
+        let cat = || {
+            let mut cat = CommandBuilder::new("/bin/sh");
+            cat.args(["-c", "exec cat"]);
+            cat
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mgr = PtyManager::new().with_process_list(Box::new(Counting(calls.clone())));
+        let _held: Vec<_> = ["a", "b", "c"].into_iter().map(|id| hold(&mgr, id, cat())).collect();
+        let asked: Vec<String> = ["c", "ghost", "a", "b"].into_iter().map(String::from).collect();
+        let first = mgr.resource_usage(&asked).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "three terminals, one listing");
+        let order: Vec<&str> = first.iter().map(|u| u.session_id.as_str()).collect();
+        assert_eq!(order, ["c", "a", "b"], "the unknown one left out");
+        assert!(first.iter().all(|u| u.cpu_percent.is_none() && u.memory_bytes == 4096 && u.processes == 1));
+        std::thread::sleep(Duration::from_millis(5));
+        let second = mgr.resource_usage(&asked[..1]).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(second[0].cpu_percent, Some(0.0));
+        assert!(mgr.resource_usage(&["ghost".to_string()]).unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "nothing to measure, nothing listed");
+        for id in ["a", "b", "c"] {
+            let _ = mgr.kill(id);
+        }
+
+        let mgr = PtyManager::new();
+        let _output = hold(&mgr, "ours", cat());
+        let asked = ["ours".to_string()];
+        let first = mgr.resource_usage(&asked).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].cpu_percent.is_none() && first[0].processes >= 1 && first[0].memory_bytes > 0, "{first:?}");
+        std::thread::sleep(Duration::from_millis(20));
+        let second = mgr.resource_usage(&asked).unwrap();
+        assert!(second[0].cpu_percent.is_some_and(|cpu| cpu >= 0.0), "{second:?}");
+        let _ = mgr.kill("ours");
+        assert!(mgr.resource_usage(&asked).unwrap().is_empty(), "a killed terminal is not there");
+    }
+
+    /// Every root asked for, a process of a page of memory, and the roots
+    /// of each listing kept.
+    struct Fixed(Arc<std::sync::Mutex<Vec<Vec<u32>>>>);
+    impl super::resources::Enumerate for Fixed {
+        fn processes(&mut self, roots: &[u32]) -> Option<Vec<super::resources::Process>> {
+            use super::resources::{Process, Reading, Seen};
+            self.0.lock().unwrap().push(roots.to_vec());
+            let read = Seen::Read(Reading { start: 1, cpu_ns: 0, resident_bytes: 4096 });
+            Some(roots.iter().map(|&pid| Process { pid, parent: 1, seen: read }).collect())
+        }
+    }
+
+    /// Review A-R3: the reader thread holds the child's lock while it waits
+    /// for a shell that closed its terminal but runs on. The figures read the
+    /// pid kept at spawn instead, so they come regardless — for this
+    /// terminal and every other.
+    #[test]
+    fn resource_usage_does_not_wait_for_the_child_lock() {
+        let cat = || {
+            let mut cat = CommandBuilder::new("/bin/sh");
+            cat.args(["-c", "exec cat"]);
+            cat
+        };
+        let roots = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mgr = Arc::new(PtyManager::new().with_process_list(Box::new(Fixed(roots.clone()))));
+        let _held = hold(&mgr, "held", cat());
+        let _other = hold(&mgr, "other", cat());
+        let session = mgr.sessions.lock().get("held").cloned().expect("held");
+        let shell = session.child.lock().process_id();
+        assert!(shell.is_some() && session.pid == shell, "the pid kept is the child's: {:?} {shell:?}", session.pid);
+        // As the reader's `child.wait()` holds it.
+        let waiting = session.child.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asking = mgr.clone();
+        thread::spawn(move || {
+            let _ = tx.send(asking.resource_usage(&["held".to_string(), "other".to_string()]));
+        });
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        drop(waiting);
+        let got = got.expect("resource_usage waited for the child's lock").unwrap();
+        let order: Vec<&str> = got.iter().map(|u| u.session_id.as_str()).collect();
+        assert_eq!(order, ["held", "other"]);
+        assert_eq!(roots.lock().unwrap()[0][0], shell.unwrap());
+        for id in ["held", "other"] {
+            let _ = mgr.kill(id);
+        }
+    }
+
+    /// Review A-R4: however many ids the page sends, and however long, the
+    /// first MAX_ASKED are looked at and none longer than MAX_ID_BYTES.
+    #[test]
+    fn resource_usage_bounds_the_ids_it_is_asked() {
+        use super::resources::{MAX_ASKED, MAX_ID_BYTES};
+        let cat = || {
+            let mut cat = CommandBuilder::new("/bin/sh");
+            cat.args(["-c", "exec cat"]);
+            cat
+        };
+        let roots = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mgr = PtyManager::new().with_process_list(Box::new(Fixed(roots.clone())));
+        let longest = "x".repeat(MAX_ID_BYTES);
+        let too_long = "y".repeat(MAX_ID_BYTES + 1);
+        let ids = ["a".to_string(), longest.clone(), too_long.clone()];
+        let _held: Vec<_> = ids.iter().map(|id| hold(&mgr, id, cat())).collect();
+        let got = mgr.resource_usage(&ids).unwrap();
+        let order: Vec<&str> = got.iter().map(|u| u.session_id.as_str()).collect();
+        assert_eq!(order, ["a", longest.as_str()], "a real session's id, if too long, is still ignored");
+        // A real session past the first MAX_ASKED ids is not looked at.
+        let mut many: Vec<String> = (0..MAX_ASKED).map(|n| format!("ghost-{n}")).collect();
+        many.push("a".into());
+        assert!(mgr.resource_usage(&many).unwrap().is_empty());
+        many.rotate_right(1);
+        assert_eq!(mgr.resource_usage(&many).unwrap().len(), 1, "within the first MAX_ASKED it is");
+        assert_eq!(roots.lock().unwrap().len(), 2, "nothing to measure, nothing listed");
+        for id in &ids {
+            let _ = mgr.kill(id);
         }
     }
 
@@ -1935,6 +2115,7 @@ mod canonical_limit_tests {
                     .master,
             )),
             input: Mutex::new(Some(cooked.tx.clone())),
+            pid: None,
             child: Mutex::new(spare_child()),
             flow: Arc::new(FlowGate::default()),
         });
@@ -2039,6 +2220,7 @@ mod kill_tests {
                 created_at: Utc::now(),
                 master: Mutex::new(Some(pair.master)),
                 input: Mutex::new(Some(spawn_writer_thread(writer, "slow").unwrap())),
+                pid: child.process_id(),
                 child: Mutex::new(child),
                 flow: Arc::new(FlowGate::default()),
             }),

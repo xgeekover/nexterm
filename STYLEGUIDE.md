@@ -138,7 +138,10 @@ use:
 - 120 ms: colour changes on a field's border and a separator.
 - 200 ms: the wait before a hovered separator turns violet, so a pointer
   passing over it does not flash it. Leaving starts back at once, and a drag
-  shows violet at once (no transition). This is the one delay in use.
+  shows violet at once (no transition).
+- 600 ms: the wait before a terminal tab's hover card opens, and 100 ms of
+  grace after the pointer leaves (below). These and the separator's are the
+  only delays in use.
 - 150 ms: drag overlays and drop zones fading in and swapping.
 - 150 ms: a toast fading in, and a confirmation toast fading out over the
   last 150 ms of its 3 s. By opacity only: a toast never slides.
@@ -193,6 +196,124 @@ NexTerm is dense, like VS Code. The sizes in `tailwind.config.js`:
   token and no transition. A mask, never an overlay element, so a half-faded
   tab still takes its click. While a drag is over a strip it does not fade,
   so the insertion or drop marker is drawn whole.
+
+## Hover cards
+
+A terminal tab chip's tooltip is its hover card (`src/lib/tabHoverCard.js`,
+`TabHoverCard.jsx`), and neither the chip nor anything on it the pointer
+reaches without leaving it (its ✕, the unread count, the *controlled*
+badge) has a native `title`: two tooltips would show at once. What such a
+part says is its `aria-label`, and the card's.
+
+- It opens 600 ms after the pointer rests on the chip, or after keyboard
+  focus (`:focus-visible`) lands on it, and goes 100 ms after the pointer
+  leaves. Moving to the next chip while one is shown switches at once.
+  `Escape` closes it and the keyboard stays on the chip; while it is only
+  about to open, `Escape` drops the wait and goes on to whatever else takes
+  it. Never during a drag, a rename or an open menu, nor after a press on
+  the chip. It goes when its chip's element does (the strip moving into or
+  out of the hidden strip's overlay).
+- It is a floating surface (Elevation): `rounded-popover`, `shadow-widget`,
+  `bg-vsc-widget`, a `border-vsc-widget-border` edge, drawn below the chip in
+  a portal, above the chip when there is no room below; placed again
+  whenever its size changes (a ResizeObserver), so a row arriving never
+  pushes it over the chip or past the window's edge. `role="tooltip"`,
+  `pointer-events: none`, nothing in it to press or focus, so a click where
+  it is lands on the terminal. The chip names it in `aria-describedby` only
+  while it is shown.
+- It fades in by opacity over 150 ms (`animate-overlay-in`) and, under
+  either reduced-motion switch, not at all (`[data-hover-card]`).
+- What may appear, in this order: the full title; glyph, agent, state and how
+  long in words, from the TERMINALS row's own helpers (terminalStatus.js);
+  the folder, shortened in the middle; the shell; with Show CPU and Memory
+  on, *Usage* and 'CPU% · memory' in the TERMINALS row's own words
+  (resourceUsage.js); the flags (typing hidden, read-only, controlled by
+  another terminal, N unread); the
+  last notification, dimmed; the dimmed hint "Drag to reorder or move ·
+  Double-click to rename".
+- The CPU and memory figure, on the card and at the end of a TERMINALS
+  row's second line, is plain dimmed text in `tabular-nums`, never coloured
+  however high it is: colour is for state, and a figure is not one. Its
+  words ("CPU 12% of one core, …") are its tooltip and what a screen reader
+  reads; with the setting off, or no sample yet, nothing is drawn, not even
+  a gap — and after sampling stops nothing old is kept to draw, so a figure
+  is never one from before a pause. Its CPU reads *measuring* for the first
+  sample of each start and has a figure 1 s later
+  (`RESOURCE_FOLLOW_UP_MS`). It refreshes from its own store entry while
+  shown, never from the minute clock.
+- What may never appear: anything of the terminal's screen or scrollback,
+  and the command line running in it.
+- Every row is someone else's text and is cleaned where it is drawn
+  (`displayText`): no control, bidirectional or zero-width character.
+
+## Preview surfaces
+
+An image tab (`ImagePreview.jsx`) and a Markdown preview tab
+(`MarkdownPreview.jsx`) show a file without editing it. Both draw
+someone else's bytes, so the rules are about what may never reach the page.
+
+- **Never Monaco.** A preview body is a tab kind of its own in the editor
+  leaf. It gets no Monaco model, no save, no dirty dot and no close prompt.
+  Send to Agent does not see it, and it is not restored after a restart.
+- **Never live markup.** Nothing in `src/` writes markup as a string into the
+  page: no `innerHTML`, `outerHTML`, `insertAdjacentHTML`,
+  `dangerouslySetInnerHTML` or `document.write`, not even in a comment
+  (RN-255 looks for the words). A Markdown document goes from the worker
+  as a hast tree that has passed an allow-list, and is drawn into React
+  elements (`hast-util-to-jsx-runtime`). An image is one `<img>` whose
+  `src` is a `data:image/…` URI made from the bytes read; an SVG is that
+  too, never inline `<svg>`, `<object>`, `<embed>` or `<iframe>`.
+- **Lazy.** Each body is its own chunk, loaded with `React.lazy` the first
+  time such a tab is shown, as the Monaco body is. Neither body, nor
+  react-markdown, remark, unified or micromark, is in the first chunk
+  (WV-06b; MC-C1 for Monaco). The Markdown parser runs in its own worker
+  (`markdownWorker.js`), never in the window's thread; a parse still
+  running after 5 s is stopped and the preview says *Too complex to
+  preview*. So does a tree past 100,000 elements
+  (`MARKDOWN_MAX_ELEMENTS`): the window draws it, and drawing one that big
+  holds the window.
+- **No `<svg>` in the image view.** Its toolbar is text: *Fit*, *100%*,
+  `−` and `+`, with the zoom figure between them, each with its
+  `aria-label` and `title`. A lucide icon there would put an `<svg>` into
+  the one view where "no `<svg>`" is the check (PH-02, RN render tests).
+  An SVG's tab adds *Open as Text*, in words, at the toolbar's right end,
+  and under the reason when the SVG is refused (RN-264). PNG, JPEG, GIF and
+  WebP tabs never show it.
+  The Markdown preview's eye button lives in the breadcrumb row, outside
+  the preview body, and uses the toolbar's colours.
+- **Waiting.** A preview with nothing to show stays an empty frame for the
+  first second, and only then says *Rendering preview…* in the muted
+  colour (`RENDERING_NOTICE_MS`, In-flight feedback). A later update keeps
+  the document on screen until the new one arrives. *Too large*, *Too
+  complex* and a read error each say why, in one line, with *Open as
+  Text* as a secondary button below it.
+- **Raw HTML is shown, dimmed.** Raw HTML in Markdown is the literal text
+  in `.md-raw-html`: `--vsc-muted`, the mono font at 12px, inline as a
+  `<span>`, and as a block a `<div>` with `white-space: pre-wrap` so its
+  lines stay where they were. It is quiet so it reads as "not drawn", and
+  never hidden, so nothing in the file is out of sight.
+- **Images not shown.** A remote, absolute, `file:`, `data:` or
+  out-of-folder image, and one past the count or byte limit, is a box
+  (`.md-image-placeholder`): dashed `--vsc-input-border` edge, the
+  control radius, the alt text and the address in the muted colour at
+  11px. Never a broken-image icon, and never the network.
+- **One scope for the document.** Every rule for the drawn document is
+  under `.markdown-preview` in `index.css`, and its colours are `--vsc-*`
+  tokens only, with no animation or transition (RN-262). Lines stop at
+  860px. Its own `.sr-only` is restated inside the scope, because the
+  heading rules would otherwise draw GFM's hidden *Footnotes* heading.
+- **Links.** Only `#…` anchors keep an `href`. External and in-folder file
+  links are `role="link"` with `tabIndex={0}` and Enter, and no `href`. An
+  inert link is a plain `<span>`, styled as text. An anchor scrolls this
+  preview's own scroller and nothing else.
+- **External links ask first, in the app.** A click on an `http` or `https`
+  link opens `ConfirmDialog` (*Open External Link?*, the cleaned address
+  from `hyperlinkTitle` in the mono font, *Open* with the fill and
+  *Cancel* quiet). Never `window.confirm`, `alert` or `prompt`. Only
+  *Open* calls `openExternal`.
+- **Cleaned text.** File names, alt text, titles, link text and addresses
+  are cleaned where they are drawn (`displayText`), as the hover card's
+  rows are.
 
 ## Copy
 

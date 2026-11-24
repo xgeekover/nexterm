@@ -16,7 +16,7 @@ import { describe, test, assert } from '../e2e/harness/testFramework.js';
 import * as terminalStore from '../../src/stores/terminalStore.js';
 import { useSettingsStore } from '../../src/stores/settingsStore.js';
 import { useSystemStore } from '../../src/stores/systemStore.js';
-import { useControlLogStore, LOG_LIMIT, logEntry } from '../../src/stores/controlLogStore.js';
+import { useControlLogStore, LOG_LIMIT, COUNT_MAX, logEntry } from '../../src/stores/controlLogStore.js';
 import { mockBridge } from '../../src/lib/ipc.js';
 import { setTerminalNoticeSink } from '../../src/lib/terminalNotice.js';
 import { installModifyOtherKeys } from '../../src/lib/modifyOtherKeys.js';
@@ -663,8 +663,11 @@ describe('Control requests: list', () => {
       const rows = answer.result;
       assert.deepEqual(rows.map((r) => r.id), [a, b, c, child]);
       for (const row of rows) {
-        assert.deepEqual(Object.keys(row).sort(), ['active', 'agent', 'child', 'cwd', 'group', 'id', 'self', 'status', 'title']);
+        assert.deepEqual(Object.keys(row).sort(), ['active', 'activity', 'agent', 'child', 'cwd', 'group', 'id', 'self', 'status', 'title']);
       }
+      // Next to status (bundle 4, B2-F7): no Claude Code here, so no activity.
+      assert.deepEqual(Object.keys(rows[0]).slice(Object.keys(rows[0]).indexOf('status'), Object.keys(rows[0]).indexOf('status') + 2), ['status', 'activity']);
+      assert.deepEqual(rows.map((r) => r.activity), [null, null, null, null]);
       assert.deepEqual(rows.map((r) => r.self), [true, false, false, false]);
       assert.deepEqual(rows.map((r) => r.child), [false, false, false, true]);
       assert.equal(rows[1].status, 'running');
@@ -674,6 +677,28 @@ describe('Control requests: list', () => {
       // Asked by the child, the caller is just another terminal.
       const fromChild = (await ask(child, 'list', {})).result;
       assert.deepEqual([fromChild.find((r) => r.id === a).self, fromChild.find((r) => r.id === child).self], [false, true]);
+    });
+  });
+
+  test("CD-61: a row's activity is the store's agentActivity state — 'working' or 'idle' — and null for anything else (bundle 4, B2-F7)", async () => {
+    await inStore(async () => {
+      const [a, b, c] = await threeTerminals();
+      const { ask } = harness();
+      const activityOf = async () => {
+        const rows = (await ask(a, 'list', {})).result;
+        return [a, b, c].map((id) => rows.find((r) => r.id === id).activity);
+      };
+      try {
+        S.setState({ agentActivity: { [a]: Object.freeze({ state: 'working', since: 1 }), [c]: Object.freeze({ state: 'idle', since: 2 }) } });
+        assert.deepEqual(await activityOf(), ['working', null, 'idle']);
+        // Only the two words go out: not a state the store never writes, not a bare string, not an object.
+        S.setState({ agentActivity: { [a]: { state: 'busy', since: 1 }, [b]: 'working', [c]: { state: { toString: () => 'idle' } } } });
+        assert.deepEqual(await activityOf(), [null, null, null]);
+        S.setState({ agentActivity: { [a]: null } });
+        assert.deepEqual(await activityOf(), [null, null, null]);
+      } finally {
+        S.setState({ agentActivity: {} });
+      }
     });
   });
 
@@ -1176,10 +1201,11 @@ describe('Logged: the last 500 calls, never what they carried', () => {
         assert.ok(!all.includes(kept), `the log holds ${JSON.stringify(kept)}`);
       }
       for (const entry of entries) {
-        assert.deepEqual(Object.keys(entry).sort(), ['at', 'caller', 'callerTitle', 'cmd', 'id', 'lines', 'result', 'size', 'target', 'targetTitle']);
+        assert.deepEqual(Object.keys(entry).sort(), ['at', 'caller', 'callerTitle', 'cmd', 'count', 'id', 'lines', 'result', 'size', 'target', 'targetTitle']);
+        assert.equal(entry.count, 1);
       }
       // Handed more, it keeps only its fields.
-      assert.deepEqual(Object.keys(logEntry({ cmd: 'send', text: 'x', token: 'y', screen: 'z' })).sort(), ['at', 'caller', 'callerTitle', 'cmd', 'lines', 'result', 'size', 'target', 'targetTitle']);
+      assert.deepEqual(Object.keys(logEntry({ cmd: 'send', text: 'x', token: 'y', screen: 'z' })).sort(), ['at', 'caller', 'callerTitle', 'cmd', 'count', 'lines', 'result', 'size', 'target', 'targetTitle']);
     });
   });
 
@@ -1201,6 +1227,132 @@ describe('Logged: the last 500 calls, never what they carried', () => {
     assert.deepEqual(written, [], 'in memory only');
     useControlLogStore.getState().clear();
     assert.equal(useControlLogStore.getState().entries.length, 0);
+  });
+
+  /** A call as the dispatcher logs it, the same each time but for its time. */
+  const call = (over = {}) => ({ caller: 'tab-term-1', callerTitle: 'agent', cmd: 'list', target: null, targetTitle: '', size: null, lines: null, result: 'ok', ...over });
+  const recordAll = (list) => {
+    for (const entry of list) useControlLogStore.getState().record(entry);
+    return useControlLogStore.getState().entries;
+  };
+  const callsIn = (entries) => entries.reduce((sum, e) => sum + e.count, 0);
+
+  test('CD-62: N identical list calls in a row from one caller are ONE entry with count N — its id kept, its time and titles the newest (bundle 4, OQ2)', async () => {
+    useControlLogStore.setState({ entries: [] });
+    const N = 7;
+    const entries = recordAll(Array.from({ length: N }, (_, i) => call({ at: 1000 + i, callerTitle: `agent ${i}` })));
+    assert.equal(entries.length, 1, JSON.stringify(entries));
+    const [only] = entries;
+    assert.equal(only.count, N);
+    assert.equal(only.at, 1000 + N - 1, 'the last call\'s time');
+    assert.equal(only.callerTitle, `agent ${N - 1}`, 'the newest title');
+    const firstId = only.id;
+    recordAll([call({ at: 2000 })]);
+    assert.equal(useControlLogStore.getState().entries[0].id, firstId, "the dialog's row key stays");
+    assert.equal(useControlLogStore.getState().entries[0].count, N + 1);
+
+    // Through the dispatcher too: a program polling list is one row.
+    await inStore(async () => {
+      const [a] = await threeTerminals();
+      useControlLogStore.setState({ entries: [] });
+      const { ask } = harness();
+      for (let i = 0; i < 5; i += 1) assert.equal((await ask(a, 'list', {})).ok, true);
+      const logged = useControlLogStore.getState().entries;
+      assert.deepEqual(logged.map((e) => [e.cmd, e.caller, e.result, e.count]), [['list', a, 'ok', 5]]);
+      // Another command in between starts again.
+      await ask(a, 'set-status', { text: 'x' });
+      await ask(a, 'list', {});
+      await ask(a, 'list', {});
+      assert.deepEqual(useControlLogStore.getState().entries.map((e) => [e.cmd, e.count]), [['list', 5], ['set-status', 1], ['list', 2]]);
+    });
+    useControlLogStore.setState({ entries: [] });
+  });
+
+  test('CD-63: only the LAST entry, and only the very same call — another caller, target, answer or command in between starts a new entry', () => {
+    useControlLogStore.setState({ entries: [] });
+    const entries = recordAll([
+      call(),
+      call(),
+      call({ caller: 'tab-term-2' }),
+      call(),
+      call({ target: 'self' }),
+      call({ target: 'self' }),
+      call({ result: 'disabled' }),
+      call(),
+      call({ cmd: 'notify' }),
+      call(),
+      call({ lines: 3 }),
+      call(),
+    ]);
+    assert.deepEqual(
+      entries.map((e) => [e.caller, e.cmd, e.target, e.result, e.count]),
+      [
+        ['tab-term-1', 'list', null, 'ok', 2],
+        ['tab-term-2', 'list', null, 'ok', 1],
+        ['tab-term-1', 'list', null, 'ok', 1],
+        ['tab-term-1', 'list', 'self', 'ok', 2],
+        ['tab-term-1', 'list', null, 'disabled', 1],
+        ['tab-term-1', 'list', null, 'ok', 1],
+        ['tab-term-1', 'notify', null, 'ok', 1],
+        ['tab-term-1', 'list', null, 'ok', 1],
+        ['tab-term-1', 'list', null, 'ok', 1],
+        ['tab-term-1', 'list', null, 'ok', 1],
+      ]
+    );
+    assert.equal(new Set(entries.map((e) => e.id)).size, entries.length, 'every entry its own id');
+    assert.equal(callsIn(entries), 12, 'every call counted');
+    useControlLogStore.setState({ entries: [] });
+  });
+
+  test('CD-64: send, read-screen, focus and new-split are never merged, however alike — and a count handed in is not taken', () => {
+    useControlLogStore.setState({ entries: [] });
+    for (const cmd of ['send', 'read-screen', 'focus', 'new-split', 'notify', 'set-status', 'set-title', 'set-progress']) {
+      useControlLogStore.setState({ entries: [] });
+      const alike = { ...call({ cmd, target: 'tab-term-2', targetTitle: 'build' }), ...(cmd === 'send' ? { size: 4 } : {}), ...(cmd === 'read-screen' ? { lines: 40 } : {}) };
+      const entries = recordAll([alike, alike, alike]);
+      assert.deepEqual(entries.map((e) => [e.cmd, e.count]), [[cmd, 1], [cmd, 1], [cmd, 1]], `${cmd} merged`);
+    }
+    // The caller does not say how many calls an entry stands for: the store counts.
+    useControlLogStore.setState({ entries: [] });
+    const handed = recordAll([call({ count: 1e6 }), call({ cmd: 'send', count: 42 })]);
+    assert.deepEqual(handed.map((e) => e.count), [1, 1]);
+    useControlLogStore.setState({ entries: [] });
+    const again = recordAll([call({ cmd: 'focus' }), call({ count: 1e6 }), call({ count: 99 })]);
+    assert.deepEqual(again.map((e) => e.count), [1, 2], 'a focus, then two lists: the second merged, the 1e6 and 99 handed in ignored');
+    // logEntry keeps a sane whole number from 1, and nothing it does not name.
+    assert.equal(logEntry({ count: 0 }).count, 1);
+    assert.equal(logEntry({ count: -3 }).count, 1);
+    assert.equal(logEntry({ count: 2.5 }).count, 1);
+    assert.equal(logEntry({ count: '9' }).count, 1);
+    assert.equal(logEntry({ count: Infinity }).count, 1);
+    assert.equal(logEntry({ count: 3 }).count, 3);
+    assert.equal(logEntry({ count: COUNT_MAX * 10 }).count, COUNT_MAX);
+    assert.deepEqual(Object.keys(logEntry({ ...call(), firstAt: 1, text: 'secret', screen: 'x', token: 'y' })).sort(), ['at', 'caller', 'callerTitle', 'cmd', 'count', 'lines', 'result', 'size', 'target', 'targetTitle']);
+    useControlLogStore.setState({ entries: [] });
+  });
+
+  test(`CD-65: a merged entry is one of the ${LOG_LIMIT}; a full log takes repeats without losing anything, and a count at COUNT_MAX starts a new entry`, () => {
+    useControlLogStore.setState({ entries: [] });
+    for (let i = 0; i < LOG_LIMIT; i += 1) useControlLogStore.getState().record(call({ caller: `tab-term-${i + 1}` }));
+    const full = useControlLogStore.getState().entries;
+    assert.equal(full.length, LOG_LIMIT);
+    // The last caller polls a thousand times: still LOG_LIMIT entries, the oldest still there.
+    for (let i = 0; i < 1000; i += 1) useControlLogStore.getState().record(call({ caller: `tab-term-${LOG_LIMIT}` }));
+    let entries = useControlLogStore.getState().entries;
+    assert.equal(entries.length, LOG_LIMIT);
+    assert.equal(entries[0].caller, 'tab-term-1', 'nothing pushed out by repeats');
+    assert.equal(entries.at(-1).count, 1001);
+    assert.equal(callsIn(entries), LOG_LIMIT + 1000);
+    // A new entry past the limit still drops the oldest.
+    useControlLogStore.getState().record(call({ cmd: 'send', size: 1 }));
+    entries = useControlLogStore.getState().entries;
+    assert.equal(entries.length, LOG_LIMIT);
+    assert.equal(entries[0].caller, 'tab-term-2');
+    // The bound: a repeat of an entry at COUNT_MAX is a new entry, so the calls still add up.
+    useControlLogStore.setState({ entries: [{ id: -1, ...logEntry(call({ count: COUNT_MAX })) }] });
+    entries = recordAll([call()]);
+    assert.deepEqual(entries.map((e) => e.count), [COUNT_MAX, 1]);
+    useControlLogStore.setState({ entries: [] });
   });
 });
 

@@ -12,7 +12,11 @@
 //! Timeouts (D3 and the CLI's own): 2 s to connect, 5 s for the answer —
 //! longer than NexTerm's own 3 s per request, so its `not_responding` arrives
 //! before ours. Every blocking call runs on one worker thread and the caller
-//! waits on a channel, so no read, write or connect can outlast them.
+//! waits on a channel, so no read, write or connect can outlast them. The
+//! thread's own reads and writes on a socket give up `IO_MARGIN` after the
+//! answer timeout, so a NexTerm that froze leaves no thread or descriptor
+//! behind for each try (`wait` tries again and again); a named pipe has no
+//! such timeout (windows.rs `limit`).
 
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -25,12 +29,12 @@ use crate::protocol::MAX_ANSWER_BYTES;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{connect, Identity};
+pub use unix::{connect, limit, Identity};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{connect, Identity};
+pub use windows::{connect, limit, Identity};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Timeouts {
@@ -39,6 +43,11 @@ pub struct Timeouts {
 }
 
 pub const TIMEOUTS: Timeouts = Timeouts { connect: Duration::from_secs(2), answer: Duration::from_secs(5) };
+
+/// How much longer than the answer timeout the worker thread's own read or
+/// write may block: the caller gives up first, with `not_responding`, and the
+/// thread a moment later, closing the connection.
+pub const IO_MARGIN: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureKind {
@@ -197,6 +206,9 @@ pub fn exchange(address: &Address, request: &[u8], me: &Identity, timeouts: Time
                     return;
                 }
             };
+            // Not for ever, though the caller stops waiting first. Where it
+            // cannot be set, the caller's timeout still holds.
+            let _ = limit(&conn, timeouts.answer + IO_MARGIN);
             let _ = tx.send(Step::Connected);
             let _ = tx.send(Step::Done(talk(&mut conn, &request)));
         })
@@ -233,10 +245,19 @@ fn seconds(d: Duration) -> String {
 }
 
 fn talk<S: Read + Write>(conn: &mut S, request: &[u8]) -> Result<Vec<u8>, Failure> {
-    conn.write_all(request)
-        .and_then(|()| conn.flush())
-        .map_err(|e| Failure::unreachable(format!("NexTerm closed the connection: {e}")))?;
+    conn.write_all(request).and_then(|()| conn.flush()).map_err(|e| {
+        if timed_out(&e) {
+            Failure::not_responding("NexTerm is not responding (it does not take the request)")
+        } else {
+            Failure::unreachable(format!("NexTerm closed the connection: {e}"))
+        }
+    })?;
     read_answer(conn, MAX_ANSWER_BYTES)
+}
+
+/// A read or write that ran out of the time `limit` gave it.
+fn timed_out(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
 /// One line, without its LF, of at most `cap` bytes. A line cut off by the
@@ -248,6 +269,7 @@ pub fn read_answer<R: Read>(conn: &mut R, cap: usize) -> Result<Vec<u8>, Failure
         let n = match conn.read(&mut chunk) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if timed_out(&e) => return Err(Failure::not_responding("NexTerm is not responding (no answer in time)")),
             Err(e) => return Err(Failure::unreachable(format!("NexTerm closed the connection: {e}"))),
         };
         if n == 0 {
@@ -288,6 +310,23 @@ pub mod tests {
     fn the_timeouts_are_2_and_5_seconds() {
         assert_eq!(TIMEOUTS.connect, Duration::from_secs(2));
         assert_eq!(TIMEOUTS.answer, Duration::from_secs(5));
+        assert_eq!(IO_MARGIN, Duration::from_secs(1));
+    }
+
+    /// A Read whose time ran out, as a socket with a read timeout says it.
+    struct Stalled(io::ErrorKind);
+    impl Read for Stalled {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+    }
+
+    #[test]
+    fn a_read_that_ran_out_of_time_is_not_responding() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            assert_eq!(read_answer(&mut Stalled(kind), 100).unwrap_err().kind, FailureKind::NotResponding, "{kind:?}");
+        }
+        assert_eq!(read_answer(&mut Stalled(io::ErrorKind::ConnectionReset), 100).unwrap_err().kind, FailureKind::Unreachable);
     }
 
     #[test]
