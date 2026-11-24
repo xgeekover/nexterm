@@ -237,6 +237,139 @@ menu, or the command palette) splits the file out beside its pane. Moving a file
 keeps its text, undo history and caret; moving a terminal keeps its program and
 scrollback.
 
+#### Image and Markdown previews
+
+**Open an image.** A `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` or `.svg` file
+opens in an image tab instead of the text editor, wherever it is opened from:
+the Explorer, Go to File, a terminal link or a search result. An SVG opened at
+a line, and a new one made with *New File*, open as text instead (see *An
+SVG's source*, below). The file is judged by its first bytes, not its name,
+so a text file called `logo.png` is
+refused, saying why. An SVG is only ever drawn as a picture, an `<img>` made
+from the file's bytes, never as part of the page, so its scripts, event
+handlers and links do nothing and it loads nothing from the network. The
+limits are 20 MB per file and 32,768 pixels per side, with 32 Mi pixels
+(33,554,432) in all. A GIF is measured by its first frame as well as by its
+canvas, since a browser grows the canvas to fit that frame. Anything larger
+is refused before it is decoded, with the size or the dimensions and the
+limit in the message. An image tab is
+never modified, never saved and closes without asking. Its picture is
+reloaded when the file changes on disk; if the file is deleted, the last
+picture stays, with *Deleted on disk* under it.
+
+**An SVG's source.** An SVG is text as well as a picture. Its image tab has
+an *Open as Text* button, which opens the file in the text editor, or shows
+its text tab if it is already open. The picture and the text are two tabs of
+one file: the text opens in another tab, and the picture stays open. An open
+that names a line opens the text at that line: a search result in an SVG, or
+a terminal link such as `icons/logo.svg:12` or `icons/logo.svg:12:5`. A new
+`.svg` made with *New File* is empty, with no picture yet, so it opens in the
+text editor; every other new file opens as it would from the Explorer. The
+text tab is an ordinary text tab: it can be edited and saved, is sent by
+*Send to Agent*, and comes
+back after a restart. PNG, JPEG, GIF and WebP files have no *Open as Text*,
+and a line asked for on one of them is ignored: the picture opens.
+
+**Zoom.** An image starts at *Fit*: as large as the pane allows, never
+enlarged past its own size. The toolbar above it has *Fit*, *100%*, and
+*Zoom Out* and *Zoom In*, which step from 10% to 800%. The mouse wheel and
+trackpad scroll the image and never zoom it. The status line under the image
+gives its size, for example `1920 × 1080 · 2.4 MB`. An SVG has no pixel
+size, so its line reads `SVG · 3.1 KB`.
+
+**Preview a Markdown file.** A `.md` or `.markdown` file still opens as text.
+The preview is a tab of its own, opened in a split to the right of the
+source tab, and both stay open side by side. There are three ways to open it:
+
+- the eye button (*Open Preview*) at the right of the breadcrumb row of a
+  Markdown text tab;
+- *Open Markdown Preview* in the command palette, listed only while a
+  Markdown text tab is the one Save would save;
+- *Open Preview* in the Explorer's right-click menu on a `.md` or `.markdown`
+  file. A click on the file in the Explorer still opens its text.
+
+There is no default shortcut. *Open Markdown Preview* is not in Settings ▸
+Keyboard Shortcuts yet either, so no key can be set for it. Opening it again
+shows the preview that is already open.
+
+**What it draws.** GitHub-flavoured Markdown: headings, paragraphs, emphasis,
+strikethrough, inline code, fenced code (plain monospace, no highlighting),
+lists and task lists (the boxes cannot be ticked), quotes, tables, rules,
+footnotes, links and images. Raw HTML in the file is never turned into
+elements. It is shown as the literal text it is, dimmed, so you can see it is
+there. A document nested deeper than the preview allows is flattened past
+that depth rather than drawn.
+
+**Links.**
+
+- `http` and `https` links ask first, in NexTerm's own confirmation (*Open
+  External Link?*), which shows the address that will be opened. Its scheme
+  and host are always shown whole; only a long path is cut, with `…`. Only
+  *Open* hands it to your browser; *Cancel* and `Esc` do nothing.
+- `#anchor` links scroll the preview to that heading or footnote.
+- A relative link to a file inside the open folder opens that file in
+  NexTerm without asking. A Markdown file opens as text.
+- Everything else is plain text with no link: `javascript:`, `data:`,
+  `vbscript:`, `file:`, `mailto:`, `//host`, paths that lead out of the
+  open folder, and `http` or `https` addresses whose host is longer than
+  the 253 characters a DNS name can have.
+
+No click in a preview can take the window away from the app.
+
+**Images in Markdown.** A relative image inside the open folder is read
+from disk and drawn inline, at most 50 images and 50 MB of them per
+document. Each image also has the image-tab limits above. Remote images
+(`http`, `https`) are **never fetched**. They, and images given as an
+absolute path, `file:` or `data:`, or a path out of the folder, are drawn as
+a dimmed box with their alt text and address. When an image changes on
+disk, only that image is read again; the others stay on screen. When a
+folder above images changes (for example it is renamed in a terminal), their
+sizes are checked again, and only an image that is gone or changed size is
+read again.
+
+**Live update.** While the file's text tab is open, the preview follows what
+you type, unsaved edits included, 300 ms after you stop. With no text tab
+open it follows the file on disk, 300 ms after a change, and within a second
+however often the file changes; a change in a folder above the file only has
+its size checked, and reads it again if the size changed or the file is gone.
+If you close the text tab without saving, the preview goes back to the file
+as saved.
+
+**Limits.** A file over 2 MB is not previewed: *Too large to preview (X; the
+limit is 2 MB)*, with *Open as Text*. Markdown is parsed in the background,
+never in the window's own thread, and a document that takes longer than 5 s
+to parse is stopped and shows *Too complex to preview*, with *Open as Text*.
+So does a document that would draw more than 100,000 elements, since the
+window draws what the parse gives.
+A preview with nothing to show yet after 1 s says *Rendering preview…*.
+
+**Not kept.** Preview tabs are never modified or saved, Send to Agent does
+not see them, and they are not restored after a restart. The files they show
+are.
+
+These checks still need a person, and none has been made yet:
+
+- **H14** — on macOS, Windows and Linux, a PNG, a JPEG, an animated GIF, a
+  WebP and an SVG open from the Explorer; a transparent PNG reads well on the
+  dark theme; *Fit*, *100%* and the zoom buttons work (AC-B4-H1;
+  [WINDOWS_VERIFICATION.md](WINDOWS_VERIFICATION.md) V75).
+- **H15** — a hostile SVG (`<script>alert(1)</script>`, `onload=`, an
+  `<image href>` to a local listener) shows no dialog and makes no request,
+  in WKWebView, WebView2 and WebKitGTK (AC-B4-H2). Chromium, the engine
+  WebView2 is built on, is checked by
+  `tests/adversarial/preview_headless.test.js`.
+- **H16** — a tiny PNG declaring 20000 × 20000 is refused with the
+  dimensions message, and a 25 MB photo with the size message; NexTerm's
+  memory stays stable after opening and closing ten large images (AC-B4-H3).
+- **H17** — this README previews legibly on the dark theme on all three
+  platforms, its relative images load, an `https` link opens the system
+  browser after *Open*, and the window never leaves the app (AC-B3-H1).
+- **H18** — a hostile `.md` (raw HTML, `javascript:` links,
+  `<img src=http://127.0.0.1:PORT>`, `../../` image paths, a link out of the
+  folder; on Windows also backslash paths and a junction, V75) shows no
+  dialog, makes no request to the listener, and no click leaves the app
+  (AC-B3-H2).
+
 #### Restoring the layout
 
 **Open files belong to a terminal group.** A file opens in the terminal group

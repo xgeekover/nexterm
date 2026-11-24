@@ -31,6 +31,7 @@ import { focusActivePane, focusTerminal } from './workspaceFocus.js';
 import { paneTabs, tabTarget } from './tabNavigation.js';
 import { recentTerminalTabs, useTabSwitcherStore } from '../stores/tabSwitcherStore.js';
 import { sendFileToAgent, sendSelectionToAgent, wireSendToAgent } from './sendToAgent.js';
+import { isMarkdownPath } from './markdownFiles.js';
 
 // Send to Agent (src/lib/sendToAgent.js): its pick lists the agent terminals
 // the most recently focused first, in the Ctrl+Tab switcher's order, and the
@@ -246,6 +247,34 @@ export function moveEditorToNewPane(direction = 'horizontal', tabId = null) {
   const paneId = editor.moveEditorTabToNewPane?.(id, direction) ?? null;
   if (paneId) focusActivePane();
   return paneId;
+}
+
+/**
+ * What Open Markdown Preview previews (Orca bundle 5, F-B3-8): the tab Save
+ * would write (`saveTarget`) when it is the text tab of a `.md` or
+ * `.markdown` file — not a preview of one, an image or any other file.
+ * Null otherwise, and then the palette does not list the command.
+ */
+export function markdownPreviewTarget(opts = {}) {
+  const id = saveTarget(opts);
+  const tab = id ? useEditorStore.getState().tabs?.find((t) => t.id === id) : null;
+  return tab && tab.kind == null && isMarkdownPath(tab.filePath) ? tab : null;
+}
+
+/**
+ * Open Markdown Preview: that file rendered, in a tab to the right of its
+ * own (editorStore.js `openMarkdownPreview`). Resolves with the preview tab,
+ * or null when there is no Markdown file to preview. A file that will not
+ * read says why in the store's notice and resolves to null.
+ */
+export async function openMarkdownPreviewActive(opts = {}) {
+  const tab = markdownPreviewTarget(opts);
+  if (!tab) return null;
+  try {
+    return (await useEditorStore.getState().openMarkdownPreview?.(tab.filePath)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -15,7 +15,7 @@
 //! blocking — dispatching those would be slower than doing them.
 
 use crate::fs;
-use crate::models::FileNode;
+use crate::models::{FileNode, ImagePreview};
 use crate::AppState;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -339,6 +339,22 @@ pub fn fs_read_file(state: State<AppState>, path: String) -> Result<String, Stri
     fs::read_file(&confined(&state, &path)?)
 }
 
+/// An image file for an image tab, as `{ mime, data, bytes, width, height }`:
+/// its bytes in base64 for a `data:` URI, the format its bytes say, and the
+/// size its header declares (null for an SVG). Confined like `fs_read_file`;
+/// `fs::preview::read_image` has the limits and the refusals' fixed words.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn fs_read_image(state: State<AppState>, path: String) -> Result<ImagePreview, String> {
+    image_in(&state.workspace, &path)
+}
+
+/// What `confined` does (`Workspace::confine`, then the path as a string),
+/// on a workspace handed in rather than the app's state, so the tests can
+/// open a folder of their own.
+fn image_in(workspace: &fs::Workspace, path: &str) -> Result<ImagePreview, String> {
+    fs::preview::read_image(&workspace.confine(path)?.to_string_lossy())
+}
+
 /// How many bytes the file at `path` holds. A save asks before writing over a
 /// file it cannot read back, and the one it cannot read because it is too
 /// large may be exactly what the tab itself last wrote — this tells which
@@ -495,6 +511,7 @@ mod dispatch_tests {
         "fs_list_files",
         "fs_read_dir",
         "fs_read_file",
+        "fs_read_image",
         "fs_write_file",
         "fs_create_file",
         "fs_create_dir",
@@ -658,7 +675,7 @@ mod dispatch_tests {
 /// passed to `write_file` as a name still free.
 #[cfg(test)]
 mod entry_tests {
-    use super::{copy_in, create_in, delete_in, rename_in, size_in, write_in};
+    use super::{copy_in, create_in, delete_in, image_in, rename_in, size_in, write_in};
     use crate::fs::Workspace;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1071,6 +1088,89 @@ mod entry_tests {
         assert_eq!(size_in(&workspace, "a.bin").unwrap(), PNG.len() as u64);
         assert!(size_in(&workspace, "missing.bin").unwrap_err().contains("missing.bin"));
         assert!(size_in(&workspace, &s(&outside.join("secret.txt"))).is_err(), "outside the open folder");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// A PNG's signature and IHDR chunk, which is all `fs_read_image` looks
+    /// at: an image it shows, wherever it is put — so a refusal below can
+    /// only be the confinement's.
+    fn png_of(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        bytes
+    }
+
+    /// An image tab reads through the same confinement as a text tab: inside
+    /// the open folder, by a relative or an absolute path, and nowhere else.
+    #[test]
+    fn an_image_is_read_inside_the_open_folder_and_nowhere_else() {
+        let (workspace, root) = open_folder("image");
+        let outside = outside_folder("image");
+        write_at(&root.join("pics").join("logo.png"), &png_of(640, 480));
+        fs::write(outside.join("x.png"), png_of(16, 16)).unwrap();
+        let outside_name = outside.file_name().unwrap().to_string_lossy().to_string();
+
+        for spelling in ["pics/logo.png".to_string(), s(&root.join("pics").join("logo.png")), "pics/../pics/logo.png".to_string()] {
+            let image = image_in(&workspace, &spelling).unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert_eq!((image.mime.as_str(), image.width, image.height), ("image/png", Some(640), Some(480)), "{spelling}");
+        }
+
+        // The file outside is an image `fs_read_image` would show.
+        for escape in [
+            "../x.png".to_string(),
+            format!("../{outside_name}/x.png"),
+            format!("pics/../../{outside_name}/x.png"),
+            s(&outside.join("x.png")),
+        ] {
+            let err = image_in(&workspace, &escape).unwrap_err();
+            assert!(err.contains("outside the workspace root"), "{escape}: {err}");
+        }
+
+        // The open folder itself is a folder, no image.
+        for spelling in ["", ".", "pics/.."] {
+            let err = image_in(&workspace, spelling).unwrap_err();
+            assert!(err.starts_with("File is not an image NexTerm can show") && err.contains("not a file"), "{spelling:?}: {err}");
+        }
+        let err = image_in(&workspace, "pics/missing.png").unwrap_err();
+        assert!(err.starts_with("File not found"), "{err}");
+
+        // With no folder open there is nothing to confine to.
+        let none_open = crate::fs::Workspace::new();
+        for path in [s(&root.join("pics").join("logo.png")), "pics/logo.png".to_string(), s(&outside.join("x.png"))] {
+            assert_eq!(image_in(&none_open, &path).unwrap_err(), "No folder is open", "{path}");
+        }
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// A link is followed, as a text tab's is, and refused when it leads out:
+    /// a link to a file, a folder link earlier in the path, and a link to
+    /// nothing. A link to an image inside the folder is that image.
+    #[cfg(unix)]
+    #[test]
+    fn an_image_behind_a_link_that_leads_out_is_refused() {
+        let (workspace, root) = open_folder("image-link");
+        let outside = outside_folder("image-link");
+        write_at(&root.join("pics").join("logo.png"), &png_of(640, 480));
+        fs::write(outside.join("x.png"), png_of(16, 16)).unwrap();
+        link(outside.join("x.png"), &root.join("ext.png"));
+        link(&outside, &root.join("ext"));
+        link(root.join("nothing.png"), &root.join("dangling.png"));
+        link(Path::new("pics").join("logo.png"), &root.join("alias.png"));
+
+        for (name, expected) in [
+            ("ext.png", "outside the workspace root"),
+            ("ext/x.png", "outside the workspace root"),
+            ("dangling.png", "broken link"),
+        ] {
+            let err = image_in(&workspace, name).unwrap_err();
+            assert!(err.contains(expected), "{name}: {err}");
+        }
+        let alias = image_in(&workspace, "alias.png").unwrap();
+        assert_eq!((alias.width, alias.height), (Some(640), Some(480)));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
     }

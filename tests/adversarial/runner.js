@@ -227,6 +227,19 @@ import './send_to_agent.test.js';
 import './tab_hover_card.test.js';
 // Show CPU and Memory (bundle 4, B8, page side): the formatting, the store, and when the sampler asks (fake timers, a mocked invoke); RU-99 tears down.
 import './resource_usage.test.js';
+// Image tabs (Orca bundle 5, B4, page side): the mock fs_read_image held to the backend's shape and words, and imagePreview.js.
+import './image_preview.test.js';
+// Preview tabs (Orca bundle 5, step P3): image and Markdown preview tabs in editorStore — opened, de-duplicated by kind and path, never dirty, never saved, closed unasked.
+import './editor_preview_tabs.test.js';
+// Markdown preview (Orca bundle 5, B3, step P6): markdownPreview.js — links and images classified, the caps, the source bound and flattening, cleaning, heading ids, raw HTML as text, the urlTransform — with the plugin run through remark-parse.
+import './markdown_preview.test.js';
+// Markdown parsed in a worker (Orca bundle 5, B3, step P6b, OQ-B3g): the pipeline's allow-list, the worker, the client's time limit and queue (fake worker, fake clock, and a real worker thread), only the worker importing the parser, the worker as Vite builds it.
+import './markdown_render_worker.test.js';
+// The Markdown preview, mounted (Orca bundle 5, B3, step P7): an external link asks in the app's own dialog and only Open opens it, file links open, anchors scroll their own preview, inert links do nothing, images read 4 at once and stopped with the preview, the renderer's results and states (fake worker).
+import './markdown_preview_mounted.test.js';
+import './markdown_preview_live.test.js';
+// The image and Markdown previews in a real browser (Orca bundle 5, P9): the built app in dist/ with and without the production CSP, a hostile SVG and a hostile Markdown document against a counting listener, the Markdown worker's origin and its 5 s limit; PH-99 tears down.
+import './preview_headless.test.js';
 
 async function run() {
   console.log('====================================================');

@@ -246,6 +246,75 @@ part says is its `aria-label`, and the card's.
 - Every row is someone else's text and is cleaned where it is drawn
   (`displayText`): no control, bidirectional or zero-width character.
 
+## Preview surfaces
+
+An image tab (`ImagePreview.jsx`) and a Markdown preview tab
+(`MarkdownPreview.jsx`) show a file without editing it. Both draw
+someone else's bytes, so the rules are about what may never reach the page.
+
+- **Never Monaco.** A preview body is a tab kind of its own in the editor
+  leaf. It gets no Monaco model, no save, no dirty dot and no close prompt.
+  Send to Agent does not see it, and it is not restored after a restart.
+- **Never live markup.** Nothing in `src/` writes markup as a string into the
+  page: no `innerHTML`, `outerHTML`, `insertAdjacentHTML`,
+  `dangerouslySetInnerHTML` or `document.write`, not even in a comment
+  (RN-255 looks for the words). A Markdown document goes from the worker
+  as a hast tree that has passed an allow-list, and is drawn into React
+  elements (`hast-util-to-jsx-runtime`). An image is one `<img>` whose
+  `src` is a `data:image/…` URI made from the bytes read; an SVG is that
+  too, never inline `<svg>`, `<object>`, `<embed>` or `<iframe>`.
+- **Lazy.** Each body is its own chunk, loaded with `React.lazy` the first
+  time such a tab is shown, as the Monaco body is. Neither body, nor
+  react-markdown, remark, unified or micromark, is in the first chunk
+  (WV-06b; MC-C1 for Monaco). The Markdown parser runs in its own worker
+  (`markdownWorker.js`), never in the window's thread; a parse still
+  running after 5 s is stopped and the preview says *Too complex to
+  preview*. So does a tree past 100,000 elements
+  (`MARKDOWN_MAX_ELEMENTS`): the window draws it, and drawing one that big
+  holds the window.
+- **No `<svg>` in the image view.** Its toolbar is text: *Fit*, *100%*,
+  `−` and `+`, with the zoom figure between them, each with its
+  `aria-label` and `title`. A lucide icon there would put an `<svg>` into
+  the one view where "no `<svg>`" is the check (PH-02, RN render tests).
+  An SVG's tab adds *Open as Text*, in words, at the toolbar's right end,
+  and under the reason when the SVG is refused (RN-264). PNG, JPEG, GIF and
+  WebP tabs never show it.
+  The Markdown preview's eye button lives in the breadcrumb row, outside
+  the preview body, and uses the toolbar's colours.
+- **Waiting.** A preview with nothing to show stays an empty frame for the
+  first second, and only then says *Rendering preview…* in the muted
+  colour (`RENDERING_NOTICE_MS`, In-flight feedback). A later update keeps
+  the document on screen until the new one arrives. *Too large*, *Too
+  complex* and a read error each say why, in one line, with *Open as
+  Text* as a secondary button below it.
+- **Raw HTML is shown, dimmed.** Raw HTML in Markdown is the literal text
+  in `.md-raw-html`: `--vsc-muted`, the mono font at 12px, inline as a
+  `<span>`, and as a block a `<div>` with `white-space: pre-wrap` so its
+  lines stay where they were. It is quiet so it reads as "not drawn", and
+  never hidden, so nothing in the file is out of sight.
+- **Images not shown.** A remote, absolute, `file:`, `data:` or
+  out-of-folder image, and one past the count or byte limit, is a box
+  (`.md-image-placeholder`): dashed `--vsc-input-border` edge, the
+  control radius, the alt text and the address in the muted colour at
+  11px. Never a broken-image icon, and never the network.
+- **One scope for the document.** Every rule for the drawn document is
+  under `.markdown-preview` in `index.css`, and its colours are `--vsc-*`
+  tokens only, with no animation or transition (RN-262). Lines stop at
+  860px. Its own `.sr-only` is restated inside the scope, because the
+  heading rules would otherwise draw GFM's hidden *Footnotes* heading.
+- **Links.** Only `#…` anchors keep an `href`. External and in-folder file
+  links are `role="link"` with `tabIndex={0}` and Enter, and no `href`. An
+  inert link is a plain `<span>`, styled as text. An anchor scrolls this
+  preview's own scroller and nothing else.
+- **External links ask first, in the app.** A click on an `http` or `https`
+  link opens `ConfirmDialog` (*Open External Link?*, the cleaned address
+  from `hyperlinkTitle` in the mono font, *Open* with the fill and
+  *Cancel* quiet). Never `window.confirm`, `alert` or `prompt`. Only
+  *Open* calls `openExternal`.
+- **Cleaned text.** File names, alt text, titles, link text and addresses
+  are cleaned where they are drawn (`displayText`), as the hover card's
+  rows are.
+
 ## Copy
 
 - Never overclaim. Say what happened, no more: "Copied" only after the copy

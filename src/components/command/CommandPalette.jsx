@@ -54,7 +54,7 @@ import {
   sendSelectionToAgent,
 } from '../../lib/sendToAgent.js';
 import { focusActivePane, focusTerminal, focusWorkspace } from '../../lib/workspaceFocus.js';
-import { moveEditorToNewPane, toggleZoomActive } from '../../lib/workbenchCommands.js';
+import { markdownPreviewTarget, moveEditorToNewPane, openMarkdownPreviewActive, toggleZoomActive } from '../../lib/workbenchCommands.js';
 import { swallowRepeatsOf } from '../../lib/heldKeys.js';
 import { handDialogReturn } from '../../lib/dialogReturn.js';
 
@@ -425,6 +425,8 @@ export function CommandPalette() {
             copyContext: activeTabId && contextTerminalOf(activeTabId) ? { lines: copyContextLines } : null,
             sendToAgent: sendState,
             lastOutput: lastOutputState,
+            // Listed only for a Markdown file's text tab, asked as the palette opens.
+            markdownPreview: markdownPreviewTarget()?.filePath ?? null,
             agentTargets: agentPick?.targets ?? [],
             agentText: agentPick?.text ?? null,
             forkTarget,
@@ -551,6 +553,11 @@ export function CommandPalette() {
         // chip's menu do.
         setActiveView('terminal');
         moveEditorToNewPane(item.command === 'move_editor_new_pane_down' ? 'vertical' : 'horizontal');
+        return;
+      case 'open_markdown_preview':
+        // The file Save would write, rendered in a tab to its right; the
+        // store puts the workbench on screen with it.
+        await openMarkdownPreviewActive();
         return;
       case 'equalize_splits':
         // The group on screen, nested splits included.

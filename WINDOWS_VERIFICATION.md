@@ -2421,6 +2421,132 @@ V74-4 to V74-8 in zsh or bash on macOS and Linux (`$?` for the exit code)
 are the rest of AC-B2-H1; write down which platforms were looked at, and
 Claude Code's version on each.
 
+### V75 — image and Markdown previews (bundle 5, B4 and B3; AC-B4-H1..H3, AC-B3-H1..H2, README H14–H18)
+
+Covered by `cargo test` in src-tauri: fs::preview (each format by its
+signature, the 20 MB, 32,768 px and 32 Mi pixel limits, a cut-short or
+invalid header, an SVG after a BOM or prolog, a FIFO) and the command tests
+on real folders (a link inside the folder pointing out, `../x.png`, no
+folder open), on Windows only in CI. Covered by the JS suites against the
+browser mock: image_preview, editor_preview_tabs, markdown_preview,
+markdown_render_worker, markdown_preview_mounted, markdown_preview_live,
+and the render suite. tests/adversarial/preview_headless.test.js draws the
+built app in headless Chromium, with and without the production CSP: a
+hostile SVG and a hostile Markdown document make no request to a counting
+listener, and no click navigates. It also shows that the built Markdown
+worker loads from the page's origin under the CSP, and is stopped after 5 s.
+Chromium is the engine WebView2 is built on, but not WebView2. No suite runs
+WebView2, its `http://tauri.localhost` origin, the CSP as Tauri rewrites it,
+the real `fs_read_image` on NTFS, backslash paths, a junction or the system
+browser. Do these checks on a release build.
+
+Before you start, make a folder `C:\v75` and open it in NexTerm, with:
+- `assets\` holding a PNG, a JPEG, an animated GIF, a WebP and an SVG, a
+  transparent PNG, a 25 MB photo, a `notes.md`, and `huge.png`, a tiny PNG whose header
+  declares 20000 × 20000. Any image editor can make the first ones; for
+  `huge.png`, change the IHDR width and height bytes of a small PNG (fix
+  the CRC or not; it is refused on the header).
+- `hostile.svg`, from the README's H15. Start a listener in a PowerShell
+  terminal that counts what reaches it:
+  `python -m http.server 8975 --bind 127.0.0.1`. Write each request line
+  it prints down.
+- outside the folder, `C:\outside\secret.md` and `C:\outside\secret.png`,
+  and a junction `C:\v75\docs-link` made with
+  `mklink /J C:\v75\docs-link C:\outside`.
+
+1. **V75-1 (AC-B4-H1, formats):** Open each image in `assets\` from the
+   Explorer. Each opens in an image tab, fitted, never enlarged; the status
+   line reads `W × H · size` (`SVG · size` for the SVG). The GIF animates,
+   and the transparent PNG shows the checkerboard and reads well on the dark
+   theme. *100%*, *Zoom Out* and *Zoom In* step between 10% and 800%, and
+   *Fit* comes back. The wheel and the touchpad scroll and never zoom.
+   Write down the WebView2 version.
+2. **V75-2 (AC-B4-H2, hostile SVG):** Open `hostile.svg`. It is drawn as a
+   picture; no dialog opens; the listener prints nothing. Click and
+   double-click the picture: still nothing. Open it again from the command
+   palette's file search: the same.
+3. **V75-3 (AC-B4-H3, limits and memory):** `huge.png` shows *Image is too
+   large to preview (20000 × 20000; the limit is 32768 px per side and 32
+   Mi pixels)*, and the 25 MB photo *Image is too large to preview (… MB;
+   the limit is 20 MB)* with its size; neither draws a picture. Write down
+   NexTerm's memory in Task Manager, open and close ten large images one
+   after another, and write it down again: it should come back to near
+   where it was.
+4. **V75-4 (AC-B3-H1, README):** Copy NexTerm's README.md and its `docs\`
+   folder into `C:\v75`, and open its preview from the breadcrumb's eye
+   button. It is legible on the dark theme, its relative image
+   (`docs\nexterm-demo.gif`) loads, and tables, code and task lists look
+   right. Click an `https` link: *Open External Link?* shows the address;
+   *Cancel* does nothing; *Open* opens the system browser, and the NexTerm
+   window stays where it was.
+5. **V75-5 (AC-B3-H2, hostile Markdown, backslash paths, the junction):**
+   Make `C:\v75\hostile.md` from the README's H18 list, with the listener's
+   port, and add:
+   - `![back](assets\logo.png)` and `[back link](assets\notes.md)`, written
+     with backslashes (they should load and open, as with `/`);
+   - `![junction](docs-link\secret.png)` and
+     `[junction link](docs-link\secret.md)` (both lead out through the
+     junction: a placeholder, and a link that opens nothing or is refused,
+     saying why);
+   - `[outside](..\outside\secret.md)` and `![outside](../outside/secret.png)`
+     (inert text and a placeholder);
+   - `![remote](http://127.0.0.1:8975/remote.png)` (a placeholder with the
+     address).
+   Open its preview. No dialog opens, and the listener prints nothing.
+   Click every link: only the `http(s)` ones ask, and Cancel each; nothing
+   else leaves the app or opens a file outside `C:\v75`. Write down what
+   each junction line did.
+6. **V75-6 (OQ-B3g, the worker on WebView2):** README.md's preview in V75-4
+   is the worker loading: if it says *The preview could not be drawn* or
+   stays at *Rendering preview…*, write down the words. Then make
+   `C:\v75\complex.md` holding `[a](` repeated 300,000 times (in
+   PowerShell: `Set-Content C:\v75\complex.md ('[a](' * 300000)`) and open
+   its preview: after about 5 s it shows *Too complex to preview* with
+   *Open as Text*, and the window answers clicks and typing in a terminal
+   the whole time. Replace the file's text with `# fine` from outside
+   NexTerm: the preview draws it.
+7. **V75-7 (live update):** Open `hostile.md`'s text tab beside its
+   preview and type a line: the preview shows it about 300 ms after you
+   stop, before you save. Close the text tab without saving: the preview
+   goes back to the saved file.
+8. **V75-8 (the Explorer entry):** Right-click `hostile.md` in the Explorer:
+   *Open Preview* is there, right after *Open*, and opens the preview;
+   a plain click on the file opens its text. Right-click an image or a
+   `.txt` file: there is no *Open Preview*. The palette's *Open Markdown
+   Preview* is listed only while a Markdown text tab is the active one.
+   Restart NexTerm: the text tabs come back, the previews do not.
+9. **V75-9 (OQ-B4d, an SVG's source; reviewer B R1):** Open the SVG in
+   `assets\` from the Explorer: its picture opens, with *Open as Text* at
+   the right of the toolbar. Click it: the SVG's text opens in a tab of its
+   own, and the picture stays open. Click *Open as Text* again: the same
+   text tab comes forward, with no second one. Edit and save it: the picture
+   follows. The PNG, JPEG, GIF and WebP have no *Open as Text*. In a
+   PowerShell terminal run `echo assets\logo.svg:3` (the SVG's name) and
+   click the link: the text tab opens at line 3. Search for a word in the
+   SVG and click the hit: the text at that line. Then open `notes.md`'s
+   preview, and in a terminal run `ren assets assets-old`: within a second
+   the preview says *Deleted on disk*. Run `ren assets-old assets`: it shows
+   the file again. Make `assets\new.svg` with the Explorer's *New File*: it
+   opens empty in the text editor, not as a refused picture.
+10. **V75-10 (later frames; reviewer A2 R2):** Only an image's first frame is
+    measured. Make two files from small ones with a hex editor: a two-frame
+    GIF with a 16 × 16 canvas whose **second** image descriptor says
+    20000 × 20000, and an animated WebP with a 16 × 16 VP8X canvas whose
+    second `ANMF` frame says 16384 × 16384. Open each from the Explorer and
+    in a Markdown preview (`![gif](gif2.gif) ![webp](anim.webp)`): each is
+    drawn within its canvas, or not at all, and the window answers clicks
+    and typing the whole time. Write down the memory of NexTerm's webview
+    process (Task Manager here) before and while each is shown: a jump of
+    gigabytes is a failure. Do the same on macOS (WKWebView, Activity
+    Monitor) and Linux (WebKitGTK, `top`), whenever a build for them is
+    checked: they decode with other libraries than WebView2.
+11. **V75-11 (a busy folder; reviewer B2 F1):** Open the SVG's picture and
+    `notes.md`'s preview, and in a PowerShell terminal run
+    `while ($true) { Add-Content assets\log.txt x; Start-Sleep -m 100 }`.
+    Edit the SVG from outside NexTerm and save it: the picture follows
+    within about a second, the loop still running. Stop the loop with
+    `Ctrl+C`.
+
 ## What the first run found
 
 Run on 2026-09-20 against the v0.5.4 portable build, Windows 10 Pro

@@ -1,6 +1,7 @@
 pub mod drive;
 pub mod external_editor;
 pub mod git;
+pub mod preview;
 pub mod project_commands;
 pub mod watcher;
 pub mod search;
@@ -241,20 +242,23 @@ pub fn read_file(path_str: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| not_text(path_str))
 }
 
+const MB: u64 = 1024 * 1024;
+
+/// A file's size as a refusal names it: "120.0 MB", "3.0 GB". Rounded up, so
+/// a file a byte over a limit does not read as at it.
+pub(crate) fn size_label(bytes: u64) -> String {
+    let tenths = (u128::from(bytes) * 10).div_ceil(u128::from(MB));
+    if tenths >= 10 * 1024 {
+        format!("{:.1} GB", tenths as f64 / 10.0 / 1024.0)
+    } else {
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
+}
+
 fn too_large_to_open(path_str: &str, size: u64) -> String {
-    const MB: u64 = 1024 * 1024;
-    // Rounded up, so a file a byte over the limit does not read as at it.
-    let shown = |bytes: u64| {
-        let tenths = (u128::from(bytes) * 10).div_ceil(u128::from(MB));
-        if tenths >= 10 * 1024 {
-            format!("{:.1} GB", tenths as f64 / 10.0 / 1024.0)
-        } else {
-            format!("{}.{} MB", tenths / 10, tenths % 10)
-        }
-    };
     format!(
         "File is too large to open ({}; the limit is {} MB): {path_str}",
-        shown(size),
+        size_label(size),
         MAX_OPEN_BYTES / MB
     )
 }
@@ -298,6 +302,38 @@ pub enum SmallFileError {
 /// large.
 pub fn read_small_file(path: &Path, follow: bool, max: u64) -> Result<Vec<u8>, SmallFileError> {
     use std::io::Read;
+    let (file, meta) = match open_regular_file(path, follow).map_err(SmallFileError::Io)? {
+        Opened::File(file, meta) => (file, meta),
+        Opened::NotFound => return Err(SmallFileError::NotFound),
+        Opened::NotAFile => return Err(SmallFileError::NotAFile),
+    };
+    if meta.len() > max {
+        return Err(SmallFileError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1).read_to_end(&mut bytes).map_err(SmallFileError::Io)?;
+    if bytes.len() as u64 > max {
+        return Err(SmallFileError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+/// What `open_regular_file` opened.
+pub(crate) enum Opened {
+    /// A regular file, with what its open handle says of it.
+    File(fs::File, fs::Metadata),
+    /// Nothing is there — or, followed, a link that leads nowhere.
+    NotFound,
+    /// A folder, a FIFO, a device, a socket — or, not following, a link.
+    NotAFile,
+}
+
+/// `path` opened for reading without waiting on it, and kept only when the
+/// open handle says it is a regular file: the open half of
+/// `read_small_file`, which says why it is done this way. `fs_read_image`
+/// (`preview::read_image`) opens through here too, so a FIFO named
+/// `photo.png` does not hold it either.
+pub(crate) fn open_regular_file(path: &Path, follow: bool) -> std::io::Result<Opened> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -312,33 +348,25 @@ pub fn read_small_file(path: &Path, follow: bool, max: u64) -> Result<Vec<u8>, S
     }
     let file = match options.open(path) {
         Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Err(SmallFileError::NotFound),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Opened::NotFound),
         // `O_NOFOLLOW` refuses a link by failing the open with ELOOP: the
         // link is there, and is no file. (Windows opens the link itself, and
         // its metadata says so below.)
         #[cfg(unix)]
-        Err(err) if !follow && err.raw_os_error() == Some(libc::ELOOP) => return Err(SmallFileError::NotAFile),
+        Err(err) if !follow && err.raw_os_error() == Some(libc::ELOOP) => return Ok(Opened::NotAFile),
         // Windows will not open a folder as a file at all (no
         // FILE_FLAG_BACKUP_SEMANTICS): the open fails with "access denied",
         // which is the folder's kind, not a permission — asked only after the
         // open failed, so nothing is read through what is asked.
         #[cfg(windows)]
-        Err(_) if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) => return Err(SmallFileError::NotAFile),
-        Err(err) => return Err(SmallFileError::Io(err)),
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) => return Ok(Opened::NotAFile),
+        Err(err) => return Err(err),
     };
-    let meta = file.metadata().map_err(SmallFileError::Io)?;
+    let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(SmallFileError::NotAFile);
+        return Ok(Opened::NotAFile);
     }
-    if meta.len() > max {
-        return Err(SmallFileError::TooLarge);
-    }
-    let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes).map_err(SmallFileError::Io)?;
-    if bytes.len() as u64 > max {
-        return Err(SmallFileError::TooLarge);
-    }
-    Ok(bytes)
+    Ok(Opened::File(file, meta))
 }
 
 pub fn write_file(path_str: &str, content: &str) -> Result<(), String> {
@@ -1896,6 +1924,36 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The words a size is said in: tenths of a MB rounded up, so a byte past
+    /// a limit never reads as within it, and GB once that is 1024.0 MB. The frontend
+    /// says sizes with one copy of this (`sizeLabel`, src/lib/sizeLabel.js),
+    /// and tests/adversarial/markdown_preview.test.js (MP-21) reads this
+    /// table and holds that copy to every row of it.
+    #[test]
+    fn a_size_is_said_in_tenths_of_a_mb_rounded_up() {
+        for (bytes, words) in [
+            (0, "0.0 MB"),
+            (1, "0.1 MB"),
+            (104857, "0.1 MB"),
+            (104858, "0.2 MB"),
+            (1024 * 1024, "1.0 MB"),
+            (2 * 1024 * 1024 + 1, "2.1 MB"),
+            (20 * 1024 * 1024 + 1, "20.1 MB"),
+            (25 * 1024 * 1024 - 1, "25.0 MB"),
+            (50 * 1024 * 1024 + 1, "50.1 MB"),
+            (120 * 1024 * 1024, "120.0 MB"),
+            (10 * 1024 * 1024 * 1024 - 1, "10.0 GB"),
+            (10 * 1024 * 1024 * 1024, "10.0 GB"),
+            (1023 * 1024 * 1024, "1023.0 MB"),
+            (1023 * 1024 * 1024 + 1, "1023.1 MB"),
+            (1024 * 1024 * 1024 - 1, "1.0 GB"),
+            (3 * 1024 * 1024 * 1024, "3.0 GB"),
+            (15 * 1024 * 1024 * 1024 + 1, "15.0 GB"),
+        ] {
+            assert_eq!(size_label(bytes), words, "{bytes} bytes");
+        }
     }
 
     /// A 500 MB log clicked in the Explorer was read whole, sent whole over

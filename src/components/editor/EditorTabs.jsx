@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { X, Circle, FileCode2, FileJson, FileText, File, SplitSquareHorizontal, SplitSquareVertical } from 'lucide-react';
+import { X, Circle, FileCode2, FileImage, FileJson, FileText, File, SplitSquareHorizontal, SplitSquareVertical } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { cn } from '../../lib/utils.js';
 import { ContextMenu } from '../common/ContextMenu.jsx';
@@ -26,6 +26,25 @@ function getTabIcon(fileName) {
     default:
       return <File size={14} className={className} />;
   }
+}
+
+/**
+ * The chip's icon and, for a preview tab, the word that tells it from the
+ * text tab of the same file (a README's source and its preview can sit in
+ * one strip): an image tab gets the picture icon the Explorer gives image
+ * files, a Markdown preview "Preview" after its name. A text tab's are as
+ * before.
+ */
+function tabIconOf(tab) {
+  if (tab.kind === 'image') {
+    return <FileImage size={14} className="text-vsc-muted shrink-0" aria-label="Image preview" role="img" />;
+  }
+  return getTabIcon(tab.fileName);
+}
+
+/** The word after a preview tab's name, or null for a text tab (and an image, which its icon tells). */
+function previewSuffixOf(tab) {
+  return tab.kind === 'markdown' ? 'Preview' : null;
 }
 
 /**
@@ -536,6 +555,8 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
           const isActive = tab.id === activeTab?.id;
           // A terminal being dragged never dims a file, whatever its id.
           const isBeingDragged = drag?.active && drag.tabId === tab.id && drag.tabKind !== 'terminal';
+          // A preview tab has no edits to keep, whatever its flag says (editorStore.js).
+          const dirty = tab.isDirty && tab.kind == null;
           return (
             // The marker is the chip's sibling, never its child: inside the
             // chip being dragged it would be dimmed along with it, and right
@@ -583,11 +604,16 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
                   isBeingDragged && 'opacity-40'
                 )}
               >
-                {getTabIcon(tab.fileName)}
+                {tabIconOf(tab)}
                 <span className="truncate max-w-[160px]">{tab.fileName}</span>
+                {previewSuffixOf(tab) && (
+                  <span data-tab-preview="" className="shrink-0 text-vsc-muted">
+                    {previewSuffixOf(tab)}
+                  </span>
+                )}
 
                 <div className="relative flex items-center justify-center w-3.5 h-3.5 shrink-0">
-                  {tab.isDirty && (
+                  {dirty && (
                     <Circle size={14} className="fill-vsc-fg text-vsc-fg group-hover:hidden" />
                   )}
                   <button
@@ -599,7 +625,7 @@ export function EditorTabs({ node, onSplitH, onSplitV, onClose, canClose = false
                     title="Close"
                     className={cn(
                       'absolute inset-0 flex items-center justify-center rounded-sm hover:bg-vsc-item-hover',
-                      tab.isDirty
+                      dirty
                         ? 'hidden group-hover:flex'
                         : cn('opacity-0 group-hover:opacity-100', isActive && 'opacity-100')
                     )}

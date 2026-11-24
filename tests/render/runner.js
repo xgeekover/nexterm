@@ -6743,6 +6743,634 @@ scenario(
   }
 );
 
+// ---- An image tab (Orca bundle 5, B4; AC-B4-6) ------------------------------
+
+/**
+ * An image tab's body is lazy, as Monaco is (EditorPane.jsx), so the
+ * whole-App render draws its Suspense fallback. These cases draw
+ * ImagePreview itself; the pane around it is drawn on its own, and once
+ * with a streaming render that waits for the lazy body (`renderSettled`).
+ */
+const { ImagePreview, imageDrawSize } = await import('../../src/components/editor/ImagePreview.jsx');
+const { EditorPane } = await import('../../src/components/editor/EditorPane.jsx');
+const { imageAltText } = await import('../../src/lib/imagePreview.js');
+const { renderToPipeableStream } = await import('react-dom/server');
+const { Writable } = await import('node:stream');
+
+/** A real 4 × 3 PNG, 80 bytes (the browser mock's /workspace/assets/logo.png). */
+const PNG_4X3 = 'iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAYAAAC09K7GAAAAF0lEQVR42mOQk9P737nl138QDcIMBAUANcIWVJdRDv4AAAAASUVORK5CYII=';
+/** An SVG that would run, call out and draw if it were ever markup rather than an image. */
+const HOSTILE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" onload="alert(1)"><script>alert(2)</script><image href="http://127.0.0.1:9/x"/><foreignObject><iframe src="https://evil.example/"></iframe></foreignObject></svg>';
+const base64Of = (text) => Buffer.from(text, 'utf8').toString('base64');
+
+/** An image tab as editorStore.js makes one, holding the 4 × 3 PNG. */
+const imageTab = (extra = {}) => ({
+  id: 'img1',
+  kind: 'image',
+  filePath: '/workspace/assets/logo.png',
+  fileName: 'logo.png',
+  isDirty: false,
+  deleted: false,
+  image: { mime: 'image/png', data: PNG_4X3, bytes: 80, width: 4, height: 3 },
+  failure: null,
+  ...extra,
+});
+const drawImage = (tab) => renderToString(React.createElement(ImagePreview, { tab }));
+/** Every `<img>` tag in the markup. */
+const imgTagsIn = (html) => [...html.matchAll(/<img\b[^>]*>/gi)].map((m) => m[0]);
+const imgAttr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1] ?? null;
+/** Markup a picture must never become: an element that runs, loads or draws a document. */
+const LIVE_MARKUP = /<(svg|object|embed|iframe|script|foreignObject|image)\b/i;
+/** The image's zoom bar buttons, by their aria-label: `{ text, pressed, disabled, title }`. */
+function zoomButtonsIn(html) {
+  const out = {};
+  for (const [, attrs, inner] of html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)) {
+    out[imgAttr(attrs, 'aria-label')] = {
+      text: visibleText(inner).trim(),
+      pressed: imgAttr(attrs, 'aria-pressed'),
+      disabled: /\sdisabled=""/.test(attrs),
+      title: imgAttr(attrs, 'title'),
+    };
+  }
+  return out;
+}
+/** Control, bidirectional and invisible characters, which a name shown must not carry. */
+/** The words on screen, one space between elements (`visibleText` puts a line break there). */
+const shownWords = (html) => visibleText(html).replace(/\n+/g, ' ').trim();
+const HOSTILE_CHARS = /[\u{0}-\u{1f}\u{7f}-\u{9f}\u{200b}-\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}\u{feff}]/u;
+
+check('RN-247', "an image tab: one <img> from a data:image/png;base64, URI, the file name as alt, the size line, Fit (pressed) and 100%, zoom buttons; drawn at its own size, never enlarged (AC-B4-6)", () => {
+  const html = drawImage(imageTab());
+  const imgs = imgTagsIn(html);
+  expectThat(imgs.length === 1, `${imgs.length} <img> drawn`);
+  const src = imgAttr(imgs[0], 'src') ?? '';
+  expectThat(src.startsWith('data:image/png;base64,'), `the picture's source: ${src.slice(0, 40)}`);
+  expectThat(src === `data:image/png;base64,${PNG_4X3}`, 'the source is not the file\u{2019}s bytes');
+  expectThat(imgAttr(imgs[0], 'alt') === 'logo.png', `alt: ${imgAttr(imgs[0], 'alt')}`);
+  expectThat(imgAttr(imgs[0], 'draggable') === 'false', 'the picture can be dragged out');
+  // No pane is laid out in a server render: Fit is 100% and the picture its own 4 × 3.
+  expectThat(/style="width:4px;height:3px;/.test(imgs[0]), `the picture's size: ${imgAttr(imgs[0], 'style')}`);
+  expectText(html, '4 \u{00d7} 3 \u{00b7} 80 B');
+  expectThat(/data-image-status=""[^>]*>[\s\S]*?4 \u{00d7} 3/u.test(html), 'the size is not on the status line');
+  const buttons = zoomButtonsIn(html);
+  expectThat(buttons['Fit to pane']?.text === 'Fit' && buttons['Fit to pane'].pressed === 'true', `Fit: ${JSON.stringify(buttons['Fit to pane'])}`);
+  expectThat(buttons['Actual size']?.text === '100%' && buttons['Actual size'].pressed === 'false' && !buttons['Actual size'].disabled, `100%: ${JSON.stringify(buttons['Actual size'])}`);
+  expectThat(buttons['Zoom out'] && !buttons['Zoom out'].disabled, `Zoom out: ${JSON.stringify(buttons['Zoom out'])}`);
+  expectThat(buttons['Zoom in'] && !buttons['Zoom in'].disabled, `Zoom in: ${JSON.stringify(buttons['Zoom in'])}`);
+  expectThat(/data-image-zoom=""[^>]*>100%</.test(html), 'the zoom shown is not 100%');
+  expectThat(/role="toolbar" aria-label="Image zoom"/.test(html), 'the controls are not a labelled toolbar');
+  expectThat(/data-image-scroller=""[^>]*tabindex="0"/.test(html), 'the scroller cannot take the keyboard to pan');
+  expectThat(!LIVE_MARKUP.test(html), `live markup drawn: ${LIVE_MARKUP.exec(html)?.[0]}`);
+  expectThat(!/Deleted on disk/.test(html), 'a file still on disk is said to be deleted');
+});
+
+check('RN-248', 'an SVG is drawn only as an <img> from a data:image/svg+xml;base64, URI: no <svg>, <object>, <embed> or <iframe>, none of its script or addresses in the markup; not base64 or not an image MIME, no <img> at all (AC-B4-6)', () => {
+  const data = base64Of(HOSTILE_SVG);
+  const html = drawImage(imageTab({ filePath: '/workspace/assets/x.svg', fileName: 'x.svg', image: { mime: 'image/svg+xml', data, bytes: HOSTILE_SVG.length, width: null, height: null } }));
+  const imgs = imgTagsIn(html);
+  expectThat(imgs.length === 1, `${imgs.length} <img> drawn for the SVG`);
+  expectThat(imgAttr(imgs[0], 'src') === `data:image/svg+xml;base64,${data}`, `the SVG's source: ${(imgAttr(imgs[0], 'src') ?? '').slice(0, 40)}`);
+  expectThat(!LIVE_MARKUP.test(html), `live markup drawn for an SVG: ${LIVE_MARKUP.exec(html)?.[0]}`);
+  expectThat(!/alert\(|127\.0\.0\.1|evil\.example|onload/.test(html), 'the SVG\u{2019}s own text reached the markup');
+  expectText(html, 'SVG \u{00b7} ');
+  // Its size is not known until it is decoded: no 100% or zoom to step from yet, and Fit is on.
+  const buttons = zoomButtonsIn(html);
+  expectThat(buttons['Fit to pane']?.pressed === 'true' && buttons['Actual size']?.disabled && buttons['Zoom in']?.disabled, `the SVG's controls: ${JSON.stringify(buttons)}`);
+
+  for (const [what, image] of [
+    ['SVG markup instead of base64', { mime: 'image/svg+xml', data: HOSTILE_SVG, bytes: 10, width: null, height: null }],
+    ['an HTML document', { mime: 'text/html', data: base64Of('<script>alert(1)</script>'), bytes: 10, width: 1, height: 1 }],
+    ['a javascript: MIME', { mime: 'javascript:alert(1)//', data: PNG_4X3, bytes: 80, width: 4, height: 3 }],
+    ['no data', { mime: 'image/png', data: '', bytes: 0, width: 4, height: 3 }],
+    ['no image at all', null],
+  ]) {
+    const refused = drawImage(imageTab({ image }));
+    expectThat(imgTagsIn(refused).length === 0, `${what}: an <img> is drawn`);
+    expectThat(!LIVE_MARKUP.test(refused) && !/alert\(/.test(refused), `${what}: live markup or its script drawn`);
+    expectText(refused, 'Cannot show logo.png');
+  }
+});
+
+check('RN-249', 'a refused image says why, in its own words, and draws no <img> — also when a picture from before is still on the tab (AC-B4-6)', () => {
+  for (const reason of [
+    'File is not an image NexTerm can show (it is no PNG, JPEG, GIF, WebP or SVG)',
+    'Image is too large to preview (25.0 MB; the limit is 20 MB)',
+    'Image is too large to preview (100000 \u{00d7} 100000; the limit is 32768 px per side and 32 Mi pixels)',
+  ]) {
+    const html = drawImage(imageTab({ image: null, failure: reason }));
+    expectThat(imgTagsIn(html).length === 0, `"${reason}": an <img> is drawn`);
+    expectText(html, reason);
+    expectText(html, 'Cannot show logo.png');
+    expectThat(!/role="toolbar"/.test(html), `"${reason}": zoom controls with no picture`);
+    const stale = drawImage(imageTab({ failure: reason }));
+    expectThat(imgTagsIn(stale).length === 0, `"${reason}": the picture from before is still drawn`);
+    expectText(stale, reason);
+  }
+  const hostile = shownWords(drawImage(imageTab({ image: null, failure: 'File is not an image\u{202e} NexTerm\u{200b} can show\u{1b}[31m (x)\u{7}' })));
+  expectThat(!HOSTILE_CHARS.test(hostile), `the reason is drawn with control or bidi characters: ${JSON.stringify(hostile)}`);
+});
+
+check('RN-250', 'an image whose file is deleted on disk keeps its picture and says "Deleted on disk"; a refused one too; one still there does not', () => {
+  const gone = drawImage(imageTab({ deleted: true }));
+  expectThat(imgTagsIn(gone).length === 1, 'the picture went with the file');
+  expectThat(/data-image-deleted=""[^>]*>Deleted on disk</.test(gone), 'the tab does not say its file is deleted on disk');
+  const refusedGone = drawImage(imageTab({ deleted: true, image: null, failure: 'Image is too large to preview (25.0 MB; the limit is 20 MB)' }));
+  expectText(refusedGone, 'Deleted on disk');
+  expectThat(imgTagsIn(refusedGone).length === 0, 'a refused image draws a picture once deleted');
+  for (const deleted of [false, undefined, 'yes', 1]) {
+    expectThat(!/Deleted on disk/.test(drawImage(imageTab({ deleted }))), `deleted: ${JSON.stringify(deleted)} says Deleted on disk`);
+  }
+});
+
+check('RN-251', 'a hostile file name is cleaned in the alt text and the words shown (control, bidi, zero-width characters removed)', () => {
+  const path = '/workspace/assets/\u{202e}gnp.exe\u{200b}\u{7}x\u{1b}[31m\u{2066}.png';
+  const html = drawImage(imageTab({ filePath: path, fileName: path.split('/').pop() }));
+  const alt = imgAttr(imgTagsIn(html)[0] ?? '', 'alt');
+  expectThat(typeof alt === 'string' && alt.length > 0, `alt: ${JSON.stringify(alt)}`);
+  expectThat(!HOSTILE_CHARS.test(alt), `alt carries control or bidi characters: ${JSON.stringify(alt)}`);
+  expectThat(alt === imageAltText(path) && alt.endsWith('.png') && alt.includes('gnp.exe'), `alt is not the cleaned name: ${JSON.stringify(alt)}`);
+  const refused = shownWords(drawImage(imageTab({ filePath: path, image: null, failure: 'Image is too large to preview (25.0 MB; the limit is 20 MB)' })));
+  expectThat(!HOSTILE_CHARS.test(refused), `the refusal names the file with control or bidi characters: ${JSON.stringify(refused)}`);
+  expectThat(refused.includes(`Cannot show ${imageAltText(path)}`), 'the refusal does not name the cleaned file');
+});
+
+check('RN-252', 'Fit never enlarges: a small picture stays its own size, a large one shrinks to the pane; 100% and the zoom scale it; an unknown size is left to the browser', () => {
+  const at = (size, pane, zoom = null) => JSON.stringify(imageDrawSize(size, pane, zoom));
+  expectThat(at({ width: 4, height: 3 }, { width: 800, height: 600 }) === '{"scale":1,"width":4,"height":3}', `4 \u{00d7} 3 in 800 \u{00d7} 600: ${at({ width: 4, height: 3 }, { width: 800, height: 600 })}`);
+  expectThat(at({ width: 4000, height: 3000 }, { width: 800, height: 600 }) === '{"scale":0.2,"width":800,"height":600}', `4000 \u{00d7} 3000: ${at({ width: 4000, height: 3000 }, { width: 800, height: 600 })}`);
+  expectThat(at({ width: 1000, height: 100 }, { width: 500, height: 600 }) === '{"scale":0.5,"width":500,"height":50}', `1000 \u{00d7} 100 in 500 wide: ${at({ width: 1000, height: 100 }, { width: 500, height: 600 })}`);
+  expectThat(at({ width: 100000, height: 10 }, { width: 800, height: 600 }) === '{"scale":0.008,"width":800,"height":1}', `a long strip: ${at({ width: 100000, height: 10 }, { width: 800, height: 600 })}`);
+  expectThat(at({ width: 4, height: 3 }, null) === '{"scale":1,"width":4,"height":3}', 'no pane laid out yet');
+  expectThat(at({ width: 4, height: 3 }, { width: 800, height: 600 }, 1) === '{"scale":1,"width":4,"height":3}', '100%');
+  expectThat(at({ width: 4000, height: 3000 }, { width: 800, height: 600 }, 1) === '{"scale":1,"width":4000,"height":3000}', '100% of a large picture');
+  expectThat(at({ width: 4, height: 3 }, { width: 800, height: 600 }, 8) === '{"scale":8,"width":32,"height":24}', '800%');
+  expectThat(at({ width: null, height: null }, { width: 800, height: 600 }) === '{"scale":1,"width":null,"height":null}', 'an SVG not yet decoded');
+  expectThat(at({ width: 0, height: 3 }, { width: 800, height: 600 }).includes('"width":null'), 'a zero width is a size');
+});
+
+/** The stores' arranged state, as a server render reads it (see `renderArranged`). */
+function settleStores() {
+  for (const s of STORES) Object.assign(s.getInitialState(), s.getState());
+}
+/** Editor pane `paneId` holding `tabIds`, `active` shown, drawn on its own. */
+function drawPane(tabIds, active) {
+  settleStores();
+  return renderToString(React.createElement(EditorPane, { node: { type: 'leaf', kind: 'editor', id: 'pane-x', tabIds, activeTabId: active } }));
+}
+/** The same, by a streaming render that waits for every lazy body to arrive. */
+function renderSettled(element) {
+  return new Promise((resolve, reject) => {
+    let html = '';
+    const sink = new Writable({
+      write(chunk, _encoding, done) {
+        html += chunk;
+        done();
+      },
+    });
+    sink.on('finish', () => resolve(html));
+    const stream = renderToPipeableStream(element, {
+      onAllReady: () => stream.pipe(sink),
+      onShellError: reject,
+      onError: reject,
+    });
+  });
+}
+/** The opening tag of the pane's body box. */
+const editorBodyTag = (html) => /<div\b[^>]*\sdata-editor-pane-body="pane-x"[^>]*>/.exec(html)?.[0] ?? null;
+
+/** A case whose `body` returns a promise. */
+async function checkAsync(id, description, body) {
+  const started = Date.now();
+  try {
+    await body();
+    results.push({ id, description, ok: true, ms: Date.now() - started });
+  } catch (err) {
+    failed += 1;
+    results.push({ id, description, ok: false, error: err, ms: Date.now() - started });
+  }
+}
+
+/** A text tab, an image tab and a Markdown preview of the README, each forced dirty. */
+function arrangePreviewPane() {
+  reset();
+  useEditorStore.setState({
+    tabs: [
+      { id: 'e1', filePath: '/workspace/README.md', fileName: 'README.md', content: '# x', savedContent: '', isDirty: true, language: 'markdown' },
+      imageTab({ isDirty: true }),
+      { id: 'md1', kind: 'markdown', filePath: '/workspace/README.md', fileName: 'README.md', isDirty: true, deleted: false, text: '# x', bytes: 3, tooLarge: false },
+    ],
+  });
+}
+
+check('RN-264', 'an SVG\u{2019}s image tab offers Open as Text in words, in its toolbar, and on its refusal too; no <svg> or icon anywhere in it; PNG, JPEG, GIF and WebP tabs have no such button (OQ-B4d)', () => {
+  const openAsTextIn = (html) => [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].filter(([, , inner]) => /Open as Text/.test(visibleText(inner)));
+  const svgImage = { mime: 'image/svg+xml', data: base64Of(HOSTILE_SVG), bytes: HOSTILE_SVG.length, width: null, height: null };
+  for (const filePath of ['/workspace/assets/x.svg', '/workspace/assets/X.SVG']) {
+    const html = drawImage(imageTab({ filePath, fileName: filePath.split('/').pop(), image: svgImage }));
+    const found = openAsTextIn(html);
+    expectThat(found.length === 1, `${filePath}: ${found.length} Open as Text buttons`);
+    const [tag, attrs, inner] = found[0] ?? ['', '', ''];
+    expectThat(visibleText(inner).trim() === 'Open as Text' && !/<(svg|img|i|span)\b/i.test(inner), `${filePath}: not words alone: ${inner}`);
+    expectThat(/\stype="button"/.test(attrs) && /\sdata-image-open-text=""/.test(attrs), `${filePath}: not a real button: ${tag}`);
+    const toolbar = /<div[^>]*role="toolbar"[^>]*>([\s\S]*?)<\/div>\s*<div[^>]*data-image-scroller/.exec(html)?.[1] ?? '';
+    expectThat(/Open as Text/.test(toolbar), `${filePath}: not in the image toolbar`);
+    expectThat(!LIVE_MARKUP.test(html), `${filePath}: live markup drawn: ${LIVE_MARKUP.exec(html)?.[0]}`);
+  }
+  // A refused SVG — its source the one most in need of opening — offers it too, with no picture.
+  const refused = drawImage(imageTab({ filePath: '/workspace/assets/broken.svg', fileName: 'broken.svg', image: null, failure: 'File is not an image NexTerm can show (its header is not valid)' }));
+  expectThat(openAsTextIn(refused).length === 1 && imgTagsIn(refused).length === 0, 'a refused SVG: no Open as Text, or a picture drawn');
+  expectThat(!LIVE_MARKUP.test(refused), 'a refused SVG: live markup drawn');
+  // The binary formats: never.
+  for (const [ext, mime] of [['png', 'image/png'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['gif', 'image/gif'], ['webp', 'image/webp']]) {
+    const html = drawImage(imageTab({ filePath: `/workspace/assets/pic.${ext}`, fileName: `pic.${ext}`, image: { mime, data: PNG_4X3, bytes: 80, width: 4, height: 3 } }));
+    expectThat(imgTagsIn(html).length === 1, `setup: pic.${ext} is not drawn`);
+    expectThat(openAsTextIn(html).length === 0 && !/Open as Text/.test(html), `pic.${ext} offers Open as Text`);
+    const failed = drawImage(imageTab({ filePath: `/workspace/assets/pic.${ext}`, fileName: `pic.${ext}`, image: null, failure: 'Image is too large to preview (25.0 MB; the limit is 20 MB)' }));
+    expectThat(!/Open as Text/.test(failed), `a refused pic.${ext} offers Open as Text`);
+  }
+  // What a file is called, not what its bytes say: SVG bytes in a .png offer nothing.
+  expectThat(!/Open as Text/.test(drawImage(imageTab({ image: svgImage }))), 'logo.png holding an SVG offers Open as Text');
+});
+
+check('RN-253', 'the editor pane chooses its body by the tab\u{2019}s kind: a text tab as before (Save, the Monaco box), an image or a Markdown preview with no Save and a box of its own; the strip tells the README\u{2019}s preview from its text tab', () => {
+  arrangePreviewPane();
+  const text = drawPane(['e1', 'img1', 'md1'], 'e1');
+  expectThat(editorBodyTag(text) === '<div data-editor-pane-body="pane-x" class="relative flex-1 overflow-hidden">', `the text tab's body box changed: ${editorBodyTag(text)}`);
+  expectThat(buttonsIn(text).some((b) => b.text === 'Save'), 'a modified text tab offers no Save');
+  expectThat(imgTagsIn(text).length === 0 && !/Markdown preview|data-preview/.test(text), 'a text tab draws a preview');
+
+  const image = drawPane(['e1', 'img1', 'md1'], 'img1');
+  expectThat(/\sdata-preview="image"/.test(editorBodyTag(image) ?? '') && /\stabindex="-1"/.test(editorBodyTag(image) ?? ''), `the image's body box: ${editorBodyTag(image)}`);
+  expectThat(!buttonsIn(image).some((b) => b.text === 'Save'), 'an image tab offers Save');
+  expectText(image, 'logo.png');
+
+  const markdown = drawPane(['e1', 'img1', 'md1'], 'md1');
+  expectThat(/\sdata-preview="markdown"/.test(editorBodyTag(markdown) ?? ''), `the preview's body box: ${editorBodyTag(markdown)}`);
+  expectThat(!buttonsIn(markdown).some((b) => b.text === 'Save'), 'a Markdown preview offers Save');
+  // Step P7: the preview's body is lazy, as the image's is (RN-261 waits for it); no placeholder is left.
+  expectThat(!/data-preview-placeholder|This tab cannot be shown/.test(markdown), 'a Markdown preview is drawn as a tab that cannot be shown');
+  expectThat(imgTagsIn(markdown).length === 0, 'a Markdown preview draws a picture');
+
+  // The strip: the image chip has the picture icon, read out; the preview says so; the text tab is as before.
+  const chip = (id) => tabChip(text, id) ?? '';
+  expectThat(/aria-label="Image preview"/.test(chip('img1')) && /lucide-file-image/.test(chip('img1')), `the image chip: ${chip('img1')}`);
+  expectThat(/data-tab-preview=""[^>]*>Preview</.test(chip('md1')), `the Markdown preview chip: ${chip('md1')}`);
+  expectThat(!/data-tab-preview|Image preview/.test(chip('e1')) && /lucide-file-text/.test(chip('e1')), `the README text chip: ${chip('e1')}`);
+  // Forced dirty, a preview still shows no unsaved dot; the modified text tab does.
+  expectThat(/lucide-circle\b/.test(chip('e1')), `the modified text chip has no dot: ${chip('e1')}`);
+  expectThat(!/lucide-circle\b/.test(chip('img1')) && !/lucide-circle\b/.test(chip('md1')), 'a preview chip shows an unsaved dot');
+});
+
+await checkAsync('RN-254', 'the image tab\u{2019}s lazy body arrives in the pane: one <img> from its data: URI inside the pane\u{2019}s box, no Monaco, no Save', async () => {
+  arrangePreviewPane();
+  settleStores();
+  const html = await renderSettled(React.createElement(EditorPane, { node: { type: 'leaf', kind: 'editor', id: 'pane-x', tabIds: ['e1', 'img1', 'md1'], activeTabId: 'img1' } }));
+  const box = html.slice(html.indexOf('data-editor-pane-body="pane-x"'));
+  const imgs = imgTagsIn(box);
+  expectThat(imgs.length === 1 && imgAttr(imgs[0], 'src') === `data:image/png;base64,${PNG_4X3}`, `the pane's picture: ${imgs.join(' ')}`);
+  expectThat(/data-image-preview=""/.test(box) && /role="toolbar" aria-label="Image zoom"/.test(box), 'the image body is not drawn in the pane');
+  expectThat(!/data-stand-in|monaco/i.test(box), 'Monaco is drawn for an image tab');
+  expectThat(!buttonsIn(html).some((b) => b.text === 'Save'), 'an image tab offers Save');
+});
+
+check('RN-255', 'nothing in src/ writes markup as a string: no dangerouslySetInnerHTML, innerHTML, outerHTML, insertAdjacentHTML or document.write, comments included (AC-B4-6)', () => {
+  const sources = sourcesUnder('src');
+  expectThat(sources.some(([file]) => file === 'src/components/editor/ImagePreview.jsx'), 'setup: src/ is not read');
+  const found = sources
+    .filter(([, text]) => /dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML|document\.write\b/.test(text))
+    .map(([file, text]) => `${file}: ${/dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML|document\.write\b/.exec(text)[0]}`);
+  expectThat(found.length === 0, `markup written as a string: ${found.join(', ')}`);
+});
+
+// ---- A Markdown preview (Orca bundle 5, B3; AC-B3-1, AC-B3-2, AC-B3-5, AC-B3-9) ----
+
+/**
+ * The preview parses nothing itself: the worker sends it a safe hast tree
+ * (OQ-B3g). These cases build that tree here, in Node, with the worker's own
+ * pipeline (markdownPipeline.js `markdownToHast`), and draw it through
+ * MarkdownPreviewView — MarkdownPreview's own drawing: the
+ * hast-util-to-jsx-runtime call and the link and image components — with
+ * renderToStaticMarkup. What a click does is
+ * tests/adversarial/markdown_preview_mounted.test.js's.
+ */
+const { MarkdownPreviewView, TOO_COMPLEX_TEXT, RENDERING_NOTICE_MS, externalLinkLabel } = await import('../../src/components/editor/MarkdownPreview.jsx');
+const { markdownToHast } = await import('../../src/lib/markdownPipeline.js');
+const { renderToStaticMarkup } = await import('react-dom/server');
+
+const MD_AT = { filePath: '/workspace/docs/README.md', root: '/workspace' };
+const MD_MB = 1024 * 1024;
+const markdownTab = (extra = {}) => ({ id: 'md1', kind: 'markdown', filePath: MD_AT.filePath, fileName: 'README.md', isDirty: false, deleted: false, text: '', bytes: 0, tooLarge: false, ...extra });
+/** `text` as the worker answers it. */
+const parsedMarkdown = (text, at = MD_AT) => ({ status: 'ok', ...markdownToHast(text, at) });
+/** The preview of `text` — or of `result` — drawn. */
+const drawMarkdown = (text, { tab = markdownTab({ text }), result = parsedMarkdown(text), ...rest } = {}) =>
+  renderToStaticMarkup(React.createElement(MarkdownPreviewView, { tab, result, ...rest }));
+/** Every opening tag in the markup, and those of one element. */
+const openingTagsIn = (html) => [...html.matchAll(/<[a-zA-Z][^>]*>/g)].map((m) => m[0]);
+const tagsNamed = (html, tag) => openingTagsIn(html).filter((t) => new RegExp(`^<${tag}[\\s/>]`, 'i').test(t));
+/** The value of every `name="…"` attribute in the markup. */
+const attrValues = (html, name) => [...html.matchAll(new RegExp(`\\s${name}="([^"]*)"`, 'g'))].map((m) => m[1]);
+/** The text of every raw-HTML element: `[kind, escaped text]`. */
+const rawHtmlIn = (html) => [...html.matchAll(/<(span|div) class="md-raw-html" data-raw-html="(inline|block)">([^<]*)<\/\1>/g)].map((m) => [m[2], m[3]]);
+
+const EVERY_ELEMENT = [
+  '# Getting Started',
+  '',
+  'A paragraph with *emphasis*, **strong**, ~~struck~~ and `inline code`.  ',
+  'After a hard line break.',
+  '',
+  '## Getting Started',
+  '',
+  '### 설치',
+  '',
+  '#### Four',
+  '',
+  '##### Five',
+  '',
+  '###### Six',
+  '',
+  '```js',
+  'const x = 1; // <b>not bold</b>',
+  '```',
+  '',
+  '1. one',
+  '2. two',
+  '',
+  '- apple',
+  '- pear',
+  '',
+  '* [x] done',
+  '* [ ] to do',
+  '',
+  '> quoted',
+  '',
+  '| Left | Right |',
+  '| :--- | ----: |',
+  '| a | b |',
+  '',
+  '---',
+  '',
+  'A [link](https://example.com/) and an ![image](assets/logo.png).',
+].join('\n');
+
+check('RN-256', 'a Markdown preview draws every F-B3-2 element from the worker\u{2019}s tree: unique ASCII-safe heading ids, emphasis, strong, strikethrough, inline and fenced code as plain monospace, ordered, unordered and task lists with disabled checkboxes, quote, GFM table, rule, line break, link and image (AC-B3-1)', () => {
+  const html = drawMarkdown(EVERY_ELEMENT);
+  expectThat(/<article class="markdown-preview">/.test(html), 'the document is not drawn in the preview\u{2019}s scope');
+  const ids = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].flatMap((h) => {
+    const tags = tagsNamed(html, h);
+    expectThat(tags.length > 0, `no <${h}> drawn`);
+    return tags.map((t) => imgAttr(t, 'id'));
+  });
+  expectThat(ids.every((id) => typeof id === 'string' && /^md-[a-z0-9-]+$/.test(id)), `heading ids not ASCII-safe: ${JSON.stringify(ids)}`);
+  expectThat(new Set(ids).size === ids.length, `heading ids not unique: ${JSON.stringify(ids)}`);
+  expectThat(ids[0] === 'md-getting-started' && ids[1].startsWith('md-getting-started-'), `the two "Getting Started" ids: ${ids[0]}, ${ids[1]}`);
+  for (const [what, re] of [
+    ['a paragraph', /<p>A paragraph with /],
+    ['emphasis', /<em>emphasis<\/em>/],
+    ['strong', /<strong>strong<\/strong>/],
+    ['strikethrough', /<del>struck<\/del>/],
+    ['inline code', /<code>inline code<\/code>/],
+    ['a line break', /<br\/>/],
+    ['an ordered list', /<ol>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ol>/],
+    ['an unordered list', /<ul>\s*<li>apple<\/li>\s*<li>pear<\/li>\s*<\/ul>/],
+    ['a task list', /<ul class="contains-task-list">\s*<li class="task-list-item">/],
+    ['a quote', /<blockquote>\s*<p>quoted<\/p>\s*<\/blockquote>/],
+    ['a table', /<table><thead><tr><th style="text-align:left">Left<\/th><th style="text-align:right">Right<\/th><\/tr><\/thead><tbody><tr><td style="text-align:left">a<\/td>/],
+    ['a rule', /<hr\/>/],
+    ['a link', /<a data-link="external"[^>]*>link<\/a>/],
+    ['an image', /data-image-placeholder="loading"[^>]*><span class="md-image-alt">image<\/span><span class="md-image-address">assets\/logo\.png<\/span>/],
+  ]) {
+    expectThat(re.test(html), `${what} is not drawn`);
+  }
+  // Fenced code: its text, escaped, in one <code> — no highlighting spans, the raw-looking tag only text.
+  const fenced = /<pre><code class="language-js">([\s\S]*?)<\/code><\/pre>/.exec(html)?.[1];
+  expectThat(fenced === 'const x = 1; // &lt;b&gt;not bold&lt;/b&gt;\n', `the fenced code: ${JSON.stringify(fenced)}`);
+  const boxes = tagsNamed(html, 'input');
+  expectThat(boxes.length === 2 && boxes.every((t) => /\stype="checkbox"/.test(t) && /\sdisabled=""/.test(t)), `the task checkboxes: ${boxes.join(' ')}`);
+  expectThat(boxes.filter((t) => /\schecked=""/.test(t)).length === 1, 'the ticked task is not checked');
+  expectThat(!/class="(?:hljs|token)|<span class="(?!md-)/.test(html), 'code is highlighted');
+});
+
+const HOSTILE_HTML = [
+  '<script>alert(1)</script>',
+  '',
+  '<img src=x onerror=alert(2)>',
+  '',
+  '<iframe src="https://evil.example/"></iframe>',
+  '',
+  '<a href="javascript:alert(3)">click</a>',
+  '',
+  '<details><summary>open me</summary>hidden</details>',
+  '',
+  '<!-- a comment -->',
+  '',
+  'Inline <script>alert(4)</script> and <img src=y onerror=alert(5)> and <details> too.',
+].join('\n');
+
+check('RN-257', 'raw HTML in Markdown — <script>, <img onerror>, <iframe>, <a href="javascript:">, <details>, a comment — is never an element: each is escaped literal text in the dimmed raw-HTML element (AC-B3-2)', () => {
+  const html = drawMarkdown(HOSTILE_HTML);
+  for (const tag of ['script', 'iframe', 'details', 'summary']) {
+    expectThat(tagsNamed(html, tag).length === 0, `a <${tag}> element is drawn`);
+  }
+  const tags = openingTagsIn(html);
+  expectThat(!tags.some((t) => /onerror|javascript:/i.test(t)), `an element carries onerror or javascript: ${tags.find((t) => /onerror|javascript:/i.test(t))}`);
+  expectThat(tagsNamed(html, 'img').length === 0 && tagsNamed(html, 'a').length === 0, 'the raw <img> or <a> became an element');
+  expectThat(!/<!--/.test(html), 'the comment is markup');
+  const raw = rawHtmlIn(html);
+  for (const [kind, literal] of [
+    ['block', '&lt;script&gt;alert(1)&lt;/script&gt;'],
+    ['block', '&lt;img src=x onerror=alert(2)&gt;'],
+    ['block', '&lt;iframe src=&quot;https://evil.example/&quot;&gt;&lt;/iframe&gt;'],
+    ['inline', '&lt;a href=&quot;javascript:alert(3)&quot;&gt;'],
+    ['block', '&lt;details&gt;&lt;summary&gt;open me&lt;/summary&gt;hidden&lt;/details&gt;'],
+    ['block', '&lt;!-- a comment --&gt;'],
+    ['inline', '&lt;script&gt;'],
+    ['inline', '&lt;img src=y onerror=alert(5)&gt;'],
+    ['inline', '&lt;details&gt;'],
+  ]) {
+    expectThat(raw.some(([k, text]) => k === kind && text.includes(literal)), `${literal} is not literal text in a ${kind} raw-HTML element: ${JSON.stringify(raw)}`);
+  }
+  expectText(html, 'alert(4)');
+});
+
+check('RN-258', 'a Markdown preview\u{2019}s states: too large and too complex with Open as Text and nothing drawn, an error in cleaned words, nothing at first and "Rendering preview\u{2026}" only once slow, and "Deleted on disk" keeping the document (AC-B3-5)', () => {
+  const big = drawMarkdown('', { tab: markdownTab({ text: null, bytes: 3 * MD_MB, tooLarge: true }), result: null });
+  expectText(big, 'Too large to preview (3.0 MB; the limit is 2 MB)');
+  expectThat(/data-markdown-notice="too-large"/.test(big) && buttonsIn(big).some((b) => b.text === 'Open as Text'), 'too large: no notice or no Open as Text');
+  // Past the limit nothing is drawn, whatever result is at hand.
+  const bigStale = drawMarkdown('# Old', { tab: markdownTab({ text: null, bytes: 3 * MD_MB, tooLarge: true }) });
+  expectThat(!/<article|Old/.test(bigStale) && /data-markdown-notice="too-large"/.test(bigStale), 'a file past the limit draws a document');
+
+  expectThat(TOO_COMPLEX_TEXT === 'Too complex to preview', `the words: ${TOO_COMPLEX_TEXT}`);
+  const complex = drawMarkdown('', { result: { status: 'too-complex' } });
+  expectThat(/data-markdown-notice="too-complex"[^>]*>\s*<p[^>]*>Too complex to preview<\/p>/.test(complex), 'too complex: the words are not shown');
+  expectThat(buttonsIn(complex).some((b) => b.text === 'Open as Text') && !/<article/.test(complex), 'too complex: no Open as Text, or a document');
+
+  const failed = drawMarkdown('', { result: { status: 'error', name: 'Error', message: 'The Markdown preview\u{202e} stopped\u{200b} unexpectedly\u{1b}[31m\u{7}' } });
+  const failedWords = shownWords(failed);
+  expectThat(/data-markdown-notice="error"/.test(failed) && failedWords.includes('The Markdown preview stopped unexpectedly'), `the error: ${failedWords}`);
+  expectThat(!HOSTILE_CHARS.test(failedWords), `the error is shown with control or bidi characters: ${JSON.stringify(failedWords)}`);
+  expectThat(buttonsIn(failed).some((b) => b.text === 'Open as Text'), 'an error offers no Open as Text');
+  expectText(drawMarkdown('', { result: { status: 'error', message: '' } }), 'The preview could not be drawn');
+
+  for (const [what, result] of [['no result yet', null], ['a superseded render', { status: 'superseded' }]]) {
+    const html = drawMarkdown('', { result });
+    expectThat(/data-markdown-scroller=""[^>]*tabindex="0"/.test(html), `${what}: no frame`);
+    expectThat(!/Rendering preview|data-markdown-notice|<article/.test(html), `${what}: something drawn before the first result`);
+  }
+  const slow = drawMarkdown('', { result: null, slow: true });
+  expectThat(/<p data-markdown-rendering="" class="[^"]*text-vsc-muted[^"]*">Rendering preview\u{2026}<\/p>/u.test(slow), 'a slow first render is not said, dimmed');
+  expectThat(RENDERING_NOTICE_MS === 1000, `the wait before saying so: ${RENDERING_NOTICE_MS} ms`);
+
+  const gone = drawMarkdown('# Kept', { tab: markdownTab({ deleted: true }) });
+  expectThat(/<h1 id="md-kept">Kept<\/h1>/.test(gone) && /data-markdown-deleted=""[^>]*>Deleted on disk</.test(gone), 'deleted: the document went, or it is not said');
+  const goneComplex = drawMarkdown('', { tab: markdownTab({ deleted: true }), result: { status: 'too-complex' } });
+  expectText(goneComplex, 'Deleted on disk');
+  expectText(goneComplex, 'Too complex to preview');
+  for (const deleted of [false, undefined, 'yes', 1]) {
+    expectThat(!/Deleted on disk/.test(drawMarkdown('# x', { tab: markdownTab({ deleted }) })), `deleted: ${JSON.stringify(deleted)} says Deleted on disk`);
+  }
+});
+
+const EVERY_LINK = [
+  '# Install',
+  '',
+  '[anchor](#install) [ext](https://example.com/path?q=1#frag) <https://auto.example/> [file](guide.md)',
+  '[up](../../secret.md) [js](javascript:alert(1)) [js2](JAVA&#9;SCRIPT:alert(1)) [data](data:text/html,x) [mail](mailto:a@b.c)',
+  '[proto](//evil.example/) [abs](/etc/passwd) [vb](vbscript:x) [file2](file:///etc/passwd) [nothing](#)',
+  '',
+  'A note[^n].',
+  '',
+  '[^n]: Its body.',
+  '',
+  '![a](assets/a.png) ![b](assets/b.png) ![c](assets/c.png) ![r](https://img.example/r.png) ![d](data:image/png;base64,AAAA) ![o](../../out.png) ![f](file:///x.png)',
+].join('\n');
+const PNG_URI = `data:image/png;base64,${PNG_4X3}`;
+
+check('RN-259', 'in a Markdown preview every href is #\u{2026} and every src a data:image/ URI: anchors and footnotes keep #\u{2026}; external and file links are focusable with no href; every other link is text; only an image read becomes an <img> (AC-B3-9, F-B3-4, F-B3-5)', () => {
+  const result = parsedMarkdown(EVERY_LINK);
+  const images = {
+    plan: result.images,
+    uris: new Map([
+      ['/workspace/docs/assets/a.png', PNG_URI],
+      // Not a data: URI, whatever put it there: never a src.
+      ['/workspace/docs/assets/b.png', 'https://evil.example/b.png'],
+    ]),
+    failed: new Set(['/workspace/docs/assets/c.png']),
+  };
+  const html = drawMarkdown(EVERY_LINK, { result, images });
+  const hrefs = attrValues(html, 'href');
+  expectThat(hrefs.length > 0 && hrefs.every((h) => h.startsWith('#')), `an href that leaves the document: ${JSON.stringify(hrefs)}`);
+  for (const h of ['#md-install', '#user-content-fn-n', '#user-content-fnref-n']) expectThat(hrefs.includes(h), `no ${h}: ${JSON.stringify(hrefs)}`);
+  const srcs = attrValues(html, 'src');
+  expectThat(JSON.stringify(srcs) === JSON.stringify([PNG_URI]), `the sources: ${JSON.stringify(srcs)}`);
+  expectThat(/<img data-image="load" src="data:image\/png;base64,[^"]+" alt="a" draggable="false" class="md-image"\/>/.test(html), 'the image read is not drawn from its data: URI');
+  const boxes = [...html.matchAll(/data-image-placeholder="([^"]+)"/g)].map((m) => m[1]);
+  expectThat(JSON.stringify(boxes) === JSON.stringify(['loading', 'failed', 'remote', 'unsupported', 'outside', 'outside']), `the image boxes: ${JSON.stringify(boxes)}`);
+  expectText(html, 'https://img.example/r.png');
+
+  const links = tagsNamed(html, 'a');
+  const external = links.filter((t) => /data-link="external"/.test(t));
+  expectThat(external.length === 2 && external.every((t) => !/\shref=/.test(t) && /\srole="link"/.test(t) && /\stabindex="0"/.test(t)), `external links: ${external.join(' ')}`);
+  expectThat(imgAttr(external[0], 'title') === 'https://example.com/path?q=1#frag', `the external link's address: ${imgAttr(external[0], 'title')}`);
+  const file = links.filter((t) => /data-link="file"/.test(t));
+  expectThat(file.length === 1 && !/\shref=/.test(file[0]) && /\stabindex="0"/.test(file[0]) && imgAttr(file[0], 'title') === '/workspace/docs/guide.md', `the file link: ${file.join(' ')}`);
+  const anchor = links.filter((t) => /data-link="anchor"/.test(t));
+  expectThat(anchor.length === 1 && imgAttr(anchor[0], 'href') === '#md-install', `the anchor: ${anchor.join(' ')}`);
+  const inert = tagsNamed(html, 'span').filter((t) => /data-link="inert"/.test(t));
+  expectThat(inert.length === 10 && inert.every((t) => t === '<span data-link="inert">'), `inert links: ${inert.length} ${inert.join(' ')}`);
+  expectThat(links.every((t) => /\shref="#/.test(t) || /\stabindex="0"/.test(t)), 'a link the keyboard cannot reach');
+  expectThat(links.length === 6, `${links.length} <a> drawn (2 external, 1 file, 1 anchor, 2 footnote)`);
+
+  // The address shown is hyperlinkTitle's, cut at 300 characters, never the whole address handed to openExternal.
+  const long = `https://example.com/${'a'.repeat(400)}`;
+  const longTitle = imgAttr(tagsNamed(drawMarkdown(`[long](${long})`), 'a')[0] ?? '', 'title') ?? '';
+  expectThat(longTitle.length <= 301 && longTitle.endsWith('\u{2026}') && longTitle.startsWith('https://example.com/aaa'), `a long address shown as: ${longTitle.length} characters`);
+  // A tree that calls a link external without an address to open (a bug upstream) still draws only text.
+  const forged = { status: 'ok', images: [], hast: { type: 'root', children: [{ type: 'element', tagName: 'a', properties: { dataLink: 'external', dataTarget: 'javascript:alert(1)' }, children: [{ type: 'text', value: 'x' }] }] } };
+  expectThat(drawMarkdown('', { result: forged }).includes('<span data-link="inert">x</span>'), 'an external link with no address to open is drawn as a link');
+});
+
+check('RN-260', 'a Markdown preview cleans a hostile file name, link text, address and alt text: no control, bidi or zero-width characters in what is shown or in any attribute (AC-B3-9)', () => {
+  const path = '/workspace/docs/\u{202e}dm.exe\u{200b}\u{7}x\u{1b}[31m\u{2066}.md';
+  const text = '[cl\u{202e}ick\u{200b} me\u{7}](https://example.com/\u{202e}x\u{200b}) ![al\u{202e}t\u{1b}31m](https://img.example/\u{202e}a.png) [f\u{2066}ile](guide.md) [in\u{202e}ert](javascript:x)';
+  const html = drawMarkdown(text, { tab: markdownTab({ filePath: path, text }), result: parsedMarkdown(text, { filePath: path, root: '/workspace' }) });
+  const words = shownWords(html);
+  expectThat(!HOSTILE_CHARS.test(words), `shown with control or bidi characters: ${JSON.stringify(words)}`);
+  expectThat(words.includes('click me') && words.includes('alt31m') && words.includes('file') && words.includes('inert'), `the cleaned words: ${JSON.stringify(words)}`);
+  const attrs = openingTagsIn(html).join(' ');
+  expectThat(!HOSTILE_CHARS.test(attrs), `an attribute carries control or bidi characters: ${JSON.stringify(attrs)}`);
+  expectThat(/aria-label="dm\.exex\[31m\.md, preview"/.test(html), `the preview's name: ${/aria-label="[^"]*, preview"/.exec(html)?.[0]}`);
+  const label = externalLinkLabel('https://example.com/\u{202e}x\u{200b}');
+  expectThat(label && !HOSTILE_CHARS.test(label) && html.includes(`title="${label}"`), `the address the link and its confirmation show: ${JSON.stringify(label)}`);
+  expectThat(externalLinkLabel('javascript:alert(1)') === '' && externalLinkLabel(null) === '', 'a label for an address that is not to be opened');
+});
+
+await checkAsync('RN-261', 'the Markdown preview\u{2019}s lazy body arrives in the pane: its frame, focusable for scrolling, and nothing flashed before the first result; an unknown kind still says it cannot be shown', async () => {
+  arrangePreviewPane();
+  settleStores();
+  const html = await renderSettled(React.createElement(EditorPane, { node: { type: 'leaf', kind: 'editor', id: 'pane-x', tabIds: ['e1', 'img1', 'md1'], activeTabId: 'md1' } }));
+  const box = html.slice(html.indexOf('data-editor-pane-body="pane-x"'));
+  expectThat(/data-markdown-preview=""/.test(box) && /data-markdown-scroller=""[^>]*tabindex="0"/.test(box), 'the Markdown body is not drawn in the pane');
+  expectThat(!/Rendering preview|data-markdown-notice|data-preview-placeholder|cannot be shown/.test(box), 'something is drawn before the first result');
+  expectThat(!/data-stand-in|monaco/i.test(box), 'Monaco is drawn for a Markdown preview');
+  expectThat(!buttonsIn(html).some((b) => b.text === 'Save'), 'a Markdown preview offers Save');
+
+  useEditorStore.setState({ tabs: [...useEditorStore.getState().tabs, { id: 'v1', kind: 'video', filePath: '/workspace/a.mp4', fileName: 'a.mp4', isDirty: false }] });
+  expectText(drawPane(['e1', 'v1'], 'v1'), 'This tab cannot be shown');
+});
+
+check('RN-262', 'the Markdown preview\u{2019}s styles: one scope, dark tokens only, no motion, raw HTML dimmed and kept in lines, the footnote heading hidden, a readable width', () => {
+  const css = readSource('src/styles/index.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]*\.markdown-preview[^{}]*)\{([^}]*)\}/g)].map((m) => [m[1].trim(), m[2]]);
+  expectThat(rules.length > 20, `${rules.length} preview rules found`);
+  expectThat(rules.every(([selector]) => selector.split(/,(?![^(]*\))/).every((s) => s.trim().startsWith('.markdown-preview'))), 'a preview rule outside .markdown-preview');
+  for (const [selector, body] of rules) {
+    expectThat(!/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(body), `${selector} writes a colour of its own`);
+    expectThat(!/animation|transition/.test(body), `${selector} moves`);
+    for (const [, prop, value] of body.matchAll(/(?:^|;)\s*(color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?)\s*:\s*([^;]+)/g)) {
+      expectThat(/var\(--vsc-[\w-]+\)/.test(value) || /^(?:none|0|transparent)$/.test(value.trim()), `${selector}: ${prop}: ${value.trim()} is not a dark token`);
+    }
+  }
+  const body = (selector) => rules.find(([s]) => s === selector)?.[1] ?? '';
+  expectThat(/white-space:\s*pre-wrap/.test(body('.markdown-preview .md-raw-html[data-raw-html="block"]')), 'block raw HTML is not kept in its lines');
+  expectThat(/color:\s*var\(--vsc-muted\)/.test(body('.markdown-preview .md-raw-html')), 'raw HTML is not dimmed');
+  expectThat(/position:\s*absolute/.test(body('.markdown-preview .sr-only')) && /clip:\s*rect\(0, 0, 0, 0\)/.test(body('.markdown-preview .sr-only')), 'the footnote heading is not hidden in the preview');
+  expectThat(/max-width:\s*\d+px/.test(body('.markdown-preview')), 'no readable width');
+  expectThat(/list-style:\s*disc/.test(body('.markdown-preview ul')) && /list-style:\s*decimal/.test(body('.markdown-preview ol')), 'lists lost their markers');
+});
+
+check('RN-263', 'the breadcrumb row offers Open Preview on a Markdown file\u{2019}s text tab only: not on its preview, an image, another file or no tab (F-B3-8, AC-B3-10)', () => {
+  arrangePreviewPane();
+  const offered = (html) => buttonsIn(html).filter((b) => b.title === 'Open Preview');
+  const text = drawPane(['e1', 'img1', 'md1'], 'e1');
+  const button = offered(text);
+  expectThat(button.length === 1 && button[0].label === 'Open Preview', `README.md's text tab: ${JSON.stringify(button)}`);
+  const tag = /<button\b[^>]*\stitle="Open Preview"[^>]*>([\s\S]*?)<\/button>/.exec(text);
+  expectThat(Boolean(tag) && /\stype="button"/.test(tag[0]) && /<svg\b/.test(tag[1]), 'not a real button with the toolbar icon');
+  expectThat(text.indexOf('title="Open Preview"') < text.indexOf('data-editor-pane-body="pane-x"'), 'not in the breadcrumb row above the body');
+  expectThat(buttonsIn(text).some((b) => b.text === 'Save'), 'the modified text tab lost its Save');
+  expectThat(!/Ctrl\+|\u{2318}/.test(tag?.[0] ?? ''), 'the button names a shortcut it has none of');
+
+  expectThat(offered(drawPane(['e1', 'img1', 'md1'], 'md1')).length === 0, 'offered on the preview tab itself');
+  expectThat(offered(drawPane(['e1', 'img1', 'md1'], 'img1')).length === 0, 'offered on an image');
+  expectThat(offered(drawPane([], null)).length === 0, 'offered with no tab');
+
+  useEditorStore.setState({
+    tabs: [
+      ...useEditorStore.getState().tabs,
+      { id: 't-txt', filePath: '/workspace/notes.txt', fileName: 'notes.txt', content: 'x', savedContent: 'x', isDirty: false, language: 'plaintext' },
+      { id: 't-mdx', filePath: '/workspace/page.mdx', fileName: 'page.mdx', content: 'x', savedContent: 'x', isDirty: false, language: 'markdown' },
+      { id: 't-up', filePath: '/workspace/CHANGES.MARKDOWN', fileName: 'CHANGES.MARKDOWN', content: '# c', savedContent: '# c', isDirty: false, language: 'markdown' },
+    ],
+  });
+  expectThat(offered(drawPane(['t-txt'], 't-txt')).length === 0, 'offered on a .txt file');
+  expectThat(offered(drawPane(['t-mdx'], 't-mdx')).length === 0, 'offered on an .mdx file');
+  const upper = drawPane(['t-up'], 't-up');
+  expectThat(offered(upper).length === 1, 'not offered on .MARKDOWN, whatever its case');
+  expectThat(!buttonsIn(upper).some((b) => b.text === 'Save'), 'a saved file offers Save');
+});
+
 console.log('====================================================');
 console.log('  NexTerm — Render Suite (does the tree draw?)      ');
 console.log('====================================================\n');

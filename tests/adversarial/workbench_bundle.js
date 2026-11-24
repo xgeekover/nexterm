@@ -12,6 +12,13 @@
  *    reached only through EditorPane's `React.lazy`, so a server render draws
  *    the Suspense fallback in its place, and a stand-in drawn means it was
  *    imported statically;
+ *  - MarkdownPreview.jsx, the Markdown preview's body (Orca bundle 5, step
+ *    P7), the same way: reached only through EditorPane's `React.lazy`, so
+ *    a server render draws the fallback and a stand-in drawn means a static
+ *    import. Stood in rather than bundled, because it brings the renderer's
+ *    hast-util-to-jsx-runtime and the worker factory's Vite-only `?worker`
+ *    with it, which neither this suite nor Node can load (WV-06b reads the
+ *    sources, and fails on a static import of either);
  *  - react-resizable-panels, by boxes that print what each Panel is handed
  *    (its id, `defaultSize` and `minSize`), so the sizes a split is drawn at
  *    can be read back.
@@ -39,6 +46,10 @@ const STAND_INS = [
   [
     /\/EditorPanel\.jsx$/,
     "import { createElement } from 'react';\nexport default function EditorBody({ activeTab }) { return createElement('div', { 'data-stand-in': 'EditorBody', 'data-file': activeTab?.filePath ?? '' }); }",
+  ],
+  [
+    /\/MarkdownPreview\.jsx$/,
+    "import { createElement } from 'react';\nexport default function MarkdownBody({ tab }) { return createElement('div', { 'data-stand-in': 'MarkdownBody', 'data-file': tab?.filePath ?? '' }); }",
   ],
   [
     /^react-resizable-panels$/,

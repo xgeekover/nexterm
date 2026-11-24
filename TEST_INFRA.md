@@ -202,6 +202,88 @@ is off: what only an interactive prompt does (`!!`, `!"`, `^a^b`) is checked
 by reading the command line instead (PC-38), and was measured once through a
 pty.
 
+### The previews: the mock, the worker, the built app and a browser
+
+The image and Markdown previews (README *Image and Markdown previews*) are
+checked at five levels, each covering what the one before it cannot:
+
+- `image_preview` and `markdown_preview` test the pure modules
+  (`imagePreview.js`, `markdownPreview.js`). The mock's `fs_read_image`
+  is held to the backend's shape and words.
+- `editor_preview_tabs` tests the store (preview tabs never dirty, saved or
+  modelled), and `markdown_preview_live` tests the 300 ms live update, the
+  image cache and the palette command, on a fake clock.
+- `markdown_render_worker` tests the worker pipeline. The client's 5 s limit
+  is tested against a fake worker, a fake clock and a real worker thread.
+  MW-60 and MW-61 test the drawing cap of 100,000 elements.
+  MW-40 checks that only the worker imports the parser. MW-50 builds the
+  worker with Vite inside the test and loads the output in a worker-only
+  scope with no `document`, so the worker chunk is checked with no `dist/`
+  and no scratch build.
+- `markdown_preview_mounted` mounts the component against a fake worker:
+  the external-link confirmation, file links, anchors, and images read 4 at
+  a time. MV-12 checks the window's own count of an answer past the cap.
+  `markdown_preview_live` ML-11 holds image reads while changes on disk
+  restart the preview, and checks that no more than 4 are out at once and
+  never two of one path. ML-12 records every image box written while one
+  image changes on disk, and checks that the others never become one, not
+  for a frame; ML-13 and ML-14 check that a folder's change asks the sizes
+  again and reads only an image whose size changed. ML-15 answers a read with
+  more bytes than the size said and checks that the image it pushes past
+  50 MB is a box; ML-16 checks that a picture the plan leaves out is read
+  again before it is drawn again, and that its over-budget box keeps its
+  reason while an earlier size is asked. ML-17 answers a held read in the
+  same tick as a second change of its image, or of its folder, before the
+  preview's round stops, and checks that the answer is not kept: the image
+  is sized again, read again and drawn new; it also checks that a plan short
+  of a forgotten size prunes no picture. ML-18 checks that an image a grown
+  read lets back under 50 MB is read and drawn in the same round. MP-15
+  checks that whoever asked before a read was marked stale gets
+  `{ status: 'stale' }`, never its answer. The render suite (RN-247 and later) draws every element and
+  state with `renderToStaticMarkup`; RN-264 checks that only an SVG's image
+  tab has *Open as Text*, in words.
+- `editor_preview_tabs` EP-27 sends a folder's `modify`, as the watcher
+  reports a rename: each preview under it has its size asked and, the file
+  gone, is read once and *Deleted on disk*. EP-31 sends a folder's `modify`
+  every 100 ms and checks that the file's own change still shows 300 ms
+  after it, that the folder reads nothing, and that a file changed every
+  100 ms shows within `PREVIEW_FOLLOW_MAX_MS`; EP-32 checks that a folder's
+  change reads an image only when its size changed or it is gone. EP-34
+  checks that a folder's look does nothing while a read of the file's own
+  change waits; EP-35 that a refused image tab, with no size known, is read
+  once per folder burst; EP-36 that a Markdown preview with its text tab
+  open is read only after that tab closes; EP-37 that a tab closed or
+  renamed while its look asks the size changes nothing and reads nothing.
+  EP-33
+  checks that *New File* opens a new `.svg` as text. EP-28 to
+  EP-30 cover an SVG's text tab: `openFileAsText`, `openFileAt` with a line,
+  a terminal link `path:line[:col]`, the session, Send to Agent, and the
+  button clicked against the real store. MP-21 holds `sizeLabel`
+  (`src/lib/sizeLabel.js`) to the backend's own table in
+  `src-tauri/src/fs/mod.rs`.
+- `preview_headless` is the only one that sees a browser. It serves the
+  built app from `dist/`, once with the production CSP from
+  `tauri.conf.json` as a response header and once with no CSP, in the
+  Chromium agent-browser drives. A listener on another port counts what
+  reaches it, and controls show that the listener and the hostile SVG are
+  live. The suite also checks that the built `markdownWorker-*.js` comes
+  from the page's own origin, and that it is stopped after 5 s.
+
+`preview_headless` and `monaco_chunk` (MC-C1, MC-C2) read what `npm run
+build` wrote to `dist/` (ignored by git), and skip, saying so, when there is
+none. A `dist/` older than the sources tests the older code, so build first:
+
+```sh
+NODE_OPTIONS=--max-old-space-size=4096 npm run build
+node tests/adversarial/runner.js
+```
+
+`preview_headless` serves `dist/` from a child process, because
+`headless_browser.js` drives agent-browser with `execFileSync`. That blocks
+the test's own event loop, and a server living there could not answer the
+page while `agent-browser open` waits for it. Any suite that brings its own
+server through `openHarness`'s `serve` option needs to do the same.
+
 ## Adding a test
 
 Write the test first and **watch it fail**. A test added after the fix, that

@@ -15,6 +15,9 @@ import {
 import { findNode, frontierOf, placeUnder, setChildrenAt } from '../components/explorer/treeRows.js';
 import { loadState, saveState } from '../lib/persistence.js';
 import { replaceModelText } from '../lib/editorModels.js';
+import { imageFailureReason, imageRefusalKind, isImagePath, isSvgPath } from '../lib/imagePreview.js';
+import { MARKDOWN_PREVIEW_MAX_BYTES } from '../lib/markdownPreview.js';
+import { MARKDOWN_EXTENSIONS, isMarkdownPath } from '../lib/markdownFiles.js';
 import {
   normalizeSessions,
   restoredLayout,
@@ -444,7 +447,8 @@ function holdForAnswer(set, get, { kind, id = null, dirty, proceed }) {
  */
 async function writeTab(set, get, targetId, { force = false } = {}) {
   const tab = get().tabs.find((t) => t.id === targetId);
-  if (!tab) return;
+  // A preview tab holds no text of its own: there is nothing to write.
+  if (!tab || isPreviewTab(tab)) return;
   const written = tab.content;
 
   // The bytes on disk may not be the ones this tab read. git, a formatter,
@@ -514,6 +518,479 @@ function newEditorTab(filePath, content) {
     isDirty: false,
     language: getLanguageFromPath(filePath),
   };
+}
+
+// --- Tabs that show a file rather than edit it (Orca bundle 5) -------------
+//
+// A text tab has no `kind`, as it never had. A preview tab has one, and
+// shows its file without holding it as text:
+//
+//   { id, kind: 'image', filePath, fileName, isDirty: false, deleted,
+//     image: { mime, data, bytes, width, height } | null,  // fs_read_image's answer
+//     failure: string | null }                             // why not, in imageFailureReason's words
+//   { id, kind: 'markdown', filePath, fileName, isDirty: false, deleted,
+//     text: string | null, bytes, tooLarge }
+//
+// A tab is a kind and a path: a README's text tab and its preview are two
+// tabs of one file, and opening either again reveals that one. A preview
+// tab has nothing to save — it is never dirty, Save and Save All pass it by,
+// and it closes without a question.
+//
+// And it follows its file (`followDisk`): a rename or a move takes it along
+// (`remapAfterMove`); a change on disk is read again, 300 ms after the last
+// one and within 1 s of the first, however busy the file (a change of a
+// folder above it only has its size asked, `checkPreview`); a delete keeps
+// the tab, with what it last showed, and `deleted: true`
+// for the view to say so — until the file is there again. A Markdown preview
+// whose text tab is open follows that buffer instead, never the disk: the
+// editor pane passes the buffer on, 300 ms after the last edit (step P8,
+// EditorPane.jsx `MarkdownPaneBody`); and when that tab closes, its edits
+// kept or given up, the preview shows the file as the editor last read or
+// wrote it, and reads it again if it changed on disk meanwhile
+// (`previewsOffSource`). Nothing of a preview is kept for a restart: the
+// session saves text tabs only (`serializeSession`), no model is made for one
+// (src/lib/editorModels.js), and Send to Agent does not see it.
+
+/** The kinds of tab that show a file rather than edit it. */
+export const PREVIEW_KINDS = Object.freeze(['image', 'markdown']);
+
+/**
+ * The extensions a Markdown preview opens for, and the rule that reads them
+ * (`isMarkdownPath`): in src/lib/markdownFiles.js, which the palette and the
+ * Explorer ask too, and exported from here as well.
+ */
+export { MARKDOWN_EXTENSIONS, isMarkdownPath };
+
+/**
+ * The largest Markdown file a preview shows, in UTF-8 bytes (the human's
+ * decision, 2026-11-24). It lives in src/lib/markdownPreview.js, beside the
+ * preview's other limits, and is exported from here as well: one value.
+ */
+export { MARKDOWN_PREVIEW_MAX_BYTES };
+
+/** Whether `tab` is a preview tab: any tab with a `kind`. */
+export function isPreviewTab(tab) {
+  return Boolean(tab) && tab.kind != null;
+}
+
+/** Whether `tab` is the tab of `kind` (null: a text tab) on the file `path` (`sameFile`). */
+function isTabOf(tab, kind, path) {
+  return (tab.kind ?? null) === (kind ?? null) && sameFile(tab.filePath, path);
+}
+
+/**
+ * Whether closing `tab` throws away edits: what every Save All, close and
+ * leaving prompt counts. Never a preview tab, whatever it says.
+ */
+function hasUnsavedEdits(tab) {
+  return Boolean(tab) && !isPreviewTab(tab) && Boolean(tab.isDirty);
+}
+
+/** A preview tab of `kind` on `filePath`, holding `fields`. */
+function newPreviewTab(kind, filePath, fields) {
+  return { id: makeEditorTabId(), kind, filePath, fileName: basename(filePath), isDirty: false, deleted: false, ...fields };
+}
+
+/**
+ * Whether `fs_read_image` refused `err` for what the file is — not an image
+ * NexTerm can show, or too large — which the image tab then says. Anything
+ * else (nothing there, outside the folder, a failed read) opens no tab, and
+ * says why as a text file's failure does.
+ */
+function refusedForWhatItIs(err) {
+  const kind = imageRefusalKind(err);
+  return kind === 'not-an-image' || kind === 'too-large';
+}
+
+/**
+ * The text tab of Markdown file `filePath` in `tabs` — the buffer a preview
+ * of it follows — or null when none is open.
+ */
+export function markdownSourceOf(tabs, filePath) {
+  return (Array.isArray(tabs) && tabs.find((t) => isTabOf(t, null, filePath))) || null;
+}
+
+/**
+ * What a Markdown preview holds for `text`: the text, or past the limit
+ * (in UTF-8 bytes) nothing but its size. The editor pane checks a live
+ * buffer with it too, before the text goes anywhere.
+ */
+export function markdownFields(text) {
+  const bytes = utf8Length(text);
+  return bytes > MARKDOWN_PREVIEW_MAX_BYTES ? { text: null, bytes, tooLarge: true } : { text, bytes, tooLarge: false };
+}
+
+/**
+ * The text a Markdown preview of `filePath` opens with, read once. The text
+ * tab of the file, when one is open, unsaved edits and all: that buffer is
+ * what the preview follows. Otherwise the file: its size asked first, so that
+ * a file past the limit is never read, and the text read through
+ * `fs_read_file`, which refuses what is not UTF-8 text in its own words.
+ * A size the backend will not give is no answer: the read then says why.
+ */
+async function markdownPreviewFields(source, filePath) {
+  if (source) return markdownFields(typeof source.content === 'string' ? source.content : '');
+  let size = null;
+  try {
+    size = await invoke('fs_file_size', { path: filePath });
+  } catch {
+    size = null;
+  }
+  if (Number.isFinite(size) && size > MARKDOWN_PREVIEW_MAX_BYTES) return { text: null, bytes: size, tooLarge: true };
+  return markdownFields(String(await invoke('fs_read_file', { path: filePath })));
+}
+
+/** The editor leaf holding file tab `tabId`, with its group, in any group; or null. */
+function editorLeafHolding(tabId) {
+  for (const group of workbench().groups) {
+    const leaf = editorLeavesOf(group).find((l) => l.tabIds.includes(tabId));
+    if (leaf) return { group, leaf };
+  }
+  return null;
+}
+
+/**
+ * The editor leaf right beside leaf `leafId` in `tree`: the next of the
+ * side-by-side split that holds it, when that is an editor leaf. Null when
+ * there is none, or something else is there.
+ */
+function editorLeafRightOf(tree, leafId) {
+  let right = null;
+  let done = false;
+  const walk = (node) => {
+    if (done || !node || node.type === 'leaf') return;
+    const at = node.children.findIndex((child) => child.type === 'leaf' && child.id === leafId);
+    if (at >= 0) {
+      done = true;
+      const next = node.children[at + 1];
+      if (node.direction === 'horizontal' && next?.type === 'leaf' && leafKind(next) === EDITOR_KIND) right = next;
+      return;
+    }
+    node.children.forEach(walk);
+  };
+  walk(tree);
+  return right;
+}
+
+/**
+ * Put Markdown preview `tabId` of `filePath` on the workbench, to the right
+ * of its source (the human's decision, 2026-11-24): beside the editor leaf
+ * that holds the file's text tab or, with none open, the editor pane of the
+ * group on screen. Into the editor leaf already right beside it when there
+ * is one, as VS Code's "to the side" does, rather than a split each time;
+ * else a new editor leaf split off to its right. An empty editor pane — one
+ * just split off, which a split beside it would prune — takes it itself.
+ * With no editor leaf at all it goes where a new file would
+ * (`placeEditorTab`).
+ */
+function placeBesideSource(tabId, filePath) {
+  const ts = workbench();
+  const source = useEditorStore.getState().tabs.find((t) => isTabOf(t, null, filePath));
+  let anchor = source ? editorLeafHolding(source.id) : null;
+  if (!anchor) {
+    const group = ts.getActiveGroup();
+    const leaf = editorLeavesOf(group).find((l) => l.id === group?.editorPaneId);
+    anchor = leaf ? { group, leaf } : null;
+  }
+  if (!anchor) {
+    ts.placeEditorTab(tabId);
+    return;
+  }
+  const { group, leaf } = anchor;
+  if (leaf.tabIds.length === 0) {
+    ts.placeEditorTab(tabId, { groupId: group.id, paneId: leaf.id });
+    return;
+  }
+  const right = editorLeafRightOf(group.tree, leaf.id);
+  if (right) {
+    ts.placeEditorTab(tabId, { groupId: group.id, paneId: right.id });
+    return;
+  }
+  ts.dropTabOnPane(tabId, leaf.id, 'right', group.id);
+  // A drop the workbench refused leaves it in no leaf: where a new file goes.
+  if (!editorLeafHolding(tabId)) ts.placeEditorTab(tabId);
+}
+
+/**
+ * Show tab `existing` where it is open, in ANY group: that group comes on
+ * screen with it (FB4). A tab in no leaf is put where `place` puts it —
+ * where a new file goes, unless said otherwise.
+ */
+function revealOpenTab(set, existing, place = (id) => workbench().placeEditorTab(id)) {
+  if (!workbench().revealEditorTab(existing.id)) place(existing.id);
+  set({ activeTabId: existing.id, openFailure: null });
+  syncActiveTab();
+  showWorkbench();
+  return existing;
+}
+
+// --- Preview tabs follow their file on disk --------------------------------
+
+/** How long after the last change of its file a preview reads it again (the human's decision, 2026-11-24). */
+export const PREVIEW_FOLLOW_MS = 300;
+/**
+ * The longest a preview waits for its file's changes to settle, from the
+ * first of them: a file changed more often than every PREVIEW_FOLLOW_MS
+ * (a log, a build writing it) is still shown within this.
+ */
+export const PREVIEW_FOLLOW_MAX_MS = 1000;
+
+/**
+ * The `fs-change` kinds that can change what a preview shows: the ones the
+ * watcher sends (src-tauri/src/fs/watcher.rs), which reports a rename as a
+ * 'modify' of both names, never as a kind of its own. Not 'other': the
+ * watcher's name for an access, which is how Linux reports a file being
+ * read — a preview's own read would set it off again, and again.
+ */
+const PREVIEW_FOLLOWS = new Set(['modify', 'create', 'delete']);
+
+/** Preview tab id -> the wait for its read to come (`settleThen`). */
+const previewTimers = new Map();
+/**
+ * Preview tab id -> the wait for its look at the disk to come: a folder
+ * above its file changed (`checkPreview`). Kept apart from `previewTimers`,
+ * so that a busy folder never holds back a read of the file's own change.
+ */
+const previewChecks = new Map();
+/** Preview tab id -> the number of its latest read: the answer of an older one is dropped. */
+const previewReads = new Map();
+/**
+ * The Markdown previews whose file changed on disk while its text tab was
+ * open, and so was not read (`rereadPreview`): what they hold may be older
+ * than the file. Read once that tab closes (`previewsOffSource`).
+ */
+const previewsBehindDisk = new Set();
+
+/** The preview tabs of `path` or of a file under it. */
+function previewsUnder(tabs, path) {
+  return tabs.filter((t) => isPreviewTab(t) && (sameFile(t.filePath, path) || isInside(path, t.filePath)));
+}
+
+/** A new read of preview `tabId` begins: from now on only its answer counts. */
+function nextPreviewRead(tabId) {
+  const read = (previewReads.get(tabId) ?? 0) + 1;
+  previewReads.set(tabId, read);
+  return read;
+}
+
+/**
+ * What preview `tab` shows once its file has been read again, as a change to
+ * the tab, or null to leave it as it is. An image is read as it was opened
+ * (`fs_read_image`); a Markdown file as its preview opened, size first so
+ * that one past 2 MB is never read (`markdownPreviewFields`). A file not
+ * there is deleted on disk, and the tab keeps what it last showed — the
+ * picture, the text. Any other failure (a lock, outside the folder) leaves
+ * the tab as it is.
+ */
+async function previewFromDisk(tab) {
+  const path = tab.filePath;
+  if (tab.kind === 'image') {
+    try {
+      return { image: await invoke('fs_read_image', { path }), failure: null, deleted: false };
+    } catch (err) {
+      if (imageRefusalKind(err) === 'not-found') return { deleted: true };
+      if (refusedForWhatItIs(err)) return { image: null, failure: imageFailureReason(err, path), deleted: false };
+      console.error(`[EditorStore] Could not read ${path} again for its preview:`, err);
+      return null;
+    }
+  }
+  try {
+    return { ...(await markdownPreviewFields(null, path)), deleted: false };
+  } catch (err) {
+    if (isFileNotFound(err)) return { deleted: true };
+    console.error(`[EditorStore] Could not read ${path} again for its preview:`, err);
+    return null;
+  }
+}
+
+/**
+ * Read preview `tabId`'s file again, now. Not a Markdown preview whose text
+ * tab is open: that one follows the buffer (step P8), not the disk. The
+ * answer is dropped when the tab has closed, been renamed or moved, or read
+ * again meanwhile, or the text tab has opened.
+ */
+async function rereadPreview(set, get, tabId) {
+  const tab = get().tabs.find((t) => t.id === tabId);
+  if (!isPreviewTab(tab)) return;
+  const sourceOpen = () => tab.kind === 'markdown' && get().tabs.some((t) => isTabOf(t, null, tab.filePath));
+  if (sourceOpen()) {
+    previewsBehindDisk.add(tabId);
+    return;
+  }
+  const read = nextPreviewRead(tabId);
+  const patch = await previewFromDisk(tab);
+  const now = get().tabs.find((t) => t.id === tabId);
+  if (!patch || !now || now.filePath !== tab.filePath || previewReads.get(tabId) !== read || sourceOpen()) return;
+  previewsBehindDisk.delete(tabId);
+  set((state) => ({ tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, ...patch } : t)) }));
+}
+
+/**
+ * Run `run` for tab `tabId` once the changes `timers` waits on settle: once
+ * for a burst of them, PREVIEW_FOLLOW_MS after the last one, and never
+ * later than PREVIEW_FOLLOW_MAX_MS after the first.
+ */
+function settleThen(timers, tabId, run) {
+  const waiting = timers.get(tabId);
+  if (waiting) {
+    clearTimeout(waiting.last);
+    waiting.last = setTimeout(waiting.fire, PREVIEW_FOLLOW_MS);
+    return;
+  }
+  const wait = {};
+  wait.fire = () => {
+    if (timers.get(tabId) !== wait) return;
+    stopWait(timers, tabId);
+    run();
+  };
+  wait.last = setTimeout(wait.fire, PREVIEW_FOLLOW_MS);
+  wait.first = setTimeout(wait.fire, PREVIEW_FOLLOW_MAX_MS);
+  timers.set(tabId, wait);
+}
+
+/** Tab `tabId` no longer waits in `timers`. */
+function stopWait(timers, tabId) {
+  const wait = timers.get(tabId);
+  if (!wait) return;
+  clearTimeout(wait.last);
+  clearTimeout(wait.first);
+  timers.delete(tabId);
+}
+
+/** Read preview `tabId` again once the changes of its file settle (`settleThen`). */
+function schedulePreviewRead(set, get, tabId) {
+  settleThen(previewTimers, tabId, () => {
+    rereadPreview(set, get, tabId).catch((err) => console.error('[EditorStore] A preview read failed:', err));
+  });
+}
+
+/** Look at preview `tabId`'s file again once the changes of a folder above it settle (`checkPreview`). */
+function schedulePreviewCheck(set, get, tabId) {
+  settleThen(previewChecks, tabId, () => {
+    checkPreview(set, get, tabId).catch((err) => console.error('[EditorStore] A preview check failed:', err));
+  });
+}
+
+/**
+ * The size of the file preview `tab` shows, as the disk gave it — an
+ * image's bytes, a Markdown file's (its UTF-8 bytes, or past 2 MB the size
+ * the backend gave) — or null when it shows none: deleted on disk, or an
+ * image refused for what it is.
+ */
+function shownSize(tab) {
+  if (tab.deleted) return null;
+  const size = tab.kind === 'image' ? tab.image?.bytes : tab.bytes;
+  return Number.isSafeInteger(size) ? size : null;
+}
+
+/**
+ * A folder above preview `tabId`'s file changed: is the file still there,
+ * the size it shows? Only its size is asked (`fs_file_size`). The file is
+ * read again (`rereadPreview`) when it is gone — the tab then says deleted
+ * on disk — or back, or its size changed, or the tab knows no size of it.
+ * Nothing when a read of the file's own change is coming anyway. A file
+ * swapped for another of the very same size is not seen this way: its own
+ * path's change is.
+ */
+async function checkPreview(set, get, tabId) {
+  const tab = get().tabs.find((t) => t.id === tabId);
+  if (!isPreviewTab(tab)) return;
+  let size = null;
+  try {
+    size = await invoke('fs_file_size', { path: tab.filePath });
+  } catch {
+    size = null;
+  }
+  const now = get().tabs.find((t) => t.id === tabId);
+  if (!now || now.filePath !== tab.filePath || previewTimers.has(tabId)) return;
+  if (Number.isFinite(size) ? size === shownSize(now) : now.deleted) return;
+  await rereadPreview(set, get, tabId);
+}
+
+/**
+ * The watcher reported a change at `payload.path` (`fs-change`): each
+ * preview of that file reads it again once the changes settle. A delete is
+ * looked at that way too, rather than taken at its word — a program saving a
+ * file can delete it and write it anew. A change of a folder above the file
+ * has its previews look at the disk, whatever its kind, on a wait of their
+ * own: a folder renamed outside the Explorer (`mv docs docs-old` in a
+ * terminal) comes as a 'modify' of `docs` and of `docs-old` and names no
+ * file in it, and the look finds the file gone — deleted on disk — or there
+ * still; a folder written into all the time (a log beside the file) costs a
+ * size asked at most once a PREVIEW_FOLLOW_MAX_MS, and never puts off the
+ * read of the file's own change.
+ */
+function followDisk(set, get, payload) {
+  const path = payload?.path;
+  if (typeof path !== 'string' || !path || !PREVIEW_FOLLOWS.has(payload.kind)) return;
+  for (const tab of get().tabs) {
+    if (!isPreviewTab(tab)) continue;
+    if (sameFile(tab.filePath, path)) schedulePreviewRead(set, get, tab.id);
+    else if (isInside(path, tab.filePath)) schedulePreviewCheck(set, get, tab.id);
+  }
+}
+
+/** The Explorer deleted `path`: its previews stay open, deleted on disk, showing what they last showed. */
+function markDeletedOnDisk(set, get, path) {
+  const gone = new Set(previewsUnder(get().tabs, path).map((t) => t.id));
+  if (gone.size === 0) return;
+  // A read under way answers for the file as it was.
+  for (const id of gone) nextPreviewRead(id);
+  set((state) => ({ tabs: state.tabs.map((t) => (gone.has(t.id) ? { ...t, deleted: true } : t)) }));
+}
+
+/**
+ * Text tab `closing` is gone from `tabs`: each Markdown preview of its file
+ * that followed its buffer shows, from this same update on, the file as the
+ * editor last read or wrote it (its `savedContent`) — never the buffer, and
+ * so never edits given up as the tab closed. Returns the new tabs, and the
+ * ids of the previews it changed. Nothing when another text tab of the file
+ * is still open, or the tab was no text tab.
+ */
+function previewsOffSource(tabs, closing) {
+  if (!closing || isPreviewTab(closing) || tabs.some((t) => isTabOf(t, null, closing.filePath))) return { tabs, changed: [] };
+  const changed = [];
+  const next = tabs.map((t) => {
+    if (!isTabOf(t, 'markdown', closing.filePath)) return t;
+    changed.push(t.id);
+    // A tab with no saved text of its own (none ever has) says nothing of the disk: the read below does.
+    return typeof closing.savedContent === 'string' ? { ...t, ...markdownFields(closing.savedContent) } : t;
+  });
+  return changed.length > 0 ? { tabs: next, changed } : { tabs, changed };
+}
+
+/**
+ * The previews `ids` no longer follow a buffer (`previewsOffSource`): a
+ * read under way answers for what they held before, and each whose file
+ * changed on disk meanwhile (`previewsBehindDisk`), or that had no saved
+ * text to take, reads it once more.
+ */
+function followDiskAgain(set, get, ids, closing) {
+  for (const id of ids) {
+    nextPreviewRead(id);
+    if (previewsBehindDisk.delete(id) || typeof closing?.savedContent !== 'string') schedulePreviewRead(set, get, id);
+  }
+}
+
+/** How many preview reads are waiting for their file's changes to settle — for the suites. */
+export function __previewReadsPending() {
+  return previewTimers.size;
+}
+
+/** How many previews are waiting to look at their file, a folder above it having changed — for the suites. */
+export function __previewChecksPending() {
+  return previewChecks.size;
+}
+
+/** What was kept for previews that are closed now goes: a read or a look to come is not made. */
+function forgetClosedPreviews(tabs) {
+  if (previewTimers.size === 0 && previewChecks.size === 0 && previewReads.size === 0 && previewsBehindDisk.size === 0) return;
+  const open = new Set(tabs.map((t) => t.id));
+  for (const timers of [previewTimers, previewChecks]) {
+    for (const id of [...timers.keys()]) if (!open.has(id)) stopWait(timers, id);
+  }
+  for (const id of [...previewReads.keys()]) if (!open.has(id)) previewReads.delete(id);
+  for (const id of [...previewsBehindDisk]) if (!open.has(id)) previewsBehindDisk.delete(id);
 }
 
 // --- The tabs each folder had open ------------------------------------------
@@ -966,7 +1443,8 @@ function sessionToSave(state) {
   for (const saved of filesShown(session)) {
     const path = followMoves(carry, saved);
     if (path === null) continue;
-    const open = state.tabs.find((t) => sameFile(t.filePath, path));
+    // Its text tab: a preview of the file is not saved, and is no stand-in for it.
+    const open = state.tabs.find((t) => isTabOf(t, null, path));
     if (open) {
       tabIdOf.set(saved, open.id);
     } else if (carry.waiting.has(saved)) {
@@ -1022,6 +1500,9 @@ function noteSessionChange(state) {
  * the restore is reading it stays closed, rather than coming back when the
  * restore lands. And once it has landed, an editor the user empties is
  * nothing open: the files it could not read go from the saved tabs as well.
+ *
+ * A preview closed is no saved file closed: closing a README's preview
+ * leaves its text tab to come back.
  */
 function noteClosedTabs(state, prev) {
   if (!carry || state.rootPath !== prev.rootPath) return;
@@ -1031,7 +1512,7 @@ function noteClosedTabs(state, prev) {
   }
   const open = new Set(state.tabs.map((t) => t.id));
   for (const tab of prev.tabs) {
-    if (open.has(tab.id)) continue;
+    if (open.has(tab.id) || isPreviewTab(tab)) continue;
     for (const saved of carry.waiting) {
       if (sameFile(followMoves(carry, saved), tab.filePath)) carry.waiting.delete(saved);
     }
@@ -1059,7 +1540,9 @@ function forgetSessions() {
  * text of each saved file read, by saved path — or null when nothing can go
  * in. A file already open keeps its tab, buffer and all, so nothing is open
  * twice; a file the user closed, or the Explorer deleted, while it was read
- * stays out; one the Explorer moved opens where it is now.
+ * stays out; one the Explorer moved opens where it is now. Open as text,
+ * that is: a preview of the file is another tab, and never takes the place
+ * of the text tab coming back.
  */
 function mergeRestored(state, carrying, contents) {
   const { root, session } = carrying;
@@ -1068,7 +1551,7 @@ function mergeRestored(state, carrying, contents) {
   for (const saved of filesShown(session)) {
     const path = followMoves(carrying, saved);
     if (path === null) continue;
-    const open = state.tabs.find((t) => sameFile(t.filePath, path));
+    const open = state.tabs.find((t) => isTabOf(t, null, path));
     if (open) {
       tabIdOf.set(saved, open.id);
       continue;
@@ -1313,6 +1796,91 @@ async function enterRoot(set, get, root) {
   return root;
 }
 
+/**
+ * `openFile` and `openFileAsText` (in the store, below): open the tab of
+ * `requestedPath` — an image tab for an image unless `asText`, else its text
+ * tab — or reveal the one open already. Resolves to the tab; a file that
+ * would not open opens nothing, says why (`openFailure`) and rejects.
+ */
+async function openFileTab(set, get, requestedPath, { asText }) {
+  // Written the way the backend writes the open folder, so that a link
+  // printed in a terminal and a click in the Explorer name the same file
+  // the same way (see `withSepOf`) — and with any `.` or `..` worked out,
+  // as the backend works them out (`collapseDots`): `src/../README.md`
+  // from a link was the Explorer's `README.md` in a second tab, and a
+  // saved tab spelled that way was never reopened.
+  const filePath = collapseDots(withSepOf(requestedPath, get().rootPath));
+  // An image opens as an image tab, read by `fs_read_image`, and is never
+  // read as text first: the text read refuses a PNG as not UTF-8 text, and
+  // would take an SVG for a text file.
+  // An SVG's Open as Text asks for its text tab (`asText`).
+  const kind = !asText && isImagePath(filePath) ? 'image' : null;
+  // Check if already open — reveal it in whichever group already shows it
+  // (VS Code's "revealIfOpen") rather than yanking it into the active
+  // group, which would be surprising if the user deliberately split panes.
+  // Compared separator-blind: on Windows `C:\p\a.js` and `C:\p/a.js` are
+  // one file, and two tabs on it were two buffers of it, each taking the
+  // other's saves for changes made on disk. And case-blind where the disk
+  // is (`sameFile`): a link printed as `C:\PROJ\a.js` opened a second tab
+  // on the Explorer's `C:\proj\a.js`. A preview of the file is another
+  // tab (`isTabOf`): opening a README reveals its text, not its preview.
+  const openTab = () => get().tabs.find((t) => isTabOf(t, kind, filePath));
+  const reveal = (existing) => revealOpenTab(set, existing);
+  const existing = openTab();
+  if (existing) return reveal(existing);
+
+  // A newly opened file joins the editor pane of the group on screen, or
+  // a new editor leaf above its terminals [60, 40] (FB4).
+  const add = (newTab) => {
+    set((state) => ({
+      tabs: [...state.tabs, newTab],
+      activeTabId: newTab.id,
+      openFailure: null,
+    }));
+    workbench().placeEditorTab(newTab.id);
+    syncActiveTab();
+    showWorkbench();
+    return newTab;
+  };
+
+  if (kind === 'image') {
+    let fields;
+    try {
+      fields = { image: await invoke('fs_read_image', { path: filePath }), failure: null };
+    } catch (err) {
+      // Refused for what it is: the tab opens and says why (P5 draws it).
+      if (!refusedForWhatItIs(err)) {
+        console.error(`[EditorStore] Failed to open image ${filePath}:`, err);
+        set({ openFailure: { path: filePath, fileName: basename(filePath), reason: imageFailureReason(err, filePath) } });
+        throw err;
+      }
+      fields = { image: null, failure: imageFailureReason(err, filePath) };
+    }
+    const raced = openTab();
+    if (raced) return reveal(raced);
+    return add(newPreviewTab('image', filePath, fields));
+  }
+
+  try {
+    const content = await invoke('fs_read_file', { path: filePath });
+    // Opened by something else while this was reading — the restore of
+    // the folder's last session bringing the same file back, or a second
+    // click — and a second tab on one file is two buffers of it.
+    const raced = openTab();
+    if (raced) return reveal(raced);
+
+    return add(newEditorTab(filePath, content));
+  } catch (err) {
+    console.error(`[EditorStore] Failed to open file ${filePath}:`, err);
+    // Said on screen as well. Every way of opening a file comes through
+    // here — the Explorer, Go to File, a link in a terminal, a search
+    // result — and a file the backend would not read, a 60 MB log or a
+    // binary, opened nothing and said nothing anywhere but the console.
+    set({ openFailure: { path: filePath, fileName: basename(filePath), reason: readFailureReason(err, filePath) } });
+    throw err;
+  }
+}
+
 export const useEditorStore = create((set, get) => ({
   tabs: [],
   activeTabId: null,
@@ -1352,6 +1920,8 @@ export const useEditorStore = create((set, get) => ({
     unlisteners.push(await listen('fs-change', (payload) => {
       // Something deleted while the tabs of last time are being read.
       if (payload?.kind === 'delete') noteDeletedOnDisk(payload.path);
+      // A preview of what changed reads it again, once the changes settle.
+      followDisk(set, get, payload);
       // A build or install fires hundreds of events; refresh once they settle.
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => get().refreshExplorer(), 300);
@@ -1371,6 +1941,8 @@ export const useEditorStore = create((set, get) => ({
     }
     unlisteners = [];
     listening = false;
+    // No preview reads its file again once nothing listens.
+    forgetClosedPreviews([]);
     // The tabs' last change is written out rather than dropped, as the
     // terminals' layout is. And the next init() — a remount, a reload —
     // reads the saved tabs again instead of taking this run's word that the
@@ -1610,10 +2182,17 @@ export const useEditorStore = create((set, get) => ({
    */
   pendingReveal: null,
 
-  /** Open `filePath` and put the caret on that line. */
+  /**
+   * Open `filePath` and put the caret on that line — what a terminal link
+   * (`path:line`, `path:line:col`) and a search result call. An SVG asked
+   * for at a line opens as text (`openFileAsText`): the line is in its
+   * source (OQ-B4d). Any other image opens as one, its line dropped.
+   */
   openFileAt: async (filePath, line, column = null) => {
-    const tab = await get().openFile(filePath);
-    if (Number.isFinite(line) && line > 0) {
+    const atLine = Number.isFinite(line) && line > 0;
+    const tab = atLine && isSvgPath(filePath) ? await get().openFileAsText(filePath) : await get().openFile(filePath);
+    // An image has no lines, and no editor would ever take the reveal.
+    if (atLine && !isPreviewTab(tab)) {
       // The tab's own spelling, which is what the editor compares against:
       // a link's `C:\proj\src/App.jsx` lands on the tab of `C:\proj\src\App.jsx`.
       set({ pendingReveal: { filePath: tab.filePath, line, column: Number.isFinite(column) ? column : 1 } });
@@ -1629,75 +2208,58 @@ export const useEditorStore = create((set, get) => ({
    * is: a file picked in Go to File, or the keyboard handed back as a prompt
    * closes (src/lib/workspaceFocus.js). A file just opened has no editor
    * yet, so this too is parked in `pendingReveal` — with no line — for
-   * EditorPanel to apply once it has one.
+   * EditorPanel to apply once it has one. Not for a preview tab, which no
+   * editor shows to take it.
    */
   focusEditor: () => {
     const tab = get().getActiveTab();
-    if (tab) set({ pendingReveal: { filePath: tab.filePath, line: null, column: null } });
+    if (tab && !isPreviewTab(tab)) set({ pendingReveal: { filePath: tab.filePath, line: null, column: null } });
   },
 
-  openFile: async (requestedPath) => {
-    // Written the way the backend writes the open folder, so that a link
-    // printed in a terminal and a click in the Explorer name the same file
-    // the same way (see `withSepOf`) — and with any `.` or `..` worked out,
-    // as the backend works them out (`collapseDots`): `src/../README.md`
-    // from a link was the Explorer's `README.md` in a second tab, and a
-    // saved tab spelled that way was never reopened.
+  openFile: (requestedPath) => openFileTab(set, get, requestedPath, { asText: false }),
+
+  /**
+   * Open or reveal the text tab of `requestedPath`, whatever its extension:
+   * an SVG's source, edited in Monaco beside its picture (the image tab's
+   * Open as Text, OQ-B4d). Never the image routing of `openFile`. It is an
+   * ordinary text tab — saved, dirty, in the session, sent to an agent.
+   */
+  openFileAsText: (requestedPath) => openFileTab(set, get, requestedPath, { asText: true }),
+
+  /**
+   * Open a preview of Markdown file `requestedPath` in a tab of kind
+   * 'markdown', to the right of its source (`placeBesideSource`), or reveal
+   * the one open already. The file's text tab, if any, stays where it is:
+   * the two are tabs of one file. A path that is no `.md` or `.markdown`
+   * file does nothing and resolves to null. A file past the preview's limit
+   * opens a tab that says so (`tooLarge`); one that will not read opens
+   * nothing and says why, as `openFile` does, and rejects.
+   */
+  openMarkdownPreview: async (requestedPath) => {
+    if (!isMarkdownPath(requestedPath)) return null;
     const filePath = collapseDots(withSepOf(requestedPath, get().rootPath));
-    // Check if already open — reveal it in whichever group already shows it
-    // (VS Code's "revealIfOpen") rather than yanking it into the active
-    // group, which would be surprising if the user deliberately split panes.
-    // Compared separator-blind: on Windows `C:\p\a.js` and `C:\p/a.js` are
-    // one file, and two tabs on it were two buffers of it, each taking the
-    // other's saves for changes made on disk. And case-blind where the disk
-    // is (`sameFile`): a link printed as `C:\PROJ\a.js` opened a second tab
-    // on the Explorer's `C:\proj\a.js`.
-    const openTab = () => get().tabs.find((t) => sameFile(t.filePath, filePath));
-    // Where it is open, in ANY group: that group comes on screen with it
-    // (FB4). A tab in no leaf goes where a new file would.
-    const reveal = (existing) => {
-      const ts = workbench();
-      if (!ts.revealEditorTab(existing.id)) ts.placeEditorTab(existing.id);
-      set({ activeTabId: existing.id, openFailure: null });
-      syncActiveTab();
-      showWorkbench();
-      return existing;
-    };
-    const existing = openTab();
+    const openPreview = () => get().tabs.find((t) => isTabOf(t, 'markdown', filePath));
+    const reveal = (existing) => revealOpenTab(set, existing, (id) => placeBesideSource(id, filePath));
+    const existing = openPreview();
     if (existing) return reveal(existing);
 
+    let fields;
     try {
-      const content = await invoke('fs_read_file', { path: filePath });
-      // Opened by something else while this was reading — the restore of
-      // the folder's last session bringing the same file back, or a second
-      // click — and a second tab on one file is two buffers of it.
-      const raced = openTab();
-      if (raced) return reveal(raced);
-
-      const newTab = newEditorTab(filePath, content);
-      const tabId = newTab.id;
-
-      set((state) => ({
-        tabs: [...state.tabs, newTab],
-        activeTabId: tabId,
-        openFailure: null,
-      }));
-      // A newly opened file joins the editor pane of the group on screen, or
-      // a new editor leaf above its terminals [60, 40] (FB4).
-      workbench().placeEditorTab(tabId);
-      syncActiveTab();
-      showWorkbench();
-
-      return newTab;
+      fields = await markdownPreviewFields(get().tabs.find((t) => isTabOf(t, null, filePath)), filePath);
     } catch (err) {
-      console.error(`[EditorStore] Failed to open file ${filePath}:`, err);
-      // Said on screen as well. Every way of opening a file comes through
-      // here — the Explorer, Go to File, a link in a terminal, a search
-      // result — and a file the backend would not read, a 60 MB log or a
-      // binary, opened nothing and said nothing anywhere but the console.
+      console.error(`[EditorStore] Failed to preview ${filePath}:`, err);
       set({ openFailure: { path: filePath, fileName: basename(filePath), reason: readFailureReason(err, filePath) } });
       throw err;
     }
+    const raced = openPreview();
+    if (raced) return reveal(raced);
+
+    const tab = newPreviewTab('markdown', filePath, fields);
+    set((state) => ({ tabs: [...state.tabs, tab], activeTabId: tab.id, openFailure: null }));
+    placeBesideSource(tab.id, filePath);
+    syncActiveTab();
+    showWorkbench();
+    return tab;
   },
 
   /** The notice of a file that would not open, closed. */
@@ -1706,7 +2268,8 @@ export const useEditorStore = create((set, get) => ({
   editBuffer: (tabId, newContent) => {
     set((state) => ({
       tabs: state.tabs.map((tab) => {
-        if (tab.id !== tabId) return tab;
+        // A preview tab has no buffer, and is never dirty.
+        if (tab.id !== tabId || isPreviewTab(tab)) return tab;
         return {
           ...tab,
           content: newContent,
@@ -1733,7 +2296,7 @@ export const useEditorStore = create((set, get) => ({
   },
 
   saveAll: async () => {
-    const dirtyTabs = get().tabs.filter((t) => t.isDirty);
+    const dirtyTabs = get().tabs.filter(hasUnsavedEdits);
     for (const tab of dirtyTabs) {
       await get().saveFile(tab.id);
     }
@@ -1742,7 +2305,7 @@ export const useEditorStore = create((set, get) => ({
   /** Close a tab, asking first if it has unsaved edits. */
   requestCloseTab: (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab || !tab.isDirty) {
+    if (!hasUnsavedEdits(tab)) {
       get().closeTab(tabId);
       return;
     }
@@ -1759,7 +2322,7 @@ export const useEditorStore = create((set, get) => ({
     const leaf = editorLeafById(paneId);
     const dirty = (leaf?.tabIds || [])
       .map((id) => get().tabs.find((t) => t.id === id))
-      .filter((t) => t && t.isDirty);
+      .filter(hasUnsavedEdits);
     if (dirty.length === 0) {
       get().closeEditorPane(paneId);
       return;
@@ -1782,7 +2345,7 @@ export const useEditorStore = create((set, get) => ({
    * promise of how it ended — `proceed`'s result, or null when cancelled.
    */
   askBeforeLeaving: (kind, proceed) => {
-    const dirty = get().tabs.filter((t) => t.isDirty);
+    const dirty = get().tabs.filter(hasUnsavedEdits);
     if (dirty.length === 0) return null;
     return holdForAnswer(set, get, { kind, dirty, proceed });
   },
@@ -1813,7 +2376,8 @@ export const useEditorStore = create((set, get) => ({
    */
   reloadFromDisk: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab) return;
+    // Not a preview tab's: it has no buffer to replace.
+    if (!tab || isPreviewTab(tab)) return;
     const content = await invoke('fs_read_file', { path: tab.filePath });
     // Where the tab is now: it may have been renamed while the file was read.
     const now = get().tabs.find((t) => t.id === tabId);
@@ -1878,7 +2442,16 @@ export const useEditorStore = create((set, get) => ({
     // Out of its leaf first — the leaves it empties go, as a group whose
     // last tab closed always did — then out of the tabs.
     workbench().removeEditorTabs([tabId]);
-    set((state) => ({ tabs: state.tabs.filter((t) => t.id !== tabId) }));
+    // A Markdown preview of a text tab's file follows the disk again, from
+    // the same update: no render ever shows it the closed tab's buffer.
+    const closing = get().tabs.find((t) => t.id === tabId);
+    let changed = [];
+    set((state) => {
+      const off = previewsOffSource(state.tabs.filter((t) => t.id !== tabId), closing);
+      changed = off.changed;
+      return { tabs: off.tabs };
+    });
+    followDiskAgain(set, get, changed, closing);
     syncActiveTab();
   },
 
@@ -1941,12 +2514,14 @@ export const useEditorStore = create((set, get) => ({
    * it reveals the line. And the request goes as soon as the keyboard goes
    * elsewhere (`dropPaneFocusRequest`): left, it took the keyboard from the
    * shell the user had moved on to when that pane's Monaco mounted.
+   * A pane showing a preview has no editor: nothing is parked, and false
+   * lets the caller focus the pane's body, as for a pane with no file.
    */
   focusEditorPane: (paneId, { find = false } = {}) => {
     const leaf = editorLeafById(paneId);
     const tabId = leaf ? (leaf.tabIds.includes(leaf.activeTabId) ? leaf.activeTabId : leaf.tabIds[0] ?? null) : null;
     const tab = tabId ? get().tabs.find((t) => t.id === tabId) : null;
-    if (!tab) return false;
+    if (!tab || isPreviewTab(tab)) return false;
     if (get().pendingReveal?.line != null) return true;
     set({ pendingReveal: { filePath: tab.filePath, line: null, column: null, paneId, ...(find ? { find: true } : {}) } });
     return true;
@@ -2023,7 +2598,8 @@ export const useEditorStore = create((set, get) => ({
     try {
       await invoke('fs_create_file', { path });
       await get().refreshExplorer();
-      await get().openFile(path);
+      // A new SVG is empty, no picture yet: what comes next is its text (the human's decision OQ-B4e).
+      await (isSvgPath(path) ? get().openFileAsText(path) : get().openFile(path));
     } catch (err) {
       console.error(`[EditorStore] Failed to create file ${path}:`, err);
       throw err;
@@ -2040,11 +2616,16 @@ export const useEditorStore = create((set, get) => ({
     }
   },
 
-  /** The open tabs at `path` or under it — what deleting `path` would close. */
-  tabsUnder: (path) => get().tabs.filter((t) => samePath(t.filePath, path) || isInside(path, t.filePath)),
+  /**
+   * The open text tabs at `path` or under it — what deleting `path` would
+   * close. Not its previews: they stay, marked as deleted on disk.
+   */
+  tabsUnder: (path) => get().tabs.filter((t) => !isPreviewTab(t) && (samePath(t.filePath, path) || isInside(path, t.filePath))),
 
   /**
-   * Delete `path`, and close the tabs of what went with it. `trash: true`
+   * Delete `path`, and close the text tabs of what went with it; a preview
+   * of it stays open, marked `deleted`, showing what it last showed
+   * (`markDeletedOnDisk`). `trash: true`
    * moves it to the Trash (the Recycle Bin on Windows) instead; a move that
    * cannot be made rejects with "Not moved to the …" and deletes nothing —
    * the Explorer then asks whether to delete it for good
@@ -2064,6 +2645,7 @@ export const useEditorStore = create((set, get) => ({
       get()
         .tabsUnder(path)
         .forEach((t) => get().closeTab(t.id));
+      markDeletedOnDisk(set, get, path);
     } catch (err) {
       console.error(`[EditorStore] Failed to delete ${path}:`, err);
       throw err;
@@ -2218,7 +2800,10 @@ useEditorStore.subscribe((state, prev) => {
   ) {
     return;
   }
-  if (state.tabs !== prev.tabs) noteClosedTabs(state, prev);
+  if (state.tabs !== prev.tabs) {
+    noteClosedTabs(state, prev);
+    forgetClosedPreviews(state.tabs);
+  }
   // Closed tabs' ticks, now and then.
   if (tabRecency.size > state.tabs.length + 100) {
     const open = new Set(state.tabs.map((t) => t.id));
@@ -2254,10 +2839,10 @@ export function registerEditorBridge() {
     closeTabs: (ids) => {
       for (const id of ids) useEditorStore.getState().closeTab(id);
     },
-    dirtyTabIds: (ids) => ids.filter((id) => useEditorStore.getState().tabs.some((t) => t.id === id && t.isDirty)),
+    dirtyTabIds: (ids) => ids.filter((id) => useEditorStore.getState().tabs.some((t) => t.id === id && hasUnsavedEdits(t))),
     confirmClose: (kind, ids) => {
       const { tabs } = useEditorStore.getState();
-      const dirty = ids.map((id) => tabs.find((t) => t.id === id)).filter((t) => t && t.isDirty);
+      const dirty = ids.map((id) => tabs.find((t) => t.id === id)).filter(hasUnsavedEdits);
       if (dirty.length === 0) return Promise.resolve(true);
       return holdForAnswer(useEditorStore.setState, useEditorStore.getState, { kind, dirty, proceed: () => true }).then(
         (answer) => answer === true

@@ -59,6 +59,10 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         // to New Pane does for a terminal.
         'Move Editor to New Pane Right',
         'Move Editor to New Pane Down',
+        // Orca bundle 5, B3 (src/lib/workbenchCommands.js): the Markdown
+        // preview of the text tab Save would save. Listed only for a Markdown
+        // tab; this harness passes no `markdownPreview`, so it is listed.
+        'Open Markdown Preview',
         'Save All Files',
         // Stage 5: the project commands' own three. The commands themselves
         // are listed in a group of their own, never among these.
@@ -85,7 +89,7 @@ describe('Tier 1: Command Palette (⌘K) Feature Coverage', () => {
         'Send File to Agent',
         'Clear Agent Session History…',
       ],
-      'The palette offers exactly the twenty-six commands the app implements'
+      'The palette offers exactly the twenty-seven commands the app implements'
     );
   });
 

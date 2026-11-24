@@ -17,6 +17,7 @@
  * (src-tauri/src/fs/external_editor.rs).
  */
 import { dirname } from '../../lib/paths.js';
+import { isMarkdownPath } from '../../lib/markdownFiles.js';
 import { failureText } from './treeRows.js';
 
 /** What the file manager is called where NexTerm runs (`useSystemStore`'s `os`). */
@@ -141,6 +142,30 @@ export function buildOpenActionItems(target, deps) {
     });
   }
   return items;
+}
+
+/**
+ * Open Preview (Orca bundle 5, F-B3-8) on a Markdown file's row — `.md` or
+ * `.markdown`, whatever its case: the file rendered, in a tab to the right
+ * of its source (`openPreview(path)`, the store's `openMarkdownPreview`).
+ * Null for any other file, a folder and the empty area. A click or Enter on
+ * the row still opens the text; this is the menu's alone. A file that will
+ * not read says why in the store's notice, so `onSelect` never rejects.
+ */
+export function openPreviewItem(target, { openPreview }) {
+  if (target?.type !== 'file' || target.isDir === true || !isMarkdownPath(target.path)) return null;
+  const path = target.path;
+  return {
+    key: 'open-preview',
+    label: 'Open Preview',
+    onSelect: () =>
+      Promise.resolve()
+        .then(() => openPreview(path))
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+  };
 }
 
 /**

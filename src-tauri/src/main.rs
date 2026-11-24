@@ -222,6 +222,7 @@ fn main() {
             commands::fs::fs_pick_root,
             commands::fs::fs_read_dir,
             commands::fs::fs_read_file,
+            commands::fs::fs_read_image,
             commands::fs::fs_file_size,
             commands::fs::fs_write_file,
             commands::fs::fs_create_file,
